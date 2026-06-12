@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, ops::RangeBounds};
 
-use dialog_common::{Blake3Hash, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use rkyv::{
@@ -14,8 +14,9 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Entry, Key, Node,
-    SearchResult, SymmetryWith, TreeShaper, TreeWalker, Value, into_owned,
+    Accessor, ArchivedNodeBody, Buffer, Cache, ContentAddressedStorage, Delta,
+    DialogSearchTreeError, Entry, Key, Node, SearchOptions, SearchResult, SymmetryWith, TreeShaper,
+    TreeWalker, Value, into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -31,6 +32,16 @@ use crate::{
 /// maintains a [`Delta`] of pending changes that can be flushed to storage in
 /// batches, and uses a [`Cache`] for frequently accessed nodes to minimize
 /// storage I/O operations.
+///
+/// ## Clone Semantics
+///
+/// Cloning a [`Tree`] does **not** fork the internal state. Instead, it shares
+/// the cache and delta via reference counting. Mutations
+/// ([`insert`](Self::insert), [`delete`](Self::delete)) implicitly fork the
+/// tree by returning a new instance with a branched [`Delta`] (independent
+/// copy) and an updated root hash, while continuing to share the [`Cache`].
+/// This enables efficient versioning where multiple tree versions share the
+/// same cache for read operations, but maintain independent mutation state.
 #[derive(Debug, Clone)]
 pub struct Tree<Key, Value>
 where
@@ -50,23 +61,32 @@ where
 
 impl<Key, Value> Tree<Key, Value>
 where
-    Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Key::Archived: Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
-    Key: for<'a> Serialize<
-        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-    >,
-    Value: self::Value,
+    Key: self::Key
+        + ConditionalSync
+        + 'static
+        + PartialOrd<Key::Archived>
+        + PartialEq<Key::Archived>
+        + for<'a> Serialize<
+            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+        >,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + ConditionalSync
+        + for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value
+        + ConditionalSync
+        + 'static
+        + for<'a> Serialize<
+            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+        >,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    Value: for<'a> Serialize<
-        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-    >,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
 {
     /// Returns the [`Blake3Hash`] of the root node of this tree.
     ///
@@ -120,9 +140,11 @@ where
         storage: &ContentAddressedStorage<Backend>,
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
-        if let Some(result) = self.search(key, storage).await? {
+        if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
             if let Some(entry) = result.leaf.body()?.find_entry(key)? {
                 into_owned(&entry.value).map(|value| Some(value))
             } else {
@@ -145,9 +167,11 @@ where
         storage: &ContentAddressedStorage<Backend>,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
-        let search_result = self.search(&key, storage).await?;
+        let search_result = self.search(&key, storage, SearchOptions::default()).await?;
         let shaper = TreeShaper::new(self.root.clone(), self.delta.clone());
         let (next_root, delta) = shaper.insert(Entry { key, value }, search_result)?;
 
@@ -164,16 +188,76 @@ where
         storage: &ContentAddressedStorage<Backend>,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
-        if let Some(search_result) = self.search(key, storage).await? {
+        let options = SearchOptions {
+            prefetch_right_neighbor: true,
+        };
+        if let Some(search_result) = self.search(key, storage, options).await? {
             let shaper = TreeShaper::new(self.root.clone(), self.delta.clone());
-            let (next_root, delta) = shaper.delete(key, search_result)?;
+            let (next_root, mut delta) = shaper.delete(key, search_result)?;
+            let next_root = Self::collapse_root_chain(next_root, &mut delta, storage).await?;
             Ok(self.advance(next_root, delta))
         } else {
             // Key not found in tree - nothing to delete
             Ok(self.clone())
         }
+    }
+
+    /// Collapses a stale chain of single-child index nodes at the root after
+    /// a deletion.
+    ///
+    /// A canonical tree never has an index root whose only child is another
+    /// index: building from scratch stops at the first level that holds a
+    /// single node (the only legitimate single-child root is an index over a
+    /// lone segment). Such chains can survive a delete when the deleted key's
+    /// rank was what created the upper levels: with the boundary gone, the
+    /// levels it terminated dissolve, but the rebuild works bottom-up along
+    /// the search path and cannot see that nothing above demanded them.
+    /// Walking down from the root and discarding wrappers restores the
+    /// canonical shape.
+    async fn collapse_root_chain<Backend>(
+        mut root: Blake3Hash,
+        delta: &mut Delta<Blake3Hash, Buffer>,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Blake3Hash, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
+    {
+        if &root == NULL_BLAKE3_HASH {
+            return Ok(root);
+        }
+
+        // The accessor shares `delta` by reference counting, so removals
+        // below remain visible to it.
+        let accessor = Accessor::new(delta.clone(), Cache::new(), storage.clone());
+
+        loop {
+            let node: Node<Key, Value> = accessor.get_node(&root).await?;
+            let child_hash = match node.body()? {
+                ArchivedNodeBody::Index(index) if index.links.len() == 1 => {
+                    <&Blake3Hash>::from(&index.links[0].node).clone()
+                }
+                _ => break,
+            };
+
+            let child: Node<Key, Value> = accessor.get_node(&child_hash).await?;
+            match child.body()? {
+                ArchivedNodeBody::Index(_) => {
+                    // The wrapper is unreachable in the new tree; drop it
+                    // from the pending changes if it originated there.
+                    delta.remove(&root);
+                    root = child_hash;
+                }
+                ArchivedNodeBody::Segment(_) => break,
+            }
+        }
+
+        Ok(root)
     }
 
     /// Returns an async stream over all entries in the tree.
@@ -189,12 +273,11 @@ where
         storage: &'a ContentAddressedStorage<Backend>,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
-        self.stream_range(
-            <Key as self::Key>::min()..<Key as self::Key>::max(),
-            storage,
-        )
+        self.stream_range(.., storage)
     }
 
     /// Returns an async stream over entries with keys within the provided
@@ -202,19 +285,20 @@ where
     ///
     /// The range can be bounded or unbounded on either end, following Rust's
     /// standard [`RangeBounds`] trait. Entries are yielded in sorted order.
-    pub fn stream_range<'a, R, Backend>(
-        &'a self,
+    pub fn stream_range<R, Backend>(
+        &self,
         range: R,
-        storage: &'a ContentAddressedStorage<Backend>,
-    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend + 'static
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
-        R: RangeBounds<Key> + 'a,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
+        R: RangeBounds<Key> + ConditionalSend + 'static,
     {
-        TreeWalker::new(self.root.clone(), async |hash| {
-            self.get_node(hash, storage).await
-        })
-        .stream(range)
+        let accessor = Accessor::new(self.delta.clone(), self.node_cache.clone(), storage.clone());
+
+        TreeWalker::new(self.root.clone()).stream(range, accessor)
     }
 
     /// Flushes all pending changes, returning an iterator of nodes to be
@@ -245,41 +329,6 @@ where
         }
     }
 
-    /// Retrieves a node from cache, delta, or storage.
-    ///
-    /// This method implements a multi-level lookup strategy:
-    /// 1. Check the node cache for a previously loaded node
-    /// 2. Check the delta for a recently created/modified node
-    /// 3. Fetch from persistent storage as a last resort
-    ///
-    /// Fetched nodes are automatically added to the cache for future access.
-    /// This layered approach minimizes expensive storage I/O operations.
-    async fn get_node<Backend>(
-        &self,
-        hash: &Blake3Hash,
-        storage: &ContentAddressedStorage<Backend>,
-    ) -> Result<Node<Key, Value>, DialogSearchTreeError>
-    where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
-    {
-        self.node_cache
-            .get_or_fetch(hash, async move |key| {
-                if let Some(buffer) = self.delta.get(hash) {
-                    Ok(Some(buffer))
-                } else {
-                    storage
-                        .retrieve(key)
-                        .await
-                        .map(|maybe_bytes| maybe_bytes.map(Buffer::from))
-                }
-            })
-            .await?
-            .ok_or_else(|| {
-                DialogSearchTreeError::Node(format!("Blob not found in storage: {}", hash))
-            })
-            .map(|buffer| Node::new(buffer))
-    }
-
     /// Searches for the leaf segment that would contain `key`, recording the
     /// path taken through the tree.
     ///
@@ -297,23 +346,26 @@ where
         &self,
         key: &Key,
         storage: &ContentAddressedStorage<Backend>,
+        options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
     {
-        TreeWalker::new(self.root.clone(), async |hash| {
-            self.get_node(hash, storage).await
-        })
-        .search(key)
-        .await
+        let accessor = Accessor::new(self.delta.clone(), self.node_cache.clone(), storage.clone());
+
+        TreeWalker::new(self.root.clone())
+            .search(key, accessor, options)
+            .await
     }
 }
 
 impl<Key, Value> From<Blake3Hash> for Tree<Key, Value>
 where
-    Key: self::Key,
+    Key: self::Key + ConditionalSync + 'static,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord + ConditionalSync,
     Key::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
@@ -321,10 +373,11 @@ where
     Key: for<'a> Serialize<
         Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
     >,
-    Value: self::Value,
+    Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
     Value: for<'a> Serialize<
         Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
     >,
@@ -1154,6 +1207,892 @@ mod tests {
         for (key, expected_value) in ledger {
             let value = tree.get(&key, &storage).await?;
             assert_eq!(value, Some(expected_value));
+        }
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_restores_tree_from_persisted_root_hash() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        for i in 0..100u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+
+        let root = tree.root().clone();
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // Reconstruct from just the root hash — no shared delta or cache
+        let restored = Tree::<[u8; 4], Vec<u8>>::from_hash(root);
+
+        for i in 0..100u32 {
+            let value = restored.get(&i.to_le_bytes(), &storage).await?;
+            assert_eq!(
+                value,
+                Some(i.to_le_bytes().to_vec()),
+                "Key {} should be retrievable from restored tree",
+                i
+            );
+        }
+
+        assert_eq!(restored.get(&200u32.to_le_bytes(), &storage).await?, None);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_streams_unflushed_insertions() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        // Insert and flush a base set
+        for i in 0..10u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // Insert more WITHOUT flushing
+        for i in 10..20u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+
+        // Stream should include both flushed and unflushed entries
+        let stream = tree.stream(&storage);
+        futures_util::pin_mut!(stream);
+
+        let mut count = 0;
+        while let Some(entry) = stream.next().await {
+            entry?;
+            count += 1;
+        }
+
+        assert_eq!(
+            count, 20,
+            "Stream should yield all entries including unflushed"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_streams_unflushed_deletions() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        // Build and flush
+        for i in 0..20u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // Delete some entries WITHOUT flushing
+        for i in (0..20u32).step_by(2) {
+            tree = tree.delete(&i.to_le_bytes(), &storage).await?;
+        }
+
+        // Stream should reflect deletions even without flush
+        let stream = tree.stream(&storage);
+        futures_util::pin_mut!(stream);
+
+        let mut keys = Vec::new();
+        while let Some(entry) = stream.next().await {
+            let entry = entry?;
+            keys.push(u32::from_le_bytes(entry.key));
+        }
+
+        let expected: Vec<u32> = (1..20u32).step_by(2).collect();
+        assert_eq!(keys, expected, "Stream should exclude unflushed deletions");
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_all_entries_after_boundary_deletion() -> Result<()> {
+        use crate::distribution;
+        use dialog_common::Blake3Hash;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let all_keys: Vec<u32> = (0..1000).collect();
+
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        for &k in &all_keys {
+            tree = tree
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // Find boundary keys
+        let boundaries: Vec<u32> = all_keys
+            .iter()
+            .copied()
+            .filter(|&i| distribution::geometric::rank(&Blake3Hash::hash(&i.to_le_bytes())) > 1)
+            .collect();
+
+        for &bk in boundaries.iter().take(3) {
+            let mut after_delete = tree.delete(&bk.to_le_bytes(), &storage).await?;
+            for (h, b) in after_delete.flush() {
+                storage.store(b.as_ref().to_vec(), &h).await?;
+            }
+
+            // Deleted key should be gone
+            assert_eq!(
+                after_delete.get(&bk.to_le_bytes(), &storage).await?,
+                None,
+                "Deleted boundary key {bk} should not be found"
+            );
+
+            // Every other key must still return the correct value
+            for &k in &all_keys {
+                if k == bk {
+                    continue;
+                }
+                let value = after_delete.get(&k.to_le_bytes(), &storage).await?;
+                assert_eq!(
+                    value,
+                    Some(k.to_le_bytes().to_vec()),
+                    "Key {k} should still be accessible after deleting boundary {bk}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_to_null_root_after_sequential_deletion_of_many_entries() -> Result<()> {
+        use dialog_common::NULL_BLAKE3_HASH;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        for i in 0..500u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // Delete all entries one at a time
+        for i in 0..500u32 {
+            tree = tree.delete(&i.to_le_bytes(), &storage).await?;
+        }
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        assert_eq!(
+            tree.root(),
+            &NULL_BLAKE3_HASH.clone(),
+            "Tree should be empty after deleting all entries"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_root_when_upserting_identical_value() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        for i in 0..50u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        let root_before = tree.root().clone();
+
+        // Re-insert key 25 with the same value
+        tree = tree
+            .insert(25u32.to_le_bytes(), vec![25u8], &storage)
+            .await?;
+
+        assert_eq!(
+            tree.root(),
+            &root_before,
+            "Upserting the same key+value should not change the root"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_streams_entries_in_byte_lexicographic_order() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        // Insert keys whose byte and numeric orders differ.
+        // 1u32 = [1,0,0,0], 256u32 = [0,1,0,0], 512u32 = [0,2,0,0]
+        // Byte order: [0,1,0,0] < [0,2,0,0] < [1,0,0,0]
+        // Numeric order: 1 < 256 < 512
+        let numeric_keys: Vec<u32> = vec![1, 256, 512, 2, 257, 0];
+
+        for &k in &numeric_keys {
+            tree = tree
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        let stream = tree.stream(&storage);
+        futures_util::pin_mut!(stream);
+
+        let mut keys_out: Vec<[u8; 4]> = Vec::new();
+        while let Some(entry) = stream.next().await {
+            keys_out.push(entry?.key);
+        }
+
+        // Verify byte-lexicographic order
+        for pair in keys_out.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "Keys should be in byte-lexicographic order: {:?} should precede {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+
+        // Verify the specific expected order
+        let mut expected = numeric_keys
+            .iter()
+            .map(|k| k.to_le_bytes())
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(keys_out, expected);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_streams_range_with_excluded_start() -> Result<()> {
+        use futures_util::StreamExt;
+        use std::ops::Bound;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        for i in 0..20u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // Excluded start: should not include key 5
+        let range = (
+            Bound::Excluded(5u32.to_le_bytes()),
+            Bound::Included(10u32.to_le_bytes()),
+        );
+        let stream = tree.stream_range(range, &storage);
+        futures_util::pin_mut!(stream);
+
+        let mut keys = Vec::new();
+        while let Some(entry) = stream.next().await {
+            keys.push(u32::from_le_bytes(entry?.key));
+        }
+
+        assert_eq!(
+            keys,
+            vec![6, 7, 8, 9, 10],
+            "Excluded start should skip key 5"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_streams_range_with_unbounded_end() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        for i in 0..20u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // start.. (unbounded end)
+        let stream = tree.stream_range(15u32.to_le_bytes().., &storage);
+        futures_util::pin_mut!(stream);
+
+        let mut keys = Vec::new();
+        while let Some(entry) = stream.next().await {
+            keys.push(u32::from_le_bytes(entry?.key));
+        }
+
+        assert_eq!(keys, vec![15, 16, 17, 18, 19]);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_streams_single_point_range() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        for i in 0..20u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+        for (key, value) in tree.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // key..=key should return exactly one entry
+        let k = 10u32.to_le_bytes();
+        let stream = tree.stream_range(k..=k, &storage);
+        futures_util::pin_mut!(stream);
+
+        let mut keys = Vec::new();
+        while let Some(entry) = stream.next().await {
+            keys.push(u32::from_le_bytes(entry?.key));
+        }
+
+        assert_eq!(keys, vec![10], "Single-point range should yield one entry");
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_produces_canonical_structure_regardless_of_insertion_order() -> Result<()> {
+        use crate::distribution;
+        use dialog_common::Blake3Hash;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let keys: Vec<u32> = (0..1000).collect();
+
+        // Sanity check: with 1000 keys we expect ~8 boundary entries
+        // (rank > 1). If none exist, the test can't exercise the bug.
+        let boundary_count = keys
+            .iter()
+            .filter(|&&k| distribution::geometric::rank(&Blake3Hash::hash(&k.to_le_bytes())) > 1)
+            .count();
+        assert!(
+            boundary_count > 0,
+            "Test requires at least one boundary key to be meaningful"
+        );
+
+        // Build tree A: forward insertion order
+        let mut tree_a = Tree::<[u8; 4], Vec<u8>>::empty();
+        for &k in &keys {
+            tree_a = tree_a
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        for (key, value) in tree_a.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // Build tree B: reverse insertion order
+        let mut tree_b = Tree::<[u8; 4], Vec<u8>>::empty();
+        for &k in keys.iter().rev() {
+            tree_b = tree_b
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        for (key, value) in tree_b.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // A canonical prolly tree must produce the same structure — and
+        // therefore the same root hash — for the same set of entries,
+        // regardless of insertion order.
+        assert_eq!(
+            tree_a.root(),
+            tree_b.root(),
+            "Trees with identical entries should have the same root \
+             regardless of insertion order ({boundary_count} boundary \
+             keys in dataset)"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_handles_interleaved_operations_across_tree_versions() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // Create base tree
+        let mut base = Tree::<[u8; 4], Vec<u8>>::empty();
+        for i in 0..20u32 {
+            base = base
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+        for (key, value) in base.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // Create two branches
+        let mut branch_a = base.clone();
+        let mut branch_b = base.clone();
+
+        // Interleave operations
+        branch_a = branch_a
+            .insert(100u32.to_le_bytes(), vec![100], &storage)
+            .await?;
+        branch_b = branch_b.delete(&5u32.to_le_bytes(), &storage).await?;
+        branch_a = branch_a
+            .insert(101u32.to_le_bytes(), vec![101], &storage)
+            .await?;
+        branch_b = branch_b.delete(&10u32.to_le_bytes(), &storage).await?;
+
+        // Flush both
+        for (key, value) in branch_a.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+        for (key, value) in branch_b.flush() {
+            storage.store(value.as_ref().to_vec(), &key).await?;
+        }
+
+        // Branch A: base + 100, 101
+        assert_eq!(
+            branch_a.get(&100u32.to_le_bytes(), &storage).await?,
+            Some(vec![100])
+        );
+        assert_eq!(
+            branch_a.get(&101u32.to_le_bytes(), &storage).await?,
+            Some(vec![101])
+        );
+        assert_eq!(
+            branch_a.get(&5u32.to_le_bytes(), &storage).await?,
+            Some(vec![5]),
+            "Branch A should still have key 5"
+        );
+
+        // Branch B: base - 5, 10
+        assert_eq!(branch_b.get(&5u32.to_le_bytes(), &storage).await?, None);
+        assert_eq!(branch_b.get(&10u32.to_le_bytes(), &storage).await?, None);
+        assert_eq!(branch_b.get(&100u32.to_le_bytes(), &storage).await?, None);
+
+        // Base unchanged
+        assert_eq!(
+            base.get(&5u32.to_le_bytes(), &storage).await?,
+            Some(vec![5])
+        );
+        assert_eq!(base.get(&100u32.to_le_bytes(), &storage).await?, None);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_reads_unflushed_entries_after_boundary_delete() -> Result<()> {
+        use crate::distribution;
+        use dialog_common::Blake3Hash;
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let all_keys: Vec<u32> = (0..1000).collect();
+
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        for &k in &all_keys {
+            tree = tree
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        for (h, b) in tree.flush() {
+            storage.store(b.as_ref().to_vec(), &h).await?;
+        }
+
+        let boundaries: Vec<u32> = all_keys
+            .iter()
+            .copied()
+            .filter(|&i| distribution::geometric::rank(&Blake3Hash::hash(&i.to_le_bytes())) > 1)
+            .collect();
+        assert!(
+            !boundaries.is_empty(),
+            "test requires at least one boundary"
+        );
+
+        for &bk in boundaries.iter().take(3) {
+            let after_delete = tree.delete(&bk.to_le_bytes(), &storage).await?;
+
+            // Read every surviving key WITHOUT flushing. Any missing new
+            // node in the delta surfaces here as a node-not-found error.
+            for &k in &all_keys {
+                if k == bk {
+                    assert_eq!(after_delete.get(&k.to_le_bytes(), &storage).await?, None);
+                    continue;
+                }
+                assert_eq!(
+                    after_delete.get(&k.to_le_bytes(), &storage).await?,
+                    Some(k.to_le_bytes().to_vec()),
+                    "key {k} should be readable from unflushed tree after deleting boundary {bk}"
+                );
+            }
+
+            // Stream the whole tree too; same guarantee, different path.
+            let expected_count = all_keys.len() - 1;
+            let stream = after_delete.stream(&storage);
+            futures_util::pin_mut!(stream);
+            let mut count = 0;
+            while let Some(entry) = stream.next().await {
+                entry?;
+                count += 1;
+            }
+            assert_eq!(
+                count, expected_count,
+                "stream should yield {expected_count} entries from unflushed tree after deleting boundary {bk}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_removes_orphaned_hashes_from_delta_after_mutation() -> Result<()> {
+        let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        // After a single insert into an empty tree the delta holds
+        // exactly the root's new subtree (here: one level-1 index and
+        // one leaf segment). Record its root hash.
+        tree = tree.insert(1u32.to_le_bytes(), vec![1], &storage).await?;
+        let root_after_first = tree.root().clone();
+        assert!(
+            tree.delta.get(&root_after_first).is_some(),
+            "root of just-inserted tree should be in the delta"
+        );
+
+        // A second insert replaces the root and (because the insert
+        // rewrites the only leaf) the old leaf segment too. The
+        // pre-mutation root hash is unreachable from the new tree and
+        // must not linger in the delta.
+        tree = tree.insert(2u32.to_le_bytes(), vec![2], &storage).await?;
+        assert!(
+            tree.delta.get(&root_after_first).is_none(),
+            "old root hash should be evicted from delta after follow-up insert",
+        );
+
+        // Update-in-place (same key, new value): the old leaf and old
+        // root are replaced; both should be evicted.
+        let root_before_update = tree.root().clone();
+        tree = tree.insert(1u32.to_le_bytes(), vec![99], &storage).await?;
+        assert!(
+            tree.delta.get(&root_before_update).is_none(),
+            "old root hash should be evicted from delta after update-in-place",
+        );
+
+        // Non-boundary delete: rewrites the leaf + root along the path,
+        // previous root must be gone.
+        let root_before_delete = tree.root().clone();
+        tree = tree.delete(&2u32.to_le_bytes(), &storage).await?;
+        assert!(
+            tree.delta.get(&root_before_delete).is_none(),
+            "old root hash should be evicted from delta after non-boundary delete",
+        );
+
+        // Delete-to-empty: the remaining leaf vanishes; tree root becomes
+        // the null hash and the last lingering content root must go.
+        let root_before_empty = tree.root().clone();
+        tree = tree.delete(&1u32.to_le_bytes(), &storage).await?;
+        assert!(
+            tree.delta.get(&root_before_empty).is_none(),
+            "old root hash should be evicted from delta after delete-to-empty",
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_delta_bounded_across_unflushed_mutations() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        // Build and flush a baseline so the delta starts empty.
+        let base_size: u32 = 200;
+        for i in 0..base_size {
+            tree = tree
+                .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        for (h, b) in tree.flush() {
+            storage.store(b.as_ref().to_vec(), &h).await?;
+        }
+        assert_eq!(tree.delta.len(), 0);
+
+        // Update each existing key in place many times. Entry count and
+        // tree shape stay the same, so delta size should stabilize near
+        // the affected-path cost (≈ tree height × a small constant per
+        // modified key, with boundary keys possibly touching a few more
+        // ancestors). If orphan-removal regresses, this grows linearly
+        // with the number of updates.
+        let mutations: u32 = 400;
+        for i in 0..mutations {
+            let key = (i % base_size).to_le_bytes();
+            tree = tree.insert(key, vec![(i % 255) as u8], &storage).await?;
+        }
+
+        // Loose but informative upper bound: the entire live tree
+        // (every segment plus every index) can't exceed `base_size`
+        // nodes, since each node holds at least one entry. Any linear
+        // accumulation would blow past this threshold for 400 updates
+        // against 200 entries.
+        let live_upper_bound = base_size as usize;
+        assert!(
+            tree.delta.len() <= live_upper_bound,
+            "delta grew to {} after {mutations} updates against {base_size} entries; \
+             expected ≤ {live_upper_bound} (tree's live node count)",
+            tree.delta.len(),
+        );
+
+        Ok(())
+    }
+
+    /// Builds a tree by inserting the given u32 keys (little-endian encoded)
+    /// in order and flushing the result to storage.
+    async fn build_and_flush_u32(
+        keys: &[u32],
+        storage: &mut ContentAddressedStorage<
+            MemoryStorageBackend<dialog_common::Blake3Hash, Vec<u8>>,
+        >,
+    ) -> Result<Tree<[u8; 4], Vec<u8>>> {
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        for &k in keys {
+            tree = tree
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), storage)
+                .await?;
+        }
+        for (hash, buffer) in tree.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+        Ok(tree)
+    }
+
+    /// Deleting a boundary whose removal collapses the root must produce the
+    /// same tree as building the remaining keys from scratch.
+    ///
+    /// Regression guard: in this dataset the tree has exactly two segments
+    /// under the root and 69161 is the boundary of the first one. Deleting
+    /// it makes the right segment adopt the orphans and the root's two
+    /// children fuse into one. `let_right_neighbor_adopt_orphans` used to
+    /// return the fused node at whatever level the fold reached (here: a
+    /// bare segment as the tree root, where a canonical tree always has an
+    /// index root) instead of collapsing to the canonical height.
+    #[dialog_common::test]
+    async fn it_produces_canonical_tree_when_boundary_delete_collapses_the_root() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let keys: Vec<u32> = vec![69161, 101527, 102790, 164389, 171478, 193283];
+
+        let mut tree = build_and_flush_u32(&keys, &mut storage).await?;
+        let mut after = tree.delete(&69161u32.to_le_bytes(), &storage).await?;
+        for (hash, buffer) in after.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        let remaining: Vec<u32> = keys.iter().copied().filter(|&k| k != 69161).collect();
+        let scratch = build_and_flush_u32(&remaining, &mut storage).await?;
+
+        assert_eq!(
+            after.root(),
+            scratch.root(),
+            "boundary delete that collapses the root should be canonical"
+        );
+        Ok(())
+    }
+
+    /// Deleting the sole entry of a segment must leave every other entry
+    /// readable and produce the canonical tree.
+    ///
+    /// Regression guard: in this dataset 198936 is a boundary that forms a
+    /// single-entry segment in a tree of height two, so deleting it walks a
+    /// multi-layer search path through the empty-segment repair.
+    /// `TreeShaper::remove_from_path` used to process the layers in
+    /// root-to-leaf order while `merge_with_path` consumes them leaf-to-root,
+    /// so the rebuilt subtrees came out in the wrong key order: keys 10554,
+    /// 83265 and 167706 landed to the right of larger keys and became
+    /// unreachable through search.
+    #[dialog_common::test]
+    async fn it_keeps_entries_readable_after_a_delete_empties_a_segment() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let keys: Vec<u32> = vec![
+            10554, 28619, 40390, 43764, 45237, 48124, 64082, 66285, 67399, 67838, 81131, 83265,
+            92896, 94186, 98645, 103270, 110189, 114100, 123267, 127869, 135162, 136309, 147808,
+            153518, 154310, 156529, 161523, 167706, 172145, 172489, 176828, 187970, 189253, 198936,
+        ];
+
+        let mut tree = build_and_flush_u32(&keys, &mut storage).await?;
+        let mut after = tree.delete(&198936u32.to_le_bytes(), &storage).await?;
+        for (hash, buffer) in after.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        let mut unreadable = vec![];
+        for &k in keys.iter().filter(|&&k| k != 198936) {
+            if after.get(&k.to_le_bytes(), &storage).await?.is_none() {
+                unreadable.push(k);
+            }
+        }
+        assert!(
+            unreadable.is_empty(),
+            "live keys unreadable after emptying a segment: {unreadable:?}"
+        );
+
+        let remaining: Vec<u32> = keys.iter().copied().filter(|&k| k != 198936).collect();
+        let scratch = build_and_flush_u32(&remaining, &mut storage).await?;
+        assert_eq!(
+            after.root(),
+            scratch.root(),
+            "emptying a segment should produce the canonical tree"
+        );
+        Ok(())
+    }
+
+    /// A range with an unbounded start bound must stream every entry below
+    /// the end bound. Regression guard: `TreeWalker::stream` used to return
+    /// immediately on `Bound::Unbounded`, yielding nothing.
+    #[dialog_common::test]
+    async fn it_streams_ranges_with_unbounded_start() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let tree = build_and_flush_u32(&(0..10).collect::<Vec<_>>(), &mut storage).await?;
+
+        let stream = tree.stream_range(..5u32.to_le_bytes(), &storage);
+        futures_util::pin_mut!(stream);
+        let mut count = 0;
+        while let Some(entry) = stream.next().await {
+            entry?;
+            count += 1;
+        }
+        assert_eq!(count, 5, "..end range should yield entries below end");
+        Ok(())
+    }
+
+    /// Streaming the whole tree must include an entry whose key is the
+    /// maximum key. Regression guard: `Tree::stream` used to delegate to
+    /// `stream_range(Key::min()..Key::max())`, whose exclusive end bound
+    /// dropped the maximum key.
+    #[dialog_common::test]
+    async fn it_streams_the_maximum_key() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        for i in 0..5u32 {
+            tree = tree
+                .insert(i.to_le_bytes(), vec![i as u8], &storage)
+                .await?;
+        }
+        tree = tree.insert([0xFF; 4], vec![0xFF], &storage).await?;
+        for (hash, buffer) in tree.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        let stream = tree.stream(&storage);
+        futures_util::pin_mut!(stream);
+        let mut count = 0;
+        while let Some(entry) = stream.next().await {
+            entry?;
+            count += 1;
+        }
+        assert_eq!(count, 6, "stream should include the maximum key");
+        Ok(())
+    }
+
+    /// After every mutation, the tree must be byte-identical to a tree built
+    /// from scratch over the same logical content. This is the invariant the
+    /// whole crate is built around: same entries, same root hash, regardless
+    /// of the operation history. Random insert/delete sequences over random
+    /// key sets exercise every mutation path (in-place redistribution,
+    /// orphan adoption across parents, empty-segment removal, cascade
+    /// collapse, root chain stripping) without hand-picking datasets.
+    #[dialog_common::test]
+    async fn it_converges_to_canonical_form_after_every_operation() -> Result<()> {
+        use std::collections::BTreeSet;
+
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+
+        let mut rng = StdRng::seed_from_u64(0x_D1A1_06DB);
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        for trial in 0..2 {
+            // Seed the tree with a random key set.
+            let mut live = BTreeSet::new();
+            let initial_size = rng.gen_range(40..120);
+            while live.len() < initial_size {
+                live.insert(rng.gen_range(0..200_000u32));
+            }
+            let initial: Vec<u32> = live.iter().copied().collect();
+            let mut tree = build_and_flush_u32(&initial, &mut storage).await?;
+
+            for op in 0..120 {
+                // Half deletes of present keys, half inserts of fresh keys
+                // (which occasionally hit a present key and become updates).
+                if !live.is_empty() && rng.gen_bool(0.5) {
+                    let index = rng.gen_range(0..live.len());
+                    let key = *live.iter().nth(index).expect("index is in range");
+                    tree = tree.delete(&key.to_le_bytes(), &storage).await?;
+                    live.remove(&key);
+                } else {
+                    let key = rng.gen_range(0..200_000u32);
+                    tree = tree
+                        .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                        .await?;
+                    live.insert(key);
+                }
+
+                // Flush periodically so both the delta-resident and the
+                // storage-resident read paths get exercised.
+                if op % 10 == 9 {
+                    for (hash, buffer) in tree.flush() {
+                        storage.store(buffer.as_ref().to_vec(), &hash).await?;
+                    }
+                }
+
+                let content: Vec<u32> = live.iter().copied().collect();
+                let scratch = build_and_flush_u32(&content, &mut storage).await?;
+                assert_eq!(
+                    tree.root(),
+                    scratch.root(),
+                    "trial {trial}, operation {op}: tree diverged from the \
+                     canonical form of its {} entries",
+                    content.len(),
+                );
+            }
         }
 
         Ok(())

@@ -1,4 +1,4 @@
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use std::sync::Arc;
 
 use hashbrown::HashMap;
@@ -6,7 +6,7 @@ use hashbrown::HashMap;
 /// A thread-safe accumulator of pending changes to tree nodes.
 #[derive(Clone, Debug)]
 pub struct Delta<K, V> {
-    contents: Arc<Mutex<HashMap<K, V>>>,
+    contents: Arc<RwLock<HashMap<K, V>>>,
 }
 
 impl<K, V> Delta<K, V>
@@ -24,13 +24,13 @@ where
     /// Creates a new delta that contains a copy of this delta's contents.
     pub fn branch(&self) -> Self {
         Self {
-            contents: Arc::new(Mutex::new(self.contents.lock().clone())),
+            contents: Arc::new(RwLock::new(self.contents.read().clone())),
         }
     }
 
     /// Adds a key-value pair to this delta.
     pub fn add(&mut self, key: K, value: V) {
-        let mut contents = self.contents.lock();
+        let mut contents = self.contents.write();
         contents.insert(key.clone(), value);
     }
 
@@ -39,24 +39,24 @@ where
     where
         Entries: Iterator<Item = (K, V)>,
     {
-        let mut contents = self.contents.lock();
+        let mut contents = self.contents.write();
         for (key, value) in entries {
             contents.insert(key.clone(), value);
         }
     }
 
     /// Removes a key from this delta.
-    pub fn subtract(&mut self, key: &K) {
-        let mut contents = self.contents.lock();
+    pub fn remove(&mut self, key: &K) {
+        let mut contents = self.contents.write();
         contents.remove(key);
     }
 
     /// Removes multiple keys from this delta.
-    pub fn subtract_all<'a, Keys>(&'a mut self, keys: Keys)
+    pub fn remove_all<'a, Keys>(&'a mut self, keys: Keys)
     where
         Keys: Iterator<Item = &'a K>,
     {
-        let mut contents = self.contents.lock();
+        let mut contents = self.contents.write();
         for key in keys {
             contents.remove(key);
         }
@@ -64,13 +64,23 @@ where
 
     /// Retrieves the value associated with a key from this delta.
     pub fn get(&self, key: &K) -> Option<V> {
-        let contents = self.contents.lock();
+        let contents = self.contents.write();
         contents.get(key).cloned()
+    }
+
+    /// Returns the number of entries currently in this delta.
+    pub fn len(&self) -> usize {
+        self.contents.read().len()
+    }
+
+    /// Returns `true` if this delta has no pending entries.
+    pub fn is_empty(&self) -> bool {
+        self.contents.read().is_empty()
     }
 
     /// Drains all entries from this delta and returns them as an iterator.
     pub fn flush(&mut self) -> impl Iterator<Item = (K, V)> {
-        std::mem::take(&mut *self.contents.lock()).into_iter()
+        std::mem::take(&mut *self.contents.write()).into_iter()
     }
 }
 
@@ -161,7 +171,7 @@ mod tests {
         assert_eq!(delta.get(&1), Some("value1".to_string()));
         assert_eq!(delta.get(&2), Some("value2".to_string()));
 
-        delta.subtract(&1);
+        delta.remove(&1);
 
         assert_eq!(delta.get(&1), None);
         assert_eq!(delta.get(&2), Some("value2".to_string()));
@@ -176,7 +186,7 @@ mod tests {
         delta.add(1, "value1".to_string());
 
         // Subtracting non-existent key should not panic
-        delta.subtract(&999);
+        delta.remove(&999);
 
         assert_eq!(delta.get(&1), Some("value1".to_string()));
 
@@ -193,7 +203,7 @@ mod tests {
         delta.add(4, "value4".to_string());
 
         let keys_to_remove = [1, 3];
-        delta.subtract_all(keys_to_remove.iter());
+        delta.remove_all(keys_to_remove.iter());
 
         assert_eq!(delta.get(&1), None);
         assert_eq!(delta.get(&2), Some("value2".to_string()));
@@ -218,7 +228,7 @@ mod tests {
 
         // Modify delta2
         delta2.add(3, "value3".to_string());
-        delta2.subtract(&1);
+        delta2.remove(&1);
 
         // Verify delta1 is unchanged
         assert_eq!(delta1.get(&1), Some("value1".to_string()));
@@ -318,7 +328,7 @@ mod tests {
         delta.add(2, "updated2".to_string());
 
         // Remove one
-        delta.subtract(&1);
+        delta.remove(&1);
 
         // Add more
         delta.add(4, "value4".to_string());
@@ -347,7 +357,7 @@ mod tests {
         assert_eq!(delta.get(&key1), Some(value1));
         assert_eq!(delta.get(&key2), Some(value2));
 
-        delta.subtract(&key1);
+        delta.remove(&key1);
         assert_eq!(delta.get(&key1), None);
         assert_eq!(delta.get(&key2), Some(vec![5, 6, 7, 8]));
 
@@ -370,7 +380,7 @@ mod tests {
 
         // Remove every other entry
         for i in (0..1000).step_by(2) {
-            delta.subtract(&i);
+            delta.remove(&i);
         }
 
         // Verify removals

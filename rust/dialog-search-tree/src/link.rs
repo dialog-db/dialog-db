@@ -1,3 +1,4 @@
+use crate::{Key, SymmetryWith};
 use dialog_common::Blake3Hash;
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -11,4 +12,15 @@ pub struct Link<Key> {
     pub upper_bound: Key,
     /// The [`Blake3Hash`] of the referenced node.
     pub node: Blake3Hash,
+}
+
+impl<Key> Link<Key>
+where
+    Key: self::Key,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+{
+    /// Computes the [`Blake3Hash`] of the entry's key.
+    pub fn upper_bound_hash(&self) -> Blake3Hash {
+        Blake3Hash::hash(self.upper_bound.as_ref())
+    }
 }

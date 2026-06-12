@@ -15,20 +15,23 @@ const CACHE_CAPACITY: usize = 2048;
 #[derive(Clone)]
 pub struct Cache<K, V>
 where
-    K: Eq + Hash + Clone + ConditionalSend + ConditionalSync,
-    V: Clone + ConditionalSend + ConditionalSync,
+    K: Eq + Hash + Clone + ConditionalSync,
+    V: Clone + ConditionalSync,
 {
     #[cfg(not(target_arch = "wasm32"))]
     cache: SieveCache<K, V>,
 
+    // NOTE: On "native" we use `SharedSieveCache` which internally wraps
+    // the cached values in an `Arc`. On web we use `SieveCache`, which is
+    // `Clone` but would deep-clone the cache without the wrapping `Rc`.
     #[cfg(target_arch = "wasm32")]
     cache: Rc<RefCell<SieveCache<K, V>>>,
 }
 
 impl<K, V> std::fmt::Debug for Cache<K, V>
 where
-    K: Eq + Hash + Clone + ConditionalSend + ConditionalSync,
-    V: Clone + ConditionalSend + ConditionalSync,
+    K: Eq + Hash + Clone + ConditionalSync,
+    V: Clone + ConditionalSync,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut debug_struct = f.debug_struct("Cache");
@@ -44,8 +47,8 @@ where
 
 impl<K, V> Default for Cache<K, V>
 where
-    K: Eq + Hash + Clone + ConditionalSend + ConditionalSync,
-    V: Clone + ConditionalSend + ConditionalSync,
+    K: Eq + Hash + Clone + ConditionalSync,
+    V: Clone + ConditionalSync,
 {
     fn default() -> Self {
         Self::new()
