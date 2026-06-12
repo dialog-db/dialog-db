@@ -1,3 +1,4 @@
+use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{Artifact, ArtifactSelector, DialogArtifactsError};
@@ -79,7 +80,7 @@ impl Select<'_> {
         };
 
         let store = NetworkedIndex::new(env, self.catalog(), remote);
-        self.execute(store)
+        self.execute(store).await
     }
 
     /// Execute the select against the given content-addressed store.
@@ -87,7 +88,7 @@ impl Select<'_> {
     /// Unlike [`perform`](Self::perform) this does not pick a store for
     /// you — useful when callers (e.g. query sessions) want to supply a
     /// custom one such as a pre-configured [`NetworkedIndex`].
-    pub fn execute<'s, S>(
+    pub async fn execute<'s, S>(
         self,
         store: S,
     ) -> Result<
@@ -100,10 +101,22 @@ impl Select<'_> {
             + ConditionalSync
             + 's,
     {
-        // Hydrating the tree is lazy: nodes load on demand during the
-        // scan, hitting the network through `store` (NetworkedIndex)
-        // when a block is remote-only.
-        let tree = Index::from_hash(NodeHash::from(self.tree_hash()));
+        // Tree hydration is lazy (nodes load on demand during the scan),
+        // but unreachable branches should fail here rather than midway
+        // through the stream, so probe the root block eagerly. Through a
+        // `NetworkedIndex` this also replicates and caches the root
+        // locally, so the scan's own root read stays local.
+        let tree_hash = self.tree_hash();
+        if tree_hash != EMPTY_TREE_HASH {
+            store.get(&tree_hash).await?.ok_or_else(|| {
+                DialogSearchTreeError::Node(format!(
+                    "Blob not found in storage: {}",
+                    tree_hash.to_base58(),
+                ))
+            })?;
+        }
+
+        let tree = Index::from_hash(NodeHash::from(tree_hash));
 
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
