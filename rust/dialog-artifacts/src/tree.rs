@@ -14,10 +14,10 @@
 //! key writes and range scans. Mutations accumulate in the tree's delta;
 //! callers must flush and persist the buffers when they mint a revision.
 //!
-//! The tree stores raw fixed-size key bytes and CBOR-encoded values:
+//! The tree stores raw fixed-size key bytes and rkyv-native values:
 //! [`Key`] is a transparent newtype over [`KeyBytes`] and passes through
-//! unchanged, while [`State<Datum>`] crosses the boundary through
-//! [`encode_state`] / [`decode_state`].
+//! unchanged, while [`State<Datum>`] is the tree's value type directly,
+//! serialized into node buffers by the tree itself.
 //!
 //! `ArtifactTree` is a type alias for a `dialog_search_tree::Tree`, so the
 //! orphan rule rules out inherent methods — the operations are exposed as
@@ -26,7 +26,7 @@
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{ContentAddressedStorage, Entry, Tree};
+use dialog_search_tree::{ContentAddressedStorage, Entry, Tree, Value as TreeValue};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
 
@@ -38,9 +38,11 @@ use crate::{
 
 /// The concrete search-tree type the artifact indexes use.
 ///
-/// Keys are the raw fixed-size bytes of [`Key`]; values are CBOR-encoded
-/// [`State<Datum>`] blocks.
-pub type ArtifactTree = Tree<KeyBytes, Vec<u8>>;
+/// Keys are the raw fixed-size bytes of [`Key`]; values are [`State`]
+/// payloads stored in the tree's native (rkyv) encoding.
+pub type ArtifactTree = Tree<KeyBytes, State<Datum>>;
+
+impl TreeValue for State<Datum> {}
 
 /// Adapts a [`StorageBackend`] keyed by raw `[u8; 32]` hashes (the
 /// [`dialog_storage::Blake3Hash`] alias used throughout the artifact
@@ -67,18 +69,6 @@ where
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.0.get(key.as_bytes()).await
     }
-}
-
-/// Encodes a [`State`] for storage as a tree value.
-pub fn encode_state(state: &State<Datum>) -> Result<Vec<u8>, DialogArtifactsError> {
-    serde_ipld_dagcbor::to_vec(state)
-        .map_err(|error| DialogArtifactsError::InvalidValue(format!("{error}")))
-}
-
-/// Decodes a tree value back into a [`State`].
-pub fn decode_state(bytes: &[u8]) -> Result<State<Datum>, DialogArtifactsError> {
-    serde_ipld_dagcbor::from_slice(bytes)
-        .map_err(|error| DialogArtifactsError::InvalidValue(format!("{error}")))
 }
 
 /// Shared mutation + scan operations on an [`ArtifactTree`].
@@ -165,7 +155,7 @@ impl ArtifactTreeExt for ArtifactTree {
                     let attribute_key = AttributeKey::from_key(&entity_key);
 
                     let datum = Datum::from(artifact);
-                    let added = encode_state(&State::Added(datum))?;
+                    let added = State::Added(datum);
                     *self = self
                         .insert(entity_key.into_key().into(), added.clone(), &storage)
                         .await?;
@@ -201,7 +191,7 @@ impl ArtifactTreeExt for ArtifactTree {
                         tokio::pin!(search_stream);
                         while let Some(candidate) = search_stream.next().await {
                             let candidate = candidate?;
-                            if let State::Added(current_element) = decode_state(&candidate.value)? {
+                            if let State::Added(current_element) = candidate.value {
                                 let current = Artifact::try_from(current_element)?;
                                 if current.is == artifact.is {
                                     found_same_value = true;
@@ -232,7 +222,7 @@ impl ArtifactTreeExt for ArtifactTree {
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
                     let datum = Datum::from(artifact);
-                    let added = encode_state(&State::Added(datum))?;
+                    let added = State::Added(datum);
                     *self = self
                         .insert(entity_key.into_key().into(), added.clone(), &storage)
                         .await?;
@@ -248,7 +238,7 @@ impl ArtifactTreeExt for ArtifactTree {
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
 
-                    let removed = encode_state(&State::Removed)?;
+                    let removed: State<Datum> = State::Removed;
                     *self = self
                         .insert(entity_key.into_key().into(), removed.clone(), &storage)
                         .await?;
@@ -325,7 +315,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 let raw = item?;
                 let entry = Entry {
                     key: Key::from(raw.key),
-                    value: decode_state(&raw.value)?,
+                    value: raw.value,
                 };
                 if entry.matches_selector(&selector)
                     && let Entry { value: State::Added(datum), .. } = entry

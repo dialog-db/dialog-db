@@ -1,5 +1,5 @@
 use dialog_artifacts::KeyBytes;
-use dialog_artifacts::tree::{TreeStorageBridge, decode_state};
+use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{
     Artifact, DialogArtifactsError, EntityKey, Exporter, Key, KeyViewConstruct, State,
 };
@@ -70,7 +70,7 @@ impl<E: Exporter> Export<'_, E> {
         tokio::pin!(stream);
 
         while let Some(entry) = stream.try_next().await? {
-            if let State::Added(datum) = decode_state(&entry.value)? {
+            if let State::Added(datum) = entry.value {
                 let artifact = Artifact::try_from(datum)?;
                 exporter.write(&artifact).await?;
             }

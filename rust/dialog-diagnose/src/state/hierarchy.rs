@@ -2,7 +2,6 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::tree::decode_state;
 use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, KeyBytes, State, Storage};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_search_tree::{ArchivedNodeBody, Buffer, Entry, Node, into_owned};
@@ -73,7 +72,7 @@ impl ArtifactsHierarchy {
                 return Ok(());
             };
 
-            let block: Node<KeyBytes, Vec<u8>> = Node::new(Buffer::from(bytes));
+            let block: Node<KeyBytes, State<Datum>> = Node::new(Buffer::from(bytes));
             let node = match block.body()? {
                 ArchivedNodeBody::Index(index) => TreeNode::Branch {
                     upper_bound: Key::from(into_owned::<KeyBytes>(
@@ -98,7 +97,7 @@ impl ArtifactsHierarchy {
                     for entry in segment.entries.iter() {
                         entries.push(Entry {
                             key: Key::from(into_owned::<KeyBytes>(&entry.key)?),
-                            value: decode_state(&into_owned::<Vec<u8>>(&entry.value)?)?,
+                            value: into_owned::<State<Datum>>(&entry.value)?,
                         });
                     }
                     TreeNode::Segment { entries }

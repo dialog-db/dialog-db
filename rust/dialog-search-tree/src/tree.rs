@@ -363,6 +363,15 @@ where
         }
     }
 
+    /// Computes the identity hash used for last-write-wins conflict
+    /// resolution: the blake3 hash of the value's serialized (rkyv) form,
+    /// the same canonical bytes the value has inside a node.
+    fn value_identity(value: &Value) -> Result<Blake3Hash, DialogSearchTreeError> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(value)
+            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+        Ok(Blake3Hash::hash(bytes.as_slice()))
+    }
+
     /// Integrates changes into this tree with deterministic conflict
     /// resolution.
     ///
@@ -371,7 +380,7 @@ where
     /// replicas eventual consistency:
     ///
     /// - **Add**: if the key exists with a different value, the value whose
-    ///   blake3 hash is higher wins.
+    ///   blake3 hash (over its serialized rkyv form) is higher wins.
     /// - **Remove**: only removes when the exact entry (key and value) is
     ///   present, so a concurrent update is not clobbered by a stale
     ///   removal.
@@ -387,7 +396,7 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
         Changes: Differential<Key, Value>,
-        Value: PartialEq + AsRef<[u8]>,
+        Value: PartialEq,
     {
         // Clones share the cache and delta cheaply; keep one to restore on
         // failure so integration stays atomic.
@@ -403,8 +412,8 @@ where
                         }
                         Some(existing) => {
                             if existing != entry.value {
-                                let existing_hash = Blake3Hash::hash(existing.as_ref());
-                                let new_hash = Blake3Hash::hash(entry.value.as_ref());
+                                let existing_hash = Self::value_identity(&existing)?;
+                                let new_hash = Self::value_identity(&entry.value)?;
                                 if new_hash.as_bytes() > existing_hash.as_bytes() {
                                     *self = self.insert(entry.key, entry.value, storage).await?;
                                 }

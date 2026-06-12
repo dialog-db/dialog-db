@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, mpsc::Sender},
 };
 
-use dialog_artifacts::tree::{TreeStorageBridge, decode_state};
+use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{CborEncoder, DialogArtifactsError, Index, Key, KeyBytes, Storage};
 use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
@@ -99,7 +99,7 @@ impl ArtifactsCursor {
                 if tx
                     .send(WorkerMessage::Fact {
                         index: state.next_index,
-                        data: decode_state(&element.value)?,
+                        data: element.value,
                     })
                     .is_err()
                 {

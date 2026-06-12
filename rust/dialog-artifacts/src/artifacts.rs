@@ -61,7 +61,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "csv")]
 use crate::{EntityKey, KeyBytes, KeyViewConstruct};
 
-use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge, decode_state};
+use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge};
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
 };
@@ -204,7 +204,7 @@ where
         tokio::pin!(entity_stream);
 
         while let Some(entry) = entity_stream.try_next().await? {
-            if let State::Added(datum) = decode_state(&entry.value)? {
+            if let State::Added(datum) = entry.value {
                 let artifact = Artifact::try_from(datum)?;
 
                 csv.serialize(artifact)

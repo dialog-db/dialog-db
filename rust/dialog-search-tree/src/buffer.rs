@@ -20,7 +20,9 @@ impl Buffer {
     /// Returns the [`Blake3Hash`] of this buffer's contents, computing it if
     /// necessary.
     pub fn blake3_hash(&self) -> &Blake3Hash {
-        self.0.1.get_or_init(|| Blake3Hash::hash(self.0.0.as_slice()))
+        self.0
+            .1
+            .get_or_init(|| Blake3Hash::hash(self.0.0.as_slice()))
     }
 
     /// Converts this [`Buffer`] into an owned `Vec<u8>`.

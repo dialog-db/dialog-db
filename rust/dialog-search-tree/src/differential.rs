@@ -1724,6 +1724,13 @@ mod tests {
         n.to_le_bytes()
     }
 
+    /// Mirrors the tree's LWW identity: blake3 over the value's serialized
+    /// rkyv form.
+    fn value_identity(value: &Vec<u8>) -> Blake3Hash {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(value).unwrap();
+        Blake3Hash::hash(bytes.as_slice())
+    }
+
     async fn flush(
         tree: &mut TestTree,
         storage: &mut ContentAddressedStorage<CountingBackend>,
@@ -2054,8 +2061,8 @@ mod tests {
         tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
             .await?;
 
-        // Check which value won based on blake3 hash comparison
-        let winner = if Blake3Hash::hash(&new_value) > Blake3Hash::hash(&existing_value) {
+        // Check which value won based on identity hash comparison
+        let winner = if value_identity(&new_value) > value_identity(&existing_value) {
             new_value
         } else {
             existing_value
@@ -2158,8 +2165,8 @@ mod tests {
 
         assert_eq!(final_a, final_b, "Trees should converge to same value");
 
-        // Verify the winner is determined by value hash
-        let winner = if Blake3Hash::hash(&[20u8]) > Blake3Hash::hash(&[30u8]) {
+        // Verify the winner is determined by the value identity hash
+        let winner = if value_identity(&vec![20u8]) > value_identity(&vec![30u8]) {
             vec![20u8]
         } else {
             vec![30u8]
