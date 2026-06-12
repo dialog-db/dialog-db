@@ -193,7 +193,7 @@ where
 
         let index = self.index.read().await;
         let range = crate::KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::min().0)
-            ..crate::KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::max().0);
+            ..=crate::KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::max().0);
         let tree_storage = TreeStorage::new(TreeStorageBridge(self.storage.clone()));
         let entity_stream = index.stream_range(range, &tree_storage);
 
@@ -461,6 +461,41 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A selector that constrains the entity, the attribute and the value
+    /// pins every component of the index key, so the scan range collapses
+    /// to a single exact key. Regression guard: the range must be treated
+    /// inclusively or the entry is unreachable (the old prolly tree papered
+    /// over this with a point-lookup special case for start == end ranges).
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_selects_fully_constrained_artifacts() -> anyhow::Result<()> {
+        let (storage_backend, _temp) = make_target_storage().await?;
+        let data = generate_data(4)?;
+        let sample = data[0].clone();
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        artifacts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let selector = ArtifactSelector::new()
+            .of(sample.of.clone())
+            .the(sample.the.clone())
+            .is(sample.is.clone());
+        let results: Vec<Artifact> = artifacts
+            .select(selector)
+            .map(|artifact| artifact.unwrap())
+            .collect()
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].of, sample.of);
+        assert_eq!(results[0].the, sample.the);
+        assert_eq!(results[0].is, sample.is);
+
+        Ok(())
+    }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]

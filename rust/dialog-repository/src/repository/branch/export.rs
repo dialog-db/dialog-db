@@ -63,7 +63,7 @@ impl<E: Exporter> Export<'_, E> {
         let tree = Index::from_hash(NodeHash::from(tree_hash));
 
         let range = KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::min().into_key())
-            ..KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::max().into_key());
+            ..=KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::max().into_key());
 
         let tree_store = TreeStorage::new(TreeStorageBridge(store));
         let stream = tree.stream_range(range, &tree_store);

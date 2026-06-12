@@ -23,8 +23,6 @@
 //! orphan rule rules out inherent methods — the operations are exposed as
 //! an extension trait instead.
 
-use std::ops::Range;
-
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
@@ -197,10 +195,7 @@ impl ArtifactTreeExt for ArtifactTree {
                             .set_attribute(entity_key.attribute())
                             .into_key();
                         let search_stream = self.stream_range(
-                            Range {
-                                start: KeyBytes::from(search_start),
-                                end: KeyBytes::from(search_end),
-                            },
+                            KeyBytes::from(search_start)..=KeyBytes::from(search_end),
                             &storage,
                         );
                         tokio::pin!(search_stream);
@@ -283,45 +278,42 @@ impl ArtifactTreeExt for ArtifactTree {
         let tree = self;
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         try_stream! {
+            // Inclusive ranges: when every key component is constrained by
+            // the selector, the lower and upper bounds are the same exact
+            // key and the scan must still select it.
             let range = if selector.entity().is_some() {
-                Range {
-                    start: KeyBytes::from(
-                        <EntityKey<Key> as KeyViewConstruct>::min()
-                            .apply_selector(&selector)
-                            .into_key(),
-                    ),
-                    end: KeyBytes::from(
+                KeyBytes::from(
+                    <EntityKey<Key> as KeyViewConstruct>::min()
+                        .apply_selector(&selector)
+                        .into_key(),
+                )
+                    ..=KeyBytes::from(
                         <EntityKey<Key> as KeyViewConstruct>::max()
                             .apply_selector(&selector)
                             .into_key(),
-                    ),
-                }
+                    )
             } else if selector.value().is_some() {
-                Range {
-                    start: KeyBytes::from(
-                        <ValueKey<Key> as KeyViewConstruct>::min()
-                            .apply_selector(&selector)
-                            .into_key(),
-                    ),
-                    end: KeyBytes::from(
+                KeyBytes::from(
+                    <ValueKey<Key> as KeyViewConstruct>::min()
+                        .apply_selector(&selector)
+                        .into_key(),
+                )
+                    ..=KeyBytes::from(
                         <ValueKey<Key> as KeyViewConstruct>::max()
                             .apply_selector(&selector)
                             .into_key(),
-                    ),
-                }
+                    )
             } else if selector.attribute().is_some() {
-                Range {
-                    start: KeyBytes::from(
-                        <AttributeKey<Key> as KeyViewConstruct>::min()
-                            .apply_selector(&selector)
-                            .into_key(),
-                    ),
-                    end: KeyBytes::from(
+                KeyBytes::from(
+                    <AttributeKey<Key> as KeyViewConstruct>::min()
+                        .apply_selector(&selector)
+                        .into_key(),
+                )
+                    ..=KeyBytes::from(
                         <AttributeKey<Key> as KeyViewConstruct>::max()
                             .apply_selector(&selector)
                             .into_key(),
-                    ),
-                }
+                    )
             } else {
                 // `Constrained` guarantees at least one field is set.
                 unreachable!("ArtifactSelector will always have at least one field specified")
