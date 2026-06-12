@@ -5,7 +5,7 @@
 //! from the read-only [`Tree`] interface, we achieve clearer separation of
 //! concerns and make the codebase more maintainable.
 
-use std::{collections::VecDeque, marker::PhantomData};
+use std::marker::PhantomData;
 
 use dialog_common::Blake3Hash;
 use hashbrown::HashMap;
@@ -232,20 +232,26 @@ where
     /// 1. **Key doesn't exist in segment**: Returns the current root unchanged
     ///    with the original delta (no-op).
     ///
-    /// 2. **Segment becomes empty**: Removes the empty segment by merging its
-    ///    siblings at the parent level, then rebuilds the tree upward.
+    /// 2. **Boundary-delete overflow**: The deleted entry was the segment's
+    ///    last entry (its boundary) and a right-adjacent segment exists. The
+    ///    right-adjacent segment adopts the orphans (possibly none, when the
+    ///    deletion emptied the segment): the combined entries are
+    ///    redistributed and the two affected subtrees are stitched back
+    ///    together at their lowest common ancestor. Requires the
+    ///    `right_neighbor` prefetch on the search result. See
+    ///    `Self::let_right_neighbor_adopt_orphans`.
     ///
-    /// 3. **Boundary-delete overflow**: The deleted entry was the segment's
-    ///    last entry (its boundary), the segment still has orphan entries, and
-    ///    a right-adjacent segment exists. The right-adjacent segment adopts
-    ///    the orphans: the combined entries are redistributed and the two
-    ///    affected subtrees are stitched back together at their lowest common
-    ///    ancestor. Requires the `right_neighbor` prefetch on the search
-    ///    result. See `Self::let_right_neighbor_adopt_orphans`.
+    /// 3. **Rightmost segment becomes empty**: There is no right-adjacent
+    ///    segment to adopt anything, so the empty segment is removed from its
+    ///    parent and the tree is rebuilt upward.
     ///
     /// 4. **Ordinary shrink**: The segment still has entries after removal and
     ///    there is no overflow. The remaining entries are redistributed using
     ///    their intrinsic ranks and the tree path is rebuilt.
+    ///
+    /// A deletion can leave a stale chain of single-child index nodes at the
+    /// root (when the deleted key's rank was what demanded those levels);
+    /// callers must collapse it, see `Tree::collapse_root_chain`.
     pub fn delete(
         self,
         key: &Key,
@@ -270,13 +276,13 @@ where
         let mut segment = into_owned::<Segment<Key, Value>>(segment)?;
         segment.entries.remove(removal_index);
 
-        // Boundary-delete with non-empty orphans and a right-adjacent segment
-        // triggers overflow: the orphans must fold into the next segment so
-        // the resulting tree matches a from-scratch build.
-        if deleted_boundary
-            && !segment.entries.is_empty()
-            && let Some(right_neighbor) = search_result.right_neighbor
-        {
+        // Boundary-delete with a right-adjacent segment triggers overflow:
+        // the dissolved boundary demands fusion with the right-adjacent
+        // subtree so the resulting tree matches a from-scratch build. This
+        // applies even when the deletion emptied the segment (zero orphans):
+        // the boundary may have terminated index groups at several levels,
+        // and all of them fuse with their right-adjacent peers.
+        if deleted_boundary && let Some(right_neighbor) = search_result.right_neighbor {
             let main_leaf_hash = search_result.leaf.hash().clone();
             return self.let_right_neighbor_adopt_orphans(
                 segment.entries,
@@ -291,18 +297,25 @@ where
         // remaining entries redistribute in place), a boundary delete with no
         // right-adjacent segment (the segment was the rightmost in the tree,
         // so there is no neighbor to adopt the remaining entries and they
-        // redistribute in place), or a delete that emptied the segment
-        // entirely (the segment itself must be removed from its parent).
+        // redistribute in place), or a delete that emptied the rightmost
+        // segment entirely (the segment itself must be removed from its
+        // parent).
         match NonEmpty::from_vec(segment.entries) {
             Some(entries) => self.distribute(entries, Some(search_result)),
-            None => self.remove_from_path(search_result.path),
+            None => {
+                let main_leaf_hash = search_result.leaf.hash().clone();
+                self.remove_from_path(main_leaf_hash, search_result.path)
+            }
         }
     }
 
     /// Resolves a boundary-delete overflow by letting the prefetched
     /// right-adjacent segment adopt the orphaned entries.
     ///
-    /// See case (3) in [`Self::delete`] for the high-level contract.
+    /// See case (2) in [`Self::delete`] for the high-level contract. The
+    /// `orphans` list may be empty (the deletion emptied the segment); the
+    /// fusion below the lowest common ancestor is required regardless,
+    /// because it is driven by the dissolved boundary, not by the orphans.
     ///
     /// Throughout this method "LCA" stands for *lowest common ancestor*: the
     /// deepest node on the search path that is an ancestor of both the
@@ -460,16 +473,12 @@ where
             context.delta().remove(lca_layer.host.hash());
 
             if above_lca.is_empty() {
-                // The LCA was the tree root; the unified subtree is the new
-                // root. Forcing another collect here would inject an extra
-                // level (a 1-child index) that never appears in a from-scratch
-                // build.
-                context.delta().add_all(
-                    unified
-                        .iter()
-                        .map(|(n, _)| (n.hash().clone(), n.buffer().clone())),
-                );
-                return Ok((unified.head.0.hash().clone(), context.take_delta()));
+                // The LCA was the tree root; the unified subtree becomes the
+                // new root via the standard merge with nothing left to merge
+                // against. This can leave a stale single-child wrapper on
+                // top (the merge cannot know that nothing above demands the
+                // level); `Tree::collapse_root_chain` strips it.
+                return Self::merge_with_path(unified, vec![], context, level_minimum_rank);
             }
 
             // Promote the unified subtree to the LCA's level so it can slot
@@ -631,77 +640,61 @@ where
     /// Removes a segment from the tree when it becomes empty after deletion.
     ///
     /// This method handles the case where deleting an entry leaves a segment
-    /// with no entries. It removes the segment by merging its left and right
-    /// siblings at the parent level, then rebuilds the tree upward.
+    /// with no entries. It removes the segment from its parent (the deepest
+    /// layer of the path), regroups the parent's surviving children, and
+    /// rebuilds the tree upward.
     ///
     /// If the removed segment was the only child (no siblings), the removal
-    /// propagates upward. If it was the last segment in the entire tree, the
-    /// tree becomes empty.
+    /// cascades: the now-childless parent is removed from *its* parent, and
+    /// so on toward the root. Because the path is ordered root-first, the
+    /// cascade pops layers from the back, and it tracks how many levels it
+    /// has climbed so the survivors are regrouped with the rank threshold of
+    /// the level actually being rebuilt. If the cascade consumes the whole
+    /// path, the tree has become empty.
     fn remove_from_path(
         self,
-        path: Vec<TreeLayer<Key, Value>>,
-    ) -> Result<(Blake3Hash, Delta<Blake3Hash, Buffer>), DialogSearchTreeError> {
-        let context = MutationContext::<Key>::new(self.delta.branch());
-
-        Self::remove_from_path_with_context(path.into(), context)
-    }
-
-    /// Internal helper for `remove_from_path` that works with a
-    /// [`MutationContext`] directly.
-    ///
-    /// Takes a [`VecDeque`] rather than [`Vec`] so recursive/cascading removal
-    /// can `pop_front` each layer in O(1); a `Vec::remove(0)` here would push
-    /// the shift cost to O(H²) across a chain of collapsed ancestors.
-    fn remove_from_path_with_context(
-        mut path: VecDeque<TreeLayer<Key, Value>>,
-        mut context: MutationContext<Key>,
+        leaf_hash: Blake3Hash,
+        mut path: Vec<TreeLayer<Key, Value>>,
     ) -> Result<(Blake3Hash, Delta<Blake3Hash, Buffer>), DialogSearchTreeError> {
         use dialog_common::NULL_BLAKE3_HASH;
 
-        // If there's no parent, the tree becomes empty
-        let Some(layer) = path.pop_front() else {
-            return Ok((NULL_BLAKE3_HASH.clone(), Delta::zero()));
-        };
+        let mut context = MutationContext::<Key>::new(self.delta.branch());
+        context.delta().remove(&leaf_hash);
 
-        context.delta().remove(layer.host.hash());
+        // The level of the removed child at the layer currently being
+        // popped; the leaf's parent hosts level-0 children (segments).
+        let mut level: Rank = 0;
 
-        // Collect left and right siblings, excluding the removed segment
-        let mut links = Vec::new();
+        while let Some(layer) = path.pop() {
+            context.delta().remove(layer.host.hash());
 
-        if let Some(left_siblings) = layer.left_siblings {
-            links.extend(left_siblings);
-        }
+            // Collect left and right siblings, excluding the removed child
+            let mut links = Vec::new();
+            if let Some(left_siblings) = layer.left_siblings {
+                links.extend(left_siblings);
+            }
+            if let Some(right_siblings) = layer.right_siblings {
+                links.extend(right_siblings);
+            }
 
-        // Note: we skip the removed segment's link here
-
-        if let Some(right_siblings) = layer.right_siblings {
-            links.extend(right_siblings);
-        }
-
-        // If no siblings remain, propagate the removal upward
-        if links.is_empty() {
-            return if path.is_empty() {
-                Ok((NULL_BLAKE3_HASH.clone(), context.take_delta()))
-            } else {
-                // Continue removing up the path with the same context
-                Self::remove_from_path_with_context(path, context)
+            let Some(links) = NonEmpty::from_vec(links) else {
+                // The removed child was the layer's only child; the layer's
+                // host dissolves and the removal cascades one level up.
+                level += 1;
+                continue;
             };
+
+            // The survivors are level-`level` nodes; regroup them into
+            // parents one level up and continue the standard merge from
+            // there. Both thresholds follow the "level `L` is built with
+            // threshold `L + 1`" rule.
+            let ranked_links = into_ranked_links(links, &mut context);
+            let nodes = Self::collect::<Link<_>>(ranked_links, FIRST_INDEX_RANK + level)?;
+            return Self::merge_with_path(nodes, path, context, FIRST_INDEX_RANK + level + 1);
         }
 
-        // We have siblings; rebuild with them
-        let Some(links) = NonEmpty::from_vec(links) else {
-            return Err(DialogSearchTreeError::Node(
-                "Unexpectedly empty link list".into(),
-            ));
-        };
-        let ranked_links = into_ranked_links(links, &mut context);
-
-        // Create nodes from the remaining links
-        let nodes = Self::collect::<Link<_>>(ranked_links, 1)?;
-
-        // Merge up the remaining path. `merge_with_path` pops from the back,
-        // so hand it back a `Vec` of the still-pending ancestors.
-        Self::merge_with_path(nodes, path.into(), context, FIRST_INDEX_RANK)
+        // Every layer cascaded away: the tree is empty.
+        Ok((NULL_BLAKE3_HASH.clone(), context.take_delta()))
     }
 
     /// Collects a sequence of ranked children into nodes based on a minimum

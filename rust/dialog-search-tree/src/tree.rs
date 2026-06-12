@@ -14,8 +14,9 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Entry, Key,
-    SearchOptions, SearchResult, SymmetryWith, TreeShaper, TreeWalker, Value, into_owned,
+    Accessor, ArchivedNodeBody, Buffer, Cache, ContentAddressedStorage, Delta,
+    DialogSearchTreeError, Entry, Key, Node, SearchOptions, SearchResult, SymmetryWith, TreeShaper,
+    TreeWalker, Value, into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -196,12 +197,67 @@ where
         };
         if let Some(search_result) = self.search(key, storage, options).await? {
             let shaper = TreeShaper::new(self.root.clone(), self.delta.clone());
-            let (next_root, delta) = shaper.delete(key, search_result)?;
+            let (next_root, mut delta) = shaper.delete(key, search_result)?;
+            let next_root = Self::collapse_root_chain(next_root, &mut delta, storage).await?;
             Ok(self.advance(next_root, delta))
         } else {
             // Key not found in tree - nothing to delete
             Ok(self.clone())
         }
+    }
+
+    /// Collapses a stale chain of single-child index nodes at the root after
+    /// a deletion.
+    ///
+    /// A canonical tree never has an index root whose only child is another
+    /// index: building from scratch stops at the first level that holds a
+    /// single node (the only legitimate single-child root is an index over a
+    /// lone segment). Such chains can survive a delete when the deleted key's
+    /// rank was what created the upper levels: with the boundary gone, the
+    /// levels it terminated dissolve, but the rebuild works bottom-up along
+    /// the search path and cannot see that nothing above demanded them.
+    /// Walking down from the root and discarding wrappers restores the
+    /// canonical shape.
+    async fn collapse_root_chain<Backend>(
+        mut root: Blake3Hash,
+        delta: &mut Delta<Blake3Hash, Buffer>,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Blake3Hash, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync
+            + 'static,
+    {
+        if &root == NULL_BLAKE3_HASH {
+            return Ok(root);
+        }
+
+        // The accessor shares `delta` by reference counting, so removals
+        // below remain visible to it.
+        let accessor = Accessor::new(delta.clone(), Cache::new(), storage.clone());
+
+        loop {
+            let node: Node<Key, Value> = accessor.get_node(&root).await?;
+            let child_hash = match node.body()? {
+                ArchivedNodeBody::Index(index) if index.links.len() == 1 => {
+                    <&Blake3Hash>::from(&index.links[0].node).clone()
+                }
+                _ => break,
+            };
+
+            let child: Node<Key, Value> = accessor.get_node(&child_hash).await?;
+            match child.body()? {
+                ArchivedNodeBody::Index(_) => {
+                    // The wrapper is unreachable in the new tree; drop it
+                    // from the pending changes if it originated there.
+                    delta.remove(&root);
+                    root = child_hash;
+                }
+                ArchivedNodeBody::Segment(_) => break,
+            }
+        }
+
+        Ok(root)
     }
 
     /// Returns an async stream over all entries in the tree.
@@ -221,10 +277,7 @@ where
             + ConditionalSync
             + 'static,
     {
-        self.stream_range(
-            <Key as self::Key>::min()..<Key as self::Key>::max(),
-            storage,
-        )
+        self.stream_range(.., storage)
     }
 
     /// Returns an async stream over entries with keys within the provided
@@ -1852,12 +1905,13 @@ mod tests {
     /// Deleting a boundary whose removal collapses the root must produce the
     /// same tree as building the remaining keys from scratch.
     ///
-    /// In this dataset the tree has exactly two segments under the root and
-    /// 69161 is the boundary of the first one. Deleting it makes the right
-    /// segment adopt the orphans, the root's two children fuse into one, and
-    /// the early-return in `let_right_neighbor_adopt_orphans` then returns
-    /// the fused node at the wrong level (here: a bare segment as the tree
-    /// root, where a canonical tree always has an index root).
+    /// Regression guard: in this dataset the tree has exactly two segments
+    /// under the root and 69161 is the boundary of the first one. Deleting
+    /// it makes the right segment adopt the orphans and the root's two
+    /// children fuse into one. `let_right_neighbor_adopt_orphans` used to
+    /// return the fused node at whatever level the fold reached (here: a
+    /// bare segment as the tree root, where a canonical tree always has an
+    /// index root) instead of collapsing to the canonical height.
     #[dialog_common::test]
     async fn it_produces_canonical_tree_when_boundary_delete_collapses_the_root() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
@@ -1883,13 +1937,14 @@ mod tests {
     /// Deleting the sole entry of a segment must leave every other entry
     /// readable and produce the canonical tree.
     ///
-    /// In this dataset 198936 is a boundary that forms a single-entry
-    /// segment in a tree of height two, so deleting it sends a multi-layer
-    /// search path through `TreeShaper::remove_from_path`. That path
-    /// processes the layers in root-to-leaf order while `merge_with_path`
-    /// consumes them leaf-to-root, so the rebuilt subtrees come out in the
-    /// wrong key order: keys 10554, 83265 and 167706 land to the right of
-    /// larger keys and become unreachable through search.
+    /// Regression guard: in this dataset 198936 is a boundary that forms a
+    /// single-entry segment in a tree of height two, so deleting it walks a
+    /// multi-layer search path through the empty-segment repair.
+    /// `TreeShaper::remove_from_path` used to process the layers in
+    /// root-to-leaf order while `merge_with_path` consumes them leaf-to-root,
+    /// so the rebuilt subtrees came out in the wrong key order: keys 10554,
+    /// 83265 and 167706 landed to the right of larger keys and became
+    /// unreachable through search.
     #[dialog_common::test]
     async fn it_keeps_entries_readable_after_a_delete_empties_a_segment() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
@@ -1927,8 +1982,8 @@ mod tests {
     }
 
     /// A range with an unbounded start bound must stream every entry below
-    /// the end bound. `TreeWalker::stream` currently returns immediately on
-    /// `Bound::Unbounded` and yields nothing.
+    /// the end bound. Regression guard: `TreeWalker::stream` used to return
+    /// immediately on `Bound::Unbounded`, yielding nothing.
     #[dialog_common::test]
     async fn it_streams_ranges_with_unbounded_start() -> Result<()> {
         use futures_util::StreamExt;
@@ -1948,9 +2003,9 @@ mod tests {
     }
 
     /// Streaming the whole tree must include an entry whose key is the
-    /// maximum key. `Tree::stream` currently delegates to
-    /// `stream_range(Key::min()..Key::max())`, and the exclusive end bound
-    /// drops the maximum key.
+    /// maximum key. Regression guard: `Tree::stream` used to delegate to
+    /// `stream_range(Key::min()..Key::max())`, whose exclusive end bound
+    /// dropped the maximum key.
     #[dialog_common::test]
     async fn it_streams_the_maximum_key() -> Result<()> {
         use futures_util::StreamExt;
@@ -1975,6 +2030,71 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 6, "stream should include the maximum key");
+        Ok(())
+    }
+
+    /// After every mutation, the tree must be byte-identical to a tree built
+    /// from scratch over the same logical content. This is the invariant the
+    /// whole crate is built around: same entries, same root hash, regardless
+    /// of the operation history. Random insert/delete sequences over random
+    /// key sets exercise every mutation path (in-place redistribution,
+    /// orphan adoption across parents, empty-segment removal, cascade
+    /// collapse, root chain stripping) without hand-picking datasets.
+    #[dialog_common::test]
+    async fn it_converges_to_canonical_form_after_every_operation() -> Result<()> {
+        use std::collections::BTreeSet;
+
+        use rand::{Rng, SeedableRng, rngs::StdRng};
+
+        let mut rng = StdRng::seed_from_u64(0x_D1A1_06DB);
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        for trial in 0..2 {
+            // Seed the tree with a random key set.
+            let mut live = BTreeSet::new();
+            let initial_size = rng.gen_range(40..120);
+            while live.len() < initial_size {
+                live.insert(rng.gen_range(0..200_000u32));
+            }
+            let initial: Vec<u32> = live.iter().copied().collect();
+            let mut tree = build_and_flush_u32(&initial, &mut storage).await?;
+
+            for op in 0..120 {
+                // Half deletes of present keys, half inserts of fresh keys
+                // (which occasionally hit a present key and become updates).
+                if !live.is_empty() && rng.gen_bool(0.5) {
+                    let index = rng.gen_range(0..live.len());
+                    let key = *live.iter().nth(index).expect("index is in range");
+                    tree = tree.delete(&key.to_le_bytes(), &storage).await?;
+                    live.remove(&key);
+                } else {
+                    let key = rng.gen_range(0..200_000u32);
+                    tree = tree
+                        .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                        .await?;
+                    live.insert(key);
+                }
+
+                // Flush periodically so both the delta-resident and the
+                // storage-resident read paths get exercised.
+                if op % 10 == 9 {
+                    for (hash, buffer) in tree.flush() {
+                        storage.store(buffer.as_ref().to_vec(), &hash).await?;
+                    }
+                }
+
+                let content: Vec<u32> = live.iter().copied().collect();
+                let scratch = build_and_flush_u32(&content, &mut storage).await?;
+                assert_eq!(
+                    tree.root(),
+                    scratch.root(),
+                    "trial {trial}, operation {op}: tree diverged from the \
+                     canonical form of its {} entries",
+                    content.len(),
+                );
+            }
+        }
+
         Ok(())
     }
 }
