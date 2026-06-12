@@ -144,8 +144,8 @@ pub use tree::*;
 mod delta;
 pub use delta::*;
 
-mod diff;
-pub use diff::*;
+mod differential;
+pub use differential::*;
 
 mod cache;
 pub use cache::*;
@@ -167,3 +167,10 @@ pub use shaper::*;
 
 mod compare;
 pub use compare::*;
+
+/// Helpers for testing and development.
+///
+/// This module provides utilities for creating deterministic tree structures
+/// for testing, including the `tree_spec!` macro and `DistributionSimulator`.
+#[cfg(any(test, feature = "helpers"))]
+pub mod helpers;

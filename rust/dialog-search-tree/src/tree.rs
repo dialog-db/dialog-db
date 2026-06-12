@@ -16,8 +16,8 @@ use rkyv::{
 
 use crate::{
     Accessor, ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Differential, Entry, Key, Node, SearchOptions, SearchResult,
-    SymmetryWith, TreeDifference, TreeShaper, TreeWalker, Value, into_owned,
+    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Node, SearchOptions,
+    SearchResult, SymmetryWith, TreeDifference, TreeShaper, TreeWalker, Value, into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -43,16 +43,18 @@ use crate::{
 /// copy) and an updated root hash, while continuing to share the [`Cache`].
 /// This enables efficient versioning where multiple tree versions share the
 /// same cache for read operations, but maintain independent mutation state.
-#[derive(Debug, Clone)]
-pub struct Tree<Key, Value>
+#[derive(Debug)]
+pub struct Tree<Key, Value, D = Geometric>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
+    D: Distribution,
 {
     key: PhantomData<Key>,
     value: PhantomData<Value>,
+    distribution: PhantomData<D>,
 
     root: Blake3Hash,
     node_cache: Cache<Blake3Hash, Buffer>,
@@ -60,7 +62,29 @@ where
     delta: Delta<Blake3Hash, Buffer>,
 }
 
-impl<Key, Value> Tree<Key, Value>
+// Manual impl: a derived `Clone` would demand `D: Clone`, but the
+// distribution is a pure type-level strategy that is never instantiated.
+impl<Key, Value, D> Clone for Tree<Key, Value, D>
+where
+    Key: self::Key,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Value: self::Value,
+    D: Distribution,
+{
+    fn clone(&self) -> Self {
+        Self {
+            key: PhantomData,
+            value: PhantomData,
+            distribution: PhantomData,
+            root: self.root.clone(),
+            node_cache: self.node_cache.clone(),
+            delta: self.delta.clone(),
+        }
+    }
+}
+
+impl<Key, Value, D> Tree<Key, Value, D>
 where
     Key: self::Key
         + ConditionalSync
@@ -88,6 +112,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
+    D: Distribution,
 {
     /// Returns the [`Blake3Hash`] of the root node of this tree.
     ///
@@ -105,6 +130,7 @@ where
         Self {
             key: PhantomData,
             value: PhantomData,
+            distribution: PhantomData,
             root: NULL_BLAKE3_HASH.clone(),
             node_cache: Cache::new(),
             delta: Delta::zero(),
@@ -120,6 +146,7 @@ where
         Self {
             key: PhantomData,
             value: PhantomData,
+            distribution: PhantomData,
             root,
             node_cache: Cache::new(),
             delta: Delta::zero(),
@@ -171,7 +198,7 @@ where
             + ConditionalSync,
     {
         let search_result = self.search(&key, storage, SearchOptions::default()).await?;
-        let shaper = TreeShaper::new(self.root.clone(), self.delta.clone());
+        let shaper = TreeShaper::<Key, Value, D>::new(self.root.clone(), self.delta.clone());
         let (next_root, delta) = shaper.insert(Entry { key, value }, search_result)?;
 
         Ok(self.advance(next_root, delta))
@@ -194,7 +221,7 @@ where
             prefetch_right_neighbor: true,
         };
         if let Some(search_result) = self.search(key, storage, options).await? {
-            let shaper = TreeShaper::new(self.root.clone(), self.delta.clone());
+            let shaper = TreeShaper::<Key, Value, D>::new(self.root.clone(), self.delta.clone());
             let (next_root, mut delta) = shaper.delete(key, search_result)?;
             let next_root = Self::collapse_root_chain(next_root, &mut delta, storage).await?;
             Ok(self.advance(next_root, delta))
@@ -413,6 +440,7 @@ where
         Tree {
             key: PhantomData,
             value: PhantomData,
+            distribution: PhantomData,
             root,
             node_cache: self.node_cache.clone(),
             delta,
@@ -450,7 +478,7 @@ where
     }
 }
 
-impl<Key, Value> From<Blake3Hash> for Tree<Key, Value>
+impl<Key, Value, D> From<Blake3Hash> for Tree<Key, Value, D>
 where
     Key: self::Key + ConditionalSync + 'static,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -470,6 +498,7 @@ where
     Value: for<'a> Serialize<
         Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
     >,
+    D: Distribution,
 {
     fn from(root: Blake3Hash) -> Self {
         Self::from_hash(root)

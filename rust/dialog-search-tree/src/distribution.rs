@@ -1,5 +1,29 @@
+use dialog_common::Blake3Hash;
+
 /// The rank of a node in the prolly tree.
 pub type Rank = u32;
+
+/// Strategy for assigning ranks to keys.
+///
+/// The distribution decides which keys become node boundaries, and thereby
+/// the shape of the tree. The default, [`Geometric`], derives ranks from the
+/// blake3 hash of the key bytes, producing the canonical production shape.
+/// Tests may inject an alternative distribution to force exact tree shapes.
+pub trait Distribution {
+    /// Computes the rank of a key from its bytes.
+    fn rank(key: &[u8]) -> Rank;
+}
+
+/// The default [`Distribution`]: a geometric distribution over the blake3
+/// hash of the key bytes (see [`geometric`]).
+#[derive(Clone, Debug, Default)]
+pub struct Geometric;
+
+impl Distribution for Geometric {
+    fn rank(key: &[u8]) -> Rank {
+        geometric::rank(&Blake3Hash::hash(key))
+    }
+}
 
 /// Geometric distribution for computing node ranks.
 pub mod geometric {
