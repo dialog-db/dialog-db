@@ -9,6 +9,12 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 /// (`dialog_common::NULL_BLAKE3_HASH`) byte for byte.
 pub const EMPTY_TREE_HASH: Blake3Hash = [0; 32];
 
+/// Maximum number of concurrent block writes when persisting a tree's
+/// pending nodes. Blocks are content-addressed and independent, so their
+/// write order doesn't matter; only completion before the root is
+/// referenced does.
+pub(crate) const FLUSH_CONCURRENCY: usize = 16;
+
 /// Reference to a search tree by its root hash.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TreeReference(Blake3Hash);

@@ -48,12 +48,9 @@ pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
     MemoryStorageBackend, Storage, StorageBackend,
 };
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-#[cfg(feature = "csv")]
-use futures_util::TryStreamExt;
 
 #[cfg(feature = "csv")]
 use async_stream::stream;
@@ -74,6 +71,12 @@ use crate::{
 /// bytes and values are CBOR-encoded [`State`] blocks (see
 /// [`crate::tree`]).
 pub type Index = ArtifactTree;
+
+/// Maximum number of concurrent block writes when persisting the index's
+/// pending nodes. Blocks are content-addressed and independent, so their
+/// write order doesn't matter; only completion before the root is
+/// referenced does.
+const FLUSH_CONCURRENCY: usize = 16;
 
 /// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
 /// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,
@@ -398,11 +401,14 @@ where
 
             // Persist the tree's pending nodes before minting a revision;
             // a revision must only reference durable blocks.
-            for (hash, buffer) in index.flush() {
-                self.storage
-                    .set(*hash.as_bytes(), buffer.into_vec())
-                    .await?;
-            }
+            stream::iter(index.flush())
+                .map(|(hash, buffer)| {
+                    let mut storage = self.storage.clone();
+                    async move { storage.set(*hash.as_bytes(), buffer.into_vec()).await }
+                })
+                .buffer_unordered(FLUSH_CONCURRENCY)
+                .try_collect::<()>()
+                .await?;
 
             let root = index.root();
             let next_revision = if root == NULL_BLAKE3_HASH {

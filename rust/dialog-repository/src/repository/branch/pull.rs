@@ -7,9 +7,10 @@ use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 use dialog_storage::StorageBackend;
+use futures_util::{StreamExt, TryStreamExt, stream};
 
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, PullError, RemoteSite,
+    Branch, EMPTY_TREE_HASH, FLUSH_CONCURRENCY, Index, NetworkedIndex, PullError, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
 
@@ -117,10 +118,14 @@ impl Pull<'_> {
 
         // Persist the merged tree's pending nodes before referencing its
         // root in a revision.
-        let mut store = store;
-        for (hash, buffer) in merged.flush() {
-            store.set(*hash.as_bytes(), buffer.into_vec()).await?;
-        }
+        stream::iter(merged.flush())
+            .map(|(hash, buffer)| {
+                let mut store = store.clone();
+                async move { store.set(*hash.as_bytes(), buffer.into_vec()).await }
+            })
+            .buffer_unordered(FLUSH_CONCURRENCY)
+            .try_collect::<()>()
+            .await?;
 
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
 

@@ -1,5 +1,5 @@
 use crate::{
-    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
+    Branch, CommitError, EMPTY_TREE_HASH, FLUSH_CONCURRENCY, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
 use dialog_artifacts::tree::ArtifactTreeExt as _;
@@ -11,7 +11,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_storage::StorageBackend;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 
 /// Command that commits a stream of changes (assert/retract) to a branch.
 ///
@@ -89,12 +89,15 @@ where
         // Persist the tree's pending nodes before referencing the root in
         // a revision; a revision must only point at durable blocks. The
         // empty tree's root is the canonical empty-tree hash already.
-        for (hash, buffer) in tree.flush() {
-            store
-                .set(*hash.as_bytes(), buffer.into_vec())
-                .await
-                .map_err(DialogArtifactsError::from)?;
-        }
+        stream::iter(tree.flush())
+            .map(|(hash, buffer)| {
+                let mut store = store.clone();
+                async move { store.set(*hash.as_bytes(), buffer.into_vec()).await }
+            })
+            .buffer_unordered(FLUSH_CONCURRENCY)
+            .try_collect::<()>()
+            .await
+            .map_err(DialogArtifactsError::from)?;
 
         let tree = TreeReference::from(*tree.root().as_bytes());
 
