@@ -1,3 +1,5 @@
+use std::sync::{Arc, OnceLock};
+
 use dialog_common::Blake3Hash;
 use rkyv::{
     Deserialize,
@@ -24,6 +26,13 @@ pub struct Node<Key, Value> {
     value: PhantomData<Value>,
 
     buffer: Buffer,
+
+    /// Proof that `buffer` passed archive validation as
+    /// `ArchivedNodeBody<Key, Value>`. Living on the typed node (rather
+    /// than the type-erased buffer) ties the proof to the exact archived
+    /// type by construction; sharing it across clones lets one validation
+    /// cover every copy of this node.
+    validated: Arc<OnceLock<()>>,
 }
 
 impl<Key, Value> Node<Key, Value>
@@ -47,6 +56,7 @@ where
             buffer,
             key: PhantomData,
             value: PhantomData,
+            validated: Arc::new(OnceLock::new()),
         }
     }
 
@@ -81,14 +91,14 @@ where
 
     /// Accesses the deserialized body of this node.
     pub fn body(&self) -> Result<&ArchivedNodeBody<Key, Value>, DialogSearchTreeError> {
-        if self.buffer.is_validated() {
-            // SAFETY: this exact buffer already passed a full `rkyv::access`
-            // validation as `ArchivedNodeBody` (the marker is only ever set
-            // on that path), buffers are immutable and 16-byte aligned, and
-            // content addressing guarantees stored bytes are byte-identical
-            // to what was validated. Skipping re-validation turns every
-            // subsequent body access from a linear bytecheck pass into a
-            // pointer cast.
+        if self.validated.get().is_some() {
+            // SAFETY: the marker is set only after this node's buffer passed
+            // a full `rkyv::access` validation as exactly this
+            // `ArchivedNodeBody<Key, Value>` (the marker lives on the typed
+            // node, so no other archived type can set it), and buffers are
+            // immutable and 16-byte aligned. Skipping re-validation turns
+            // every subsequent body access from a linear bytecheck pass
+            // into a pointer cast.
             return Ok(unsafe {
                 rkyv::access_unchecked::<ArchivedNodeBody<Key, Value>>(self.buffer.as_ref())
             });
@@ -96,7 +106,7 @@ where
 
         let body = rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
             .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
-        self.buffer.mark_validated();
+        let _ = self.validated.set(());
         Ok(body)
     }
 
