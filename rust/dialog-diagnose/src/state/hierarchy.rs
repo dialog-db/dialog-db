@@ -2,9 +2,11 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, State, Storage};
-use dialog_prolly_tree::{Block, Entry};
-use dialog_storage::{Blake3Hash, ContentAddressedStorage, MemoryStorageBackend};
+use dialog_artifacts::tree::decode_state;
+use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, KeyBytes, State, Storage};
+use dialog_common::Blake3Hash as NodeHash;
+use dialog_search_tree::{ArchivedNodeBody, Buffer, Entry, Node, into_owned};
+use dialog_storage::{Blake3Hash, MemoryStorageBackend, StorageBackend};
 
 use super::store::WorkerMessage;
 
@@ -66,25 +68,41 @@ impl ArtifactsHierarchy {
         let hash = hash.to_owned();
 
         tokio::spawn(async move {
-            let Some(block): Option<Block<Key, State<Datum>, Blake3Hash>> =
-                storage.read(&hash).await?
-            else {
+            let Some(bytes) = storage.get(&hash).await? else {
                 // TODO: This should be an error condition
                 return Ok(());
             };
 
-            let node = match &block {
-                Block::Branch(_) => TreeNode::Branch {
-                    upper_bound: block.upper_bound().clone(),
-                    children: block
-                        .references()?
+            let block: Node<KeyBytes, Vec<u8>> = Node::new(Buffer::from(bytes));
+            let node = match block.body()? {
+                ArchivedNodeBody::Index(index) => TreeNode::Branch {
+                    upper_bound: Key::from(into_owned::<KeyBytes>(
+                        &index
+                            .links
+                            .last()
+                            .ok_or_else(|| {
+                                DialogArtifactsError::MalformedIndex(
+                                    "Index node had no children".into(),
+                                )
+                            })?
+                            .upper_bound,
+                    )?),
+                    children: index
+                        .links
                         .iter()
-                        .map(|reference| reference.hash().to_owned())
+                        .map(|link| *<&NodeHash>::from(&link.node).as_bytes())
                         .collect(),
                 },
-                Block::Segment(_) => TreeNode::Segment {
-                    entries: Vec::from(block.into_entries()?),
-                },
+                ArchivedNodeBody::Segment(segment) => {
+                    let mut entries = Vec::with_capacity(segment.entries.len());
+                    for entry in segment.entries.iter() {
+                        entries.push(Entry {
+                            key: Key::from(into_owned::<KeyBytes>(&entry.key)?),
+                            value: decode_state(&into_owned::<Vec<u8>>(&entry.value)?)?,
+                        });
+                    }
+                    TreeNode::Segment { entries }
+                }
             };
 
             tx.send(WorkerMessage::Node { hash, node }).unwrap();

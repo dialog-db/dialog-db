@@ -9,13 +9,12 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::Resolve;
-use dialog_prolly_tree::EMPT_TREE_HASH;
 use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 use futures_util::TryStreamExt;
 
 use crate::{
-    Branch, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt,
-    Upstream,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt, Upstream,
 };
 
 /// Command struct for exporting all artifacts from a branch.
@@ -59,7 +58,7 @@ impl<E: Exporter> Export<'_, E> {
             .revision()
             .as_ref()
             .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPT_TREE_HASH);
+            .unwrap_or(EMPTY_TREE_HASH);
 
         let tree = Index::from_hash(NodeHash::from(tree_hash));
 

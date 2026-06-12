@@ -7,13 +7,13 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_effects::memory::Resolve;
-use dialog_prolly_tree::{DialogProllyTreeError, EMPT_TREE_HASH};
+use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    Branch, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt,
-    Upstream,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt, Upstream,
 };
 
 /// Command struct for selecting artifacts from a branch.
@@ -33,7 +33,7 @@ impl<'a> Select<'a> {
             .revision()
             .as_ref()
             .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPT_TREE_HASH)
+            .unwrap_or(EMPTY_TREE_HASH)
     }
 
     /// The catalog (archive index) scoped to this branch's subject.
@@ -52,7 +52,7 @@ impl Select<'_> {
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogProllyTreeError>
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogSearchTreeError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -92,7 +92,7 @@ impl Select<'_> {
         store: S,
     ) -> Result<
         impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
-        DialogProllyTreeError,
+        DialogSearchTreeError,
     >
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>

@@ -38,6 +38,7 @@ impl Reset<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::EMPTY_TREE_HASH;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -45,7 +46,6 @@ mod tests {
     use std::collections::HashSet;
 
     use dialog_capability::Subject;
-    use dialog_prolly_tree::EMPT_TREE_HASH;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
@@ -63,7 +63,7 @@ mod tests {
             subject: subject.did().clone(),
             issuer: subject.did().clone(),
             authority: subject.did().clone(),
-            tree: TreeReference::from(EMPT_TREE_HASH),
+            tree: TreeReference::from(EMPTY_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
             moment: 0,

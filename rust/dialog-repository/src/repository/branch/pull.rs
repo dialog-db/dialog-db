@@ -5,13 +5,12 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_prolly_tree::EMPT_TREE_HASH;
 use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 use dialog_storage::StorageBackend;
 
 use crate::{
-    Branch, Index, NetworkedIndex, PullError, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt, Revision, TreeReference, Upstream,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, PullError, RemoteSite,
+    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
 
 /// Command struct for pulling from upstream (auto-dispatches local/remote).
@@ -94,7 +93,7 @@ impl Pull<'_> {
         let local_tree_hash = local_revision
             .as_ref()
             .map(|revision| *revision.tree.hash())
-            .unwrap_or(EMPT_TREE_HASH);
+            .unwrap_or(EMPTY_TREE_HASH);
 
         // `NetworkedIndex` reads from the local archive first and,
         // when the upstream is remote, falls back to the remote

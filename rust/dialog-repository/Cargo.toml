@@ -28,7 +28,6 @@ dialog-network = { workspace = true }
 dialog-remote-s3 = { workspace = true }
 dialog-remote-ucan-s3 = { workspace = true }
 dialog-storage = { workspace = true }
-dialog-prolly-tree = { workspace = true }
 dialog-search-tree = { workspace = true }
 dialog-ucan = { workspace = true }
 dialog-ucan-core = { workspace = true }

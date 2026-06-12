@@ -3,7 +3,7 @@
 //! This module defines the [`Datum`] type which is the internal serializable
 //! representation of artifacts stored within the prolly tree indexes.
 
-use dialog_prolly_tree::ValueType;
+use crate::ValueType;
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Serialize};
 

@@ -1,6 +1,6 @@
 use crate::{
-    Branch, CommitError, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt, Revision, TreeReference, Upstream,
+    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
+    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
 use dialog_artifacts::Instruction;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
@@ -10,7 +10,6 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_prolly_tree::EMPT_TREE_HASH;
 use dialog_storage::StorageBackend;
 use futures_util::Stream;
 
@@ -78,7 +77,7 @@ where
         let base_tree_hash = base_revision
             .as_ref()
             .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPT_TREE_HASH);
+            .unwrap_or(EMPTY_TREE_HASH);
 
         let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
 

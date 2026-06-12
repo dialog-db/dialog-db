@@ -1,4 +1,4 @@
-use dialog_prolly_tree::ValueType;
+use crate::ValueType;
 use serde::{Deserialize, Serialize};
 
 #[cfg(doc)]
