@@ -86,13 +86,12 @@ where
             // Get the start key. Included/Excluded ranges are identical here,
             // the check if key is in range is below, and this will at most read
             // one unnecessary segment iff `Bound::Excluded(K)` and `K` is a
-            // boundary node.
+            // boundary node. An unbounded start begins at the leftmost leaf,
+            // which searching for the minimum key descends to.
             let start_key = match range.start_bound() {
                 Bound::Included(start) => start.clone(),
                 Bound::Excluded(start) => start.clone(),
-                Bound::Unbounded => {
-                    return;
-                },
+                Bound::Unbounded => <Key as crate::Key>::min(),
             };
             let Some(search_result) = self
                 .search(&start_key, accessor.clone(), SearchOptions::default())
