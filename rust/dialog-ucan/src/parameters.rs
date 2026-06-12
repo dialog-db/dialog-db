@@ -82,7 +82,7 @@ mod tests {
 
     use super::*;
     use dialog_capability::{Subject, did};
-    use dialog_common::Blake3Hash;
+    use dialog_common::{Blake3Hash, Buffer};
     use dialog_effects::archive::{Archive, Catalog, Get, Put};
 
     #[dialog_common::test]
@@ -142,11 +142,10 @@ mod tests {
     #[dialog_common::test]
     fn it_produces_multiple_constraints_for_chain_with_payload() {
         let content = b"hello world";
-        let digest = Blake3Hash::hash(content);
         let cap = Subject::from(did!("key:z6MkTest"))
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
-            .invoke(Put::new(digest, content.to_vec()));
+            .invoke(Put::new(Buffer::from(content.to_vec())));
         let policy = parameters_to_policy(parameters(&cap));
 
         // Should have constraints for catalog, digest, and content (via checksum)

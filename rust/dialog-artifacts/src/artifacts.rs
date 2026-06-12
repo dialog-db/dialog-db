@@ -402,9 +402,12 @@ where
             // Persist the tree's pending nodes before minting a revision;
             // a revision must only reference durable blocks.
             stream::iter(index.flush())
-                .map(|(hash, buffer)| {
+                .map(|buffer| {
                     let mut storage = self.storage.clone();
-                    async move { storage.set(*hash.as_bytes(), buffer.into_vec()).await }
+                    async move {
+                        let digest = *buffer.blake3_hash().as_bytes();
+                        storage.set(digest, buffer.into_vec()).await
+                    }
                 })
                 .buffer_unordered(FLUSH_CONCURRENCY)
                 .try_collect::<()>()

@@ -57,6 +57,7 @@ use crate::resource::Resource;
 pub trait SpaceProvider:
     Provider<archive::Get>
     + Provider<archive::Put>
+    + Provider<archive::Import>
     + Provider<memory::Resolve>
     + Provider<memory::Publish>
     + Provider<memory::Retract>
@@ -74,6 +75,7 @@ pub trait SpaceProvider:
 impl<T> SpaceProvider for T where
     T: Provider<archive::Get>
         + Provider<archive::Put>
+        + Provider<archive::Import>
         + Provider<memory::Resolve>
         + Provider<memory::Publish>
         + Provider<memory::Retract>
@@ -92,7 +94,7 @@ impl<T> SpaceProvider for T where
 #[derive(Clone, dialog_capability::Provider)]
 pub struct Space<A, M, C, D> {
     /// Archive provider.
-    #[provide(archive::Get, archive::Put)]
+    #[provide(archive::Get, archive::Put, archive::Import)]
     pub archive: A,
 
     /// Memory provider.

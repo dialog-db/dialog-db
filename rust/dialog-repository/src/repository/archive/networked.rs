@@ -2,7 +2,7 @@ use crate::RemoteSite;
 use async_trait::async_trait;
 use dialog_capability::Fork;
 use dialog_capability::{Capability, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_storage::{Blake3Hash, DialogStorageError, Encoder, StorageBackend};
@@ -88,7 +88,11 @@ where
         match remote_result {
             Some(bytes) => {
                 // Cache locally
-                let cache = self.local.catalog().clone().put(*key, bytes.clone());
+                let cache = self
+                    .local
+                    .catalog()
+                    .clone()
+                    .put(Buffer::from(bytes.as_slice()));
                 let _: Result<(), _> = cache.perform(self.local.env()).await;
                 Ok(Some(bytes))
             }

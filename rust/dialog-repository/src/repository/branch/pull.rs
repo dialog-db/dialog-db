@@ -1,16 +1,16 @@
+use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::{Get, Put};
+use dialog_effects::archive::prelude::CatalogExt as _;
+use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::ContentAddressedStorage as TreeStorage;
-use dialog_storage::StorageBackend;
-use futures_util::{StreamExt, TryStreamExt, stream};
 
 use crate::{
-    Branch, EMPTY_TREE_HASH, FLUSH_CONCURRENCY, Index, NetworkedIndex, PullError, RemoteSite,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, PullError, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
 
@@ -38,6 +38,7 @@ impl Pull<'_> {
     where
         Env: Provider<Get>
             + Provider<Put>
+            + Provider<Import>
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
@@ -116,16 +117,19 @@ impl Pull<'_> {
         let local_changes = base.differentiate(&local, &tree_store, &tree_store);
         Box::pin(merged.integrate(local_changes, &tree_store)).await?;
 
-        // Persist the merged tree's pending nodes before referencing its
-        // root in a revision.
-        stream::iter(merged.flush())
-            .map(|(hash, buffer)| {
-                let mut store = store.clone();
-                async move { store.set(*hash.as_bytes(), buffer.into_vec()).await }
-            })
-            .buffer_unordered(FLUSH_CONCURRENCY)
-            .try_collect::<()>()
-            .await?;
+        // Persist the merged tree's pending nodes to the local archive
+        // before referencing its root in a revision. The whole flush
+        // travels as one `Import` invocation: block buffers are
+        // reference-counted (nothing is copied on the way in) and
+        // providers with native batching persist it in a single round
+        // trip.
+        branch
+            .archive()
+            .index()
+            .import(merged.flush())
+            .perform(env)
+            .await
+            .map_err(DialogArtifactsError::from)?;
 
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
 

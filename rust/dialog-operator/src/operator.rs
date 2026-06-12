@@ -38,6 +38,7 @@ pub struct Operator<S: Clone> {
     #[provide(
         archive::Get,
         archive::Put,
+        archive::Import,
         credential::Load<Credential>,
         credential::Save<Credential>,
         credential::Load<Secret>,

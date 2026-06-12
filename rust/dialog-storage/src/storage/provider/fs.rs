@@ -502,7 +502,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_writes_archive_to_expected_path() {
-        use dialog_common::Blake3Hash;
+        use dialog_common::{Blake3Hash, Buffer};
         use dialog_credentials::Ed25519Signer;
         use dialog_effects::prelude::*;
         use dialog_varsig::Principal;
@@ -519,7 +519,7 @@ mod tests {
 
         did.archive()
             .catalog("index")
-            .put(digest.clone(), content)
+            .put(Buffer::from(content))
             .perform(&provider)
             .await
             .unwrap();

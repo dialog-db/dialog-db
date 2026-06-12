@@ -1,7 +1,11 @@
+use std::fmt::{Formatter, Result as FmtResult};
 use std::sync::{Arc, OnceLock};
 
-use dialog_common::Blake3Hash;
 use rkyv::util::AlignedVec;
+use serde::de::{Error as DeserializeError, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::Blake3Hash;
 
 /// A reference-counted buffer with lazy hash computation.
 ///
@@ -35,6 +39,16 @@ impl Buffer {
     }
 }
 
+/// Buffers compare by content (with a pointer-equality fast path for
+/// clones sharing the same allocation).
+impl PartialEq for Buffer {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for Buffer {}
+
 impl AsRef<[u8]> for Buffer {
     fn as_ref(&self) -> &[u8] {
         self.0.0.as_slice()
@@ -58,6 +72,63 @@ impl From<&[u8]> for Buffer {
 impl From<AlignedVec> for Buffer {
     fn from(value: AlignedVec) -> Self {
         Self(Arc::new((value, OnceLock::new())))
+    }
+}
+
+/// Serializes as raw bytes. Only exercised when a buffer crosses a wire
+/// boundary (e.g. a remote invocation); in-process effect dispatch passes
+/// buffers by reference-counted handle without touching this.
+impl Serialize for Buffer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(self.as_ref())
+    }
+}
+
+/// Deserializes from raw bytes, realigning them (see the type docs).
+impl<'de> Deserialize<'de> for Buffer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct BufferVisitor;
+
+        impl<'de> Visitor<'de> for BufferVisitor {
+            type Value = Buffer;
+
+            fn expecting(&self, formatter: &mut Formatter) -> FmtResult {
+                formatter.write_str("a byte buffer")
+            }
+
+            fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Buffer, E>
+            where
+                E: DeserializeError,
+            {
+                Ok(Buffer::from(bytes))
+            }
+
+            fn visit_byte_buf<E>(self, bytes: Vec<u8>) -> Result<Buffer, E>
+            where
+                E: DeserializeError,
+            {
+                Ok(Buffer::from(bytes))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Buffer, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                Ok(Buffer::from(bytes))
+            }
+        }
+
+        deserializer.deserialize_bytes(BufferVisitor)
     }
 }
 

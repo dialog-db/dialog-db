@@ -42,12 +42,18 @@ struct AttenuateField<'a> {
     conversion: Option<Conversion>,
     rename: Option<Ident>,
     attrs: Vec<&'a syn::Attribute>,
+    /// A `#[serde(with = "...")]` path to attach to the projected field.
+    serde_with: Option<syn::LitStr>,
+    /// Whether the conversion must clone the source (a field with several
+    /// projections is consumed only by its last one).
+    clone_source: bool,
 }
 
 struct AttenuateAttr {
     into_ty: Type,
     with_fn: Option<syn::ExprPath>,
     rename: Option<Ident>,
+    serde_with: Option<syn::LitStr>,
 }
 
 fn parse_attenuate_attr(attr: &syn::Attribute) -> syn::Result<AttenuateAttr> {
@@ -55,6 +61,7 @@ fn parse_attenuate_attr(attr: &syn::Attribute) -> syn::Result<AttenuateAttr> {
         let mut into_ty = None;
         let mut with_fn = None;
         let mut rename = None;
+        let mut serde_with = None;
 
         loop {
             let key: syn::Ident = input.parse()?;
@@ -66,10 +73,12 @@ fn parse_attenuate_attr(attr: &syn::Attribute) -> syn::Result<AttenuateAttr> {
                 with_fn = Some(input.parse::<syn::ExprPath>()?);
             } else if key == "rename" {
                 rename = Some(input.parse::<Ident>()?);
+            } else if key == "serde_with" {
+                serde_with = Some(input.parse::<syn::LitStr>()?);
             } else {
                 return Err(syn::Error::new_spanned(
                     &key,
-                    "expected `into`, `with`, or `rename`",
+                    "expected `into`, `with`, `rename`, or `serde_with`",
                 ));
             }
 
@@ -88,6 +97,7 @@ fn parse_attenuate_attr(attr: &syn::Attribute) -> syn::Result<AttenuateAttr> {
             into_ty,
             with_fn,
             rename,
+            serde_with,
         })
     })
 }
@@ -169,39 +179,62 @@ fn generate_for_named_struct(
         let ident = field.ident.as_ref().unwrap();
         let ty = &field.ty;
 
-        let mut attenuate_attr = None;
+        let mut attenuate_attrs = Vec::new();
         let mut other_attrs = Vec::new();
 
         for attr in &field.attrs {
             if attr.path().is_ident("attenuate") {
-                attenuate_attr = Some(parse_attenuate_attr(attr)?);
+                attenuate_attrs.push(parse_attenuate_attr(attr)?);
                 has_projections = true;
             } else {
                 other_attrs.push(attr);
             }
         }
 
-        let (into_ty, conversion, rename, field_attrs) = match attenuate_attr {
-            Some(a) => {
-                let conv = match a.with_fn {
-                    Some(path) => Conversion::With(path),
-                    None => Conversion::From(a.into_ty.clone()),
-                };
-                // Projected fields get a fresh type — don't carry original attrs
-                // (e.g. #[serde(with = "serde_bytes")] doesn't apply to Checksum)
-                (Some(a.into_ty), Some(conv), a.rename, Vec::new())
-            }
-            None => (None, None, None, other_attrs),
-        };
+        if attenuate_attrs.is_empty() {
+            fields.push(AttenuateField {
+                ident,
+                ty,
+                into_ty: None,
+                conversion: None,
+                rename: None,
+                attrs: other_attrs,
+                serde_with: None,
+                clone_source: false,
+            });
+            continue;
+        }
 
-        fields.push(AttenuateField {
-            ident,
-            ty,
-            into_ty,
-            conversion,
-            rename,
-            attrs: field_attrs,
-        });
+        // A field may carry several projections (e.g. a payload projected
+        // to both a digest and a checksum); each then needs a distinct
+        // `rename`, and every conversion but the last clones the source.
+        if attenuate_attrs.len() > 1 && attenuate_attrs.iter().any(|a| a.rename.is_none()) {
+            return Err(syn::Error::new_spanned(
+                ident,
+                "each of multiple #[attenuate(...)] projections of one field requires `rename`",
+            ));
+        }
+
+        let last = attenuate_attrs.len() - 1;
+        for (index, a) in attenuate_attrs.into_iter().enumerate() {
+            let conv = match a.with_fn {
+                Some(path) => Conversion::With(path),
+                None => Conversion::From(a.into_ty.clone()),
+            };
+            // Projected fields get a fresh type — don't carry original attrs
+            // (e.g. #[serde(with = "serde_bytes")] doesn't apply to Checksum);
+            // `serde_with` re-attaches one explicitly when needed.
+            fields.push(AttenuateField {
+                ident,
+                ty,
+                into_ty: Some(a.into_ty),
+                conversion: Some(conv),
+                rename: a.rename,
+                attrs: Vec::new(),
+                serde_with: a.serde_with,
+                clone_source: index < last,
+            });
+        }
     }
 
     if !has_projections {
@@ -224,7 +257,11 @@ fn generate_for_named_struct(
             let field_ident = f.rename.as_ref().unwrap_or(f.ident);
             let ty = f.into_ty.as_ref().unwrap_or(f.ty);
             let attrs = &f.attrs;
-            quote! { #(#attrs)* pub #field_ident: #ty }
+            let serde_attr = f
+                .serde_with
+                .as_ref()
+                .map(|with| quote! { #[serde(with = #with)] });
+            quote! { #(#attrs)* #serde_attr pub #field_ident: #ty }
         })
         .collect();
 
@@ -233,15 +270,20 @@ fn generate_for_named_struct(
         .map(|f| {
             let source_ident = f.ident;
             let field_ident = f.rename.as_ref().unwrap_or(f.ident);
+            let source = if f.clone_source {
+                quote! { self.#source_ident.clone() }
+            } else {
+                quote! { self.#source_ident }
+            };
             match &f.conversion {
                 Some(Conversion::With(path)) => {
-                    quote! { #field_ident: #path(self.#source_ident) }
+                    quote! { #field_ident: #path(#source) }
                 }
                 Some(Conversion::From(into_ty)) => {
-                    quote! { #field_ident: <#into_ty>::from(self.#source_ident) }
+                    quote! { #field_ident: <#into_ty>::from(#source) }
                 }
                 None => {
-                    quote! { #field_ident: self.#source_ident }
+                    quote! { #field_ident: #source }
                 }
             }
         })

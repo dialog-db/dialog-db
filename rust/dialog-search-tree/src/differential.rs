@@ -668,8 +668,10 @@ mod tests {
         for (key, value) in keys {
             tree = tree.insert(key.to_le_bytes(), value, storage).await?;
         }
-        for (hash, buffer) in tree.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
         Ok(tree)
     }
@@ -767,8 +769,10 @@ mod tests {
         let mut merged = source.clone();
         let changes = source.differentiate(&target, &storage, &storage);
         merged.integrate(changes, &storage).await?;
-        for (hash, buffer) in merged.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in merged.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
         assert_eq!(
             merged.root(),
@@ -794,8 +798,10 @@ mod tests {
         modified = modified
             .insert(1000u32.to_le_bytes(), vec![0xFF], &storage)
             .await?;
-        for (hash, buffer) in modified.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in modified.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         storage.backend().reset();
@@ -828,16 +834,20 @@ mod tests {
 
         let mut ours = base.clone();
         ours = ours.insert(99u32.to_le_bytes(), vec![1], &storage).await?;
-        for (hash, buffer) in ours.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in ours.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let mut theirs = base.clone();
         theirs = theirs
             .insert(99u32.to_le_bytes(), vec![2], &storage)
             .await?;
-        for (hash, buffer) in theirs.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in theirs.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Integrate their changes into ours, and our changes into theirs;
@@ -850,11 +860,15 @@ mod tests {
         let our_changes = base.differentiate(&ours, &storage, &storage);
         merged_theirs.integrate(our_changes, &storage).await?;
 
-        for (hash, buffer) in merged_ours.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in merged_ours.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
-        for (hash, buffer) in merged_theirs.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in merged_theirs.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         assert_eq!(
@@ -881,8 +895,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (hash, buffer) in extended.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in extended.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // A "remote" that already has the base tree.
@@ -1735,8 +1751,10 @@ mod tests {
         tree: &mut TestTree,
         storage: &mut ContentAddressedStorage<CountingBackend>,
     ) -> Result<()> {
-        for (hash, buffer) in tree.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
         Ok(())
     }

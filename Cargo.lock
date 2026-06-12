@@ -1072,7 +1072,9 @@ dependencies = [
  "dialog-credentials",
  "serde",
  "serde_bytes",
+ "serde_ipld_dagcbor",
  "thiserror 2.0.18",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

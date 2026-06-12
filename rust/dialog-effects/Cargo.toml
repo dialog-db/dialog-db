@@ -5,6 +5,10 @@ version.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+integration-tests = []
+web-integration-tests = []
+
 [dependencies]
 dialog-capability = { workspace = true }
 dialog-credentials = { workspace = true }
@@ -17,3 +21,8 @@ thiserror = { workspace = true }
 
 [lints.rust]
 missing_docs = "warn"
+
+[dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
+serde_ipld_dagcbor = { workspace = true }
+wasm-bindgen-test = { workspace = true }
