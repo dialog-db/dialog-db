@@ -23,6 +23,7 @@ blake3 = { workspace = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 futures-core = { workspace = true }
+futures-util = { workspace = true }
 hashbrown = { workspace = true }
 nonempty = { workspace = true, features = ["serialize"] }
 parking_lot = { workspace = true }

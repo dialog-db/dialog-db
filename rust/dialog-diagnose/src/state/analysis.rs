@@ -53,11 +53,7 @@ impl ArtifactsTreeAnalysis {
     /// * `tree` - The prolly tree index to analyze
     /// * `storage` - The storage backend for tree operations
     /// * `tx` - Channel sender for worker messages
-    pub fn new(
-        tree: Index,
-        storage: DiagnoseStorage,
-        tx: Sender<WorkerMessage>,
-    ) -> Self {
+    pub fn new(tree: Index, storage: DiagnoseStorage, tx: Sender<WorkerMessage>) -> Self {
         Self { tree, storage, tx }
     }
 
@@ -76,8 +72,7 @@ impl ArtifactsTreeAnalysis {
         let tx = self.tx.clone();
 
         tokio::spawn(async move {
-            let tree_storage =
-                TreeStorage::new(TreeStorageBridge(storage));
+            let tree_storage = TreeStorage::new(TreeStorageBridge(storage));
             let accessor = Accessor::new(Delta::zero(), Cache::new(), tree_storage);
 
             let mut stats = ArtifactsTreeStats::default();

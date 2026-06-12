@@ -144,6 +144,9 @@ pub use tree::*;
 mod delta;
 pub use delta::*;
 
+mod diff;
+pub use diff::*;
+
 mod cache;
 pub use cache::*;
 

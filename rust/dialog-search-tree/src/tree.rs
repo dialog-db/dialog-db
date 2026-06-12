@@ -3,6 +3,7 @@ use std::{marker::PhantomData, ops::RangeBounds};
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
+use futures_util::StreamExt;
 use rkyv::{
     Deserialize, Serialize,
     bytecheck::CheckBytes,
@@ -14,7 +15,7 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, ArchivedNodeBody, Buffer, Cache, ContentAddressedStorage, Delta,
+    Accessor, ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta,
     DialogSearchTreeError, Entry, Key, Node, SearchOptions, SearchResult, SymmetryWith, TreeShaper,
     TreeWalker, Value, into_owned,
 };
@@ -306,6 +307,101 @@ where
     /// future, they should persist the flushed changes.
     pub fn flush(&mut self) -> impl Iterator<Item = (Blake3Hash, Buffer)> {
         self.delta.flush()
+    }
+
+    /// Returns a differential that produces changes to transform `self` into
+    /// `other`.
+    ///
+    /// Usage: applying the changes to `self` (via
+    /// [`integrate`](Self::integrate)) results in `other`. Only blocks on
+    /// differing paths are read; see [`TreeDifference`](crate::TreeDifference)
+    /// for the frugality contract.
+    pub fn differentiate<'a, Backend>(
+        &'a self,
+        other: &'a Self,
+        self_storage: &'a ContentAddressedStorage<Backend>,
+        other_storage: &'a ContentAddressedStorage<Backend>,
+    ) -> impl crate::Differential<Key, Value> + 'a
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Value: PartialEq,
+    {
+        async_stream::try_stream! {
+            let difference =
+                crate::TreeDifference::compute(self, other, self_storage, other_storage).await?;
+            for await change in difference.changes() {
+                yield change?;
+            }
+        }
+    }
+
+    /// Integrates changes into this tree with deterministic conflict
+    /// resolution.
+    ///
+    /// Applies a differential (stream of changes) with last-write-wins
+    /// conflict resolution based on value hashes, which gives uncoordinated
+    /// replicas eventual consistency:
+    ///
+    /// - **Add**: if the key exists with a different value, the value whose
+    ///   blake3 hash is higher wins.
+    /// - **Remove**: only removes when the exact entry (key and value) is
+    ///   present, so a concurrent update is not clobbered by a stale
+    ///   removal.
+    ///
+    /// The operation is atomic: if any change fails to apply, the tree is
+    /// left at its prior state.
+    pub async fn integrate<Backend, Changes>(
+        &mut self,
+        changes: Changes,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<(), DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Changes: crate::Differential<Key, Value>,
+        Value: PartialEq + AsRef<[u8]>,
+    {
+        // Clones share the cache and delta cheaply; keep one to restore on
+        // failure so integration stays atomic.
+        let checkpoint = self.clone();
+
+        let result: Result<(), DialogSearchTreeError> = async {
+            futures_util::pin_mut!(changes);
+            while let Some(change) = changes.next().await {
+                match change? {
+                    Change::Add(entry) => match self.get(&entry.key, storage).await? {
+                        None => {
+                            *self = self.insert(entry.key, entry.value, storage).await?;
+                        }
+                        Some(existing) => {
+                            if existing != entry.value {
+                                let existing_hash = Blake3Hash::hash(existing.as_ref());
+                                let new_hash = Blake3Hash::hash(entry.value.as_ref());
+                                if new_hash.as_bytes() > existing_hash.as_bytes() {
+                                    *self = self.insert(entry.key, entry.value, storage).await?;
+                                }
+                            }
+                        }
+                    },
+                    Change::Remove(entry) => {
+                        if let Some(existing) = self.get(&entry.key, storage).await?
+                            && existing == entry.value
+                        {
+                            *self = self.delete(&entry.key, storage).await?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+
+        if result.is_err() {
+            *self = checkpoint;
+        }
+
+        result
     }
 
     /// Creates a new tree version with an updated root hash and delta.

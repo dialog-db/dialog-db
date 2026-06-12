@@ -52,11 +52,7 @@ impl ArtifactsCursor {
     /// * `tree` - The prolly tree index containing facts data
     /// * `storage` - The storage backend for tree operations
     /// * `tx` - Channel sender for worker messages
-    pub fn new(
-        tree: Index,
-        storage: DiagnoseStorage,
-        tx: Sender<WorkerMessage>,
-    ) -> Self {
+    pub fn new(tree: Index, storage: DiagnoseStorage, tx: Sender<WorkerMessage>) -> Self {
         Self {
             state: Default::default(),
             tree,

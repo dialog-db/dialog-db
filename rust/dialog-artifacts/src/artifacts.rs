@@ -398,7 +398,9 @@ where
             // Persist the tree's pending nodes before minting a revision;
             // a revision must only reference durable blocks.
             for (hash, buffer) in index.flush() {
-                self.storage.set(*hash.as_bytes(), buffer.into_vec()).await?;
+                self.storage
+                    .set(*hash.as_bytes(), buffer.into_vec())
+                    .await?;
             }
 
             let root = index.root();

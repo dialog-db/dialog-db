@@ -140,8 +140,7 @@ pub trait ArtifactTreeExt {
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
             + ConditionalSync
-            + 's
-            + 'static;
+            + 's + 'static;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -225,9 +224,7 @@ impl ArtifactTreeExt for ArtifactTree {
                         let value_key = ValueKey::from_key(&entity_key);
                         let attribute_key = AttributeKey::from_key(&entity_key);
 
-                        *self = self
-                            .delete(&entity_key.into_key().into(), &storage)
-                            .await?;
+                        *self = self.delete(&entity_key.into_key().into(), &storage).await?;
                         *self = self.delete(&value_key.into_key().into(), &storage).await?;
                         *self = self
                             .delete(&attribute_key.into_key().into(), &storage)
@@ -283,8 +280,7 @@ impl ArtifactTreeExt for ArtifactTree {
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
             + ConditionalSync
-            + 's
-            + 'static,
+            + 's + 'static,
     {
         let tree = self;
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
