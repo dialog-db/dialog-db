@@ -23,9 +23,11 @@
 //! orphan rule rules out inherent methods — the operations are exposed as
 //! an extension trait instead.
 
+use std::collections::BTreeMap;
+
 use async_stream::try_stream;
 use async_trait::async_trait;
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
+use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
 use dialog_search_tree::{ContentAddressedStorage, Entry, Tree, Value as TreeValue};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
@@ -144,6 +146,16 @@ impl ArtifactTreeExt for ArtifactTree {
             + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
+        // A batch applied to an empty tree (the seeding path) stages
+        // entirely in memory and builds the tree bottom-up in one pass:
+        // every key is ranked once and every node is serialized and hashed
+        // exactly once. The per-instruction loop below instead rewrites
+        // each touched segment once per insert, which dominates seed
+        // commits.
+        if self.root() == NULL_BLAKE3_HASH {
+            return apply_to_empty(self, instructions).await;
+        }
+
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
 
         tokio::pin!(instructions);
@@ -324,5 +336,190 @@ impl ArtifactTreeExt for ArtifactTree {
                 }
             }
         }
+    }
+}
+
+/// Applies a batch of instructions to an empty tree by staging the final
+/// key/value set in memory and bulk-building the tree in one bottom-up
+/// pass ([`Tree::from_entries`]).
+///
+/// Semantically identical to the per-instruction loop in
+/// [`ArtifactTreeExt::apply`]: because the base tree is empty, the staged
+/// map is at every point exactly the state the incremental loop's tree
+/// would hold, so `Replace` supersession scans the map instead of the
+/// tree.
+async fn apply_to_empty<I>(
+    tree: &mut ArtifactTree,
+    instructions: I,
+) -> Result<(), DialogArtifactsError>
+where
+    I: Stream<Item = Instruction> + ConditionalSend,
+{
+    let mut staged: BTreeMap<KeyBytes, State<Datum>> = BTreeMap::new();
+
+    tokio::pin!(instructions);
+    while let Some(instruction) = instructions.next().await {
+        match instruction {
+            Instruction::Assert(artifact) => {
+                let entity_key = EntityKey::from(&artifact);
+                let value_key = ValueKey::from_key(&entity_key);
+                let attribute_key = AttributeKey::from_key(&entity_key);
+
+                let datum = Datum::from(artifact);
+                let added = State::Added(datum);
+                staged.insert(entity_key.into_key().into(), added.clone());
+                staged.insert(attribute_key.into_key().into(), added.clone());
+                staged.insert(value_key.into_key().into(), added);
+            }
+            Instruction::Replace(artifact) => {
+                let entity_key = EntityKey::from(&artifact);
+
+                // Scan staged priors at this (entity, attribute); the
+                // base tree is empty, so the staged batch is the entire
+                // state. Same-valued priors already represent the desired
+                // state; only different-valued ones need superseding.
+                let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
+                    .set_entity(entity_key.entity())
+                    .set_attribute(entity_key.attribute())
+                    .into_key();
+                let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
+                    .set_entity(entity_key.entity())
+                    .set_attribute(entity_key.attribute())
+                    .into_key();
+
+                let mut superseded_keys: Vec<Key> = Vec::new();
+                let mut found_same_value = false;
+                for (key, state) in
+                    staged.range(KeyBytes::from(search_start)..=KeyBytes::from(search_end))
+                {
+                    if let State::Added(current_element) = state {
+                        let current = Artifact::try_from(current_element.clone())?;
+                        if current.is == artifact.is {
+                            found_same_value = true;
+                        } else {
+                            superseded_keys.push(Key::from(*key));
+                        }
+                    }
+                }
+
+                for key in superseded_keys {
+                    let entity_key = EntityKey(key);
+                    let value_key = ValueKey::from_key(&entity_key);
+                    let attribute_key = AttributeKey::from_key(&entity_key);
+
+                    staged.remove(&KeyBytes::from(entity_key.into_key()));
+                    staged.remove(&KeyBytes::from(value_key.into_key()));
+                    staged.remove(&KeyBytes::from(attribute_key.into_key()));
+                }
+
+                if found_same_value {
+                    continue;
+                }
+
+                let entity_key = EntityKey::from(&artifact);
+                let value_key = ValueKey::from_key(&entity_key);
+                let attribute_key = AttributeKey::from_key(&entity_key);
+                let datum = Datum::from(artifact);
+                let added = State::Added(datum);
+                staged.insert(entity_key.into_key().into(), added.clone());
+                staged.insert(attribute_key.into_key().into(), added.clone());
+                staged.insert(value_key.into_key().into(), added);
+            }
+            Instruction::Retract(artifact) => {
+                let entity_key = EntityKey::from(&artifact);
+                let value_key = ValueKey::from_key(&entity_key);
+                let attribute_key = AttributeKey::from_key(&entity_key);
+
+                let removed: State<Datum> = State::Removed;
+                staged.insert(entity_key.into_key().into(), removed.clone());
+                staged.insert(attribute_key.into_key().into(), removed.clone());
+                staged.insert(value_key.into_key().into(), removed);
+            }
+        }
+    }
+
+    *tree = ArtifactTree::from_entries(staged)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use anyhow::Result;
+    use dialog_storage::MemoryStorageBackend;
+    use futures_util::stream;
+
+    use super::{ArtifactTree, ArtifactTreeExt as _};
+    use crate::{Artifact, Instruction, Value};
+
+    fn artifact(entity: u32, attribute: &str, value: &str) -> Artifact {
+        Artifact {
+            the: attribute.parse().expect("valid attribute"),
+            of: format!("user:{entity}").parse().expect("valid entity"),
+            is: Value::String(value.to_string()),
+            cause: None,
+        }
+    }
+
+    /// The bulk (empty-tree) apply path must produce the byte-identical
+    /// canonical tree the per-instruction path produces. The incremental
+    /// side seeds one instruction first (taking the bulk path for a tree
+    /// of one instruction), then applies the rest through the non-empty
+    /// per-insert path.
+    fn instructions() -> Vec<Instruction> {
+        let mut instructions = Vec::new();
+        for entity in 0..24u32 {
+            instructions.push(Instruction::Assert(artifact(
+                entity,
+                "test/name",
+                &format!("name-{entity}"),
+            )));
+            instructions.push(Instruction::Assert(artifact(
+                entity,
+                "test/role",
+                &format!("role-{entity}"),
+            )));
+        }
+        // Cardinality-one updates: supersede some priors, repeat one
+        // same-valued write (a no-op), and retract a fact.
+        for entity in 0..8u32 {
+            instructions.push(Instruction::Replace(artifact(
+                entity,
+                "test/role",
+                &format!("role-updated-{entity}"),
+            )));
+        }
+        instructions.push(Instruction::Replace(artifact(3, "test/name", "name-3")));
+        instructions.push(Instruction::Retract(artifact(9, "test/name", "name-9")));
+        instructions
+    }
+
+    #[dialog_common::test]
+    async fn it_bulk_applies_to_an_empty_tree_canonically() -> Result<()> {
+        let mut bulk_store = MemoryStorageBackend::default();
+        let mut bulk = ArtifactTree::empty();
+        bulk.apply(&mut bulk_store, stream::iter(instructions()))
+            .await?;
+
+        let mut incremental_store = MemoryStorageBackend::default();
+        let mut incremental = ArtifactTree::empty();
+        let mut first = instructions();
+        let rest = first.split_off(1);
+        incremental
+            .apply(&mut incremental_store, stream::iter(first))
+            .await?;
+        incremental
+            .apply(&mut incremental_store, stream::iter(rest))
+            .await?;
+
+        assert_eq!(
+            bulk.root(),
+            incremental.root(),
+            "bulk apply must build the same canonical tree as incremental apply"
+        );
+
+        Ok(())
     }
 }
