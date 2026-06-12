@@ -184,6 +184,9 @@ path = "./rust/dialog-csv"
 [workspace.dependencies.dialog-prolly-tree]
 path = "./rust/dialog-prolly-tree"
 
+[workspace.dependencies.dialog-search-tree]
+path = "./rust/dialog-search-tree"
+
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
 

@@ -24,6 +24,7 @@ dialog-capability = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-prolly-tree = { workspace = true }
+dialog-search-tree = { workspace = true }
 
 anyhow = { workspace = true, optional = true }
 arrayref = { workspace = true }

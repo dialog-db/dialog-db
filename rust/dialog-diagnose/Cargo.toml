@@ -17,6 +17,8 @@ anyhow = { workspace = true }
 base58 = { workspace = true }
 dialog-artifacts = { workspace = true, features = ["csv", "debug"] }
 dialog-prolly-tree = { workspace = true }
+dialog-search-tree = { workspace = true }
+dialog-common = { workspace = true }
 dialog-storage = { workspace = true }
 futures-util = { workspace = true }
 

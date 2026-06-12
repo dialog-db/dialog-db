@@ -42,8 +42,8 @@ use rand::{Rng, distributions::Alphanumeric};
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
+use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
     MemoryStorageBackend, Storage, StorageBackend,
@@ -61,14 +61,16 @@ use async_stream::stream;
 #[cfg(feature = "csv")]
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::tree::ArtifactTreeExt;
+use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge, decode_state};
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
 };
 
-/// An alias type that describes the [`Tree`]-based prolly tree that is
-/// used for each index in [`Artifacts`]
-pub type Index<Key, Value> = Tree<GeometricDistribution, Key, State<Value>, Blake3Hash>;
+/// An alias type that describes the search tree that is used for each
+/// index in [`Artifacts`]. Kept generic-free: keys are raw fixed-size key
+/// bytes and values are CBOR-encoded [`State`] blocks (see
+/// [`crate::tree`]).
+pub type Index = ArtifactTree;
 
 /// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
 /// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,
@@ -91,7 +93,7 @@ where
 {
     identifier: String,
     storage: Storage<CborEncoder, Backend>,
-    index: Arc<RwLock<Index<Key, Datum>>>,
+    index: Arc<RwLock<Index>>,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -102,7 +104,7 @@ where
 {
     #[cfg(feature = "debug")]
     /// Get a reference-counted pointer to the internal entity index of the [`Artifacts`]
-    pub fn index(&self) -> Arc<RwLock<Index<Key, Datum>>> {
+    pub fn index(&self) -> Arc<RwLock<Index>> {
         self.index.clone()
     }
 
@@ -150,9 +152,9 @@ where
             };
 
             if let Some(revision) = revision {
-                Tree::from_hash(revision.index(), &storage).await?
+                ArtifactTree::from_hash(NodeHash::from(*revision.index()))
             } else {
-                Tree::new()
+                ArtifactTree::empty()
             }
         };
 
@@ -190,16 +192,15 @@ where
         let mut csv = csv_async::AsyncSerializer::from_writer(write);
 
         let index = self.index.read().await;
-        let range = <EntityKey<Key> as KeyViewConstruct>::min().0
-            ..<EntityKey<Key> as KeyViewConstruct>::max().0;
-        let entity_stream = index.stream_range(range, &self.storage);
+        let range = crate::KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::min().0)
+            ..crate::KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::max().0);
+        let tree_storage = TreeStorage::new(TreeStorageBridge(self.storage.clone()));
+        let entity_stream = index.stream_range(range, &tree_storage);
 
         tokio::pin!(entity_stream);
 
         while let Some(entry) = entity_stream.try_next().await? {
-            let Entry { value, .. } = entry;
-
-            if let State::Added(datum) = value {
+            if let State::Added(datum) = decode_state(&entry.value)? {
                 let artifact = Artifact::try_from(datum)?;
 
                 csv.serialize(artifact)
@@ -245,9 +246,11 @@ where
     pub async fn revision(&self) -> Result<Blake3Hash, DialogArtifactsError> {
         let index = self.index.read().await;
 
-        Ok(match index.hash() {
-            Some(index_version) => Revision::new(index_version).as_reference().await?,
-            _ => NULL_REVISION_HASH,
+        let root = index.root();
+        Ok(if root == NULL_BLAKE3_HASH {
+            NULL_REVISION_HASH
+        } else {
+            Revision::new(root.as_bytes()).as_reference().await?
         })
     }
 
@@ -325,7 +328,10 @@ where
 
         // Finally update the index
         let mut index = self.index.write().await;
-        index.set_hash(index_version, &self.storage).await?;
+        *index = match index_version {
+            Some(hash) => ArtifactTree::from_hash(NodeHash::from(hash)),
+            None => ArtifactTree::empty(),
+        };
 
         Ok(())
     }
@@ -389,7 +395,18 @@ where
             // rollback below.
             index.apply(&mut self.storage, instructions).await?;
 
-            let next_revision = index.hash().map(Revision::new);
+            // Persist the tree's pending nodes before minting a revision;
+            // a revision must only reference durable blocks.
+            for (hash, buffer) in index.flush() {
+                self.storage.set(*hash.as_bytes(), buffer.into_vec()).await?;
+            }
+
+            let root = index.root();
+            let next_revision = if root == NULL_BLAKE3_HASH {
+                None
+            } else {
+                Some(Revision::new(root.as_bytes()))
+            };
 
             let revision_hash = if let Some(revision) = &next_revision {
                 self.storage.write(&revision).await?;

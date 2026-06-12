@@ -2,7 +2,12 @@
 
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
-use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Index, Key, Storage};
+use dialog_artifacts::tree::TreeStorageBridge;
+use dialog_artifacts::{CborEncoder, DialogArtifactsError, Index, KeyBytes, Storage};
+use dialog_common::{Blake3Hash as NodeHash, NULL_BLAKE3_HASH};
+use dialog_search_tree::{
+    Accessor, ArchivedNodeBody, Cache, ContentAddressedStorage as TreeStorage, Delta, Node,
+};
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 
 use super::store::WorkerMessage;
@@ -33,7 +38,7 @@ pub struct ArtifactsTreeStats {
 /// to compute various statistics about its structure and contents.
 pub struct ArtifactsTreeAnalysis {
     /// The prolly tree index to analyze
-    tree: Index<Key, Datum>,
+    tree: Index,
     /// The storage backend for tree operations
     storage: DiagnoseStorage,
     /// Channel sender for worker messages
@@ -49,7 +54,7 @@ impl ArtifactsTreeAnalysis {
     /// * `storage` - The storage backend for tree operations
     /// * `tx` - Channel sender for worker messages
     pub fn new(
-        tree: Index<Key, Datum>,
+        tree: Index,
         storage: DiagnoseStorage,
         tx: Sender<WorkerMessage>,
     ) -> Self {
@@ -62,32 +67,40 @@ impl ArtifactsTreeAnalysis {
     /// of the tree to compute statistics. The results are sent via the
     /// configured channel when complete.
     pub fn run(&self) {
-        let Some(root) = self.tree.root() else {
+        let root = self.tree.root().clone();
+        if &root == NULL_BLAKE3_HASH {
             return;
-        };
+        }
 
-        let root = root.clone();
         let storage = self.storage.clone();
         let tx = self.tx.clone();
 
         tokio::spawn(async move {
+            let tree_storage =
+                TreeStorage::new(TreeStorageBridge(storage));
+            let accessor = Accessor::new(Delta::zero(), Cache::new(), tree_storage);
+
             let mut stats = ArtifactsTreeStats::default();
-            let mut levels = VecDeque::from([vec![root.clone()]]);
+            let mut levels = VecDeque::from([vec![root]]);
             let mut segment_sizes: Vec<usize> = vec![];
 
             while let Some(level) = levels.pop_front() {
                 let mut next_level = vec![];
 
-                for node in level {
-                    if node.is_branch() {
-                        let mut children = Vec::from(node.load_children(&storage).await?);
-                        next_level.append(&mut children);
-                    } else {
-                        let entries = node.into_entries()?;
-                        let entry_count = entries.len();
+                for hash in level {
+                    let node: Node<KeyBytes, Vec<u8>> = accessor.get_node(&hash).await?;
+                    match node.body()? {
+                        ArchivedNodeBody::Index(index) => {
+                            for link in index.links.iter() {
+                                next_level.push(<&NodeHash>::from(&link.node).clone());
+                            }
+                        }
+                        ArchivedNodeBody::Segment(segment) => {
+                            let entry_count = segment.entries.len();
 
-                        segment_sizes.push(entry_count);
-                        stats.total_entries += entry_count;
+                            segment_sizes.push(entry_count);
+                            stats.total_entries += entry_count;
+                        }
                     }
                 }
 

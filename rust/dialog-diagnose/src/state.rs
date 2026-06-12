@@ -180,13 +180,7 @@ impl DiagnoseState {
     /// This initializes all the state components and sets up the tree view
     /// to start at the root of the prolly tree.
     pub async fn new(artifacts: Artifacts<MemoryStorageBackend<[u8; 32], Vec<u8>>>) -> Self {
-        let root_hash = artifacts
-            .index()
-            .read()
-            .await
-            .hash()
-            .expect("Tree is empty!")
-            .to_owned();
+        let root_hash = *artifacts.index().read().await.root().as_bytes();
 
         Self {
             store: DiagnoseStore::new(artifacts).await,
