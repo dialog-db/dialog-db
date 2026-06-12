@@ -16,8 +16,8 @@ use rkyv::{
 
 use crate::{
     Accessor, ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Entry, Key, Node, SearchOptions, SearchResult, SymmetryWith, TreeShaper,
-    TreeWalker, Value, into_owned,
+    DialogSearchTreeError, Differential, Entry, Key, Node, SearchOptions, SearchResult,
+    SymmetryWith, TreeDifference, TreeShaper, TreeWalker, Value, into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -321,7 +321,7 @@ where
         other: &'a Self,
         self_storage: &'a ContentAddressedStorage<Backend>,
         other_storage: &'a ContentAddressedStorage<Backend>,
-    ) -> impl crate::Differential<Key, Value> + 'a
+    ) -> impl Differential<Key, Value> + 'a
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
@@ -329,7 +329,7 @@ where
     {
         async_stream::try_stream! {
             let difference =
-                crate::TreeDifference::compute(self, other, self_storage, other_storage).await?;
+                TreeDifference::compute(self, other, self_storage, other_storage).await?;
             for await change in difference.changes() {
                 yield change?;
             }
@@ -359,7 +359,7 @@ where
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
-        Changes: crate::Differential<Key, Value>,
+        Changes: Differential<Key, Value>,
         Value: PartialEq + AsRef<[u8]>,
     {
         // Clones share the cache and delta cheaply; keep one to restore on

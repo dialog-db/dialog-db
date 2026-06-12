@@ -61,6 +61,9 @@ use async_stream::stream;
 #[cfg(feature = "csv")]
 use tokio::io::{AsyncRead, AsyncWrite};
 
+#[cfg(feature = "csv")]
+use crate::{EntityKey, KeyBytes, KeyViewConstruct};
+
 use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge, decode_state};
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
@@ -187,13 +190,11 @@ where
     where
         Write: AsyncWrite + Unpin,
     {
-        use crate::{EntityKey, KeyViewConstruct};
-
         let mut csv = csv_async::AsyncSerializer::from_writer(write);
 
         let index = self.index.read().await;
-        let range = crate::KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::min().0)
-            ..=crate::KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::max().0);
+        let range = KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::min().0)
+            ..=KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::max().0);
         let tree_storage = TreeStorage::new(TreeStorageBridge(self.storage.clone()));
         let entity_stream = index.stream_range(range, &tree_storage);
 

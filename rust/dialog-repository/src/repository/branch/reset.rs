@@ -38,7 +38,6 @@ impl Reset<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::EMPTY_TREE_HASH;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -49,7 +48,7 @@ mod tests {
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    use crate::{RepositoryMemoryExt, Revision, TreeReference};
+    use crate::{EMPTY_TREE_HASH, RepositoryMemoryExt, Revision, TreeReference};
 
     #[dialog_common::test]
     async fn it_sets_revision() -> Result<()> {

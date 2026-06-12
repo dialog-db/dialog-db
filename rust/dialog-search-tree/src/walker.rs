@@ -90,7 +90,7 @@ where
             let start_key = match range.start_bound() {
                 Bound::Included(start) => start.clone(),
                 Bound::Excluded(start) => start.clone(),
-                Bound::Unbounded => <Key as crate::Key>::min(),
+                Bound::Unbounded => <Key as self::Key>::min(),
             };
             let Some(search_result) = self
                 .search(&start_key, accessor.clone(), SearchOptions::default())

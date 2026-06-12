@@ -2,8 +2,8 @@ use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
-use dialog_artifacts::Instruction;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
+use dialog_artifacts::{DialogArtifactsError, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -93,7 +93,7 @@ where
             store
                 .set(*hash.as_bytes(), buffer.into_vec())
                 .await
-                .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+                .map_err(DialogArtifactsError::from)?;
         }
 
         let tree = TreeReference::from(*tree.root().as_bytes());
