@@ -141,8 +141,7 @@ where
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
             if let Some(entry) = result.leaf.body()?.find_entry(key)? {
@@ -168,8 +167,7 @@ where
     ) -> Result<Self, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         let search_result = self.search(&key, storage, SearchOptions::default()).await?;
         let shaper = TreeShaper::new(self.root.clone(), self.delta.clone());
@@ -189,8 +187,7 @@ where
     ) -> Result<Self, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         let options = SearchOptions {
             prefetch_right_neighbor: true,
@@ -225,8 +222,7 @@ where
     ) -> Result<Blake3Hash, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         if &root == NULL_BLAKE3_HASH {
             return Ok(root);
@@ -274,8 +270,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         self.stream_range(.., storage)
     }
@@ -289,12 +284,11 @@ where
         &self,
         range: R,
         storage: &ContentAddressedStorage<Backend>,
-    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend + 'static
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
-        R: RangeBounds<Key> + ConditionalSend + 'static,
+            + ConditionalSync,
+        R: RangeBounds<Key> + ConditionalSend,
     {
         let accessor = Accessor::new(self.delta.clone(), self.node_cache.clone(), storage.clone());
 
@@ -350,8 +344,7 @@ where
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         let accessor = Accessor::new(self.delta.clone(), self.node_cache.clone(), storage.clone());
 

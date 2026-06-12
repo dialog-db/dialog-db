@@ -32,8 +32,7 @@ where
 impl<Backend> Accessor<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend
-        + 'static,
+        + ConditionalSend,
 {
     /// Creates a new accessor with the provided delta, cache, and storage backend.
     pub fn new(
