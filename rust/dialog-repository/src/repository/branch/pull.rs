@@ -1,9 +1,13 @@
+use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_capability::{Fork, Provider};
+use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
+use dialog_prolly_tree::EMPT_TREE_HASH;
+use dialog_search_tree::ContentAddressedStorage as TreeStorage;
+use dialog_storage::StorageBackend;
 
 use crate::{
     Branch, Index, NetworkedIndex, PullError, RemoteSite, RepositoryArchiveExt as _,
@@ -98,20 +102,28 @@ impl Pull<'_> {
         // `remote: None` it degrades to a plain local index.
         let store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
-        // Load the three trees: last-sync base, local current, and the
-        // upstream revision we're merging in.
-        let base: Index = Tree::from_hash(base.hash(), &store).await?;
-        let local: Index = Tree::from_hash(&local_tree_hash, &store).await?;
-        let mut merged: Index = Tree::from_hash(upstream_revision.tree.hash(), &store).await?;
+        // The three trees: last-sync base, local current, and the
+        // upstream revision we're merging in. Hydration is lazy; blocks
+        // load on demand as the differential walks them.
+        let base = Index::from_hash(NodeHash::from(*base.hash()));
+        let local = Index::from_hash(NodeHash::from(local_tree_hash));
+        let mut merged = Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
 
         // Replay local changes (base → local) on top of the upstream
-        // tree to produce the merged tree.
-        let read_store = store.clone();
-        let local_changes = base.differentiate(&local, &read_store, &read_store);
-        let mut write_store = store;
-        Box::pin(merged.integrate(local_changes, &mut write_store)).await?;
+        // tree to produce the merged tree. The differential only reads
+        // blocks on paths where base and local actually differ.
+        let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+        let local_changes = base.differentiate(&local, &tree_store, &tree_store);
+        Box::pin(merged.integrate(local_changes, &tree_store)).await?;
 
-        let merged_tree = TreeReference::from(merged.hash().copied().unwrap_or(EMPT_TREE_HASH));
+        // Persist the merged tree's pending nodes before referencing its
+        // root in a revision.
+        let mut store = store;
+        for (hash, buffer) in merged.flush() {
+            store.set(*hash.as_bytes(), buffer.into_vec()).await?;
+        }
+
+        let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
         let new_revision = match local_revision {
             // Merging produced the upstream tree verbatim

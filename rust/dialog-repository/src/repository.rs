@@ -1589,7 +1589,7 @@ mod tests {
                 .claims()
                 .select(ArtifactSelector::new().the("dialog.branch/name".parse()?));
             let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
-            let stream = select.execute(store).await?;
+            let stream = select.execute(store)?;
             let leaked: Vec<_> = stream.collect::<Vec<_>>().await;
 
             assert!(
@@ -1856,7 +1856,7 @@ mod tests {
                 // The branch's prolly tree is the order ground truth.
                 let select = branch.claims().select(sel.clone());
                 let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
-                let branch_stream: ArtifactStream<'_> = Box::pin(select.execute(store).await?);
+                let branch_stream: ArtifactStream<'_> = Box::pin(select.execute(store)?);
                 let branch_order = keys_from_stream(branch_stream).await?;
 
                 // Changes overlay scan via Provider<Select>.

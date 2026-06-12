@@ -3,9 +3,7 @@ use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::*;
 use dialog_effects::archive::{Catalog, Get, Put};
-use dialog_storage::{
-    Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder,
-};
+use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
@@ -56,38 +54,31 @@ impl<'a, Env> LocalIndex<'a, Env> {
     }
 }
 
+/// Raw block access for the search tree: node buffers are already
+/// serialized, so they pass straight through the catalog effects without
+/// the CBOR encoder. The encoder remains in use for typed blocks like
+/// revisions (via `dialog_storage::ContentAddressedStorage`).
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> ContentAddressedStorage for LocalIndex<'_, Env>
+impl<Env> StorageBackend for LocalIndex<'_, Env>
 where
     Env: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
 {
-    type Hash = Blake3Hash;
+    type Key = Blake3Hash;
+    type Value = Vec<u8>;
     type Error = DialogStorageError;
 
-    async fn read<T>(&self, hash: &Self::Hash) -> Result<Option<T>, Self::Error>
-    where
-        T: DeserializeOwned + ConditionalSync,
-    {
-        let result: Option<Vec<u8>> = self.catalog.clone().get(*hash).perform(self.env).await?;
-
-        match result {
-            Some(bytes) => Ok(Some(self.encoder.decode(&bytes).await?)),
-            None => Ok(None),
-        }
-    }
-
-    async fn write<T>(&mut self, block: &T) -> Result<Self::Hash, Self::Error>
-    where
-        T: Serialize + ConditionalSync + Debug,
-    {
-        let (hash, bytes) = self.encoder.encode(block).await?;
+    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.catalog
             .clone()
-            .put(hash, bytes)
+            .put(key, value)
             .perform(self.env)
             .await?;
-        Ok(hash)
+        Ok(())
+    }
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        Ok(self.catalog.clone().get(*key).perform(self.env).await?)
     }
 }
 
@@ -120,6 +111,8 @@ where
 mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use dialog_storage::ContentAddressedStorage;
 
     use super::*;
     use anyhow::Result;

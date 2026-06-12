@@ -115,8 +115,7 @@ pub trait ArtifactTreeExt {
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend;
 
     /// Scan the tree for [`Artifact`]s matching the given constrained
@@ -140,7 +139,7 @@ pub trait ArtifactTreeExt {
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
             + ConditionalSync
-            + 's + 'static;
+            + 's;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -154,8 +153,7 @@ impl ArtifactTreeExt for ArtifactTree {
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
@@ -280,7 +278,7 @@ impl ArtifactTreeExt for ArtifactTree {
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
             + ConditionalSync
-            + 's + 'static,
+            + 's,
     {
         let tree = self;
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));

@@ -2,12 +2,13 @@ use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{Artifact, ArtifactSelector, DialogArtifactsError};
 use dialog_capability::{Capability, Fork, Provider};
+use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_effects::memory::Resolve;
-use dialog_prolly_tree::{DialogProllyTreeError, EMPT_TREE_HASH, Tree};
-use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError};
+use dialog_prolly_tree::{DialogProllyTreeError, EMPT_TREE_HASH};
+use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
@@ -78,7 +79,7 @@ impl Select<'_> {
         };
 
         let store = NetworkedIndex::new(env, self.catalog(), remote);
-        self.execute(store).await
+        self.execute(store)
     }
 
     /// Execute the select against the given content-addressed store.
@@ -86,7 +87,7 @@ impl Select<'_> {
     /// Unlike [`perform`](Self::perform) this does not pick a store for
     /// you — useful when callers (e.g. query sessions) want to supply a
     /// custom one such as a pre-configured [`NetworkedIndex`].
-    pub async fn execute<'s, S>(
+    pub fn execute<'s, S>(
         self,
         store: S,
     ) -> Result<
@@ -94,15 +95,15 @@ impl Select<'_> {
         DialogProllyTreeError,
     >
     where
-        S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError>
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
             + ConditionalSync
             + 's,
     {
-        // Load the branch's search tree. Tree loading may have to hit
-        // the network through `store` (NetworkedIndex) when the root is
-        // remote-only, which is why this is async and fallible up front.
-        let tree: Index = Tree::from_hash(&self.tree_hash(), &store).await?;
+        // Hydrating the tree is lazy: nodes load on demand during the
+        // scan, hitting the network through `store` (NetworkedIndex)
+        // when a block is remote-only.
+        let tree = Index::from_hash(NodeHash::from(self.tree_hash()));
 
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay

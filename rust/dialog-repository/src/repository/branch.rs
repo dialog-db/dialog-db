@@ -1,12 +1,11 @@
 use super::memory::Cell;
 use crate::Revision;
-use dialog_artifacts::{Datum, Exporter, Importer, Key, State};
+
+use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Capability, Did, Subject};
 use dialog_effects::archive::Archive;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
-use dialog_prolly_tree::{GeometricDistribution, Tree};
 use dialog_query::query::Application;
-use dialog_storage::Blake3Hash;
 
 mod claims;
 pub use claims::*;
@@ -63,7 +62,7 @@ pub use upstream::*;
 mod integration_tests;
 
 /// Type alias for the search tree index.
-pub type Index = Tree<GeometricDistribution, Key, State<Datum>, Blake3Hash>;
+pub type Index = dialog_artifacts::Index;
 
 /// A branch represents a named line of development within a repository.
 ///

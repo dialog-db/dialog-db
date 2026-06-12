@@ -5,11 +5,13 @@ use crate::{
 use dialog_artifacts::Instruction;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::{Fork, Provider};
+use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_prolly_tree::{EMPT_TREE_HASH, Tree};
+use dialog_prolly_tree::EMPT_TREE_HASH;
+use dialog_storage::StorageBackend;
 use futures_util::Stream;
 
 /// Command that commits a stream of changes (assert/retract) to a branch.
@@ -78,16 +80,24 @@ where
             .map(|rev| *rev.tree.hash())
             .unwrap_or(EMPT_TREE_HASH);
 
-        let mut tree: Index = Tree::from_hash(&base_tree_hash, &store).await?;
+        let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
         // cardinality-one supersession, and retraction live in the
         // shared `ArtifactTreeExt::apply` so the key layout stays uniform.
         tree.apply(&mut store, changes).await?;
 
-        // `tree.hash()` returns `None` only when the tree is empty, which
-        // we represent as the canonical empty-tree hash.
-        let tree = TreeReference::from(tree.hash().copied().unwrap_or(EMPT_TREE_HASH));
+        // Persist the tree's pending nodes before referencing the root in
+        // a revision; a revision must only point at durable blocks. The
+        // empty tree's root is the canonical empty-tree hash already.
+        for (hash, buffer) in tree.flush() {
+            store
+                .set(*hash.as_bytes(), buffer.into_vec())
+                .await
+                .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+        }
+
+        let tree = TreeReference::from(*tree.root().as_bytes());
 
         // Discover who we are so the revision can be attributed to the
         // correct profile / operator. The subject comes from the branch

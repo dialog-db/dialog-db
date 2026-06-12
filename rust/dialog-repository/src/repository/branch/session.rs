@@ -283,7 +283,7 @@ where
     };
 
     let store = NetworkedIndex::new(env, select.catalog(), remote);
-    let stream = select.execute(store).await?;
+    let stream = select.execute(store)?;
     Ok(Box::pin(stream))
 }
 
