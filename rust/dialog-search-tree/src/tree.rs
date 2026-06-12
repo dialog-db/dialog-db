@@ -1,4 +1,6 @@
-use std::{marker::PhantomData, ops::RangeBounds};
+use std::{collections::BTreeMap, marker::PhantomData, ops::RangeBounds};
+
+use nonempty::NonEmpty;
 
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
 use dialog_storage::{DialogStorageError, StorageBackend};
@@ -151,6 +153,43 @@ where
             node_cache: Cache::new(),
             delta: Delta::zero(),
         }
+    }
+
+    /// Builds a tree from a collection of entries in one bottom-up pass.
+    ///
+    /// Every key is ranked once and every node is serialized and hashed
+    /// exactly once. A per-key insert loop produces the same canonical tree
+    /// (byte-identical root) but rewrites each touched segment once per
+    /// insert, so batch construction should prefer this constructor.
+    /// Duplicate keys resolve to the last value in iteration order.
+    ///
+    /// The build performs no reads: every produced node accumulates in the
+    /// tree's delta, to be persisted via [`flush`](Self::flush).
+    pub fn from_entries<I>(entries: I) -> Result<Self, DialogSearchTreeError>
+    where
+        I: IntoIterator<Item = (Key, Value)>,
+    {
+        let collection: BTreeMap<Key, Value> = entries.into_iter().collect();
+        let Some(entries) = NonEmpty::from_vec(
+            collection
+                .into_iter()
+                .map(|(key, value)| Entry { key, value })
+                .collect(),
+        ) else {
+            return Ok(Self::empty());
+        };
+
+        let shaper = TreeShaper::<Key, Value, D>::new(NULL_BLAKE3_HASH.clone(), Delta::zero());
+        let (root, delta) = shaper.distribute(entries, None)?;
+
+        Ok(Self {
+            key: PhantomData,
+            value: PhantomData,
+            distribution: PhantomData,
+            root,
+            node_cache: Cache::new(),
+            delta,
+        })
     }
 
     /// Retrieves the value associated with `key` from the tree.
@@ -2221,6 +2260,37 @@ mod tests {
                 );
             }
         }
+
+        Ok(())
+    }
+
+    /// Bulk construction must be canonical: byte-identical root to the
+    /// same entries arriving through a per-key insert loop, regardless of
+    /// insertion order or duplicate keys (last value wins).
+    #[dialog_common::test]
+    async fn it_bulk_builds_the_same_canonical_tree_as_an_insert_loop() -> Result<()> {
+        let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let entries: Vec<([u8; 4], Vec<u8>)> = (0..1000u32)
+            .map(|i| (i.to_le_bytes(), vec![(i % 251) as u8]))
+            .collect();
+
+        let mut incremental = Tree::<[u8; 4], Vec<u8>>::empty();
+        // Insert in reverse order to exercise order independence.
+        for (key, value) in entries.iter().rev() {
+            incremental = incremental.insert(*key, value.clone(), &storage).await?;
+        }
+
+        // Bulk build with a stale duplicate first; the later value must win.
+        let mut with_duplicates: Vec<([u8; 4], Vec<u8>)> = vec![(7u32.to_le_bytes(), vec![0xFF])];
+        with_duplicates.extend(entries);
+        let bulk = Tree::<[u8; 4], Vec<u8>>::from_entries(with_duplicates)?;
+
+        assert_eq!(
+            bulk.root(),
+            incremental.root(),
+            "bulk build must produce the canonical tree"
+        );
 
         Ok(())
     }

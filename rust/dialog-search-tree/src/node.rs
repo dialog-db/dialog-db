@@ -81,8 +81,23 @@ where
 
     /// Accesses the deserialized body of this node.
     pub fn body(&self) -> Result<&ArchivedNodeBody<Key, Value>, DialogSearchTreeError> {
-        rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
-            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
+        if self.buffer.is_validated() {
+            // SAFETY: this exact buffer already passed a full `rkyv::access`
+            // validation as `ArchivedNodeBody` (the marker is only ever set
+            // on that path), buffers are immutable and 16-byte aligned, and
+            // content addressing guarantees stored bytes are byte-identical
+            // to what was validated. Skipping re-validation turns every
+            // subsequent body access from a linear bytecheck pass into a
+            // pointer cast.
+            return Ok(unsafe {
+                rkyv::access_unchecked::<ArchivedNodeBody<Key, Value>>(self.buffer.as_ref())
+            });
+        }
+
+        let body = rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
+            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+        self.buffer.mark_validated();
+        Ok(body)
     }
 
     /// Interprets this node as an index node, returning an error if it's a

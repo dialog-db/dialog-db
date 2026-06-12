@@ -526,7 +526,7 @@ where
     ///
     /// Returns the new root hash and a delta containing all newly created
     /// nodes.
-    fn distribute(
+    pub(crate) fn distribute(
         self,
         entries: NonEmpty<Entry<Key, Value>>,
         search_result: Option<SearchResult<Key, Value>>,

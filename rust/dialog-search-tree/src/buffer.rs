@@ -14,7 +14,7 @@ use rkyv::util::AlignedVec;
 /// free to return odd addresses for align-1 allocations, which surfaced as
 /// "unaligned pointer" errors when accessing nodes loaded from storage.
 #[derive(Clone, Debug)]
-pub struct Buffer(Arc<(AlignedVec, OnceLock<Blake3Hash>)>);
+pub struct Buffer(Arc<(AlignedVec, OnceLock<Blake3Hash>, OnceLock<()>)>);
 
 impl Buffer {
     /// Returns the [`Blake3Hash`] of this buffer's contents, computing it if
@@ -23,6 +23,21 @@ impl Buffer {
         self.0
             .1
             .get_or_init(|| Blake3Hash::hash(self.0.0.as_slice()))
+    }
+
+    /// Records that this buffer's contents passed archive validation, so
+    /// subsequent accesses can skip the (linear) bytecheck pass. The marker
+    /// is shared across clones, including copies handed out by the node
+    /// cache and the delta. Buffers are immutable, so a single successful
+    /// validation holds for the buffer's lifetime.
+    pub(crate) fn mark_validated(&self) {
+        let _ = self.0.2.set(());
+    }
+
+    /// Returns whether this buffer's contents have already passed archive
+    /// validation.
+    pub(crate) fn is_validated(&self) -> bool {
+        self.0.2.get().is_some()
     }
 
     /// Converts this [`Buffer`] into an owned `Vec<u8>`.
@@ -51,13 +66,13 @@ impl From<&[u8]> for Buffer {
     fn from(value: &[u8]) -> Self {
         let mut bytes = AlignedVec::with_capacity(value.len());
         bytes.extend_from_slice(value);
-        Self(Arc::new((bytes, OnceLock::new())))
+        Self(Arc::new((bytes, OnceLock::new(), OnceLock::new())))
     }
 }
 
 impl From<AlignedVec> for Buffer {
     fn from(value: AlignedVec) -> Self {
-        Self(Arc::new((value, OnceLock::new())))
+        Self(Arc::new((value, OnceLock::new(), OnceLock::new())))
     }
 }
 
