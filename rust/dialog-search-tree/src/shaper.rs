@@ -868,8 +868,10 @@ mod tests {
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), storage)
                 .await?;
         }
-        for (hash, buf) in tree.flush() {
-            storage.store(buf.as_ref().to_vec(), &hash).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
         Ok(tree)
     }
@@ -1015,8 +1017,10 @@ mod tests {
 
         for &bk in boundaries.iter().take(5) {
             let mut tree_via_delete = full_tree.delete(&bk.to_le_bytes(), &storage).await?;
-            for (h, b) in tree_via_delete.flush() {
-                storage.store(b.as_ref().to_vec(), &h).await?;
+            for buffer in tree_via_delete.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
             }
 
             let remaining: Vec<u32> = all_keys.iter().copied().filter(|&k| k != bk).collect();
@@ -1045,8 +1049,10 @@ mod tests {
 
         for &key in non_boundaries.iter().take(5) {
             let mut tree_via_delete = full_tree.delete(&key.to_le_bytes(), &storage).await?;
-            for (h, b) in tree_via_delete.flush() {
-                storage.store(b.as_ref().to_vec(), &h).await?;
+            for buffer in tree_via_delete.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
             }
 
             let remaining: Vec<u32> = all_keys.iter().copied().filter(|&k| k != key).collect();
@@ -1079,8 +1085,10 @@ mod tests {
         for &ek in &extra_keys {
             tree_pruned = tree_pruned.delete(&ek.to_le_bytes(), &storage).await?;
         }
-        for (h, b) in tree_pruned.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree_pruned.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         assert_eq!(
@@ -1109,15 +1117,19 @@ mod tests {
 
         for &key in &test_keys {
             let mut after_delete = original.delete(&key.to_le_bytes(), &storage).await?;
-            for (h, b) in after_delete.flush() {
-                storage.store(b.as_ref().to_vec(), &h).await?;
+            for buffer in after_delete.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
             }
 
             let mut restored = after_delete
                 .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
                 .await?;
-            for (h, b) in restored.flush() {
-                storage.store(b.as_ref().to_vec(), &h).await?;
+            for buffer in restored.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
             }
 
             assert_eq!(
@@ -1142,8 +1154,10 @@ mod tests {
         for i in 100..200u32 {
             tree_b = tree_b.delete(&i.to_le_bytes(), &storage).await?;
         }
-        for (h, b) in tree_b.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree_b.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         assert_eq!(
@@ -1202,8 +1216,10 @@ mod tests {
         let mut full_tree = build_and_flush(&all_keys, &mut storage).await?;
 
         let mut tree_via_delete = full_tree.delete(&solo_key.to_le_bytes(), &storage).await?;
-        for (h, b) in tree_via_delete.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree_via_delete.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let remaining: Vec<u32> = all_keys
@@ -1237,8 +1253,10 @@ mod tests {
         let mut full_tree = build_and_flush(&all_keys, &mut storage).await?;
 
         let mut tree_via_delete = full_tree.delete(&first_key, &storage).await?;
-        for (h, b) in tree_via_delete.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree_via_delete.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let remaining: Vec<u32> = all_keys
@@ -1274,8 +1292,10 @@ mod tests {
         let mut full_tree = build_and_flush(&all_keys, &mut storage).await?;
 
         let mut tree_via_delete = full_tree.delete(&last_key, &storage).await?;
-        for (h, b) in tree_via_delete.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree_via_delete.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let remaining: Vec<u32> = all_keys

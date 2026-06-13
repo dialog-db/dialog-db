@@ -622,6 +622,7 @@ mod tests {
         use super::*;
         use dialog_capability::Subject;
         use dialog_common::Blake3Hash;
+        use dialog_common::Buffer;
         use dialog_effects::archive::prelude::*;
         use dialog_effects::credential::Secret;
         use dialog_effects::memory::prelude::*;
@@ -758,7 +759,7 @@ mod tests {
             Subject::from(operator.profile_did())
                 .archive()
                 .catalog("cred-roundtrip")
-                .put(digest.clone(), content.clone())
+                .put(Buffer::from(content.clone()))
                 .fork(&address)
                 .perform(&operator)
                 .await
@@ -1009,7 +1010,7 @@ mod tests {
     mod ucan_fork_tests {
         use super::*;
         use dialog_capability::Subject;
-        use dialog_common::Blake3Hash;
+        use dialog_common::{Blake3Hash, Buffer};
         use dialog_effects::archive::prelude::*;
         use dialog_effects::memory::prelude::*;
         use dialog_network::NetworkAddress as SiteAddress;
@@ -1069,7 +1070,7 @@ mod tests {
             Subject::from(operator.profile_did())
                 .archive()
                 .catalog("ucan-roundtrip")
-                .put(digest.clone(), content.clone())
+                .put(Buffer::from(content.clone()))
                 .fork(&address)
                 .perform(&operator)
                 .await?;
@@ -1336,7 +1337,7 @@ mod tests {
             Subject::from(operator.profile_did())
                 .archive()
                 .catalog("allowed")
-                .put(digest.clone(), content.clone())
+                .put(Buffer::from(content.clone()))
                 .fork(&address)
                 .perform(&operator)
                 .await?;

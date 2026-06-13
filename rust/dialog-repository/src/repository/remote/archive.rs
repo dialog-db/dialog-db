@@ -3,7 +3,7 @@
 use crate::{RemoteRepository, RemoteSite, UploadError};
 use dialog_artifacts::{Datum, KeyBytes, State};
 use dialog_capability::{Capability, Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
 use dialog_effects::archive::{ArchiveError, Catalog, Get, Put};
 use dialog_search_tree::{DialogSearchTreeError, Node};
@@ -41,12 +41,8 @@ impl RemoteArchiveIndex<'_> {
     }
 
     /// Write a block to the remote archive.
-    pub fn put(&self, hash: Blake3Hash, bytes: Vec<u8>) -> RemotePut<'_> {
-        RemotePut {
-            index: self,
-            hash,
-            bytes,
-        }
+    pub fn put(&self, block: Buffer) -> RemotePut<'_> {
+        RemotePut { index: self, block }
     }
 }
 
@@ -76,8 +72,7 @@ impl RemoteGet<'_> {
 /// Command to write a block to the remote archive.
 pub struct RemotePut<'a> {
     index: &'a RemoteArchiveIndex<'a>,
-    hash: Blake3Hash,
-    bytes: Vec<u8>,
+    block: Buffer,
 }
 
 impl RemotePut<'_> {
@@ -90,7 +85,7 @@ impl RemotePut<'_> {
         self.index
             .catalog
             .clone()
-            .put(self.hash, self.bytes)
+            .put(self.block)
             .fork(address.site())
             .perform(env)
             .await
@@ -132,10 +127,8 @@ where
         self.nodes
             .map(|node| async move {
                 let node = node?;
-                let hash = *node.hash().as_bytes();
-                let bytes = node.buffer().as_ref().to_vec();
                 index
-                    .put(hash, bytes)
+                    .put(node.buffer().clone())
                     .perform(env)
                     .await
                     .map_err(UploadError::RemoteWrite)?;

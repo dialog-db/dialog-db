@@ -3,6 +3,7 @@
 #![cfg(feature = "s3-integration-tests")]
 
 use dialog_common::Blake3Hash;
+use dialog_common::Buffer;
 use dialog_effects::archive::prelude::*;
 
 use super::environment::Environment;
@@ -40,7 +41,7 @@ async fn it_puts_and_gets_content() -> anyhow::Result<()> {
     env.subject()
         .archive()
         .catalog(catalog)
-        .put(digest.clone(), content.clone())
+        .put(Buffer::from(content.clone()))
         .fork(&env.address)
         .perform(&env.network)
         .await?;
@@ -68,7 +69,7 @@ async fn it_handles_binary_content() -> anyhow::Result<()> {
     env.subject()
         .archive()
         .catalog(catalog)
-        .put(digest.clone(), content.clone())
+        .put(Buffer::from(content.clone()))
         .fork(&env.address)
         .perform(&env.network)
         .await?;
@@ -98,7 +99,7 @@ async fn it_isolates_catalogs() -> anyhow::Result<()> {
     env.subject()
         .archive()
         .catalog(catalog_a)
-        .put(digest.clone(), content.clone())
+        .put(Buffer::from(content.clone()))
         .fork(&env.address)
         .perform(&env.network)
         .await?;
@@ -138,7 +139,7 @@ async fn it_handles_large_content() -> anyhow::Result<()> {
     env.subject()
         .archive()
         .catalog(catalog)
-        .put(digest.clone(), content.clone())
+        .put(Buffer::from(content.clone()))
         .fork(&env.address)
         .perform(&env.network)
         .await?;

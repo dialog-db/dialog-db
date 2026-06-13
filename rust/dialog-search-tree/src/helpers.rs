@@ -569,8 +569,10 @@ impl TreeDescriptor {
 
         // Persist all pending nodes so differentials read them through the
         // journaled backend.
-        for (hash, buffer) in tree.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let root = tree.root().clone();

@@ -6,9 +6,9 @@ use super::{FileSystem, FileSystemError, FileSystemHandle};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
-use dialog_common::Blake3Hash;
-use dialog_effects::archive::prelude::{GetExt, PutExt};
-use dialog_effects::archive::{ArchiveError, Get, Put};
+use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
+use dialog_effects::archive::{ArchiveError, Get, Import, Put};
+use futures_util::future::try_join_all;
 
 const ARCHIVE: &str = "archive";
 
@@ -47,15 +47,6 @@ impl Provider<Put> for FileSystem {
         let digest = effect.digest();
         let content = effect.content();
 
-        // Verify content matches the declared digest
-        let actual_digest = Blake3Hash::hash(content);
-        if &actual_digest != digest {
-            return Err(ArchiveError::DigestMismatch {
-                expected: digest.as_bytes().to_base58(),
-                actual: actual_digest.as_bytes().to_base58(),
-            });
-        }
-
         let key = digest.as_bytes().to_base58();
         let destination = self.archive()?.resolve(catalog)?;
         let handle = destination.resolve(&key)?;
@@ -75,11 +66,51 @@ impl Provider<Put> for FileSystem {
     }
 }
 
+#[async_trait]
+impl Provider<Import> for FileSystem {
+    async fn execute(&self, effect: Capability<Import>) -> Result<(), ArchiveError> {
+        let catalog = effect.catalog();
+        let blocks = effect.blocks();
+
+        if blocks.is_empty() {
+            return Ok(());
+        }
+
+        // Content addressing derives each key from the bytes (the buffer
+        // memoizes its hash). Write concurrently: blocks are independent
+        // files.
+        let destination = self.archive()?.resolve(catalog)?;
+        try_join_all(blocks.iter().map(|buffer| {
+            let destination = &destination;
+            async move {
+                let key = buffer.blake3_hash().as_bytes().to_base58();
+                let handle = destination.resolve(&key)?;
+
+                // Content-addressed storage is idempotent - if file exists
+                // with same content hash, no need to rewrite
+                if handle.exists().await {
+                    return Ok(());
+                }
+
+                // Write atomically via temp file + rename
+                let tmp_handle = destination.resolve(&format!("{}.tmp", key))?;
+                tmp_handle.write(buffer.as_ref()).await?;
+                tmp_handle.rename(&handle).await?;
+                Ok(()) as Result<(), ArchiveError>
+            }
+        }))
+        .await?;
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::helpers::{unique_did, unique_name};
     use crate::resource::Resource;
+    use dialog_common::{Blake3Hash, Buffer};
     use dialog_effects::prelude::*;
     use dialog_effects::storage::{Directory, Location as StorageLocation};
 
@@ -120,7 +151,7 @@ mod tests {
             .clone()
             .archive()
             .catalog("index")
-            .put(digest.clone(), content.clone());
+            .put(Buffer::from(content.clone()));
 
         put_effect.perform(&provider).await?;
 
@@ -132,28 +163,6 @@ mod tests {
             .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_rejects_digest_mismatch() -> anyhow::Result<()> {
-        let location = StorageLocation::new(
-            Directory::Temp,
-            unique_name("fs-it_rejects_digest_mismatch"),
-        );
-        let provider = FileSystem::open(&location).await?;
-        let subject = unique_did().await;
-        let content = b"hello world".to_vec();
-        let wrong_digest = Blake3Hash::hash(b"different content");
-
-        let effect = subject
-            .archive()
-            .catalog("index")
-            .put(wrong_digest, content);
-
-        let result = effect.perform(&provider).await;
-        assert!(matches!(result, Err(ArchiveError::DigestMismatch { .. })));
 
         Ok(())
     }
@@ -176,7 +185,7 @@ mod tests {
             .clone()
             .archive()
             .catalog("catalog1")
-            .put(digest1.clone(), content1.clone())
+            .put(Buffer::from(content1.clone()))
             .perform(&provider)
             .await?;
 
@@ -184,7 +193,7 @@ mod tests {
             .clone()
             .archive()
             .catalog("catalog2")
-            .put(digest2.clone(), content2.clone())
+            .put(Buffer::from(content2.clone()))
             .perform(&provider)
             .await?;
 
@@ -236,7 +245,7 @@ mod tests {
             .clone()
             .archive()
             .catalog("index")
-            .put(digest.clone(), content.clone())
+            .put(Buffer::from(content.clone()))
             .perform(&provider)
             .await?;
 
@@ -244,7 +253,7 @@ mod tests {
             .clone()
             .archive()
             .catalog("index")
-            .put(digest.clone(), content.clone())
+            .put(Buffer::from(content.clone()))
             .perform(&provider)
             .await?;
 
@@ -273,7 +282,7 @@ mod tests {
             .clone()
             .archive()
             .catalog("index")
-            .put(digest.clone(), content.clone())
+            .put(Buffer::from(content.clone()))
             .perform(&provider)
             .await?;
 
@@ -302,7 +311,7 @@ mod tests {
             .clone()
             .archive()
             .catalog("index")
-            .put(digest.clone(), content.clone())
+            .put(Buffer::from(content.clone()))
             .perform(&provider)
             .await?;
 
@@ -313,6 +322,41 @@ mod tests {
             .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_imports_blocks_in_bulk() -> anyhow::Result<()> {
+        let location =
+            StorageLocation::new(Directory::Temp, unique_name("fs-it_imports_blocks_in_bulk"));
+        let provider = FileSystem::open(&location).await?;
+        let subject = unique_did().await;
+
+        let blocks: Vec<Buffer> = (0..8u8).map(|i| Buffer::from(vec![i; 64])).collect();
+        let digests: Vec<_> = blocks
+            .iter()
+            .map(|buffer| buffer.blake3_hash().clone())
+            .collect();
+
+        subject
+            .clone()
+            .archive()
+            .catalog("index")
+            .import(blocks)
+            .perform(&provider)
+            .await?;
+
+        for (i, digest) in digests.into_iter().enumerate() {
+            let content = subject
+                .clone()
+                .archive()
+                .catalog("index")
+                .get(digest)
+                .perform(&provider)
+                .await?;
+            assert_eq!(content, Some(vec![i as u8; 64]));
+        }
 
         Ok(())
     }

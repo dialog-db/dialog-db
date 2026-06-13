@@ -37,6 +37,7 @@ pub struct Storage<S: Clone> {
     #[provide(
         archive::Get,
         archive::Put,
+        archive::Import,
         memory::Resolve,
         memory::Publish,
         memory::Retract,
@@ -114,7 +115,7 @@ mod tests {
     use super::*;
     use crate::helpers::test_credential;
     use dialog_capability::did;
-    use dialog_common::Blake3Hash;
+    use dialog_common::{Blake3Hash, Buffer};
     use dialog_effects::prelude::*;
     use dialog_effects::storage::{LocationExt, Storage as StorageFx};
     use dialog_varsig::Principal;
@@ -153,7 +154,7 @@ mod tests {
         did.clone()
             .archive()
             .catalog("index")
-            .put(digest.clone(), content.clone())
+            .put(Buffer::from(content.clone()))
             .perform(&env)
             .await
             .unwrap();
@@ -243,7 +244,7 @@ mod tests {
 
         did1.archive()
             .catalog("index")
-            .put(digest.clone(), content)
+            .put(Buffer::from(content))
             .perform(&env)
             .await
             .unwrap();
@@ -346,7 +347,7 @@ mod tests {
             did.clone()
                 .archive()
                 .catalog("index")
-                .put(digest.clone(), content.clone())
+                .put(Buffer::from(content.clone()))
                 .perform(&env)
                 .await
                 .unwrap();

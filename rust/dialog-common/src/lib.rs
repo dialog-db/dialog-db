@@ -42,6 +42,9 @@ pub mod time;
 mod hash;
 pub use hash::*;
 
+mod buffer;
+pub use buffer::*;
+
 mod checksum;
 pub use checksum::*;
 

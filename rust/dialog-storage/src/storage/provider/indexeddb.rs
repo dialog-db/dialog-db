@@ -328,6 +328,7 @@ mod tests {
 
     use super::*;
     use crate::helpers::unique_name;
+    use dialog_common::Buffer;
     use wasm_bindgen::JsValue;
 
     #[dialog_common::test]
@@ -475,7 +476,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
-            .invoke(Put::new(digest, content))
+            .invoke(Put::new(Buffer::from(content)))
             .perform(&db)
             .await?;
 

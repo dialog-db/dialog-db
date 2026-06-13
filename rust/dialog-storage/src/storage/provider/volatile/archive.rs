@@ -4,9 +4,8 @@ use super::{ArchiveKey, Volatile, VolatileError};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
-use dialog_common::Blake3Hash;
-use dialog_effects::archive::prelude::{GetExt, PutExt};
-use dialog_effects::archive::{ArchiveError, Get, Put};
+use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
+use dialog_effects::archive::{ArchiveError, Get, Import, Put};
 
 impl From<VolatileError> for ArchiveError {
     fn from(e: VolatileError) -> Self {
@@ -40,15 +39,6 @@ impl Provider<Put> for Volatile {
         let digest = effect.digest();
         let content = effect.content();
 
-        // Verify content matches the declared digest
-        let actual_digest = Blake3Hash::hash(content);
-        if &actual_digest != digest {
-            return Err(ArchiveError::DigestMismatch {
-                expected: digest.as_bytes().to_base58(),
-                actual: actual_digest.as_bytes().to_base58(),
-            });
-        }
-
         let key: ArchiveKey = (catalog.to_string(), digest.as_bytes().to_base58());
 
         // Content-addressed storage is idempotent
@@ -63,10 +53,43 @@ impl Provider<Put> for Volatile {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Import> for Volatile {
+    async fn execute(&self, effect: Capability<Import>) -> Result<(), ArchiveError> {
+        let subject = effect.subject().into();
+        let catalog = effect.catalog();
+        let blocks = effect.blocks();
+
+        if blocks.is_empty() {
+            return Ok(());
+        }
+
+        // Content addressing derives each key from the bytes (the buffer
+        // memoizes its hash). One lock acquisition for the whole batch.
+        let mut sessions = self.sessions.write();
+        let session = sessions.entry(subject).or_default();
+        for buffer in blocks {
+            let key: ArchiveKey = (
+                catalog.to_string(),
+                buffer.blake3_hash().as_bytes().to_base58(),
+            );
+            // Content-addressed storage is idempotent
+            session
+                .archive
+                .entry(key)
+                .or_insert_with(|| buffer.as_ref().to_vec());
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::helpers::unique_subject;
+    use dialog_common::{Blake3Hash, Buffer};
     use dialog_effects::archive::{Archive, Catalog};
 
     #[dialog_common::test]
@@ -98,7 +121,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
-            .invoke(Put::new(digest.clone(), content.clone()));
+            .invoke(Put::new(Buffer::from(content.clone())));
 
         put_effect.perform(&provider).await?;
 
@@ -110,24 +133,6 @@ mod tests {
 
         let result = get_effect.perform(&provider).await?;
         assert_eq!(result, Some(content));
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_rejects_digest_mismatch() -> anyhow::Result<()> {
-        let provider = Volatile::new();
-        let subject = unique_subject("archive-mismatch");
-        let content = b"hello world".to_vec();
-        let wrong_digest = Blake3Hash::hash(b"different content");
-
-        let effect = subject
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(wrong_digest, content));
-
-        let result = effect.perform(&provider).await;
-        assert!(matches!(result, Err(ArchiveError::DigestMismatch { .. })));
 
         Ok(())
     }
@@ -146,7 +151,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
-            .invoke(Put::new(digest1.clone(), content1.clone()))
+            .invoke(Put::new(Buffer::from(content1.clone())))
             .perform(&provider)
             .await?;
 
@@ -154,7 +159,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog2"))
-            .invoke(Put::new(digest2.clone(), content2.clone()))
+            .invoke(Put::new(Buffer::from(content2.clone())))
             .perform(&provider)
             .await?;
 
@@ -202,7 +207,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
-            .invoke(Put::new(digest.clone(), content.clone()))
+            .invoke(Put::new(Buffer::from(content.clone())))
             .perform(&provider)
             .await?;
 
@@ -210,7 +215,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
-            .invoke(Put::new(digest.clone(), content.clone()))
+            .invoke(Put::new(Buffer::from(content.clone())))
             .perform(&provider)
             .await?;
 
@@ -237,7 +242,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
-            .invoke(Put::new(digest.clone(), content.clone()))
+            .invoke(Put::new(Buffer::from(content.clone())))
             .perform(&provider)
             .await?;
 
@@ -264,7 +269,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
-            .invoke(Put::new(digest.clone(), content.clone()))
+            .invoke(Put::new(Buffer::from(content.clone())))
             .perform(&provider)
             .await?;
 
@@ -275,6 +280,76 @@ mod tests {
             .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_imports_blocks_in_bulk() -> anyhow::Result<()> {
+        let provider = Volatile::new();
+        let subject = unique_subject("archive-import");
+
+        let blocks: Vec<Buffer> = (0..8u8).map(|i| Buffer::from(vec![i; 64])).collect();
+        let digests: Vec<_> = blocks
+            .iter()
+            .map(|buffer| buffer.blake3_hash().clone())
+            .collect();
+
+        subject
+            .clone()
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Import::new(blocks))
+            .perform(&provider)
+            .await?;
+
+        for (i, digest) in digests.into_iter().enumerate() {
+            let content = subject
+                .clone()
+                .attenuate(Archive)
+                .attenuate(Catalog::new("index"))
+                .invoke(Get::new(digest))
+                .perform(&provider)
+                .await?;
+            assert_eq!(content, Some(vec![i as u8; 64]));
+        }
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_accepts_empty_and_repeated_imports() -> anyhow::Result<()> {
+        let provider = Volatile::new();
+        let subject = unique_subject("archive-import-idempotent");
+
+        subject
+            .clone()
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Import::new(Vec::<Buffer>::new()))
+            .perform(&provider)
+            .await?;
+
+        let block = Buffer::from(vec![7u8; 32]);
+        let digest = block.blake3_hash().clone();
+        for _ in 0..2 {
+            subject
+                .clone()
+                .attenuate(Archive)
+                .attenuate(Catalog::new("index"))
+                .invoke(Import::new([block.clone()]))
+                .perform(&provider)
+                .await?;
+        }
+
+        let content = subject
+            .clone()
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Get::new(digest))
+            .perform(&provider)
+            .await?;
+        assert_eq!(content, Some(vec![7u8; 32]));
 
         Ok(())
     }

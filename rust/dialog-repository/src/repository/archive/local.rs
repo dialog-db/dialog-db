@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::*;
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
@@ -68,10 +68,10 @@ where
     type Value = Vec<u8>;
     type Error = DialogStorageError;
 
-    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+    async fn set(&mut self, _key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         self.catalog
             .clone()
-            .put(key, value)
+            .put(Buffer::from(value))
             .perform(self.env)
             .await?;
         Ok(())
