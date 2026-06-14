@@ -74,8 +74,8 @@
 //!
 //! // Flush the delta to get buffers that need to be persisted
 //! let root_hash = tree.root().clone();
-//! for (hash, buffer) in tree.flush() {
-//!     storage.store(buffer.as_ref().to_vec(), &hash).await.unwrap();
+//! for buffer in tree.flush() {
+//!     storage.store(buffer.as_ref().to_vec(), buffer.blake3_hash()).await.unwrap();
 //! }
 //!
 //! // After flushing, the tree can be reconstructed from its root hash
@@ -117,8 +117,7 @@
 mod accessor;
 pub use accessor::*;
 
-mod buffer;
-pub use buffer::*;
+pub use dialog_common::Buffer;
 
 mod kv;
 pub use kv::*;
@@ -144,6 +143,9 @@ pub use tree::*;
 mod delta;
 pub use delta::*;
 
+mod differential;
+pub use differential::*;
+
 mod cache;
 pub use cache::*;
 
@@ -164,3 +166,10 @@ pub use shaper::*;
 
 mod compare;
 pub use compare::*;
+
+/// Helpers for testing and development.
+///
+/// This module provides utilities for creating deterministic tree structures
+/// for testing, including the `tree_spec!` macro and `DistributionSimulator`.
+#[cfg(any(test, feature = "helpers"))]
+pub mod helpers;

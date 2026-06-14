@@ -1,8 +1,13 @@
 use base58::ToBase58;
-use dialog_prolly_tree::EMPT_TREE_HASH;
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+
+/// A hash representing an empty (usually newly created) search tree.
+///
+/// Matches the search tree's null root sentinel
+/// (`dialog_common::NULL_BLAKE3_HASH`) byte for byte.
+pub const EMPTY_TREE_HASH: Blake3Hash = [0; 32];
 
 /// Reference to a search tree by its root hash.
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -18,7 +23,7 @@ impl TreeReference {
 impl Default for TreeReference {
     /// By default, a [`TreeReference`] points at the empty search tree.
     fn default() -> Self {
-        Self(EMPT_TREE_HASH)
+        Self(EMPTY_TREE_HASH)
     }
 }
 

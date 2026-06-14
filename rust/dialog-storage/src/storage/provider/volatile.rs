@@ -152,7 +152,7 @@ mod tests {
     use super::*;
     use base58::ToBase58;
     use dialog_capability::did;
-    use dialog_common::Blake3Hash;
+    use dialog_common::{Blake3Hash, Buffer};
 
     #[dialog_common::test]
     fn it_creates_new_provider() {
@@ -247,7 +247,7 @@ mod tests {
                     .clone()
                     .attenuate(Archive)
                     .attenuate(Catalog::new("index"))
-                    .invoke(Put::new(digest.clone(), content))
+                    .invoke(Put::new(Buffer::from(content)))
                     .perform(provider.as_ref())
                     .await
                     .unwrap();

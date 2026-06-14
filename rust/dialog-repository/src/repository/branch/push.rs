@@ -1,8 +1,10 @@
+use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_capability::{Fork, Provider};
+use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_prolly_tree::{Tree, TreeDifference};
+use dialog_search_tree::{ContentAddressedStorage as TreeStorage, TreeDifference};
 use futures_util::TryStreamExt;
 
 use crate::{
@@ -132,14 +134,16 @@ impl Push<'_> {
                 // before we publish the revision pointing at it.
                 let index = branch.archive().index();
                 let store = LocalIndex::new(env, index.clone());
-                let base_tree: Index = Tree::from_hash(base.hash(), &store).await?;
-                let current_tree: Index = Tree::from_hash(revision.tree.hash(), &store).await?;
+                let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
+                let current_tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+                let tree_store = TreeStorage::new(TreeStorageBridge(store));
                 let difference =
-                    TreeDifference::compute(&base_tree, &current_tree, &store, &store).await?;
+                    TreeDifference::compute(&base_tree, &current_tree, &tree_store, &tree_store)
+                        .await?;
                 let novelty = difference.novel_nodes().map_err(Into::into);
                 let remote_archive = remote.archive();
                 let remote_index = remote_archive.index();
-                let upload = remote_index.upload(novelty, index).perform(env);
+                let upload = remote_index.upload(novelty).perform(env);
                 // Boxed because the upload future carries the full
                 // stream type and produces large futures.
                 Box::pin(upload).await?;

@@ -1,18 +1,20 @@
+use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{Artifact, ArtifactSelector, DialogArtifactsError};
 use dialog_capability::{Capability, Fork, Provider};
+use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_effects::memory::Resolve;
-use dialog_prolly_tree::{DialogProllyTreeError, EMPT_TREE_HASH, Tree};
-use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError};
+use dialog_search_tree::DialogSearchTreeError;
+use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    Branch, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt,
-    Upstream,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt, Upstream,
 };
 
 /// Command struct for selecting artifacts from a branch.
@@ -32,7 +34,7 @@ impl<'a> Select<'a> {
             .revision()
             .as_ref()
             .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPT_TREE_HASH)
+            .unwrap_or(EMPTY_TREE_HASH)
     }
 
     /// The catalog (archive index) scoped to this branch's subject.
@@ -51,7 +53,7 @@ impl Select<'_> {
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogProllyTreeError>
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogSearchTreeError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -91,18 +93,30 @@ impl Select<'_> {
         store: S,
     ) -> Result<
         impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
-        DialogProllyTreeError,
+        DialogSearchTreeError,
     >
     where
-        S: ContentAddressedStorage<Hash = Blake3Hash, Error = DialogStorageError>
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
             + ConditionalSync
             + 's,
     {
-        // Load the branch's search tree. Tree loading may have to hit
-        // the network through `store` (NetworkedIndex) when the root is
-        // remote-only, which is why this is async and fallible up front.
-        let tree: Index = Tree::from_hash(&self.tree_hash(), &store).await?;
+        // Tree hydration is lazy (nodes load on demand during the scan),
+        // but unreachable branches should fail here rather than midway
+        // through the stream, so probe the root block eagerly. Through a
+        // `NetworkedIndex` this also replicates and caches the root
+        // locally, so the scan's own root read stays local.
+        let tree_hash = self.tree_hash();
+        if tree_hash != EMPTY_TREE_HASH {
+            store.get(&tree_hash).await?.ok_or_else(|| {
+                DialogSearchTreeError::Node(format!(
+                    "Blob not found in storage: {}",
+                    tree_hash.to_base58(),
+                ))
+            })?;
+        }
+
+        let tree = Index::from_hash(NodeHash::from(tree_hash));
 
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay

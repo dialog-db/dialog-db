@@ -100,10 +100,12 @@ where
         >,
 {
     /// Serializes this node body to bytes.
-    pub fn as_bytes(&self) -> Result<Vec<u8>, DialogSearchTreeError> {
-        rkyv::to_bytes(self)
-            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))
-            .map(|bytes| bytes.to_vec())
+    ///
+    /// Returns the serializer's [`AlignedVec`] directly so the alignment
+    /// that in-place archive access depends on is preserved all the way
+    /// into the node [`Buffer`](crate::Buffer).
+    pub fn as_bytes(&self) -> Result<AlignedVec, DialogSearchTreeError> {
+        rkyv::to_bytes(self).map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))
     }
 }
 

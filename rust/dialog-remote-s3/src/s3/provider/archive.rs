@@ -64,7 +64,7 @@ impl Provider<ForkInvocation<S3, Put>> for S3 {
 impl Provider<S3Invocation<Put>> for S3 {
     async fn execute(&self, input: S3Invocation<Put>) -> Result<(), ArchiveError> {
         let put = input.capability.into_effect();
-        let response = input.permit.upload(put.content).await?;
+        let response = input.permit.upload(put.block.as_ref().to_vec()).await?;
 
         if response.status().is_success() {
             Ok(())

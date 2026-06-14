@@ -5,7 +5,7 @@ use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
 use dialog_effects::memory::{MemoryError, Version};
 use dialog_effects::storage::StorageError;
-use dialog_prolly_tree::DialogProllyTreeError;
+use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::DialogStorageError;
 use std::io;
 use thiserror::Error;
@@ -96,7 +96,7 @@ pub enum RepositoryError {
     /// `DialogArtifactsError` per-item, which is surfaced through the
     /// stream).
     #[error(transparent)]
-    Select(#[from] DialogProllyTreeError),
+    Select(#[from] DialogSearchTreeError),
 
     /// A verifier-only credential was used where a signer was required.
     #[error(transparent)]
@@ -288,7 +288,7 @@ pub enum FetchError {
 pub enum CommitError {
     /// A search-tree operation during commit failed.
     #[error("Tree operation failed during commit: {0}")]
-    Tree(#[from] DialogProllyTreeError),
+    Tree(#[from] DialogSearchTreeError),
 
     /// An artifact decode during commit failed.
     #[error("Artifact decode failed during commit: {0}")]
@@ -339,7 +339,7 @@ pub enum PullError {
 
     /// A search-tree operation during pull failed.
     #[error("Tree operation failed during pull: {0}")]
-    Tree(#[from] DialogProllyTreeError),
+    Tree(#[from] DialogSearchTreeError),
 
     /// Streaming a block during replication failed.
     #[error("Block streaming failed during pull: {0}")]
@@ -406,7 +406,7 @@ pub enum PushError {
 
     /// A search-tree operation during push failed.
     #[error("Tree operation failed during push: {0}")]
-    Tree(#[from] DialogProllyTreeError),
+    Tree(#[from] DialogSearchTreeError),
 }
 
 /// Errors returned by cell resolve operations.
@@ -498,7 +498,7 @@ impl From<MemoryError> for PublishError {
 pub enum UploadError {
     /// Failed to walk the local tree to enumerate novel nodes.
     #[error("Failed to enumerate novel tree nodes: {0}")]
-    Tree(#[from] DialogProllyTreeError),
+    Tree(#[from] DialogSearchTreeError),
 
     /// Failed to read a block from the local archive before uploading.
     #[error("Failed to read block from local archive: {0}")]

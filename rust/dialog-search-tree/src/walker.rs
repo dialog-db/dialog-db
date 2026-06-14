@@ -75,12 +75,11 @@ where
         self,
         range: R,
         accessor: Accessor<Backend>,
-    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend + 'static
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
-        R: RangeBounds<Key> + ConditionalSend + 'static,
+        R: RangeBounds<Key> + ConditionalSend,
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         try_stream! {
             // Get the start key. Included/Excluded ranges are identical here,
@@ -91,7 +90,7 @@ where
             let start_key = match range.start_bound() {
                 Bound::Included(start) => start.clone(),
                 Bound::Excluded(start) => start.clone(),
-                Bound::Unbounded => <Key as crate::Key>::min(),
+                Bound::Unbounded => <Key as self::Key>::min(),
             };
             let Some(search_result) = self
                 .search(&start_key, accessor.clone(), SearchOptions::default())
@@ -149,8 +148,7 @@ where
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         if &self.root == NULL_BLAKE3_HASH {
             return Ok(None);
@@ -272,8 +270,7 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync
-        + 'static,
+        + ConditionalSync,
 {
     // Only prefetch when the caller's key matches the leaf's last entry;
     // boundary-delete overflow can't happen otherwise.

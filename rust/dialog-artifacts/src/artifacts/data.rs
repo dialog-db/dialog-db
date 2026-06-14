@@ -3,8 +3,9 @@
 //! This module defines the [`Datum`] type which is the internal serializable
 //! representation of artifacts stored within the prolly tree indexes.
 
-use dialog_prolly_tree::ValueType;
+use crate::ValueType;
 use dialog_storage::Blake3Hash;
+use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 
 use crate::{Artifact, Cause, make_reference};
@@ -13,7 +14,9 @@ use crate::{Artifact, Cause, make_reference};
 use crate::{Artifacts, Attribute, Entity};
 
 /// A [`Datum`] is the layout of data stored in one of the indexes of [`Artifacts`]
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, PartialEq, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize,
+)]
 pub struct Datum {
     /// The stringified [`Entity`] associated with this [`Datum`]
     pub entity: String,

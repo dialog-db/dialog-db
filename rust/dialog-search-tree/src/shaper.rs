@@ -21,8 +21,9 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, Delta, DialogSearchTreeError, Entry, Key, Link, Node, NodeBody, Rank, RightNeighbor,
-    SearchResult, Segment, SymmetryWith, TreeLayer, Value, distribution, into_owned,
+    Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Geometric, Key, Link, Node,
+    NodeBody, Rank, RightNeighbor, SearchResult, Segment, SymmetryWith, TreeLayer, Value,
+    into_owned,
 };
 
 /// A collection of nodes with their ranks.
@@ -50,26 +51,30 @@ const FIRST_INDEX_RANK: Rank = BOTTOM_RANK + 1;
 /// computation). Ideally this rank cache would be kept at a higher layer of
 /// abstraction so that it could be shared across mutations, but holding the
 /// cache in the mutation context is a low-hanging fruit.
-struct MutationContext<Key>
+struct MutationContext<Key, D>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + crate::SymmetryWith<Key> + Ord,
+    D: Distribution,
 {
     delta: Delta<Blake3Hash, Buffer>,
     rank_cache: HashMap<Key, Rank>,
+    distribution: PhantomData<D>,
 }
 
-impl<Key> MutationContext<Key>
+impl<Key, D> MutationContext<Key, D>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + crate::SymmetryWith<Key> + Ord,
+    D: Distribution,
 {
     pub fn new(delta: Delta<Blake3Hash, Buffer>) -> Self {
         Self {
             delta,
             rank_cache: HashMap::new(),
+            distribution: PhantomData,
         }
     }
 
@@ -77,8 +82,7 @@ where
         if let Some(rank) = self.rank_cache.get(key) {
             *rank
         } else {
-            let key_hash = Blake3Hash::hash(key.as_ref());
-            let rank = distribution::geometric::rank(&key_hash);
+            let rank = D::rank(key.as_ref());
             self.rank_cache.insert(key.clone(), rank);
             rank
         }
@@ -93,13 +97,14 @@ where
     }
 }
 
-impl<Key> From<MutationContext<Key>> for Delta<Blake3Hash, Buffer>
+impl<Key, D> From<MutationContext<Key, D>> for Delta<Blake3Hash, Buffer>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + crate::SymmetryWith<Key> + Ord,
+    D: Distribution,
 {
-    fn from(value: MutationContext<Key>) -> Self {
+    fn from(value: MutationContext<Key, D>) -> Self {
         value.delta
     }
 }
@@ -115,20 +120,22 @@ where
 /// This struct holds the delta for a mutation operation and provides methods to
 /// perform tree modifications. Each instance is tied to a specific mutation and
 /// consumes itself when the operation completes.
-pub struct TreeShaper<Key, Value>
+pub struct TreeShaper<Key, Value, D = Geometric>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + crate::SymmetryWith<Key> + Ord,
     Value: self::Value,
+    D: Distribution,
 {
     root: Blake3Hash,
     delta: Delta<Blake3Hash, Buffer>,
     key: PhantomData<Key>,
     value: PhantomData<Value>,
+    distribution: PhantomData<D>,
 }
 
-impl<Key, Value> TreeShaper<Key, Value>
+impl<Key, Value, D> TreeShaper<Key, Value, D>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -147,6 +154,7 @@ where
     Value: for<'a> Serialize<
         Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
     >,
+    D: Distribution,
 {
     /// Creates a new [`TreeShaper`] with the given root and delta.
     ///
@@ -159,6 +167,7 @@ where
             delta,
             key: PhantomData,
             value: PhantomData,
+            distribution: PhantomData,
         }
     }
 
@@ -381,7 +390,7 @@ where
             leaf: right_leaf,
         } = right_neighbor;
 
-        let mut context = MutationContext::<Key>::new(self.delta.branch());
+        let mut context = MutationContext::<Key, D>::new(self.delta.branch());
 
         // Both original leaves are replaced; clear any lingering delta entries.
         context.delta().remove(&main_leaf_hash);
@@ -522,7 +531,7 @@ where
         entries: NonEmpty<Entry<Key, Value>>,
         search_result: Option<SearchResult<Key, Value>>,
     ) -> Result<(Blake3Hash, Delta<Blake3Hash, Buffer>), DialogSearchTreeError> {
-        let mut context = MutationContext::<Key>::new(self.delta.branch());
+        let mut context = MutationContext::<Key, D>::new(self.delta.branch());
         let ranked_entries = entries.map(|entry| {
             let rank = context.rank(&entry.key);
             (entry, rank)
@@ -566,7 +575,7 @@ where
     fn merge_with_path(
         mut nodes: NonEmpty<(Node<Key, Value>, Rank)>,
         mut search_path: Vec<TreeLayer<Key, Value>>,
-        mut context: MutationContext<Key>,
+        mut context: MutationContext<Key, D>,
         initial_level_minimum_rank: Rank,
     ) -> Result<(Blake3Hash, Delta<Blake3Hash, Buffer>), DialogSearchTreeError> {
         let mut level_minimum_rank = initial_level_minimum_rank;
@@ -658,7 +667,7 @@ where
     ) -> Result<(Blake3Hash, Delta<Blake3Hash, Buffer>), DialogSearchTreeError> {
         use dialog_common::NULL_BLAKE3_HASH;
 
-        let mut context = MutationContext::<Key>::new(self.delta.branch());
+        let mut context = MutationContext::<Key, D>::new(self.delta.branch());
         context.delta().remove(&leaf_hash);
 
         // The level of the removed child at the layer currently being
@@ -758,9 +767,9 @@ where
 /// This is the shared helper used when a rebuild hands off its output up one
 /// level: the nodes become children of a new higher-level index, so we must
 /// both commit them to the delta (by hash) and convert them to links.
-fn promote_to_ranked_links<Key, Value>(
+fn promote_to_ranked_links<Key, Value, D>(
     nodes: NonEmpty<(Node<Key, Value>, Rank)>,
-    context: &mut MutationContext<Key>,
+    context: &mut MutationContext<Key, D>,
 ) -> Result<NonEmpty<(Link<Key>, Rank)>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -776,6 +785,7 @@ where
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
+    D: Distribution,
 {
     context.delta().add_all(
         nodes
@@ -791,14 +801,15 @@ where
 
 /// Converts a collection of links into ranked links by computing each link's
 /// rank from its node hash.
-fn into_ranked_links<Key>(
+fn into_ranked_links<Key, D>(
     links: NonEmpty<Link<Key>>,
-    context: &mut MutationContext<Key>,
+    context: &mut MutationContext<Key, D>,
 ) -> NonEmpty<(Link<Key>, Rank)>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + crate::SymmetryWith<Key> + Ord,
+    D: Distribution,
 {
     links.map(|link| {
         let rank = context.rank(&link.upper_bound);
@@ -857,8 +868,10 @@ mod tests {
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), storage)
                 .await?;
         }
-        for (hash, buf) in tree.flush() {
-            storage.store(buf.as_ref().to_vec(), &hash).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
         Ok(tree)
     }
@@ -1004,8 +1017,10 @@ mod tests {
 
         for &bk in boundaries.iter().take(5) {
             let mut tree_via_delete = full_tree.delete(&bk.to_le_bytes(), &storage).await?;
-            for (h, b) in tree_via_delete.flush() {
-                storage.store(b.as_ref().to_vec(), &h).await?;
+            for buffer in tree_via_delete.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
             }
 
             let remaining: Vec<u32> = all_keys.iter().copied().filter(|&k| k != bk).collect();
@@ -1034,8 +1049,10 @@ mod tests {
 
         for &key in non_boundaries.iter().take(5) {
             let mut tree_via_delete = full_tree.delete(&key.to_le_bytes(), &storage).await?;
-            for (h, b) in tree_via_delete.flush() {
-                storage.store(b.as_ref().to_vec(), &h).await?;
+            for buffer in tree_via_delete.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
             }
 
             let remaining: Vec<u32> = all_keys.iter().copied().filter(|&k| k != key).collect();
@@ -1068,8 +1085,10 @@ mod tests {
         for &ek in &extra_keys {
             tree_pruned = tree_pruned.delete(&ek.to_le_bytes(), &storage).await?;
         }
-        for (h, b) in tree_pruned.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree_pruned.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         assert_eq!(
@@ -1098,15 +1117,19 @@ mod tests {
 
         for &key in &test_keys {
             let mut after_delete = original.delete(&key.to_le_bytes(), &storage).await?;
-            for (h, b) in after_delete.flush() {
-                storage.store(b.as_ref().to_vec(), &h).await?;
+            for buffer in after_delete.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
             }
 
             let mut restored = after_delete
                 .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
                 .await?;
-            for (h, b) in restored.flush() {
-                storage.store(b.as_ref().to_vec(), &h).await?;
+            for buffer in restored.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
             }
 
             assert_eq!(
@@ -1131,8 +1154,10 @@ mod tests {
         for i in 100..200u32 {
             tree_b = tree_b.delete(&i.to_le_bytes(), &storage).await?;
         }
-        for (h, b) in tree_b.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree_b.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         assert_eq!(
@@ -1191,8 +1216,10 @@ mod tests {
         let mut full_tree = build_and_flush(&all_keys, &mut storage).await?;
 
         let mut tree_via_delete = full_tree.delete(&solo_key.to_le_bytes(), &storage).await?;
-        for (h, b) in tree_via_delete.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree_via_delete.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let remaining: Vec<u32> = all_keys
@@ -1226,8 +1253,10 @@ mod tests {
         let mut full_tree = build_and_flush(&all_keys, &mut storage).await?;
 
         let mut tree_via_delete = full_tree.delete(&first_key, &storage).await?;
-        for (h, b) in tree_via_delete.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree_via_delete.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let remaining: Vec<u32> = all_keys
@@ -1263,8 +1292,10 @@ mod tests {
         let mut full_tree = build_and_flush(&all_keys, &mut storage).await?;
 
         let mut tree_via_delete = full_tree.delete(&last_key, &storage).await?;
-        for (h, b) in tree_via_delete.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree_via_delete.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let remaining: Vec<u32> = all_keys

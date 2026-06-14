@@ -4,9 +4,8 @@ use super::{IndexedDb, to_uint8array};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
-use dialog_common::Blake3Hash;
-use dialog_effects::archive::prelude::{GetExt, PutExt};
-use dialog_effects::archive::{ArchiveError, Get, Put};
+use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
+use dialog_effects::archive::{ArchiveError, Get, Import, Put};
 use js_sys::Uint8Array;
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -58,15 +57,6 @@ impl Provider<Put> for IndexedDb {
         let digest = effect.digest();
         let content = effect.content();
 
-        // Verify content matches the declared digest
-        let actual_digest = Blake3Hash::hash(content);
-        if &actual_digest != digest {
-            return Err(ArchiveError::DigestMismatch {
-                expected: digest.as_bytes().to_base58(),
-                actual: actual_digest.as_bytes().to_base58(),
-            });
-        }
-
         let store_name = format!("{ARCHIVE}/{catalog}");
         let key = JsValue::from_str(&digest.as_bytes().to_base58());
         let value: JsValue = to_uint8array(content).into();
@@ -84,12 +74,51 @@ impl Provider<Put> for IndexedDb {
     }
 }
 
+#[async_trait(?Send)]
+impl Provider<Import> for IndexedDb {
+    async fn execute(&self, effect: Capability<Import>) -> Result<(), ArchiveError> {
+        let catalog = effect.catalog();
+        let blocks = effect.blocks();
+
+        if blocks.is_empty() {
+            return Ok(());
+        }
+
+        // Content addressing derives each key from the bytes (the buffer
+        // memoizes its hash).
+        let entries: Vec<(JsValue, JsValue)> = blocks
+            .iter()
+            .map(|buffer| {
+                let key = JsValue::from_str(&buffer.blake3_hash().as_bytes().to_base58());
+                let value: JsValue = to_uint8array(buffer.as_ref()).into();
+                (key, value)
+            })
+            .collect();
+
+        let store_name = format!("{ARCHIVE}/{catalog}");
+        let store = self.store(&store_name).await?;
+        // One read-write transaction for the whole batch.
+        store
+            .transact(|object_store| async move {
+                for (key, value) in entries {
+                    object_store
+                        .put(&value, Some(&key))
+                        .await
+                        .map_err(storage_error)?;
+                }
+                Ok(())
+            })
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
     use crate::helpers::{unique_name, unique_subject};
+    use dialog_common::{Blake3Hash, Buffer};
     use dialog_effects::archive::{Archive, Catalog};
 
     #[dialog_common::test]
@@ -120,7 +149,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("index"))
-            .invoke(Put::new(digest.clone(), content.clone()))
+            .invoke(Put::new(Buffer::from(content.clone())))
             .perform(&provider)
             .await?;
 
@@ -131,24 +160,6 @@ mod tests {
             .perform(&provider)
             .await?;
         assert_eq!(result, Some(content));
-
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_rejects_digest_mismatch() -> anyhow::Result<()> {
-        let provider = IndexedDb::connect(unique_name("archive-mismatch")).await?;
-        let subject = unique_subject("archive-mismatch");
-        let content = b"hello world".to_vec();
-        let wrong_digest = Blake3Hash::hash(b"different content");
-
-        let effect = subject
-            .attenuate(Archive)
-            .attenuate(Catalog::new("index"))
-            .invoke(Put::new(wrong_digest, content));
-
-        let result = effect.perform(&provider).await;
-        assert!(matches!(result, Err(ArchiveError::DigestMismatch { .. })));
 
         Ok(())
     }
@@ -166,7 +177,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog1"))
-            .invoke(Put::new(digest1.clone(), content1.clone()))
+            .invoke(Put::new(Buffer::from(content1.clone())))
             .perform(&provider)
             .await?;
 
@@ -174,7 +185,7 @@ mod tests {
             .clone()
             .attenuate(Archive)
             .attenuate(Catalog::new("catalog2"))
-            .invoke(Put::new(digest2.clone(), content2.clone()))
+            .invoke(Put::new(Buffer::from(content2.clone())))
             .perform(&provider)
             .await?;
 
@@ -203,6 +214,88 @@ mod tests {
             .perform(&provider)
             .await?;
         assert!(cross.is_none());
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_imports_blocks_in_bulk() -> anyhow::Result<()> {
+        let provider = IndexedDb::connect(unique_name("archive-import")).await?;
+        let subject = unique_subject("archive-import");
+
+        let blocks: Vec<Buffer> = (0..8u8).map(|i| Buffer::from(vec![i; 64])).collect();
+        let digests: Vec<_> = blocks
+            .iter()
+            .map(|buffer| buffer.blake3_hash().clone())
+            .collect();
+
+        subject
+            .clone()
+            .attenuate(Archive)
+            .attenuate(Catalog::new("index"))
+            .invoke(Import::new(blocks))
+            .perform(&provider)
+            .await?;
+
+        for (i, digest) in digests.into_iter().enumerate() {
+            let content = subject
+                .clone()
+                .attenuate(Archive)
+                .attenuate(Catalog::new("index"))
+                .invoke(Get::new(digest))
+                .perform(&provider)
+                .await?;
+            assert_eq!(content, Some(vec![i as u8; 64]));
+        }
+
+        Ok(())
+    }
+
+    /// Not an assertion-bearing benchmark (timing in CI is too noisy to
+    /// gate on), but a measurement that prints alongside the test run:
+    /// per-block puts vs one import for a flush-sized batch.
+    #[dialog_common::test]
+    async fn it_reports_import_vs_puts_timing() -> anyhow::Result<()> {
+        const BLOCKS: usize = 64;
+        const BLOCK_SIZE: usize = 4096;
+
+        let provider = IndexedDb::connect(unique_name("archive-import-timing")).await?;
+        let subject = unique_subject("archive-import-timing");
+
+        let blocks: Vec<Buffer> = (0..BLOCKS)
+            .map(|i| {
+                let mut content = vec![0u8; BLOCK_SIZE];
+                content[0] = i as u8;
+                content[1] = (i >> 8) as u8;
+                Buffer::from(content)
+            })
+            .collect();
+
+        let start = js_sys::Date::now();
+        for block in &blocks {
+            subject
+                .clone()
+                .attenuate(Archive)
+                .attenuate(Catalog::new("puts"))
+                .invoke(Put::new(block.clone()))
+                .perform(&provider)
+                .await?;
+        }
+        let puts_ms = js_sys::Date::now() - start;
+
+        let start = js_sys::Date::now();
+        subject
+            .clone()
+            .attenuate(Archive)
+            .attenuate(Catalog::new("import"))
+            .invoke(Import::new(blocks))
+            .perform(&provider)
+            .await?;
+        let import_ms = js_sys::Date::now() - start;
+
+        wasm_bindgen_test::console_log!(
+            "[measurement] {BLOCKS} blocks x {BLOCK_SIZE}B: per-block puts {puts_ms:.1} ms, single import {import_ms:.1} ms"
+        );
 
         Ok(())
     }

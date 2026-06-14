@@ -16,8 +16,7 @@ where
 impl<Backend> ContentAddressedStorage<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSend
-        + 'static,
+        + ConditionalSend,
 {
     /// Creates a new content-addressed storage wrapper.
     pub fn new(backend: Backend) -> Self {

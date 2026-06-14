@@ -895,7 +895,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-effects",
- "dialog-prolly-tree",
+ "dialog-search-tree",
  "dialog-storage",
  "ed25519-dalek",
  "futures-util",
@@ -905,9 +905,9 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "reqwest",
+ "rkyv",
  "serde",
  "serde-big-array",
- "serde_ipld_dagcbor",
  "serde_json",
  "static_assertions",
  "tempfile",
@@ -1052,7 +1052,8 @@ dependencies = [
  "base58",
  "clap",
  "dialog-artifacts",
- "dialog-prolly-tree",
+ "dialog-common",
+ "dialog-search-tree",
  "dialog-storage",
  "futures-util",
  "ratatui",
@@ -1071,7 +1072,9 @@ dependencies = [
  "dialog-credentials",
  "serde",
  "serde_bytes",
+ "serde_ipld_dagcbor",
  "thiserror 2.0.18",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
@@ -1151,28 +1154,6 @@ dependencies = [
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-bindgen-test",
-]
-
-[[package]]
-name = "dialog-prolly-tree"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "base58",
- "blake3",
- "dialog-common",
- "dialog-storage",
- "futures-core",
- "futures-util",
- "getrandom 0.2.16",
- "nonempty",
- "rand 0.8.5",
- "serde",
- "thiserror 2.0.18",
- "tokio",
  "wasm-bindgen-test",
 ]
 
@@ -1298,10 +1279,10 @@ dependencies = [
  "dialog-effects",
  "dialog-network",
  "dialog-operator",
- "dialog-prolly-tree",
  "dialog-query",
  "dialog-remote-s3",
  "dialog-remote-ucan-s3",
+ "dialog-search-tree",
  "dialog-storage",
  "dialog-ucan",
  "dialog-ucan-core",

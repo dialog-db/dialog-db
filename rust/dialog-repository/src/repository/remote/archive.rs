@@ -1,12 +1,12 @@
 //! Remote archive operations -- upload blocks to remote storage.
 
 use crate::{RemoteRepository, RemoteSite, UploadError};
-use dialog_artifacts::{Datum, Key, State};
+use dialog_artifacts::{Datum, KeyBytes, State};
 use dialog_capability::{Capability, Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
 use dialog_effects::archive::{ArchiveError, Catalog, Get, Put};
-use dialog_prolly_tree::{DialogProllyTreeError, Node};
+use dialog_search_tree::{DialogSearchTreeError, Node};
 use dialog_storage::Blake3Hash;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 
@@ -41,12 +41,8 @@ impl RemoteArchiveIndex<'_> {
     }
 
     /// Write a block to the remote archive.
-    pub fn put(&self, hash: Blake3Hash, bytes: Vec<u8>) -> RemotePut<'_> {
-        RemotePut {
-            index: self,
-            hash,
-            bytes,
-        }
+    pub fn put(&self, block: Buffer) -> RemotePut<'_> {
+        RemotePut { index: self, block }
     }
 }
 
@@ -76,8 +72,7 @@ impl RemoteGet<'_> {
 /// Command to write a block to the remote archive.
 pub struct RemotePut<'a> {
     index: &'a RemoteArchiveIndex<'a>,
-    hash: Blake3Hash,
-    bytes: Vec<u8>,
+    block: Buffer,
 }
 
 impl RemotePut<'_> {
@@ -90,7 +85,7 @@ impl RemotePut<'_> {
         self.index
             .catalog
             .clone()
-            .put(self.hash, self.bytes)
+            .put(self.block)
             .fork(address.site())
             .perform(env)
             .await
@@ -101,15 +96,11 @@ impl RemoteArchiveIndex<'_> {
     /// Upload a stream of novel nodes to the remote.
     ///
     /// `local_catalog` is used to read raw bytes from local storage.
-    pub fn upload<'a, S>(&'a self, nodes: S, local_catalog: Capability<Catalog>) -> Upload<'a, S>
+    pub fn upload<'a, S>(&'a self, nodes: S) -> Upload<'a, S>
     where
-        S: Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogProllyTreeError>>,
+        S: Stream<Item = Result<Node<KeyBytes, State<Datum>>, DialogSearchTreeError>>,
     {
-        Upload {
-            index: self,
-            nodes,
-            local_catalog,
-        }
+        Upload { index: self, nodes }
     }
 }
 
@@ -117,41 +108,30 @@ impl RemoteArchiveIndex<'_> {
 pub struct Upload<'a, S> {
     index: &'a RemoteArchiveIndex<'a>,
     nodes: S,
-    local_catalog: Capability<Catalog>,
 }
 
 const UPLOAD_CONCURRENCY: usize = 16;
 
 impl<S> Upload<'_, S>
 where
-    S: Stream<Item = Result<Node<Key, State<Datum>, Blake3Hash>, DialogProllyTreeError>>,
+    S: Stream<Item = Result<Node<KeyBytes, State<Datum>>, DialogSearchTreeError>>,
 {
-    /// Execute the upload, reading blocks locally and writing to remote
+    /// Execute the upload, writing the nodes' own buffers to the remote
     /// with up to 16 concurrent uploads.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), UploadError>
     where
         Env: Provider<Get> + Provider<Fork<RemoteSite, Put>> + ConditionalSync,
     {
         let index = self.index;
-        let local_catalog = &self.local_catalog;
 
         self.nodes
             .map(|node| async move {
                 let node = node?;
-                let hash = *node.hash();
-                let bytes: Option<Vec<u8>> = local_catalog
-                    .clone()
-                    .get(hash)
+                index
+                    .put(node.buffer().clone())
                     .perform(env)
                     .await
-                    .map_err(UploadError::LocalRead)?;
-                if let Some(bytes) = bytes {
-                    index
-                        .put(hash, bytes)
-                        .perform(env)
-                        .await
-                        .map_err(UploadError::RemoteWrite)?;
-                }
+                    .map_err(UploadError::RemoteWrite)?;
                 Ok(())
             })
             .buffer_unordered(UPLOAD_CONCURRENCY)

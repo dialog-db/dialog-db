@@ -2,10 +2,10 @@ use crate::RemoteSite;
 use async_trait::async_trait;
 use dialog_capability::Fork;
 use dialog_capability::{Capability, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
 use dialog_effects::archive::{Catalog, Get, Put};
-use dialog_storage::{Blake3Hash, ContentAddressedStorage, DialogStorageError, Encoder};
+use dialog_storage::{Blake3Hash, DialogStorageError, Encoder, StorageBackend};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Debug;
 
@@ -44,28 +44,32 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
     }
 }
 
+/// Raw block access for the search tree, with the same transparent
+/// remote fallback as the content-addressed `read`: reads that miss
+/// locally are fetched from the remote and cached, writes go to the
+/// local index only. Node buffers pass through without the CBOR encoder.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env> ContentAddressedStorage for NetworkedIndex<'_, Env>
+impl<Env> StorageBackend for NetworkedIndex<'_, Env>
 where
     Env:
         Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
 {
-    type Hash = Blake3Hash;
+    type Key = Blake3Hash;
+    type Value = Vec<u8>;
     type Error = DialogStorageError;
 
-    async fn read<T>(&self, hash: &Self::Hash) -> Result<Option<T>, Self::Error>
-    where
-        T: DeserializeOwned + ConditionalSync,
-    {
-        // Try local first
-        if let Some(value) = self.local.read::<T>(hash).await? {
-            return Ok(Some(value));
+    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        StorageBackend::set(&mut self.local, key, value).await
+    }
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        if let Some(bytes) = StorageBackend::get(&self.local, key).await? {
+            return Ok(Some(bytes));
         }
 
-        // Fall back to offloaded nodes
         let remote = match &self.remote {
-            Some(r) => r,
+            Some(remote) => remote,
             None => return Ok(None),
         };
 
@@ -75,7 +79,7 @@ where
         let env = self.local.env();
         let remote_result = remote_catalog
             .clone()
-            .get(*hash)
+            .get(*key)
             .fork(&address.address)
             .perform(env)
             .await
@@ -84,26 +88,16 @@ where
         match remote_result {
             Some(bytes) => {
                 // Cache locally
-                let cache = self.local.catalog().clone().put(*hash, bytes.clone());
-                let _: Result<(), _> = cache.perform(self.local.env()).await;
-
-                let value: T = self
+                let cache = self
                     .local
-                    .encoder()
-                    .decode(&bytes)
-                    .await
-                    .map_err(|e| DialogStorageError::DecodeFailed(e.to_string()))?;
-                Ok(Some(value))
+                    .catalog()
+                    .clone()
+                    .put(Buffer::from(bytes.as_slice()));
+                let _: Result<(), _> = cache.perform(self.local.env()).await;
+                Ok(Some(bytes))
             }
             None => Ok(None),
         }
-    }
-
-    async fn write<T>(&mut self, block: &T) -> Result<Self::Hash, Self::Error>
-    where
-        T: Serialize + ConditionalSync + Debug,
-    {
-        self.local.write(block).await
     }
 }
 

@@ -5,7 +5,9 @@ use std::{
     sync::{Arc, mpsc::Sender},
 };
 
-use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Index, Key, Storage};
+use dialog_artifacts::tree::TreeStorageBridge;
+use dialog_artifacts::{CborEncoder, DialogArtifactsError, Index, Key, KeyBytes, Storage};
+use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 use futures_util::{Stream, TryStreamExt};
 use tokio::sync::Mutex;
@@ -35,7 +37,7 @@ pub struct ArtifactsCursor {
     /// Shared state for tracking cursor position
     state: Arc<Mutex<ArtifactsCursorState>>,
     /// The prolly tree index containing the facts
-    tree: Index<Key, Datum>,
+    tree: Index,
     /// The storage backend for tree operations
     storage: DiagnoseStorage,
     /// Channel sender for worker messages
@@ -50,11 +52,7 @@ impl ArtifactsCursor {
     /// * `tree` - The prolly tree index containing facts data
     /// * `storage` - The storage backend for tree operations
     /// * `tx` - Channel sender for worker messages
-    pub fn new(
-        tree: Index<Key, Datum>,
-        storage: DiagnoseStorage,
-        tx: Sender<WorkerMessage>,
-    ) -> Self {
+    pub fn new(tree: Index, storage: DiagnoseStorage, tx: Sender<WorkerMessage>) -> Self {
         Self {
             state: Default::default(),
             tree,
@@ -89,13 +87,14 @@ impl ArtifactsCursor {
                 return Ok(());
             }
 
+            let tree_storage = TreeStorage::new(TreeStorageBridge(storage));
             let mut stream: Pin<Box<dyn Stream<Item = _> + Send>> = match state.last_key.clone() {
-                Some(key) => Box::pin(tree.stream_range(key.., &storage)),
-                None => Box::pin(tree.stream(&storage)),
+                Some(key) => Box::pin(tree.stream_range(KeyBytes::from(key).., &tree_storage)),
+                None => Box::pin(tree.stream(&tree_storage)),
             };
 
             while let Some(element) = stream.try_next().await? {
-                state.last_key = Some(element.key);
+                state.last_key = Some(Key::from(element.key));
 
                 if tx
                     .send(WorkerMessage::Fact {

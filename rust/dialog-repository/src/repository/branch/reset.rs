@@ -45,11 +45,10 @@ mod tests {
     use std::collections::HashSet;
 
     use dialog_capability::Subject;
-    use dialog_prolly_tree::EMPT_TREE_HASH;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    use crate::{RepositoryMemoryExt, Revision, TreeReference};
+    use crate::{EMPTY_TREE_HASH, RepositoryMemoryExt, Revision, TreeReference};
 
     #[dialog_common::test]
     async fn it_sets_revision() -> Result<()> {
@@ -63,7 +62,7 @@ mod tests {
             subject: subject.did().clone(),
             issuer: subject.did().clone(),
             authority: subject.did().clone(),
-            tree: TreeReference::from(EMPT_TREE_HASH),
+            tree: TreeReference::from(EMPTY_TREE_HASH),
             cause: HashSet::new(),
             period: 0,
             moment: 0,

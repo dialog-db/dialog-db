@@ -1,22 +1,23 @@
-//! Tree specification macro and distribution simulator for testing.
+//! Tree specification macro and test utilities.
 //!
-//! This module provides tools to create prolly trees with deterministic structure
-//! for testing the differential algorithm.
+//! This module provides tools to create search trees with deterministic
+//! structure for testing the differential algorithm. The [`crate::tree_spec!`]
+//! macro describes the exact shape a tree should take; ranks are read
+//! straight out of the spec keys by [`DistributionSimulator`] instead of
+//! being derived from key hashes, so the resulting tree matches the spec
+//! exactly.
 //!
-//! It also provides utilities for iterating over all nodes in a tree,
-//! which is useful for testing, debugging, and advanced introspection.
+//! It also provides utilities for iterating over all nodes in a tree, which
+//! is useful for testing, debugging, and advanced introspection.
 //!
 //! # Tree Specification Example
 //!
 //! ```no_run
-//! use dialog_prolly_tree::{tree_spec, JournaledBackend, TestStorage, TreeSpec};
-//! use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage};
-//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-//! let storage: TestStorage = Storage {
-//!     encoder: CborEncoder,
-//!     backend: JournaledBackend::new(MemoryStorageBackend::default()),
-//! };
+//! use dialog_search_tree::helpers::{TestStorage, TreeSpec, test_storage};
+//! use dialog_search_tree::tree_spec;
+//!
+//! let storage: TestStorage = test_storage();
 //!
 //! let spec = tree_spec![
 //!     [                        ..l]  // Height 1 (index nodes)
@@ -28,24 +29,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! # Traversal Example
-//!
-//! ```no_run
-//! use dialog_prolly_tree::{Tree, GeometricDistribution, Traversable, TraversalOrder, TreeNodes};
-//! use dialog_storage::{Blake3Hash, CborEncoder, MemoryStorageBackend, Storage};
-//!
-//! # type TestStorage = Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
-//! # async fn example(
-//! #     tree: &Tree<GeometricDistribution, Vec<u8>, Vec<u8>, Blake3Hash>,
-//! #     storage: &TestStorage,
-//! # ) -> Result<(), Box<dyn std::error::Error>> {
-//! // Collect all node hashes for comparison
-//! let hashes = tree.traverse(TraversalOrder::DepthFirst, storage).into_hash_set().await;
-//! println!("Tree contains {} nodes", hashes.len());
-//! # Ok(())
-//! # }
-//! ```
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -53,11 +36,24 @@ use std::{
 };
 
 use async_stream::try_stream;
-use dialog_storage::{ContentAddressedStorage, HashType};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_storage::{DialogStorageError, JournaledStorage, MemoryStorageBackend, StorageBackend};
 use futures_core::Stream;
 use futures_util::StreamExt;
+use rkyv::{
+    Deserialize, Serialize,
+    bytecheck::CheckBytes,
+    de::Pool,
+    rancor::Strategy,
+    ser::{Serializer, allocator::ArenaHandle, sharing::Share},
+    util::AlignedVec,
+    validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
+};
 
-use crate::{DialogProllyTreeError, Distribution, KeyType, Node, Tree, ValueType};
+use crate::{
+    ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Key,
+    Link, Node, Rank, SymmetryWith, Tree, Value, into_owned,
+};
 
 /// Traversal order for tree iteration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -128,135 +124,227 @@ impl<T> TraversalQueue<T> {
 ///
 /// This trait provides the ability to iterate over every node in a tree,
 /// which is useful for debugging, testing, and advanced introspection.
-pub trait Traversable<Key, Value, Hash>
+pub trait Traversable<Key, Value>
 where
-    Key: KeyType + 'static,
-    Value: ValueType,
-    Hash: HashType,
+    Key: self::Key,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Value: self::Value,
 {
     /// Returns an async stream that traverses all nodes in the specified order.
     ///
-    /// This yields every node in the tree, loading each node from storage lazily
-    /// as it's visited.
+    /// This yields every node in the tree, loading each node from storage
+    /// lazily as it's visited (including the root, which the tree only holds
+    /// by hash).
     ///
     /// # Arguments
     /// * `order` - The traversal order:
     ///   - `DepthFirst`: Visit children before siblings (pre-order)
     ///   - `BreadthFirst`: Visit all nodes at each level before going deeper
-    fn traverse<'a, Storage>(
+    fn traverse<'a, Backend>(
         &'a self,
         order: TraversalOrder,
-        storage: &'a Storage,
-    ) -> impl Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>> + 'a
+        storage: &'a ContentAddressedStorage<Backend>,
+    ) -> impl Stream<Item = Result<Node<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Storage: ContentAddressedStorage<Hash = Hash> + 'a;
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSend;
 }
 
-impl<Distribution, Key, Value, Hash> Traversable<Key, Value, Hash>
-    for Tree<Distribution, Key, Value, Hash>
+impl<Key, Value, D> Traversable<Key, Value> for Tree<Key, Value, D>
 where
-    Distribution: crate::Distribution<Key, Hash>,
-    Key: KeyType,
-    Value: ValueType,
-    Hash: HashType,
+    Key: self::Key + ConditionalSync + 'static,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key: for<'b> Serialize<
+        Strategy<Serializer<AlignedVec, ArenaHandle<'b>, Share>, rkyv::rancor::Error>,
+    >,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + ConditionalSync
+        + for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value + ConditionalSync + 'static,
+    Value: for<'b> Serialize<
+        Strategy<Serializer<AlignedVec, ArenaHandle<'b>, Share>, rkyv::rancor::Error>,
+    >,
+    Value::Archived: for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    D: Distribution,
 {
-    fn traverse<'a, Storage>(
+    fn traverse<'a, Backend>(
         &'a self,
         order: TraversalOrder,
-        storage: &'a Storage,
-    ) -> impl Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>> + 'a
+        storage: &'a ContentAddressedStorage<Backend>,
+    ) -> impl Stream<Item = Result<Node<Key, Value>, DialogSearchTreeError>> + 'a
     where
-        Storage: ContentAddressedStorage<Hash = Hash> + 'a,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSend,
     {
-        let root = self.root().cloned();
+        let root = self.root().clone();
 
         try_stream! {
-            if let Some(root) = root {
-                // Yield the root first (it's already loaded)
-                yield root.clone();
-
-                // Enqueue root's children as references (loaded on demand)
+            if &root != NULL_BLAKE3_HASH {
                 let mut queue = order.queue();
-                if root.is_branch() {
-                    queue.enqueue(root.references()?.iter().cloned());
-                }
+                queue.enqueue([root]);
 
-                // Process remaining nodes lazily
-                while let Some(reference) = queue.dequeue() {
-                    let node = Node::from_reference(reference, storage).await?;
-                    yield node.clone();
+                while let Some(hash) = queue.dequeue() {
+                    let node = load_node::<Key, Value, Backend>(storage, &hash).await?;
 
-                    if node.is_branch() {
-                        queue.enqueue(node.references()?.iter().cloned());
+                    if let ArchivedNodeBody::Index(index) = node.body()? {
+                        let children = index
+                            .links
+                            .iter()
+                            .map(|link| Ok(into_owned::<Link<Key>>(link)?.node))
+                            .collect::<Result<Vec<_>, DialogSearchTreeError>>()?;
+                        queue.enqueue(children);
                     }
+
+                    yield node;
                 }
             }
         }
     }
 }
 
+/// Reads a node from storage by hash.
+async fn load_node<Key, Value, Backend>(
+    storage: &ContentAddressedStorage<Backend>,
+    hash: &Blake3Hash,
+) -> Result<Node<Key, Value>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value,
+    Value::Archived: for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSend,
+{
+    let bytes = storage
+        .retrieve(hash)
+        .await?
+        .ok_or_else(|| DialogSearchTreeError::Node(format!("Blob not found in storage: {hash}")))?;
+    Ok(Node::new(Buffer::from(bytes)))
+}
+
 /// A stream of tree nodes.
 ///
 /// This trait is implemented for any stream that yields `Result<Node<...>, Error>`.
 /// Import this trait to use extension methods like [`into_hash_set`](TreeNodes::into_hash_set).
-pub trait TreeNodes<Key, Value, Hash>:
-    Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>>
+pub trait TreeNodes<Key, Value>:
+    Stream<Item = Result<Node<Key, Value>, DialogSearchTreeError>>
 where
-    Key: KeyType + 'static,
-    Value: ValueType,
-    Hash: HashType,
+    Key: self::Key,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Value: self::Value,
 {
     /// Collects all node hashes into a `HashSet`, ignoring errors.
     ///
     /// This is useful for comparing sets of nodes between trees.
-    fn into_hash_set(self) -> impl std::future::Future<Output = std::collections::HashSet<Hash>>;
+    fn into_hash_set(self) -> impl std::future::Future<Output = HashSet<Blake3Hash>>;
 }
 
-impl<Key, Value, Hash, S> TreeNodes<Key, Value, Hash> for S
+impl<Key, Value, S> TreeNodes<Key, Value> for S
 where
-    Key: KeyType + 'static,
-    Value: ValueType,
-    Hash: HashType + std::hash::Hash + Eq,
-    S: Stream<Item = Result<Node<Key, Value, Hash>, DialogProllyTreeError>>,
+    Key: self::Key,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value,
+    Value::Archived: for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+    S: Stream<Item = Result<Node<Key, Value>, DialogSearchTreeError>>,
 {
-    fn into_hash_set(self) -> impl std::future::Future<Output = std::collections::HashSet<Hash>> {
-        self.filter_map(|r| async { r.ok().map(|n| n.hash().clone()) })
+    fn into_hash_set(self) -> impl std::future::Future<Output = HashSet<Blake3Hash>> {
+        self.filter_map(|result| async { result.ok().map(|node| node.hash().clone()) })
             .collect()
     }
 }
 
+/// Fixed width of spec keys: base bytes, a `0x00` separator, a rank byte,
+/// and zero padding.
+pub const SPEC_KEY_LENGTH: usize = 8;
+
+/// Key type used by spec trees, encoded as `[base.., 0x00, rank, 0x00..]`.
+///
+/// The zero separator sorts below every alphabetic base byte, so the rank
+/// suffix never affects ordering between distinct bases.
+pub type SpecKey = [u8; SPEC_KEY_LENGTH];
+
 /// Type alias for the journaled storage backend used in tree specs.
-pub type JournaledBackend =
-    dialog_storage::JournaledStorage<dialog_storage::MemoryStorageBackend<[u8; 32], Vec<u8>>>;
+pub type JournaledBackend = JournaledStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
 
 /// Type alias for the storage type used in tree specs.
-pub type TestStorage = dialog_storage::Storage<dialog_storage::CborEncoder, JournaledBackend>;
+pub type TestStorage = ContentAddressedStorage<JournaledBackend>;
 
 /// Type alias for the tree type used in tree specs.
-pub type TestTree =
-    crate::Tree<DistributionSimulator, Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>;
+pub type TestTree = Tree<SpecKey, Vec<u8>, DistributionSimulator>;
+
+/// Creates an empty journaled [`TestStorage`].
+pub fn test_storage() -> TestStorage {
+    ContentAddressedStorage::new(JournaledStorage::new(MemoryStorageBackend::default()))
+}
 
 /// A distribution that reads ranks directly from keys.
-/// Keys are encoded as: [actual_key_bytes, 0x00, rank_byte]
-/// This makes the distribution trivial - just read the last byte!
-#[derive(Clone)]
+///
+/// Spec keys are encoded as `[base bytes, 0x00, rank byte, zero padding]`,
+/// which makes the distribution trivial: find the separator and read the
+/// next byte as the rank.
+#[derive(Clone, Debug)]
 pub struct DistributionSimulator;
 
-impl<Hash> Distribution<Vec<u8>, Hash> for DistributionSimulator
-where
-    Hash: HashType,
-{
-    const BRANCH_FACTOR: u32 = 4;
-
-    fn rank(key: &Vec<u8>) -> u32 {
-        // Keys are encoded as [key_bytes, 0x00, rank_byte]
-        // Just read the last byte as the rank
-        if key.len() >= 2 && key[key.len() - 2] == 0x00 {
-            key[key.len() - 1] as u32
-        } else {
-            1 // Default rank for keys without encoding
+impl Distribution for DistributionSimulator {
+    fn rank(key: &[u8]) -> Rank {
+        match key.iter().position(|byte| *byte == 0) {
+            Some(separator) if separator + 1 < key.len() && key[separator + 1] != 0 => {
+                key[separator + 1] as Rank
+            }
+            _ => 1,
         }
     }
+}
+
+/// Encodes a base key and rank into a fixed-width [`SpecKey`].
+pub fn encode_key(base: &[u8], rank: Rank) -> SpecKey {
+    assert!(
+        base.len() + 2 <= SPEC_KEY_LENGTH,
+        "spec key base too long: {:?}",
+        String::from_utf8_lossy(base)
+    );
+    let mut key = [0u8; SPEC_KEY_LENGTH];
+    key[..base.len()].copy_from_slice(base);
+    key[base.len() + 1] = rank as u8;
+    key
+}
+
+/// Decodes a spec key back into its base bytes (everything before the
+/// `0x00` separator).
+pub fn decode_key(encoded: &[u8]) -> Vec<u8> {
+    let end = encoded
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(encoded.len());
+    encoded[..end].to_vec()
 }
 
 /// Get the next alphabetic key (a -> b -> c -> ... -> z -> aa -> ab -> ...)
@@ -284,21 +372,20 @@ fn next_alpha_key(key: &[u8]) -> Vec<u8> {
     result
 }
 
-/// Build a rank map from the tree spec
-/// For branching factor BF=4, we use generous rank spacing to ensure boundaries form
-/// Height 0 boundaries get rank 2, height 1 get rank 4, height 2 get rank 6, etc.
+/// Build a rank map from the tree spec.
+///
+/// Height 0 boundaries get rank 2, height 1 boundaries rank 3, and so on.
 /// If a boundary appears at multiple heights, it gets the HIGHEST rank.
-pub fn build_rank_map(levels: &[Vec<Vec<u8>>]) -> HashMap<Vec<u8>, u32> {
+pub fn build_rank_map(levels: &[Vec<Vec<u8>>]) -> HashMap<Vec<u8>, Rank> {
     let mut rank_map = HashMap::new();
 
-    // Process from bottom to top, so higher levels overwrite lower levels
-    // This ensures keys appearing at multiple heights get the HIGHEST rank
+    // Process from bottom to top, so higher levels overwrite lower levels.
+    // This ensures keys appearing at multiple heights get the HIGHEST rank.
     for (level_idx, boundaries) in levels.iter().enumerate().rev() {
         let height = levels.len() - level_idx - 1;
-        let rank = (height + 2) as u32;
+        let rank = (height + 2) as Rank;
 
         for boundary in boundaries {
-            // Insert or overwrite - higher heights (processed later in reverse) will overwrite
             rank_map.insert(boundary.clone(), rank);
         }
     }
@@ -311,7 +398,7 @@ pub fn build_rank_map(levels: &[Vec<Vec<u8>>]) -> HashMap<Vec<u8>, u32> {
 pub enum Expect {
     /// Node should be read during differentiation
     Read,
-    /// Node is in memory and doesn't need to be read (e.g., root nodes)
+    /// Node should be pruned without being read (its hash matched)
     Skip,
 }
 
@@ -404,23 +491,21 @@ impl TreeDescriptor {
         self,
         mut storage: TestStorage,
     ) -> Result<TreeSpec, Box<dyn std::error::Error + Send + Sync>> {
-        use std::collections::BTreeMap;
-
         // Validate the tree structure first
         self.validate()?;
 
         // Handle empty tree case
         if self.0.is_empty() {
-            let tree = TestTree::new();
             return Ok(TreeSpec {
                 spec: Vec::new(),
-                tree,
+                tree: TestTree::empty(),
                 storage,
             });
         }
 
-        // Disable journaling during tree building to avoid polluting with build reads
-        storage.backend.disable_journal();
+        // Disable journaling during tree building to avoid polluting with
+        // build reads
+        storage.backend().disable_journal();
 
         // First, collect metadata to build the tree
         let mut all_segments = Vec::new();
@@ -471,48 +556,41 @@ impl TreeDescriptor {
         // Build rank map
         let ranks = build_rank_map(&boundaries_per_level);
 
-        // Build tree with encoded keys
-        let mut btree_collection = BTreeMap::new();
+        // Build the tree by inserting every key with its rank encoded into
+        // the key bytes, where DistributionSimulator reads it back out.
+        // Values carry the decoded base key.
+        let mut tree = TestTree::empty();
         for key in &collection {
             let rank = ranks.get(key).copied().unwrap_or(1);
-            let mut encoded_key = key.clone();
-            encoded_key.push(0x00);
-            encoded_key.push(rank as u8);
-            btree_collection.insert(encoded_key, key.clone());
+            tree = tree
+                .insert(encode_key(key, rank), key.clone(), &storage)
+                .await?;
         }
 
-        let temp_tree = crate::Tree::from_collection(btree_collection, &mut storage).await?;
+        // Persist all pending nodes so differentials read them through the
+        // journaled backend.
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let root = tree.root().clone();
 
         // Now build NodeSpec levels from the actual tree
         let max_height = self.0.len() - 1;
         let mut spec = vec![Vec::new(); self.0.len()];
 
-        // Disable journaling during spec building to avoid tracking child loads
-        storage.backend.disable_journal();
+        if &root != NULL_BLAKE3_HASH {
+            Self::build_spec_from_node(&mut spec, &root, &storage, max_height, &expected_ops)
+                .await?;
+        }
 
-        let root_hash = if let Some(root) = temp_tree.root() {
-            Box::pin(Self::build_spec_from_node(
-                &mut spec,
-                root,
-                &storage,
-                max_height,
-                &expected_ops,
-            ))
-            .await;
-            Some(*root.hash())
-        } else {
-            None
-        };
-
-        // Re-enable journaling to track root and differential reads
-        storage.backend.enable_journal();
-
-        // Load tree from hash so root is freshly loaded (not from temp_tree)
-        let tree = if let Some(hash) = root_hash {
-            crate::Tree::from_hash(&hash, &storage).await?
-        } else {
-            temp_tree
-        };
+        // Reload the tree from its hash so the root is freshly loaded during
+        // differentials (the build tree's node cache is dropped with it), and
+        // re-enable journaling to track root and differential reads.
+        let tree = TestTree::from_hash(root);
+        storage.backend().enable_journal();
 
         Ok(TreeSpec {
             spec,
@@ -551,13 +629,14 @@ impl TreeDescriptor {
     /// Recursively build NodeSpecs from the tree structure
     async fn build_spec_from_node(
         spec: &mut [Vec<NodeSpec>],
-        node: &crate::Node<Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
+        hash: &Blake3Hash,
         storage: &TestStorage,
         height: usize,
         expected_ops: &HashMap<(Vec<u8>, usize), Expect>,
-    ) {
-        let decoded_boundary = decode_key(node.upper_bound());
-        let hash = *node.hash();
+    ) -> Result<(), DialogSearchTreeError> {
+        let node = load_node::<SpecKey, Vec<u8>, JournaledBackend>(storage, hash).await?;
+        let upper_bound: SpecKey = node.body()?.upper_bound().and_then(into_owned)?;
+        let decoded_boundary = decode_key(upper_bound.as_ref());
 
         // Look up the expected operation for this node
         let expected_op = expected_ops
@@ -567,46 +646,50 @@ impl TreeDescriptor {
 
         // Create and add the NodeSpec
         let level_idx = spec.len() - 1 - height;
-        spec[level_idx].push(NodeSpec::new(decoded_boundary, height, hash, expected_op));
-
-        if node.is_segment() {
-            return;
-        }
+        spec[level_idx].push(NodeSpec::new(
+            decoded_boundary,
+            height,
+            node.hash().clone(),
+            expected_op,
+        ));
 
         // Only recurse if we have more levels to go and height won't underflow
         if height > 0
-            && let Ok(children) = node.load_children(storage).await
+            && let ArchivedNodeBody::Index(index) = node.body()?
         {
-            for child in children {
+            for link in index.links.iter() {
+                let link = into_owned::<Link<SpecKey>>(link)?;
                 Box::pin(Self::build_spec_from_node(
                     spec,
-                    &child,
+                    &link.node,
                     storage,
                     height - 1,
                     expected_ops,
                 ))
-                .await;
+                .await?;
             }
         }
+
+        Ok(())
     }
 }
 
 /// Specification for a single node in the tree.
 #[derive(Clone)]
 pub struct NodeSpec {
-    /// The upper bound key of this node.
+    /// The upper bound key of this node (decoded base bytes).
     pub boundary: Vec<u8>,
     /// The height of this node in the tree (0 for leaves).
     pub height: usize,
     /// The content hash of this node.
-    pub hash: [u8; 32],
+    pub hash: Blake3Hash,
     /// The expected operation during differential (Read or Skip).
     pub expect: Expect,
 }
 
 impl NodeSpec {
     /// Creates a new NodeSpec with the given parameters.
-    pub fn new(boundary: Vec<u8>, height: usize, hash: [u8; 32], expected_op: Expect) -> Self {
+    pub fn new(boundary: Vec<u8>, height: usize, hash: Blake3Hash, expected_op: Expect) -> Self {
         Self {
             boundary,
             height,
@@ -621,18 +704,9 @@ impl Debug for NodeSpec {
         f.debug_struct("NodeSpec")
             .field("boundary", &String::from_utf8_lossy(&self.boundary))
             .field("height", &self.height)
-            .field("hash", &self.hash.display())
+            .field("hash", &self.hash.to_string())
             .field("expect", &self.expect)
             .finish()
-    }
-}
-
-/// Decode a key by removing the [0x00, rank] suffix
-fn decode_key(encoded: &[u8]) -> Vec<u8> {
-    if encoded.len() >= 2 && encoded[encoded.len() - 2] == 0x00 {
-        encoded[..encoded.len() - 2].to_vec()
-    } else {
-        encoded.to_vec()
     }
 }
 
@@ -653,58 +727,63 @@ impl TreeSpec {
         &self.tree
     }
 
-    /// Get a reference to the storage backend
+    /// Get a reference to the storage
     pub fn storage(&self) -> &TestStorage {
         &self.storage
     }
 
-    /// Visualize the full tree structure by loading all nodes
-    /// Temporarily disables journaling during visualization to avoid polluting
-    /// read tracking
+    /// Visualize the full tree structure by loading all nodes.
+    ///
+    /// Temporarily disables journaling during visualization to avoid
+    /// polluting read tracking.
     #[allow(dead_code)]
     pub async fn visualize(&self) -> String {
-        // Disable journaling during visualization
-        self.storage.backend.disable_journal();
+        self.storage.backend().disable_journal();
 
         let mut output = String::new();
 
-        if let Some(root) = self.tree.root() {
-            Self::visualize_node(&mut output, root, &self.storage, "", true).await;
+        if self.tree.root() != NULL_BLAKE3_HASH {
+            Self::visualize_node(&mut output, self.tree.root(), &self.storage, "", true).await;
         } else {
             output.push_str("(empty tree)\n");
         }
 
-        // Re-enable journaling after visualization
-        self.storage.backend.enable_journal();
+        self.storage.backend().enable_journal();
 
         output
     }
 
-    /// Produced tree visualisation helpful for debugging
+    /// Produces tree visualization helpful for debugging
     #[allow(dead_code)]
     fn visualize_node<'a>(
         output: &'a mut String,
-        node: &'a crate::Node<Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
+        hash: &'a Blake3Hash,
         storage: &'a TestStorage,
         prefix: &'a str,
         is_last: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
         Box::pin(async move {
-            let branch = if is_last { "└── " } else { "├── " };
-            let boundary = node.upper_bound();
-            let key_str = String::from_utf8_lossy(boundary).to_string();
-
-            // Extract rank from encoded boundary
-            let rank = if boundary.len() >= 2 && boundary[boundary.len() - 2] == 0x00 {
-                boundary[boundary.len() - 1]
-            } else {
-                1
+            let Ok(node) = load_node::<SpecKey, Vec<u8>, JournaledBackend>(storage, hash).await
+            else {
+                output.push_str(&format!("{prefix}(missing node {hash})\n"));
+                return;
+            };
+            let Ok(upper_bound) = node
+                .body()
+                .and_then(|body| body.upper_bound().and_then(into_owned::<SpecKey>))
+            else {
+                output.push_str(&format!("{prefix}(malformed node {hash})\n"));
+                return;
             };
 
-            let hash = node.hash();
+            let branch = if is_last { "└── " } else { "├── " };
+            let key_str = String::from_utf8_lossy(&decode_key(upper_bound.as_ref())).to_string();
+            let rank = DistributionSimulator::rank(upper_bound.as_ref());
+
+            let bytes = node.hash().as_bytes();
             let hash_str = format!(
                 "{:02x}{:02x}{:02x}{:02x}",
-                hash[0], hash[1], hash[2], hash[3]
+                bytes[0], bytes[1], bytes[2], bytes[3]
             );
 
             if prefix.is_empty() {
@@ -716,16 +795,16 @@ impl TreeSpec {
                 ));
             }
 
-            if node.is_branch() {
-                // Load children and recurse
-                if let Ok(children) = node.load_children(storage).await {
-                    let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
-                    let child_count = children.len();
-                    for (i, child) in children.iter().enumerate() {
-                        let is_last_child = i == child_count - 1;
-                        Self::visualize_node(output, child, storage, &new_prefix, is_last_child)
-                            .await;
-                    }
+            if let Ok(ArchivedNodeBody::Index(index)) = node.body() {
+                let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
+                let child_count = index.links.len();
+                for (i, link) in index.links.iter().enumerate() {
+                    let Ok(link) = into_owned::<Link<SpecKey>>(link) else {
+                        continue;
+                    };
+                    let is_last_child = i == child_count - 1;
+                    Self::visualize_node(output, &link.node, storage, &new_prefix, is_last_child)
+                        .await;
                 }
             }
         })
@@ -736,10 +815,10 @@ impl TreeSpec {
     /// Panics with a detailed diff if the pattern doesn't match.
     #[track_caller]
     pub fn assert(&self) {
-        let reads = self.storage.backend.get_reads();
+        let reads = self.storage.backend().get_reads();
 
         // Build a set of hashes that were read
-        let reads_set: HashSet<[u8; 32]> = reads.iter().copied().collect();
+        let reads_set: HashSet<Blake3Hash> = reads.iter().cloned().collect();
 
         // Build expected/actual based on NodeSpecs
         // Use (boundary, height) tuples as keys
@@ -749,7 +828,6 @@ impl TreeSpec {
 
         for level in &self.spec {
             for node in level {
-                let hash = node.hash;
                 let key = (node.boundary.clone(), node.height);
 
                 match node.expect {
@@ -761,7 +839,7 @@ impl TreeSpec {
                     }
                 }
 
-                if reads_set.contains(&hash) {
+                if reads_set.contains(&node.hash) {
                     actual_reads.insert(key);
                 }
             }
@@ -885,87 +963,6 @@ impl TreeSpec {
     }
 }
 
-impl std::fmt::Debug for TreeSpec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(root) = self.tree.root() {
-            Self::fmt_node(f, root, "", true)
-        } else {
-            write!(f, "(empty tree)")
-        }
-    }
-}
-
-impl TreeSpec {
-    fn fmt_node(
-        f: &mut std::fmt::Formatter<'_>,
-        node: &crate::Node<Vec<u8>, Vec<u8>, dialog_storage::Blake3Hash>,
-        prefix: &str,
-        is_last: bool,
-    ) -> std::fmt::Result {
-        let branch = if is_last { "└── " } else { "├── " };
-        let boundary = node.upper_bound();
-        let key_str = String::from_utf8_lossy(boundary).to_string();
-
-        // Extract rank from encoded boundary
-        let rank = if boundary.len() >= 2 && boundary[boundary.len() - 2] == 0x00 {
-            boundary[boundary.len() - 1]
-        } else {
-            1
-        };
-
-        let hash = node.hash();
-        let hash_str = format!(
-            "{:02x}{:02x}{:02x}{:02x}",
-            hash[0], hash[1], hash[2], hash[3]
-        );
-
-        if prefix.is_empty() {
-            writeln!(f, "{} [{}]@{}", key_str, rank, hash_str)?;
-        } else {
-            writeln!(f, "{}{}{} [{}]@{}", prefix, branch, key_str, rank, hash_str)?;
-        }
-
-        if node.is_branch()
-            && let Ok(refs) = node.references()
-        {
-            let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
-            let ref_count = refs.len();
-            for (i, reference) in refs.iter().enumerate() {
-                let is_last_child = i == ref_count - 1;
-                let child_branch = if is_last_child {
-                    "└── "
-                } else {
-                    "├── "
-                };
-
-                let ref_boundary = reference.upper_bound();
-                let ref_key_str = String::from_utf8_lossy(ref_boundary).to_string();
-
-                let ref_rank =
-                    if ref_boundary.len() >= 2 && ref_boundary[ref_boundary.len() - 2] == 0x00 {
-                        ref_boundary[ref_boundary.len() - 1]
-                    } else {
-                        1
-                    };
-
-                let ref_hash = reference.hash();
-                let ref_hash_str = format!(
-                    "{:02x}{:02x}{:02x}{:02x}",
-                    ref_hash[0], ref_hash[1], ref_hash[2], ref_hash[3]
-                );
-
-                writeln!(
-                    f,
-                    "{}{}{} [{}]@{} (ref)",
-                    new_prefix, child_branch, ref_key_str, ref_rank, ref_hash_str
-                )?;
-            }
-        }
-
-        Ok(())
-    }
-}
-
 /// # Tree Specification Macro
 ///
 /// The `tree_spec!` macro allows you to visually define the exact structure of
@@ -999,11 +996,8 @@ impl TreeSpec {
 ///    - `a..b` = segment explicitly from 'a' to 'b' (inclusive)
 ///    - Multi-char keys supported: `..aa`, `ab..az` (Excel-style naming: a-z, aa-az, etc.)
 ///
-/// 4. **Key inference**:
-///    - `..a` after nothing = starts at 'a', ends at 'a' (contains only 'a')
-///    - `..d` after `..a` = starts at 'b' (next after 'a'), ends at 'd' (contains b, c, d)
-///    - `c..e` = explicitly starts at 'c', ends at 'e' (contains c, d, e)
-///    - `f..f` = starts and ends at 'f' (contains only 'f')
+/// 4. **Parentheses**: Mark nodes expected to be pruned (not read) during a
+///    differential: `(..x)` or `(a..b)`
 ///
 /// ## Key Inference
 ///
@@ -1027,48 +1021,6 @@ impl TreeSpec {
 /// 1. Every boundary in a parent level has a corresponding child
 /// 2. Boundaries are in strictly ascending order
 /// 3. Child boundaries don't exceed parent boundaries
-///
-/// ## Boundary Checking
-///
-/// Check if boundaries exist at specific heights:
-///
-/// ```text
-/// let spec = tree_spec![
-///     [     ..d,      ..g]
-///     [..a, ..d, ..f, ..g]
-/// ];
-///
-/// assert!(spec.has_boundary("d", 1));  // Index node at height 1
-/// assert!(spec.has_boundary("a", 0));  // Range at height 0
-/// assert!(!spec.has_boundary("a", 1)); // 'a' doesn't exist at height 1
-/// ```
-///
-/// ## Example: Overlapping Trees
-///
-/// ```text
-/// let spec_a = tree_spec![
-///     [                         ..l]
-///     [..a, ..d, ..e, ..f, ..g, ..l]
-/// ];
-///
-/// let spec_b = tree_spec![
-///     [             ..s]
-///     [f..f, g..g, h..s]
-/// ];
-///
-/// // Build trees
-/// let spec_a = spec_a.build(storage.clone()).await?;
-/// let spec_b = spec_b.build(storage.clone()).await?;
-///
-/// // Test differential
-/// let tree = spec_a.tree().clone();
-/// let delta = tree.differentiate(spec_b.tree());
-/// ```
-///
-/// In this example:
-/// - Tree A has keys: a, b, c, d, e, f, g, h, i, j, k, l
-/// - Tree B has keys: f, g, h, i, j, k, l, m, n, o, p, q, r, s
-/// - Trees overlap in keys f-l, differ in a-e (only in A) and m-s (only in B)
 #[macro_export]
 macro_rules! tree_spec {
     // Empty tree case: tree_spec![]

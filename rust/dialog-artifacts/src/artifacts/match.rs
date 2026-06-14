@@ -3,7 +3,7 @@
 //! This module provides functionality for matching artifacts and index entries
 //! against artifact selectors during query operations.
 
-use dialog_prolly_tree::Entry;
+use dialog_search_tree::Entry;
 
 use crate::{
     ATTRIBUTE_KEY_TAG, ArtifactSelector, AttributeKey, Datum, ENTITY_KEY_TAG, EntityKey, Key,

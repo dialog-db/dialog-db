@@ -3,6 +3,7 @@ use std::{marker::PhantomData, ops::RangeBounds};
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
+use futures_util::StreamExt;
 use rkyv::{
     Deserialize, Serialize,
     bytecheck::CheckBytes,
@@ -14,9 +15,9 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, ArchivedNodeBody, Buffer, Cache, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Entry, Key, Node, SearchOptions, SearchResult, SymmetryWith, TreeShaper,
-    TreeWalker, Value, into_owned,
+    Accessor, ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta,
+    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Node, SearchOptions,
+    SearchResult, SymmetryWith, TreeDifference, TreeShaper, TreeWalker, Value, into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -42,16 +43,18 @@ use crate::{
 /// copy) and an updated root hash, while continuing to share the [`Cache`].
 /// This enables efficient versioning where multiple tree versions share the
 /// same cache for read operations, but maintain independent mutation state.
-#[derive(Debug, Clone)]
-pub struct Tree<Key, Value>
+#[derive(Debug)]
+pub struct Tree<Key, Value, D = Geometric>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
+    D: Distribution,
 {
     key: PhantomData<Key>,
     value: PhantomData<Value>,
+    distribution: PhantomData<D>,
 
     root: Blake3Hash,
     node_cache: Cache<Blake3Hash, Buffer>,
@@ -59,7 +62,29 @@ where
     delta: Delta<Blake3Hash, Buffer>,
 }
 
-impl<Key, Value> Tree<Key, Value>
+// Manual impl: a derived `Clone` would demand `D: Clone`, but the
+// distribution is a pure type-level strategy that is never instantiated.
+impl<Key, Value, D> Clone for Tree<Key, Value, D>
+where
+    Key: self::Key,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Value: self::Value,
+    D: Distribution,
+{
+    fn clone(&self) -> Self {
+        Self {
+            key: PhantomData,
+            value: PhantomData,
+            distribution: PhantomData,
+            root: self.root.clone(),
+            node_cache: self.node_cache.clone(),
+            delta: self.delta.clone(),
+        }
+    }
+}
+
+impl<Key, Value, D> Tree<Key, Value, D>
 where
     Key: self::Key
         + ConditionalSync
@@ -87,6 +112,7 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
+    D: Distribution,
 {
     /// Returns the [`Blake3Hash`] of the root node of this tree.
     ///
@@ -104,6 +130,7 @@ where
         Self {
             key: PhantomData,
             value: PhantomData,
+            distribution: PhantomData,
             root: NULL_BLAKE3_HASH.clone(),
             node_cache: Cache::new(),
             delta: Delta::zero(),
@@ -119,6 +146,7 @@ where
         Self {
             key: PhantomData,
             value: PhantomData,
+            distribution: PhantomData,
             root,
             node_cache: Cache::new(),
             delta: Delta::zero(),
@@ -141,8 +169,7 @@ where
     ) -> Result<Option<Value>, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
             if let Some(entry) = result.leaf.body()?.find_entry(key)? {
@@ -168,11 +195,10 @@ where
     ) -> Result<Self, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         let search_result = self.search(&key, storage, SearchOptions::default()).await?;
-        let shaper = TreeShaper::new(self.root.clone(), self.delta.clone());
+        let shaper = TreeShaper::<Key, Value, D>::new(self.root.clone(), self.delta.clone());
         let (next_root, delta) = shaper.insert(Entry { key, value }, search_result)?;
 
         Ok(self.advance(next_root, delta))
@@ -189,14 +215,13 @@ where
     ) -> Result<Self, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         let options = SearchOptions {
             prefetch_right_neighbor: true,
         };
         if let Some(search_result) = self.search(key, storage, options).await? {
-            let shaper = TreeShaper::new(self.root.clone(), self.delta.clone());
+            let shaper = TreeShaper::<Key, Value, D>::new(self.root.clone(), self.delta.clone());
             let (next_root, mut delta) = shaper.delete(key, search_result)?;
             let next_root = Self::collapse_root_chain(next_root, &mut delta, storage).await?;
             Ok(self.advance(next_root, delta))
@@ -225,8 +250,7 @@ where
     ) -> Result<Blake3Hash, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         if &root == NULL_BLAKE3_HASH {
             return Ok(root);
@@ -274,8 +298,7 @@ where
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + 'a
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         self.stream_range(.., storage)
     }
@@ -289,12 +312,11 @@ where
         &self,
         range: R,
         storage: &ContentAddressedStorage<Backend>,
-    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend + 'static
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
-        R: RangeBounds<Key> + ConditionalSend + 'static,
+            + ConditionalSync,
+        R: RangeBounds<Key> + ConditionalSend,
     {
         let accessor = Accessor::new(self.delta.clone(), self.node_cache.clone(), storage.clone());
 
@@ -310,8 +332,112 @@ where
     ///
     /// In cases where the caller wishes to access the modified tree in the
     /// future, they should persist the flushed changes.
-    pub fn flush(&mut self) -> impl Iterator<Item = (Blake3Hash, Buffer)> {
-        self.delta.flush()
+    pub fn flush(&mut self) -> impl Iterator<Item = Buffer> {
+        self.delta.flush().map(|(_, buffer)| buffer)
+    }
+
+    /// Returns a differential that produces changes to transform `self` into
+    /// `other`.
+    ///
+    /// Usage: applying the changes to `self` (via
+    /// [`integrate`](Self::integrate)) results in `other`. Only blocks on
+    /// differing paths are read; see [`TreeDifference`](crate::TreeDifference)
+    /// for the frugality contract.
+    pub fn differentiate<'a, Backend>(
+        &'a self,
+        other: &'a Self,
+        self_storage: &'a ContentAddressedStorage<Backend>,
+        other_storage: &'a ContentAddressedStorage<Backend>,
+    ) -> impl Differential<Key, Value> + 'a
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Value: PartialEq,
+    {
+        async_stream::try_stream! {
+            let difference =
+                TreeDifference::compute(self, other, self_storage, other_storage).await?;
+            for await change in difference.changes() {
+                yield change?;
+            }
+        }
+    }
+
+    /// Computes the identity hash used for last-write-wins conflict
+    /// resolution: the blake3 hash of the value's serialized (rkyv) form,
+    /// the same canonical bytes the value has inside a node.
+    fn value_identity(value: &Value) -> Result<Blake3Hash, DialogSearchTreeError> {
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(value)
+            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+        Ok(Blake3Hash::hash(bytes.as_slice()))
+    }
+
+    /// Integrates changes into this tree with deterministic conflict
+    /// resolution.
+    ///
+    /// Applies a differential (stream of changes) with last-write-wins
+    /// conflict resolution based on value hashes, which gives uncoordinated
+    /// replicas eventual consistency:
+    ///
+    /// - **Add**: if the key exists with a different value, the value whose
+    ///   blake3 hash (over its serialized rkyv form) is higher wins.
+    /// - **Remove**: only removes when the exact entry (key and value) is
+    ///   present, so a concurrent update is not clobbered by a stale
+    ///   removal.
+    ///
+    /// The operation is atomic: if any change fails to apply, the tree is
+    /// left at its prior state.
+    pub async fn integrate<Backend, Changes>(
+        &mut self,
+        changes: Changes,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<(), DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Changes: Differential<Key, Value>,
+        Value: PartialEq,
+    {
+        // Clones share the cache and delta cheaply; keep one to restore on
+        // failure so integration stays atomic.
+        let checkpoint = self.clone();
+
+        let result: Result<(), DialogSearchTreeError> = async {
+            futures_util::pin_mut!(changes);
+            while let Some(change) = changes.next().await {
+                match change? {
+                    Change::Add(entry) => match self.get(&entry.key, storage).await? {
+                        None => {
+                            *self = self.insert(entry.key, entry.value, storage).await?;
+                        }
+                        Some(existing) => {
+                            if existing != entry.value {
+                                let existing_hash = Self::value_identity(&existing)?;
+                                let new_hash = Self::value_identity(&entry.value)?;
+                                if new_hash.as_bytes() > existing_hash.as_bytes() {
+                                    *self = self.insert(entry.key, entry.value, storage).await?;
+                                }
+                            }
+                        }
+                    },
+                    Change::Remove(entry) => {
+                        if let Some(existing) = self.get(&entry.key, storage).await?
+                            && existing == entry.value
+                        {
+                            *self = self.delete(&entry.key, storage).await?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+
+        if result.is_err() {
+            *self = checkpoint;
+        }
+
+        result
     }
 
     /// Creates a new tree version with an updated root hash and delta.
@@ -323,6 +449,7 @@ where
         Tree {
             key: PhantomData,
             value: PhantomData,
+            distribution: PhantomData,
             root,
             node_cache: self.node_cache.clone(),
             delta,
@@ -350,8 +477,7 @@ where
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync
-            + 'static,
+            + ConditionalSync,
     {
         let accessor = Accessor::new(self.delta.clone(), self.node_cache.clone(), storage.clone());
 
@@ -361,7 +487,7 @@ where
     }
 }
 
-impl<Key, Value> From<Blake3Hash> for Tree<Key, Value>
+impl<Key, Value, D> From<Blake3Hash> for Tree<Key, Value, D>
 where
     Key: self::Key + ConditionalSync + 'static,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -381,6 +507,7 @@ where
     Value: for<'a> Serialize<
         Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
     >,
+    D: Distribution,
 {
     fn from(root: Blake3Hash) -> Self {
         Self::from_hash(root)
@@ -412,8 +539,10 @@ mod tests {
         }
 
         // Flush to storage
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Verify we can retrieve all inserted values
@@ -442,8 +571,10 @@ mod tests {
         }
 
         // Flush to storage
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Delete some values
@@ -452,8 +583,10 @@ mod tests {
         }
 
         // Flush deletions
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Verify deleted values are gone
@@ -492,8 +625,10 @@ mod tests {
         }
 
         // Flush to storage
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Stream all entries and verify they come out sorted
@@ -537,8 +672,10 @@ mod tests {
         }
 
         // Flush to storage
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Test inclusive range [10..20)
@@ -593,8 +730,10 @@ mod tests {
         }
 
         // Flush to storage
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Query range with no entries [50..60)
@@ -662,8 +801,10 @@ mod tests {
             .await?;
 
         // Flush to storage
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Verify initial value
@@ -676,8 +817,10 @@ mod tests {
             .await?;
 
         // Flush update
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Verify updated value
@@ -698,8 +841,10 @@ mod tests {
             .await?;
 
         // Flush v1
-        for (key, value) in tree_v1.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree_v1.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let v1_root = tree_v1.root().clone();
@@ -710,8 +855,10 @@ mod tests {
             .await?;
 
         // Flush v2
-        for (key, value) in tree_v2.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree_v2.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Verify v1 is unchanged
@@ -749,8 +896,10 @@ mod tests {
         }
 
         // Flush base
-        for (key, value) in base.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in base.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Create two independent branches
@@ -762,11 +911,15 @@ mod tests {
             .await?;
 
         // Flush both branches
-        for (key, value) in branch_a.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in branch_a.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
-        for (key, value) in branch_b.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in branch_b.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Verify branch A
@@ -801,8 +954,10 @@ mod tests {
         tree = tree.insert(1u32.to_le_bytes(), vec![1], &storage).await?;
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let root_after_insert = tree.root().clone();
@@ -812,8 +967,10 @@ mod tests {
         tree = tree.insert(2u32.to_le_bytes(), vec![2], &storage).await?;
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let root_after_second_insert = tree.root().clone();
@@ -823,8 +980,10 @@ mod tests {
         tree = tree.delete(&1u32.to_le_bytes(), &storage).await?;
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let root_after_delete = tree.root().clone();
@@ -844,8 +1003,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in tree_a.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree_a.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Build tree B with same data
@@ -855,8 +1016,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in tree_b.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree_b.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Trees with identical content should have same root (content-addressed)
@@ -908,8 +1071,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Insert second batch WITHOUT flushing
@@ -939,8 +1104,10 @@ mod tests {
             .await?;
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Get should work
@@ -953,8 +1120,10 @@ mod tests {
         tree = tree.delete(&42u32.to_le_bytes(), &storage).await?;
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Should be empty again
@@ -988,8 +1157,10 @@ mod tests {
         tree = tree.insert(1u32.to_le_bytes(), vec![1], &storage).await?;
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let root_before = tree.root().clone();
@@ -1018,8 +1189,10 @@ mod tests {
         tree = tree.insert(1u32.to_le_bytes(), vec![1], &storage).await?;
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         assert_eq!(
@@ -1031,8 +1204,10 @@ mod tests {
         tree = tree.delete(&1u32.to_le_bytes(), &storage).await?;
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         assert_eq!(tree.get(&1u32.to_le_bytes(), &storage).await?, None);
@@ -1043,8 +1218,10 @@ mod tests {
             .await?;
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         assert_eq!(
@@ -1065,8 +1242,10 @@ mod tests {
         tree_a = tree_a.insert(2u32.to_le_bytes(), vec![2], &storage).await?;
         tree_a = tree_a.insert(3u32.to_le_bytes(), vec![3], &storage).await?;
 
-        for (key, value) in tree_a.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree_a.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Build tree B with different insertion order
@@ -1075,8 +1254,10 @@ mod tests {
         tree_b = tree_b.insert(1u32.to_le_bytes(), vec![1], &storage).await?;
         tree_b = tree_b.insert(2u32.to_le_bytes(), vec![2], &storage).await?;
 
-        for (key, value) in tree_b.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree_b.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Different insertion orders should produce same root hash
@@ -1098,8 +1279,10 @@ mod tests {
         tree = tree.insert(3u32.to_le_bytes(), vec![3], &storage).await?;
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Verify tree is not empty
@@ -1107,18 +1290,24 @@ mod tests {
 
         // Delete all entries
         tree = tree.delete(&1u32.to_le_bytes(), &storage).await?;
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         tree = tree.delete(&2u32.to_le_bytes(), &storage).await?;
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         tree = tree.delete(&3u32.to_le_bytes(), &storage).await?;
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Tree should be back to empty state with null root
@@ -1142,8 +1331,10 @@ mod tests {
         }
 
         // Flush
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Query completely below range (0-5)
@@ -1199,8 +1390,10 @@ mod tests {
         }
 
         // Flush to storage
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Verify all entries can be retrieved
@@ -1224,8 +1417,10 @@ mod tests {
         }
 
         let root = tree.root().clone();
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Reconstruct from just the root hash — no shared delta or cache
@@ -1259,8 +1454,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Insert more WITHOUT flushing
@@ -1301,8 +1498,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Delete some entries WITHOUT flushing
@@ -1340,8 +1539,10 @@ mod tests {
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Find boundary keys
@@ -1353,8 +1554,10 @@ mod tests {
 
         for &bk in boundaries.iter().take(3) {
             let mut after_delete = tree.delete(&bk.to_le_bytes(), &storage).await?;
-            for (h, b) in after_delete.flush() {
-                storage.store(b.as_ref().to_vec(), &h).await?;
+            for buffer in after_delete.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
             }
 
             // Deleted key should be gone
@@ -1393,16 +1596,20 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Delete all entries one at a time
         for i in 0..500u32 {
             tree = tree.delete(&i.to_le_bytes(), &storage).await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         assert_eq!(
@@ -1424,8 +1631,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let root_before = tree.root().clone();
@@ -1462,8 +1671,10 @@ mod tests {
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let stream = tree.stream(&storage);
@@ -1508,8 +1719,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Excluded start: should not include key 5
@@ -1546,8 +1759,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // start.. (unbounded end)
@@ -1576,8 +1791,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in tree.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // key..=key should return exactly one entry
@@ -1622,8 +1839,10 @@ mod tests {
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?;
         }
-        for (key, value) in tree_a.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree_a.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Build tree B: reverse insertion order
@@ -1633,8 +1852,10 @@ mod tests {
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?;
         }
-        for (key, value) in tree_b.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in tree_b.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // A canonical prolly tree must produce the same structure — and
@@ -1662,8 +1883,10 @@ mod tests {
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
                 .await?;
         }
-        for (key, value) in base.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in base.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Create two branches
@@ -1681,11 +1904,15 @@ mod tests {
         branch_b = branch_b.delete(&10u32.to_le_bytes(), &storage).await?;
 
         // Flush both
-        for (key, value) in branch_a.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in branch_a.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
-        for (key, value) in branch_b.flush() {
-            storage.store(value.as_ref().to_vec(), &key).await?;
+        for buffer in branch_b.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         // Branch A: base + 100, 101
@@ -1733,8 +1960,10 @@ mod tests {
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
                 .await?;
         }
-        for (h, b) in tree.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let boundaries: Vec<u32> = all_keys
@@ -1849,8 +2078,10 @@ mod tests {
                 .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
                 .await?;
         }
-        for (h, b) in tree.flush() {
-            storage.store(b.as_ref().to_vec(), &h).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
         assert_eq!(tree.delta.len(), 0);
 
@@ -1896,8 +2127,10 @@ mod tests {
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), storage)
                 .await?;
         }
-        for (hash, buffer) in tree.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
         Ok(tree)
     }
@@ -1919,8 +2152,10 @@ mod tests {
 
         let mut tree = build_and_flush_u32(&keys, &mut storage).await?;
         let mut after = tree.delete(&69161u32.to_le_bytes(), &storage).await?;
-        for (hash, buffer) in after.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in after.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let remaining: Vec<u32> = keys.iter().copied().filter(|&k| k != 69161).collect();
@@ -1956,8 +2191,10 @@ mod tests {
 
         let mut tree = build_and_flush_u32(&keys, &mut storage).await?;
         let mut after = tree.delete(&198936u32.to_le_bytes(), &storage).await?;
-        for (hash, buffer) in after.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in after.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let mut unreadable = vec![];
@@ -2018,8 +2255,10 @@ mod tests {
                 .await?;
         }
         tree = tree.insert([0xFF; 4], vec![0xFF], &storage).await?;
-        for (hash, buffer) in tree.flush() {
-            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
         }
 
         let stream = tree.stream(&storage);
@@ -2078,8 +2317,10 @@ mod tests {
                 // Flush periodically so both the delta-resident and the
                 // storage-resident read paths get exercised.
                 if op % 10 == 9 {
-                    for (hash, buffer) in tree.flush() {
-                        storage.store(buffer.as_ref().to_vec(), &hash).await?;
+                    for buffer in tree.flush() {
+                        storage
+                            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                            .await?;
                     }
                 }
 

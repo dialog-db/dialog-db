@@ -42,18 +42,15 @@ use rand::{Rng, distributions::Alphanumeric};
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_prolly_tree::{Entry, GeometricDistribution, Tree};
+use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
     MemoryStorageBackend, Storage, StorageBackend,
 };
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt, TryStreamExt, stream};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-#[cfg(feature = "csv")]
-use futures_util::TryStreamExt;
 
 #[cfg(feature = "csv")]
 use async_stream::stream;
@@ -61,14 +58,25 @@ use async_stream::stream;
 #[cfg(feature = "csv")]
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::tree::ArtifactTreeExt;
+#[cfg(feature = "csv")]
+use crate::{EntityKey, KeyBytes, KeyViewConstruct};
+
+use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge};
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
 };
 
-/// An alias type that describes the [`Tree`]-based prolly tree that is
-/// used for each index in [`Artifacts`]
-pub type Index<Key, Value> = Tree<GeometricDistribution, Key, State<Value>, Blake3Hash>;
+/// An alias type that describes the search tree that is used for each
+/// index in [`Artifacts`]. Kept generic-free: keys are raw fixed-size key
+/// bytes and values are CBOR-encoded [`State`] blocks (see
+/// [`crate::tree`]).
+pub type Index = ArtifactTree;
+
+/// Maximum number of concurrent block writes when persisting the index's
+/// pending nodes. Blocks are content-addressed and independent, so their
+/// write order doesn't matter; only completion before the root is
+/// referenced does.
+const FLUSH_CONCURRENCY: usize = 16;
 
 /// [`Artifacts`] is an implementor of [`ArtifactStore`] and [`ArtifactStoreMut`].
 /// Internally, [`Artifacts`] maintains indexes built from [`Tree`]s (that is,
@@ -91,7 +99,7 @@ where
 {
     identifier: String,
     storage: Storage<CborEncoder, Backend>,
-    index: Arc<RwLock<Index<Key, Datum>>>,
+    index: Arc<RwLock<Index>>,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -102,7 +110,7 @@ where
 {
     #[cfg(feature = "debug")]
     /// Get a reference-counted pointer to the internal entity index of the [`Artifacts`]
-    pub fn index(&self) -> Arc<RwLock<Index<Key, Datum>>> {
+    pub fn index(&self) -> Arc<RwLock<Index>> {
         self.index.clone()
     }
 
@@ -150,9 +158,9 @@ where
             };
 
             if let Some(revision) = revision {
-                Tree::from_hash(revision.index(), &storage).await?
+                ArtifactTree::from_hash(NodeHash::from(*revision.index()))
             } else {
-                Tree::new()
+                ArtifactTree::empty()
             }
         };
 
@@ -185,21 +193,18 @@ where
     where
         Write: AsyncWrite + Unpin,
     {
-        use crate::{EntityKey, KeyViewConstruct};
-
         let mut csv = csv_async::AsyncSerializer::from_writer(write);
 
         let index = self.index.read().await;
-        let range = <EntityKey<Key> as KeyViewConstruct>::min().0
-            ..<EntityKey<Key> as KeyViewConstruct>::max().0;
-        let entity_stream = index.stream_range(range, &self.storage);
+        let range = KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::min().0)
+            ..=KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::max().0);
+        let tree_storage = TreeStorage::new(TreeStorageBridge(self.storage.clone()));
+        let entity_stream = index.stream_range(range, &tree_storage);
 
         tokio::pin!(entity_stream);
 
         while let Some(entry) = entity_stream.try_next().await? {
-            let Entry { value, .. } = entry;
-
-            if let State::Added(datum) = value {
+            if let State::Added(datum) = entry.value {
                 let artifact = Artifact::try_from(datum)?;
 
                 csv.serialize(artifact)
@@ -245,9 +250,11 @@ where
     pub async fn revision(&self) -> Result<Blake3Hash, DialogArtifactsError> {
         let index = self.index.read().await;
 
-        Ok(match index.hash() {
-            Some(index_version) => Revision::new(index_version).as_reference().await?,
-            _ => NULL_REVISION_HASH,
+        let root = index.root();
+        Ok(if root == NULL_BLAKE3_HASH {
+            NULL_REVISION_HASH
+        } else {
+            Revision::new(root.as_bytes()).as_reference().await?
         })
     }
 
@@ -325,7 +332,10 @@ where
 
         // Finally update the index
         let mut index = self.index.write().await;
-        index.set_hash(index_version, &self.storage).await?;
+        *index = match index_version {
+            Some(hash) => ArtifactTree::from_hash(NodeHash::from(hash)),
+            None => ArtifactTree::empty(),
+        };
 
         Ok(())
     }
@@ -389,7 +399,26 @@ where
             // rollback below.
             index.apply(&mut self.storage, instructions).await?;
 
-            let next_revision = index.hash().map(Revision::new);
+            // Persist the tree's pending nodes before minting a revision;
+            // a revision must only reference durable blocks.
+            stream::iter(index.flush())
+                .map(|buffer| {
+                    let mut storage = self.storage.clone();
+                    async move {
+                        let digest = *buffer.blake3_hash().as_bytes();
+                        storage.set(digest, buffer.into_vec()).await
+                    }
+                })
+                .buffer_unordered(FLUSH_CONCURRENCY)
+                .try_collect::<()>()
+                .await?;
+
+            let root = index.root();
+            let next_revision = if root == NULL_BLAKE3_HASH {
+                None
+            } else {
+                Some(Revision::new(root.as_bytes()))
+            };
 
             let revision_hash = if let Some(revision) = &next_revision {
                 self.storage.write(&revision).await?;
@@ -442,6 +471,41 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A selector that constrains the entity, the attribute and the value
+    /// pins every component of the index key, so the scan range collapses
+    /// to a single exact key. Regression guard: the range must be treated
+    /// inclusively or the entry is unreachable (the old prolly tree papered
+    /// over this with a point-lookup special case for start == end ranges).
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_selects_fully_constrained_artifacts() -> anyhow::Result<()> {
+        let (storage_backend, _temp) = make_target_storage().await?;
+        let data = generate_data(4)?;
+        let sample = data[0].clone();
+        let mut artifacts = Artifacts::anonymous(storage_backend).await?;
+
+        artifacts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let selector = ArtifactSelector::new()
+            .of(sample.of.clone())
+            .the(sample.the.clone())
+            .is(sample.is.clone());
+        let results: Vec<Artifact> = artifacts
+            .select(selector)
+            .map(|artifact| artifact.unwrap())
+            .collect()
+            .await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].of, sample.of);
+        assert_eq!(results[0].the, sample.the);
+        assert_eq!(results[0].is, sample.is);
+
+        Ok(())
+    }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
@@ -606,7 +670,13 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 2);
+        // The old prolly tree pinned its eagerly loaded root node in
+        // memory, so query read counts excluded the root. The search tree
+        // holds only the root hash and reads the root block on first use;
+        // the shared node cache absorbs that read on every subsequent
+        // query against the same tree (see it_uses_indexes_to_optimize_reads
+        // where the second select costs one read fewer than it used to).
+        assert_eq!(net_reads, 3);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -664,7 +734,13 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 2);
+        // The old prolly tree pinned its eagerly loaded root node in
+        // memory, so query read counts excluded the root. The search tree
+        // holds only the root hash and reads the root block on first use;
+        // the shared node cache absorbs that read on every subsequent
+        // query against the same tree (see it_uses_indexes_to_optimize_reads
+        // where the second select costs one read fewer than it used to).
+        assert_eq!(net_reads, 3);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -700,7 +776,13 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 4);
+        // The old prolly tree pinned its eagerly loaded root node in
+        // memory, so query read counts excluded the root. The search tree
+        // holds only the root hash and reads the root block on first use;
+        // the shared node cache absorbs that read on every subsequent
+        // query against the same tree (see it_uses_indexes_to_optimize_reads
+        // where the second select costs one read fewer than it used to).
+        assert_eq!(net_reads, 5);
         assert_eq!(net_writes, 0);
 
         let fact_stream =
@@ -718,7 +800,10 @@ mod tests {
             )
         };
 
-        assert_eq!(net_reads, 11);
+        // One read fewer than the old tree: the root block was cached
+        // by the select above, while the old tree re-walked from its
+        // resident root through uncached children.
+        assert_eq!(net_reads, 10);
         assert_eq!(net_writes, 0);
 
         Ok(())
