@@ -58,6 +58,15 @@ harness = false
 name = "range_query"
 harness = false
 
+[[bench]]
+name = "distribution"
+harness = false
+required-features = ["helpers"]
+
+[[example]]
+name = "node_sizes"
+required-features = ["helpers"]
+
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 criterion = { version = "0.5", features = ["async_tokio"] }

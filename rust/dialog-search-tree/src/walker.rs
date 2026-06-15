@@ -230,6 +230,71 @@ where
             }
         }
     }
+
+    /// Descends to the leaf segment that would contain `key`, returning just
+    /// that leaf node.
+    ///
+    /// This is the read-only counterpart to [`search`](Self::search): it does
+    /// the same root-to-leaf descent but performs no work a read does not need.
+    /// In particular it does **not** materialize the search path, which means it
+    /// never `into_owned`s the sibling links of the index nodes it passes
+    /// through. `search` builds that path for the insert/delete rebuild, and
+    /// doing so is `O(fan-out)` per index node — proportional to how many
+    /// children each index holds. For a flat, high-fan-out tree that dominates
+    /// a point lookup, even though the descent itself touches only a couple of
+    /// nodes.
+    ///
+    /// Here each index node is instead navigated with a binary search over its
+    /// links (`O(log fan-out)`), and only the chosen child hash is decoded, so
+    /// the cost is independent of fan-out. Callers that only read a value (e.g.
+    /// [`Tree::get`](crate::Tree::get)) should prefer this.
+    pub async fn find_leaf<Backend>(
+        &self,
+        key: &Key,
+        accessor: Accessor<Backend>,
+    ) -> Result<Option<Node<Key, Value>>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        if &self.root == NULL_BLAKE3_HASH {
+            return Ok(None);
+        }
+
+        const MAXIMUM_TREE_DEPTH: usize = 32;
+
+        let mut next_node = self.root.clone();
+        let mut depth = 0;
+
+        loop {
+            if depth > MAXIMUM_TREE_DEPTH {
+                return Err(DialogSearchTreeError::Operation(format!(
+                    "Tree depth exceded the soft maximum ({MAXIMUM_TREE_DEPTH})"
+                )));
+            }
+
+            let node = accessor.get_node(&next_node).await?;
+
+            match node.body()? {
+                ArchivedNodeBody::Index(index) => {
+                    // Links are sorted by `upper_bound`; descend into the first
+                    // whose `upper_bound >= key`, falling back to the last when
+                    // the key is above every bound. `partition_point` counts the
+                    // links strictly below `key`, so it lands on that first
+                    // candidate without scanning or owning any sibling.
+                    let child = index
+                        .links
+                        .partition_point(|link| &link.upper_bound < key)
+                        .min(index.links.len() - 1);
+
+                    next_node = into_owned(&index.links[child].node)?;
+                }
+                ArchivedNodeBody::Segment(_) => return Ok(Some(node)),
+            }
+
+            depth += 1;
+        }
+    }
 }
 
 /// Walks the narrow "overflow" path for [`RightNeighbor`] prefetching.

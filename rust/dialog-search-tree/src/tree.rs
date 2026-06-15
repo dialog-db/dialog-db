@@ -171,8 +171,17 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
-        if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
-            if let Some(entry) = result.leaf.body()?.find_entry(key)? {
+        // A read does not need the search path (sibling links, prefetch) that
+        // `search` builds for the insert/delete rebuild; that path is
+        // `O(fan-out)` per index node and dominates a point lookup on a flat,
+        // high-fan-out tree. `find_leaf` does the same descent with a binary
+        // search per index node and no sibling materialization.
+        let accessor = Accessor::new(self.delta.clone(), self.node_cache.clone(), storage.clone());
+        if let Some(leaf) = TreeWalker::<Key, Value>::new(self.root.clone())
+            .find_leaf(key, accessor)
+            .await?
+        {
+            if let Some(entry) = leaf.body()?.find_entry(key)? {
                 into_owned(&entry.value).map(|value| Some(value))
             } else {
                 Ok(None)
@@ -1401,6 +1410,56 @@ mod tests {
             let value = tree.get(&key, &storage).await?;
             assert_eq!(value, Some(expected_value));
         }
+
+        Ok(())
+    }
+
+    /// `get` descends with [`TreeWalker::find_leaf`], a read-only path that
+    /// binary-searches each index node instead of walking and materializing the
+    /// sibling links the way the insert/delete `search` does. This pins that the
+    /// two descents agree on every key, including the boundary cases the binary
+    /// search's `partition_point` must get right: a key below the minimum, keys
+    /// that sit exactly on an index `upper_bound`, keys between stored keys, and
+    /// a key above the maximum (which must fall through to the last child).
+    #[dialog_common::test]
+    async fn it_gets_present_and_absent_keys_across_index_boundaries() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+
+        // Even keys only, so every odd key probes a gap; spread wide enough to
+        // force a multi-level index whose boundaries the descent must navigate.
+        let present: Vec<u32> = (0..4000u32).map(|i| i * 2).collect();
+        for &k in &present {
+            tree = tree
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        // Every present (even) key resolves to its value.
+        for &k in &present {
+            assert_eq!(
+                tree.get(&k.to_le_bytes(), &storage).await?,
+                Some(k.to_le_bytes().to_vec()),
+                "present key {k} should resolve"
+            );
+        }
+
+        // Every absent (odd) key in range, plus one above the maximum, returns
+        // None. The odd keys land between stored keys and on the far side of
+        // index boundaries; the above-max key exercises the last-child fallback.
+        for k in (1..8000u32).step_by(2) {
+            assert_eq!(
+                tree.get(&k.to_le_bytes(), &storage).await?,
+                None,
+                "absent key {k} should not resolve"
+            );
+        }
+        assert_eq!(tree.get(&100_000u32.to_le_bytes(), &storage).await?, None);
 
         Ok(())
     }
