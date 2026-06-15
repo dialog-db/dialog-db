@@ -139,31 +139,50 @@ small nodes. This is partly inherent (wider nodes cost more to rebuild) and
 mitigable with a node-size cap on leaf segments (whose geometric tail is the
 worst offender).
 
-## Why get is slower (and why it is fixable)
+## Why get was slower, and the fix (implemented)
 
 A point lookup walks root -> ... -> leaf. The leaf search is a `binary_search`
-(`ArchivedNodeBody::find_entry`), O(log m) and cheap. The cost is in the
+(`ArchivedNodeBody::find_entry`), O(log m) and cheap. The cost was in the
 **index** walk: `TreeWalker::search` iterates **all** links of each index node
 and `into_owned`-deserializes **every sibling** link into owned
 `left_siblings` / `right_siblings` for the returned `path` (machinery the
 insert/delete rebuild needs). That work is **O(fan-out) per index node**, and
-it runs unconditionally, including on `get`.
+it ran unconditionally, including on `get` -- which is why the numbers above
+track root fan-out (m=128, fan-out 394, was the slowest) rather than depth.
 
-So the flat tree, which concentrates the whole key range under one ~196-wide
-root, makes a single get deserialize ~195 sibling links; the tall bit-batch
-tree, with ~2-wide index nodes, deserializes only a couple per level. This is
-why the get cost tracks root fan-out rather than tree depth, and why it is an
-**implementation artifact, not a property of correct branching**: a read-only
-descent that binary-searches the index links and skips the sibling
-materialization would make get roughly flat in `m`.
+A read does not need that path. `Tree::get` now descends with
+`TreeWalker::find_leaf`, a read-only walk that binary-searches each index node
+(`partition_point`, O(log fan-out)) and decodes only the chosen child -- no
+sibling materialization. Cross-checked against the `search` path by the test
+`it_gets_present_and_absent_keys_across_index_boundaries` (present keys, gaps,
+on-boundary keys, above-max fallthrough) plus the full existing suite.
+
+### get @ 50k: before vs after (threshold), with bit-batch (also via find_leaf)
+
+| m | threshold before | threshold after | bit-batch after |
+|---|---|---|---|
+| 32 | 459 µs | **130 µs** | 197 µs |
+| 64 | 546 µs | **156 µs** | 203 µs |
+| 128 | 789 µs | **180 µs** | 305 µs |
+| 254 | 685 µs | **326 µs** | 397 µs |
+
+The O(fan-out) cost is gone: threshold get dropped 3.5-4.4x and the curve is
+far flatter in `m`. With per-node cost fixed, what remains is tree depth, so the
+shorter threshold tree is now **faster than bit-batch on get at every branch
+factor**. (bit-batch improved too, since it shares the new read path; threshold
+gains more because it had the wide nodes the old path punished.)
+
+This confirms the get slowdown was an **implementation artifact, not a cost of
+correct branching**.
 
 ## Recommendation
 
-1. **Land the threshold fix.** It is correct, and at moderate `m` it is
-   perf-neutral against bit-batch while already producing a better-shaped tree.
+1. **Land the threshold fix.** It is correct; with the read-only get path it is
+   now faster than bit-batch on get and produces a strictly better-shaped tree.
 2. **Treat branch factor as a separate, tunable knob.** Raising `m` lowers
    block count (better network IO, toward Datomic's design) at the cost of
-   larger nodes. The two costs that grow with `m` are both addressable without
-   touching rank derivation:
-   - **get**: read-only search path (skip sibling `into_owned`) -> flat in `m`.
-   - **insert**: leaf segment-size cap to bound the geometric tail.
+   larger nodes.
+   - **get**: handled -- `find_leaf` makes it ~flat in `m`.
+   - **insert**: still grows with `m` (wide-node rebuild). A leaf segment-size
+     cap to bound the geometric tail is the remaining follow-up; not addressed
+     here since it touches the builder, not rank derivation.
