@@ -167,6 +167,9 @@ pub use shaper::*;
 mod compare;
 pub use compare::*;
 
+mod transient;
+pub use transient::*;
+
 /// Helpers for testing and development.
 ///
 /// This module provides utilities for creating deterministic tree structures

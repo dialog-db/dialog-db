@@ -63,6 +63,10 @@ name = "distribution"
 harness = false
 required-features = ["helpers"]
 
+[[bench]]
+name = "batch"
+harness = false
+
 [[example]]
 name = "node_sizes"
 required-features = ["helpers"]

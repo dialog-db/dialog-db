@@ -17,7 +17,8 @@ use rkyv::{
 use crate::{
     Accessor, ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta,
     DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Node, SearchOptions,
-    SearchResult, SymmetryWith, TreeDifference, TreeShaper, TreeWalker, Value, into_owned,
+    SearchResult, SymmetryWith, Transient, TreeDifference, TreeShaper, TreeWalker, Value,
+    into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -151,6 +152,36 @@ where
             node_cache: Cache::new(),
             delta: Delta::zero(),
         }
+    }
+
+    /// Opens a [`Transient`] over this tree for batched edits.
+    ///
+    /// Apply many inserts/deletes to the returned transient, then
+    /// [`Transient::persist`] to obtain the new root and delta, which
+    /// [`integrate`](Self::integrate) folds back into a durable [`Tree`]. Unlike
+    /// repeated [`insert`](Self::insert), a batch copies and re-hashes each
+    /// touched node once rather than once per operation.
+    pub async fn transient<Backend>(
+        &self,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Transient<Key, Value, Backend, D>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        Transient::open(
+            self.root.clone(),
+            self.delta.branch(),
+            self.node_cache.clone(),
+            storage.clone(),
+        )
+        .await
+    }
+
+    /// Folds the result of a [`Transient::persist`] back into a durable tree
+    /// version, sharing this tree's node cache.
+    pub fn committed(&self, root: Blake3Hash, delta: Delta<Blake3Hash, Buffer>) -> Self {
+        self.advance(root, delta)
     }
 
     /// Retrieves the value associated with `key` from the tree.
