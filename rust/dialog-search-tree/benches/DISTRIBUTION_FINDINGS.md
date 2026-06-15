@@ -150,14 +150,19 @@ insert/delete rebuild needs). That work is **O(fan-out) per index node**, and
 it ran unconditionally, including on `get` -- which is why the numbers above
 track root fan-out (m=128, fan-out 394, was the slowest) rather than depth.
 
-A read does not need that path. `Tree::get` now descends with
-`TreeWalker::find_leaf`, a read-only walk that binary-searches each index node
-(`partition_point`, O(log fan-out)) and decodes only the chosen child -- no
-sibling materialization. Cross-checked against the `search` path by the test
-`it_gets_present_and_absent_keys_across_index_boundaries` (present keys, gaps,
-on-boundary keys, above-max fallthrough) plus the full existing suite.
+The fix made `search` itself zero-copy rather than adding a parallel read path.
+A `TreeLayer` now holds only the host node (Arc-backed, shared on clone) and the
+child index the descent took; it no longer eagerly `into_owned`s the host's
+other children. Reads (`get`, range scans) take the leaf and ignore the rest,
+copying nothing. Writes (`insert`, `delete`) decode the siblings of a level
+lazily, from the host, only when they actually rebuild that level -- which they
+do by re-serializing the whole node anyway, so no extra copy is introduced. Each
+index node is navigated with a binary search (`partition_point`, O(log
+fan-out)). Cross-checked by `it_gets_present_and_absent_keys_across_index_boundaries`
+(present keys, gaps, on-boundary keys, above-max fallthrough), the canonical-form
+invariance tests, and the full existing suite.
 
-### get @ 50k: before vs after (threshold), with bit-batch (also via find_leaf)
+### get @ 50k: before vs after (threshold), with bit-batch (shares the read path)
 
 | m | threshold before | threshold after | bit-batch after |
 |---|---|---|---|
@@ -173,7 +178,11 @@ factor**. (bit-batch improved too, since it shares the new read path; threshold
 gains more because it had the wide nodes the old path punished.)
 
 This confirms the get slowdown was an **implementation artifact, not a cost of
-correct branching**.
+correct branching**. Range scans benefit from the same change (the start-key
+descent no longer materializes siblings, and `into_indexed` no longer re-derives
+each child index with a binary search -- `search` already recorded it). The
+write path keeps the same canonical output (all tests green) while shedding the
+eager sibling decode/concat it never needed before the rebuild step.
 
 ## Recommendation
 

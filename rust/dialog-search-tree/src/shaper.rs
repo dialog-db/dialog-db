@@ -368,12 +368,12 @@ where
     /// boundary rightward at every level, so the boundary's host is always
     /// the last child; the right-adjacent descent takes leftmost children)
     /// we can rely on:
-    /// - `main_layer.right_siblings == None` for every layer below the LCA, and
-    /// - `right_layer.left_siblings == None` for every layer below the LCA.
+    /// - `!main_layer.has_right_siblings()` for every layer below the LCA, and
+    /// - `!right_layer.has_left_siblings()` for every layer below the LCA.
     ///
     /// The fold that produces each fused node (`[w y]`, then `DE`) is
     /// therefore just
-    /// `[main_layer.left_siblings | unified | right_layer.right_siblings]`.
+    /// `[main_layer.left_siblings() | unified | right_layer.right_siblings()]`.
     ///
     /// The tree above the LCA is unaffected and handed off to the standard
     /// merge routine.
@@ -437,50 +437,55 @@ where
             context.delta().remove(right_layer.host.hash());
 
             debug_assert!(
-                main_layer.right_siblings.is_none(),
+                !main_layer.has_right_siblings(),
                 "main descent follows the rightmost path; no right siblings below LCA"
             );
             debug_assert!(
-                right_layer.left_siblings.is_none(),
+                !right_layer.has_left_siblings(),
                 "right-adjacent descent is leftmost; no left siblings below LCA"
             );
 
             let unified_links = promote_to_ranked_links(unified, &mut context)?;
 
-            let mut parts: Vec<NonEmpty<(Link<Key>, Rank)>> = Vec::new();
-            if let Some(left) = main_layer.left_siblings {
-                parts.push(into_ranked_links(left, &mut context));
-            }
-            parts.push(unified_links);
-            if let Some(right) = right_layer.right_siblings {
-                parts.push(into_ranked_links(right, &mut context));
-            }
-
-            let combined_links = concat_nonempty(parts)?;
+            // The unified subtree sits between the main descent's left siblings
+            // and the right descent's right siblings (the asserts above pin that
+            // those are the only siblings below the LCA).
+            let combined_links = Self::splice_siblings(
+                unified_links,
+                main_layer.left_siblings()?,
+                right_layer.right_siblings()?,
+                &mut context,
+            )?;
             unified = Self::collect::<Link<_>>(combined_links, level_minimum_rank)?;
             level_minimum_rank += 1;
         }
 
-        // At the LCA, the first right sibling was the right-descent target; it
-        // has been subsumed by the unified subtree. The remaining right
-        // siblings stay as peers of the unified subtree at this level.
-        let right_siblings_at_lca = lca_layer.right_siblings.ok_or_else(|| {
-            DialogSearchTreeError::Operation(
-                "LCA layer had no right siblings during overflow".into(),
-            )
-        })?;
-        let modified_right_siblings =
-            NonEmpty::from_vec(right_siblings_at_lca.into_iter().skip(1).collect());
+        // At the LCA, the main descent took child `lca_layer.index` and the
+        // right descent took the next child (`index + 1`); both have been
+        // subsumed by the unified subtree. The LCA's left siblings are the
+        // children before the main target, and its surviving right siblings are
+        // the children after the right target (i.e. skip the subsumed pair).
+        context.delta().remove(lca_layer.host.hash());
+        let lca_links = &lca_layer.host.as_index()?.links;
+        let lca_left = NonEmpty::from_vec(
+            lca_links[..lca_layer.index]
+                .iter()
+                .map(into_owned)
+                .collect::<Result<Vec<Link<Key>>, _>>()?,
+        );
+        let lca_right = NonEmpty::from_vec(
+            lca_links[(lca_layer.index + 2).min(lca_links.len())..]
+                .iter()
+                .map(into_owned)
+                .collect::<Result<Vec<Link<Key>>, _>>()?,
+        );
 
-        let lca_has_own_siblings =
-            lca_layer.left_siblings.is_some() || modified_right_siblings.is_some();
+        let lca_has_own_siblings = lca_left.is_some() || lca_right.is_some();
 
         if !lca_has_own_siblings {
             // The LCA's only children were the main- and right-descent targets;
             // both were subsumed by the unified subtree. The LCA node itself
             // disappears from the canonical tree.
-            context.delta().remove(lca_layer.host.hash());
-
             if above_lca.is_empty() {
                 // The LCA was the tree root; the unified subtree becomes the
                 // new root via the standard merge with nothing left to merge
@@ -498,17 +503,14 @@ where
             return Self::merge_with_path(promoted, above_lca, context, level_minimum_rank + 1);
         }
 
-        // LCA has genuine siblings: rebuild the LCA around the unified subtree
-        // and the preserved siblings, then hand off to the standard merge.
-        let modified_lca_layer = TreeLayer {
-            host: lca_layer.host,
-            left_siblings: lca_layer.left_siblings,
-            right_siblings: modified_right_siblings,
-        };
-        let mut final_path = above_lca;
-        final_path.push(modified_lca_layer);
+        // LCA has genuine siblings: rebuild the LCA level around the unified
+        // subtree and the preserved siblings, then hand off to the standard
+        // merge for everything above it.
+        let unified_links = promote_to_ranked_links(unified, &mut context)?;
+        let spliced = Self::splice_siblings(unified_links, lca_left, lca_right, &mut context)?;
+        let collected = Self::collect::<Link<_>>(spliced, level_minimum_rank)?;
 
-        Self::merge_with_path(unified, final_path, context, level_minimum_rank)
+        Self::merge_with_path(collected, above_lca, context, level_minimum_rank + 1)
     }
 
     /// Redistributes a non-empty list of entries into a new tree structure,
@@ -548,6 +550,29 @@ where
         // Nodes start at level 0 (segments); the first level-up collect uses
         // the level-1 threshold.
         Self::merge_with_path(nodes, search_path, context, FIRST_INDEX_RANK)
+    }
+
+    /// Splices the rebuilt children of a level between its unchanged left and
+    /// right siblings, ranking the siblings as it goes.
+    ///
+    /// The siblings are passed already decoded (via [`TreeLayer::left_siblings`]
+    /// / [`TreeLayer::right_siblings`], or assembled directly by the overflow
+    /// path), so this is the single place the three cases (left only, right only,
+    /// both, neither) are handled.
+    fn splice_siblings(
+        middle: NonEmpty<(Link<Key>, Rank)>,
+        left: Option<NonEmpty<Link<Key>>>,
+        right: Option<NonEmpty<Link<Key>>>,
+        context: &mut MutationContext<Key, D>,
+    ) -> Result<NonEmpty<(Link<Key>, Rank)>, DialogSearchTreeError> {
+        let left = left.map(|links| into_ranked_links(links, context));
+        let right = right.map(|links| into_ranked_links(links, context));
+        match (left, right) {
+            (None, None) => Ok(middle),
+            (Some(left), None) => concat_nonempty(vec![left, middle]),
+            (None, Some(right)) => concat_nonempty(vec![middle, right]),
+            (Some(left), Some(right)) => concat_nonempty(vec![left, middle, right]),
+        }
     }
 
     /// Merges a collection of nodes with a search path, rebuilding from leaves
@@ -600,29 +625,11 @@ where
                 match search_path.pop() {
                     Some(layer) => {
                         context.delta().remove(layer.host.hash());
-                        let ranked_left_siblings = layer
-                            .left_siblings
-                            .map(|links| into_ranked_links(links, &mut context));
-                        let ranked_right_siblings = layer
-                            .right_siblings
-                            .map(|links| into_ranked_links(links, &mut context));
-
-                        match (ranked_left_siblings, ranked_right_siblings) {
-                            (None, None) => ranked_links,
-                            (Some(ranked_left_siblings), None) => {
-                                concat_nonempty(vec![ranked_left_siblings, ranked_links])?
-                            }
-                            (None, Some(ranked_right_siblings)) => {
-                                concat_nonempty(vec![ranked_links, ranked_right_siblings])?
-                            }
-                            (Some(ranked_left_siblings), Some(ranked_right_siblings)) => {
-                                concat_nonempty(vec![
-                                    ranked_left_siblings,
-                                    ranked_links,
-                                    ranked_right_siblings,
-                                ])?
-                            }
-                        }
+                        // Rebuilding this level needs the host's other children,
+                        // so decode them from the host now.
+                        let left = layer.left_siblings()?;
+                        let right = layer.right_siblings()?;
+                        Self::splice_siblings(ranked_links, left, right, &mut context)?
                     }
                     None => ranked_links,
                 }
@@ -677,12 +684,12 @@ where
         while let Some(layer) = path.pop() {
             context.delta().remove(layer.host.hash());
 
-            // Collect left and right siblings, excluding the removed child
+            // Collect left and right siblings, excluding the removed child.
             let mut links = Vec::new();
-            if let Some(left_siblings) = layer.left_siblings {
+            if let Some(left_siblings) = layer.left_siblings()? {
                 links.extend(left_siblings);
             }
-            if let Some(right_siblings) = layer.right_siblings {
+            if let Some(right_siblings) = layer.right_siblings()? {
                 links.extend(right_siblings);
             }
 

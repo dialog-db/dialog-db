@@ -171,17 +171,12 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
-        // A read does not need the search path (sibling links, prefetch) that
-        // `search` builds for the insert/delete rebuild; that path is
-        // `O(fan-out)` per index node and dominates a point lookup on a flat,
-        // high-fan-out tree. `find_leaf` does the same descent with a binary
-        // search per index node and no sibling materialization.
-        let accessor = Accessor::new(self.delta.clone(), self.node_cache.clone(), storage.clone());
-        if let Some(leaf) = TreeWalker::<Key, Value>::new(self.root.clone())
-            .find_leaf(key, accessor)
-            .await?
-        {
-            if let Some(entry) = leaf.body()?.find_entry(key)? {
+        // The search path is the copy-on-write frontier for an update; a read
+        // ignores it and takes only the leaf. Building it is allocation-free
+        // (each layer is an Arc-backed node plus a child index), so the read
+        // pays nothing for the siblings an update would later decode.
+        if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
+            if let Some(entry) = result.leaf.body()?.find_entry(key)? {
                 into_owned(&entry.value).map(|value| Some(value))
             } else {
                 Ok(None)
