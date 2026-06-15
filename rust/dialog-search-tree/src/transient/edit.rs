@@ -27,6 +27,10 @@ use super::{NodeEdit, TransientBody};
 /// the same boundaries.
 const BOTTOM_RANK: Rank = 1;
 
+/// A run of canonical child links paired with their shared height, as a fused
+/// run hands up to its parent.
+type LeveledLinks<Key> = (Rank, Vec<Link<Key>>);
+
 /// A batch of edits applied to a tree as a single mutable session, in the style
 /// of a Clojure transient.
 ///
@@ -162,19 +166,94 @@ where
             }
         }
 
-        // Apply at the segment, then refresh upper bounds back up the path.
+        // Apply at the segment. A delete that removes the segment's last entry
+        // dissolves the boundary key that separated this subtree from the one to
+        // its right, so that neighbor must fuse back in. Record that and lift the
+        // neighbor's left spine to transient form below, so persist sees the
+        // surviving keys as one fusable run rather than stopping at a stale
+        // persistent boundary.
+        let is_remove = matches!(op, Op::Remove);
         let leaf = self.follow(edit, &path).await?;
+        let mut deleted_boundary = false;
         if let NodeEdit::Transient {
             body: TransientBody::Segment(entries),
             ..
         } = leaf
         {
+            let was_last = is_remove
+                && entries
+                    .last()
+                    .map(|entry| &entry.key == key)
+                    .unwrap_or(false);
             apply_to_segment(entries, key, op);
+            deleted_boundary = was_last;
         }
+
+        if deleted_boundary {
+            self.lift_right_neighbor_spine(edit, &path).await?;
+        }
+
         for depth in (0..=path.len()).rev() {
             let node = self.follow(edit, &path[..depth]).await?;
             refresh_upper_bound(node);
         }
+        Ok(())
+    }
+
+    /// Lifts the left spine of the subtree immediately to the right of `path` to
+    /// transient form, so a dissolved boundary at the end of the leaf reached by
+    /// `path` fuses with that neighbor during persist.
+    ///
+    /// The neighbor is found by climbing `path` to the deepest ancestor that has
+    /// a child after the one `path` descended into, then walking that next
+    /// child's leftmost edge down to its leaf. Each node on that edge is lifted,
+    /// turning the persistent boundary between the two subtrees into a transient
+    /// run that [`merge_children`] fuses. When `path` already reaches the
+    /// rightmost leaf there is no neighbor and this is a no-op.
+    async fn lift_right_neighbor_spine(
+        &self,
+        edit: &mut NodeEdit<Key, Value>,
+        path: &[usize],
+    ) -> Result<(), DialogSearchTreeError> {
+        // Find the deepest ancestor with a right sibling of the descended child,
+        // and build the path to that sibling: the ancestor prefix, then the next
+        // index.
+        let mut neighbor_path: Option<Vec<usize>> = None;
+        for depth in (0..path.len()).rev() {
+            let ancestor = self.follow(edit, &path[..depth]).await?;
+            if let NodeEdit::Transient {
+                body: TransientBody::Index(children),
+                ..
+            } = ancestor
+                && path[depth] + 1 < children.len()
+            {
+                let mut prefix = path[..depth].to_vec();
+                prefix.push(path[depth] + 1);
+                neighbor_path = Some(prefix);
+                break;
+            }
+        }
+
+        let Some(mut neighbor_path) = neighbor_path else {
+            return Ok(());
+        };
+
+        // Walk the neighbor subtree's leftmost edge to its leaf, lifting each
+        // node so the whole spine is transient.
+        loop {
+            let node = self.follow(edit, &neighbor_path).await?;
+            match node {
+                NodeEdit::Transient {
+                    body: TransientBody::Index(children),
+                    ..
+                } => {
+                    self.lift(&mut children[0]).await?;
+                    neighbor_path.push(0);
+                }
+                _ => break,
+            }
+        }
+
         Ok(())
     }
 
@@ -549,16 +628,29 @@ where
 /// A persistent child is a sealed canonical unit whose upper bound was a rank
 /// boundary in the durable tree, so it never fuses with a neighbor: it both
 /// terminates the transient run to its left and starts a fresh run to its right.
-/// Each maximal run of adjacent transient children is therefore fused as one: at
-/// the leaf level their entries concatenate and group at [`BOTTOM_RANK`]; above
-/// it their child links concatenate and group at `BOTTOM_RANK + child_level`.
+/// Each maximal run of adjacent transient children is fused as one.
+///
+/// Fusing a run is done at the finest granularity a delete may have disturbed,
+/// so a boundary the durable tree split on but the surviving keys no longer
+/// justify dissolves. A run of transient leaf segments concatenates its entries
+/// and regroups at [`BOTTOM_RANK`]. A run of transient index children does
+/// *not* seal each child's subtree on its own and then group the sealed links:
+/// that would freeze the boundary between two adjacent subtrees even after the
+/// key that separated them is gone. Instead the run concatenates the
+/// grandchildren of every transient index in it into one child list and fuses
+/// that recursively, so the rightmost spine of one subtree and the leftmost
+/// spine of the next merge wherever their separating boundary dissolved, exactly
+/// as a from-scratch build of the surviving keys would. A persistent grandchild
+/// still marks a surviving boundary and bounds the sub-run, so untouched
+/// subtrees pass through by hash and are never decoded.
+///
 /// Concatenating the per-run results in child order yields the index's child
 /// links, which the parent (or [`Transient::persist`]) groups into nodes.
 fn merge_children<Key, Value, D>(
     children: Vec<NodeEdit<Key, Value>>,
     context: &mut RankContext<Key, D>,
     delta: &mut Delta<Blake3Hash, Buffer>,
-) -> Result<(Rank, Vec<Link<Key>>), DialogSearchTreeError>
+) -> Result<LeveledLinks<Key>, DialogSearchTreeError>
 where
     Key: self::Key + Clone,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -586,106 +678,152 @@ where
     // to the leaf level defensively.
     let mut child_level: Option<Rank> = None;
     // Output child links in order: persistent links pass through inline; each
-    // transient run is grouped and spliced in when the run ends.
+    // transient run is fused and spliced in when the run ends.
     let mut links: Vec<Link<Key>> = Vec::new();
-    // The unflushed contents of the current transient run, at `child_level`.
+    // The unfused contents of the current transient run.
     let mut pending = TransientRun::Empty;
 
     for child in children {
         match child {
             NodeEdit::Persistent(link) => {
                 let run = std::mem::replace(&mut pending, TransientRun::Empty);
-                links.extend(run.group(context, delta)?);
+                if let Some((level, run_links)) = fuse_run::<Key, Value, D>(run, context, delta)? {
+                    child_level = Some(child_level.map_or(level, |c| c.max(level)));
+                    links.extend(run_links);
+                }
                 links.push(link);
             }
             NodeEdit::Transient { body, .. } => match body {
-                TransientBody::Segment(entries) => {
-                    // Segment children are the leaf level (height 0).
-                    child_level = Some(0);
-                    pending.push_entries(entries);
-                }
+                TransientBody::Segment(entries) => pending.push_entries(entries),
                 TransientBody::Index(grandchildren) => {
-                    let (grandchild_level, child_links) =
-                        merge_children::<Key, Value, D>(grandchildren, context, delta)?;
-                    child_level = Some(child_level.map_or(grandchild_level + 1, |level| {
-                        level.max(grandchild_level + 1)
-                    }));
-                    pending.push_links(grandchild_level, child_links);
+                    // Carry the grandchildren unfused so the whole run of
+                    // adjacent transient indices fuses as one list, dissolving
+                    // boundaries the surviving keys no longer justify.
+                    pending.push_children(grandchildren);
                 }
             },
         }
     }
 
     let run = std::mem::replace(&mut pending, TransientRun::Empty);
-    links.extend(run.group(context, delta)?);
+    if let Some((level, run_links)) = fuse_run::<Key, Value, D>(run, context, delta)? {
+        child_level = Some(child_level.map_or(level, |c| c.max(level)));
+        links.extend(run_links);
+    }
 
     Ok((child_level.unwrap_or(0), links))
 }
 
-/// The unflushed contents of a run of adjacent transient children, kept ungrouped
-/// so the whole run groups at once when a persistent boundary or the end of the
-/// child list closes it.
-enum TransientRun<Key, Value> {
+/// The contents of a run of adjacent transient children, carried unfused so the
+/// whole run fuses at once when a persistent boundary or the end of the child
+/// list closes it.
+///
+/// A run of leaf segments carries its entries; a run of index nodes carries the
+/// concatenated grandchildren as further [`NodeEdit`]s, so [`fuse`](Self::fuse)
+/// can rebuild the whole run from the surviving keys down rather than from each
+/// subtree's pre-sealed links. All children of a node share a height, so a run
+/// is never a mix of the two.
+enum TransientRun<Key, Value>
+where
+    Key: self::Key,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
     /// No transient children have accumulated yet.
     Empty,
     /// Leaf-level entries from a run of transient segments.
     Entries(Vec<Entry<Key, Value>>),
-    /// Child links from a run of transient indices, with the height of those links.
-    Links(Rank, Vec<Link<Key>>),
+    /// The concatenated children of a run of transient index nodes.
+    Children(Vec<NodeEdit<Key, Value>>),
 }
 
-impl<Key, Value> TransientRun<Key, Value> {
+impl<Key, Value> TransientRun<Key, Value>
+where
+    Key: self::Key,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
     /// Appends an transient segment's entries to the run.
     fn push_entries(&mut self, entries: Vec<Entry<Key, Value>>) {
         match self {
             TransientRun::Empty => *self = TransientRun::Entries(entries),
             TransientRun::Entries(existing) => existing.extend(entries),
-            TransientRun::Links(..) => {
+            TransientRun::Children(..) => {
                 unreachable!("a node's children are all the same height")
             }
         }
     }
 
-    /// Appends an transient index's child links (at height `level`) to the run.
-    fn push_links(&mut self, level: Rank, child_links: Vec<Link<Key>>) {
+    /// Appends a transient index node's children to the run.
+    fn push_children(&mut self, children: Vec<NodeEdit<Key, Value>>) {
         match self {
-            TransientRun::Empty => *self = TransientRun::Links(level, child_links),
-            TransientRun::Links(_, existing) => existing.extend(child_links),
+            TransientRun::Empty => *self = TransientRun::Children(children),
+            TransientRun::Children(existing) => existing.extend(children),
             TransientRun::Entries(_) => {
                 unreachable!("a node's children are all the same height")
             }
         }
     }
+}
 
-    /// Groups the run into nodes with the canonical cut rule and returns their
-    /// links. Leaf entries group at [`BOTTOM_RANK`]; a run of child links at
-    /// height `level` groups one level higher. An empty run yields no links.
-    fn group<D>(
-        self,
-        context: &mut RankContext<Key, D>,
-        delta: &mut Delta<Blake3Hash, Buffer>,
-    ) -> Result<Vec<Link<Key>>, DialogSearchTreeError>
-    where
-        Key: self::Key + Clone,
-        Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-        Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-        Key: for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-        Value: self::Value,
-        Value: for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-        D: Distribution,
-    {
-        match self {
-            TransientRun::Empty => Ok(Vec::new()),
-            TransientRun::Entries(entries) => {
-                group_entries::<Key, Value, D>(entries, BOTTOM_RANK, context, delta)
-            }
-            TransientRun::Links(level, child_links) => {
-                group_links::<Key, Value, D>(child_links, BOTTOM_RANK + level + 1, context, delta)
-            }
+/// Fuses a run of adjacent transient children into canonical nodes, returning
+/// their height paired with their links, or `None` for an empty run.
+///
+/// A run of leaf entries groups at [`BOTTOM_RANK`], yielding height-0 leaves. A
+/// run of index children fuses its combined child list with [`merge_children`]
+/// (so persistent grandchildren still bound sub-runs and dissolved boundaries
+/// collapse), then groups the fused child links one level higher.
+fn fuse_run<Key, Value, D>(
+    run: TransientRun<Key, Value>,
+    context: &mut RankContext<Key, D>,
+    delta: &mut Delta<Blake3Hash, Buffer>,
+) -> Result<Option<LeveledLinks<Key>>, DialogSearchTreeError>
+where
+    Key: self::Key + Clone,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: for<'a> Serialize<
+        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+    >,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: for<'a> Serialize<
+        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+    >,
+    D: Distribution,
+{
+    match run {
+        TransientRun::Empty => Ok(None),
+        TransientRun::Entries(entries) => Ok(Some((
+            0,
+            group_entries::<Key, Value, D>(entries, BOTTOM_RANK, context, delta)?,
+        ))),
+        TransientRun::Children(children) => {
+            let (grandchild_level, child_links) =
+                merge_children::<Key, Value, D>(children, context, delta)?;
+            let links = group_links::<Key, Value, D>(
+                child_links,
+                BOTTOM_RANK + grandchild_level + 1,
+                context,
+                delta,
+            )?;
+            Ok(Some((grandchild_level + 1, links)))
         }
     }
 }
@@ -1040,7 +1178,7 @@ mod tests {
     /// boundaries, level derivation, root collapse).
     #[dialog_common::test]
     async fn it_matches_sequential_for_random_mixed_batches() -> Result<()> {
-        for seed in 0..40u64 {
+        for seed in 0..2000u64 {
             let mut rng = StdRng::seed_from_u64(seed.wrapping_mul(0x9E37_79B9));
             let base_size = (rng.r#gen::<usize>() % 400) + 1;
             let base = random_entries(base_size, seed ^ 0xBA5E);
@@ -1081,6 +1219,89 @@ mod tests {
                 root_batch,
                 "seed {seed}: base={base_size} del={delete_count} ins={} diverged",
                 inserts.len(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Property: an interleaved sequence of inserts, upserts, and deletes
+    /// applied as one transient batch reaches the same canonical root as
+    /// applying that exact sequence one operation at a time. Interleaving (not
+    /// just "delete a block then insert a block") exercises orderings the
+    /// structured test does not, including heavy-delete shrink and re-grow.
+    #[dialog_common::test]
+    async fn it_matches_sequential_for_random_interleaved_ops() -> Result<()> {
+        #[derive(Clone)]
+        enum Step {
+            Put(u32),
+            Del(u32),
+        }
+
+        for seed in 0..600u64 {
+            let mut rng = StdRng::seed_from_u64(seed.wrapping_mul(0x100_0001B3));
+            let base_size = rng.r#gen::<usize>() % 500;
+            let base = random_entries(base_size, seed ^ 0x5EED);
+
+            // Build a known key universe to delete from, plus fresh keys.
+            let universe: Vec<u32> = base.iter().map(|(k, _)| *k).collect();
+            let fresh = random_entries(rng.r#gen::<usize>() % 300, seed ^ 0xF8E5);
+
+            // A random interleaving of puts (fresh or re-put existing) and
+            // deletes (existing or absent keys).
+            let step_count = rng.r#gen::<usize>() % 400;
+            let mut steps = Vec::with_capacity(step_count);
+            for _ in 0..step_count {
+                let pick = rng.r#gen::<u8>() % 3;
+                let key = if !universe.is_empty() && rng.r#gen::<bool>() {
+                    universe[rng.r#gen::<usize>() % universe.len()]
+                } else if !fresh.is_empty() {
+                    fresh[rng.r#gen::<usize>() % fresh.len()].0
+                } else {
+                    rng.r#gen::<u32>()
+                };
+                steps.push(if pick == 0 {
+                    Step::Del(key)
+                } else {
+                    Step::Put(key)
+                });
+            }
+
+            // Sequential reference.
+            let mut storage_seq = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut tree_seq = build_sequentially(&base, &mut storage_seq).await?;
+            for step in &steps {
+                tree_seq = match step {
+                    Step::Put(k) => {
+                        tree_seq
+                            .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage_seq)
+                            .await?
+                    }
+                    Step::Del(k) => tree_seq.delete(&k.to_le_bytes(), &storage_seq).await?,
+                };
+            }
+            flush(&mut tree_seq, &mut storage_seq).await?;
+
+            // One transient batch applying the same interleaved sequence.
+            let mut storage_batch = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let base_tree = build_sequentially(&base, &mut storage_batch).await?;
+            let mut transient = base_tree.transient(&storage_batch).await?;
+            for step in &steps {
+                match step {
+                    Step::Put(k) => {
+                        transient
+                            .insert(k.to_le_bytes(), k.to_le_bytes().to_vec())
+                            .await?
+                    }
+                    Step::Del(k) => transient.delete(&k.to_le_bytes()).await?,
+                }
+            }
+            let (root_batch, _) = transient.persist()?;
+
+            assert_eq!(
+                tree_seq.root().clone(),
+                root_batch,
+                "seed {seed}: base={base_size} steps={} diverged",
+                steps.len(),
             );
         }
         Ok(())
