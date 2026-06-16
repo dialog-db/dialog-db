@@ -138,7 +138,13 @@ where
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
 
     for (key, value) in keys.iter().zip(values.iter()) {
-        tree = tree.insert(*key, value.to_vec(), &storage).await.unwrap();
+        tree = tree
+            .edit()
+            .insert(*key, value.to_vec(), &storage)
+            .await
+            .unwrap()
+            .persist()
+            .unwrap();
     }
     for buffer in tree.flush() {
         storage
@@ -159,7 +165,13 @@ where
     let storage = ContentAddressedStorage::new(Backend::default());
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
     for (key, value) in keys.iter().zip(values.iter()) {
-        tree = tree.insert(*key, value.clone(), &storage).await.unwrap();
+        tree = tree
+            .edit()
+            .insert(*key, value.clone(), &storage)
+            .await
+            .unwrap()
+            .persist()
+            .unwrap();
     }
 }
 

@@ -6,19 +6,18 @@
 //! only the nodes on the path from [`Node::Persistent`] references to editable
 //! [`Node::Transient`] form, applies the change to the leaf, then re-shapes the
 //! touched path so the tree is canonical again. Untouched siblings stay shared
-//! by reference. The shape rules are the same the per-operation
-//! [`TreeShaper`](crate::TreeShaper) applies, so an edit batch and the
-//! equivalent sequence of [`PersistentTree::insert`] / [`PersistentTree::delete`]
-//! calls converge on the same root, byte for byte, after every operation.
+//! by reference. The shape rules are history-independent, so a batch of edits
+//! and the equivalent sequence of single edits each persisted in turn converge
+//! on the same root, byte for byte, after every operation.
 //!
 //! [`persist`](TransientTree::persist) is a pure bottom-up serializer: it makes
 //! no shape decisions, because the shape was already established at edit time.
 
 use crate::{
-    Accessor, BOTTOM_RANK, Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError,
-    Distribution, Entry, Geometric, Key, Node, PersistentNode, PersistentTree, Rank, SymmetryWith,
-    TransientIndex, TransientNode, TransientSegment, TreeWalker, Value, regroup_children,
-    regroup_entries,
+    Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
+    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Node, PersistentNode,
+    PersistentTree, Rank, SymmetryWith, TransientIndex, TransientNode, TransientSegment,
+    TreeWalker, Value, regroup_children, regroup_entries,
 };
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
@@ -70,6 +69,17 @@ where
     root: TransientRoot<Key, Value>,
     cache: Cache<Blake3Hash, Buffer>,
     delta: Delta<Blake3Hash, Buffer>,
+    /// Hashes of persistent nodes lifted into transient form during this batch.
+    ///
+    /// Lifting a [`Node::Persistent`] makes its serialized version a candidate
+    /// for replacement: the re-shape rewrites the lifted node, so the persist
+    /// re-emits it under a new hash. The old hash is evicted from the delta at
+    /// [`persist`](Self::persist) time, before the bottom-up persist re-adds
+    /// nodes, so a node that survives unchanged is simply re-added under the
+    /// same hash. Mirrors the per-operation shaper's `delta().remove()` of
+    /// every replaced node. A node lifted only for a read (`get`,
+    /// `stream_range`) is never recorded here, so reads evict nothing.
+    superseded: Vec<Blake3Hash>,
     distribution: PhantomData<D>,
 }
 
@@ -118,15 +128,23 @@ where
             root: TransientRoot::Unloaded(root),
             cache,
             delta,
+            superseded: Vec::new(),
             distribution: PhantomData,
         }
     }
 
-    /// Loads the root into a transient node, returning `None` for an empty tree
-    /// (a null root hash, which cannot be loaded).
+    /// Loads the root into a transient node for editing, returning `None` for an
+    /// empty tree (a null root hash, which cannot be loaded).
+    ///
+    /// A freshly loaded (non-null) root is recorded in `superseded`: the edit
+    /// rewrites the root, so its old hash is evicted from the delta at persist
+    /// time. The root is lifted here rather than through [`lift`] (which only
+    /// runs on a node's children), so this is where its supersession is
+    /// recorded.
     async fn load<Backend>(
         root: TransientRoot<Key, Value>,
         accessor: &Accessor<Backend>,
+        superseded: &mut Vec<Blake3Hash>,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -137,6 +155,7 @@ where
             TransientRoot::Unloaded(hash) if &hash == NULL_BLAKE3_HASH => Ok(None),
             TransientRoot::Unloaded(hash) => {
                 let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
+                superseded.push(hash);
                 Ok(Some(TransientNode::try_from(&node)?))
             }
         }
@@ -156,7 +175,7 @@ where
         let entry = Entry { key, value };
         let accessor = Accessor::new(self.delta.clone(), self.cache.clone(), storage.clone());
 
-        let node = match Self::load(self.root, &accessor).await? {
+        let node = match Self::load(self.root, &accessor, &mut self.superseded).await? {
             // The first entry of an empty tree becomes a lone segment wrapped in
             // a single-child index, matching the canonical root invariant that
             // the root is always an index.
@@ -166,7 +185,7 @@ where
                 }))],
             }),
             Some(root) => Edit::Upsert(entry)
-                .apply::<Backend, D>(root, &accessor)
+                .apply::<Backend, D>(root, &accessor, &mut self.superseded)
                 .await?
                 .expect("an insert never empties the tree"),
         };
@@ -187,13 +206,13 @@ where
     {
         let accessor = Accessor::new(self.delta.clone(), self.cache.clone(), storage.clone());
 
-        let Some(root) = Self::load(self.root, &accessor).await? else {
+        let Some(root) = Self::load(self.root, &accessor, &mut self.superseded).await? else {
             // Deleting from an empty tree is a no-op; leave it empty.
             self.root = TransientRoot::Unloaded(NULL_BLAKE3_HASH.clone());
             return Ok(self);
         };
         let edited = Edit::Delete(key.clone())
-            .apply::<Backend, D>(root, &accessor)
+            .apply::<Backend, D>(root, &accessor, &mut self.superseded)
             .await?;
         self.root = match edited {
             Some(node) => TransientRoot::Loaded(node),
@@ -336,6 +355,15 @@ where
     /// forward. The root is empty (`NULL_BLAKE3_HASH`) when the batch left the
     /// tree empty.
     pub fn persist(mut self) -> Result<PersistentTree<Key, Value, D>, DialogSearchTreeError> {
+        // Evict every superseded node (one lifted from a persistent reference and
+        // since rewritten) from the delta first, then persist bottom-up. A node
+        // that the re-shape left unchanged is re-emitted under its original hash
+        // and so re-enters the delta; one that was rewritten or orphaned stays
+        // evicted. This keeps the delta bounded by the live tree rather than
+        // growing with the number of unflushed edits, matching the per-operation
+        // shaper's remove-then-add ordering.
+        self.delta.remove_all(self.superseded.iter());
+
         let root = match self.root {
             // An untouched root (including an empty tree's null hash) was never
             // loaded; its hash is already durable and is returned verbatim,
@@ -346,6 +374,75 @@ where
 
         Ok(PersistentTree::seal(root, self.cache, self.delta))
     }
+
+    /// Integrates a differential into this edit batch with deterministic
+    /// last-write-wins conflict resolution, returning the edited batch.
+    ///
+    /// Each change is resolved against the batch's own in-flight writes (read
+    /// via [`get`](Self::get)), so changes later in the stream see the effect of
+    /// earlier ones:
+    ///
+    /// - **Add**: if the key exists with a different value, the value whose
+    ///   blake3 hash (over its serialized rkyv form) is higher wins.
+    /// - **Remove**: only removes when the exact entry (key and value) is
+    ///   present, so a concurrent update is not clobbered by a stale removal.
+    ///
+    /// Atomicity is the caller's: on error the batch is dropped and never
+    /// persisted, leaving the original tree untouched. The caller seals a
+    /// successful integration with [`persist`](Self::persist).
+    pub async fn integrate<Backend, Changes>(
+        mut self,
+        changes: Changes,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Changes: Differential<Key, Value>,
+        Value: PartialEq,
+    {
+        futures_util::pin_mut!(changes);
+        while let Some(change) = changes.next().await {
+            match change? {
+                Change::Add(entry) => match self.get(&entry.key, storage).await? {
+                    None => {
+                        self = self.insert(entry.key, entry.value, storage).await?;
+                    }
+                    Some(existing) => {
+                        if existing != entry.value {
+                            let existing_hash = value_identity(&existing)?;
+                            let new_hash = value_identity(&entry.value)?;
+                            if new_hash.as_bytes() > existing_hash.as_bytes() {
+                                self = self.insert(entry.key, entry.value, storage).await?;
+                            }
+                        }
+                    }
+                },
+                Change::Remove(entry) => {
+                    if let Some(existing) = self.get(&entry.key, storage).await?
+                        && existing == entry.value
+                    {
+                        self = self.delete(&entry.key, storage).await?;
+                    }
+                }
+            }
+        }
+        Ok(self)
+    }
+}
+
+/// Computes the identity hash used for last-write-wins conflict resolution: the
+/// blake3 hash of the value's serialized (rkyv) form, the same canonical bytes
+/// the value has inside a node.
+fn value_identity<Value>(value: &Value) -> Result<Blake3Hash, DialogSearchTreeError>
+where
+    Value: for<'a> Serialize<
+        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+    >,
+{
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(value)
+        .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+    Ok(Blake3Hash::hash(bytes.as_slice()))
 }
 
 /// A single keyed edit applied to a [`TransientTree`].
@@ -411,6 +508,7 @@ where
         self,
         mut root: TransientNode<Key, Value>,
         accessor: &Accessor<Backend>,
+        superseded: &mut Vec<Blake3Hash>,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -427,7 +525,7 @@ where
             match node {
                 TransientNode::Index(index) => {
                     let at = child_for::<Key, Value>(&index.children, key);
-                    lift(&mut index.children[at], accessor).await?;
+                    lift(&mut index.children[at], accessor, superseded).await?;
                     path.push(at);
                 }
                 TransientNode::Segment(_) => break,
@@ -480,7 +578,7 @@ where
         }
 
         let neighbor_path = if is_boundary_delete {
-            lift_right_neighbor_spine(&mut root, &path, accessor).await?
+            lift_right_neighbor_spine(&mut root, &path, accessor, superseded).await?
         } else {
             None
         };
@@ -551,10 +649,13 @@ fn follow<'a, Key, Value>(
 }
 
 /// Ensures `node` is transient, loading and opening it from storage if it is
-/// still a persistent reference.
+/// still a persistent reference. Records the lifted node's hash in `superseded`,
+/// since the re-shape will rewrite it and the persist will re-emit it under a
+/// fresh hash; the old hash is evicted from the delta at persist time.
 async fn lift<Key, Value, Backend>(
     node: &mut Node<Key, Value>,
     accessor: &Accessor<Backend>,
+    superseded: &mut Vec<Blake3Hash>,
 ) -> Result<(), DialogSearchTreeError>
 where
     Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -574,6 +675,7 @@ where
 {
     if let Node::Persistent(link) = node {
         let persistent = accessor.get_node(&link.node).await?;
+        superseded.push(link.node.clone());
         *node = TransientNode::try_from(&persistent)?.into();
     }
     Ok(())
@@ -593,6 +695,7 @@ async fn lift_right_neighbor_spine<Key, Value, Backend>(
     root: &mut TransientNode<Key, Value>,
     path: &[usize],
     accessor: &Accessor<Backend>,
+    superseded: &mut Vec<Blake3Hash>,
 ) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
 where
     Key: self::Key
@@ -635,13 +738,25 @@ where
         return Ok(None);
     };
 
+    // Lift the right sibling itself (the last index in `neighbor_path`) so the
+    // leftmost descent below can follow into it; the descent only lifts the
+    // first child at each deeper level, never the sibling it starts from.
+    let sibling = neighbor_path[neighbor_path.len() - 1];
+    let parent = follow(root, &neighbor_path[..neighbor_path.len() - 1])?;
+    lift(
+        &mut parent.as_index_mut()?.children[sibling],
+        accessor,
+        superseded,
+    )
+    .await?;
+
     // Walk the neighbor subtree's leftmost edge to its leaf, lifting each node so
     // the whole spine is transient.
     loop {
         let node = follow(root, &neighbor_path)?;
         match node {
             TransientNode::Index(index) => {
-                lift(&mut index.children[0], accessor).await?;
+                lift(&mut index.children[0], accessor, superseded).await?;
                 neighbor_path.push(0);
             }
             TransientNode::Segment(_) => break,
@@ -1136,22 +1251,42 @@ mod tests {
     use dialog_common::Blake3Hash;
     use dialog_storage::MemoryStorageBackend;
 
-    use crate::{ContentAddressedStorage, PersistentTree};
+    use crate::{ContentAddressedStorage, PersistentTree, Rank, distribution};
 
     type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
     type TestStorage = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
 
+    /// The geometric rank of a `u32` key, hashed the same way the tree hashes it.
+    fn rank_of(key: u32) -> Rank {
+        distribution::geometric::rank(&Blake3Hash::hash(&key.to_le_bytes()))
+    }
+
+    /// The keys in `range` that act as segment boundaries (rank above the
+    /// leaf threshold).
+    fn boundary_keys(range: std::ops::Range<u32>) -> Vec<u32> {
+        range.filter(|&i| rank_of(i) > 1).collect()
+    }
+
+    /// The keys in `range` that are interior (not segment boundaries).
+    fn interior_keys(range: std::ops::Range<u32>) -> Vec<u32> {
+        range.filter(|&i| rank_of(i) <= 1).collect()
+    }
+
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    /// Build a tree by inserting `keys` one at a time with [`Tree::insert`],
-    /// then flush it to storage.
+    /// Build a tree by inserting `keys` one at a time, each in its own
+    /// single-operation edit batch, then flush it to storage. Persisting after
+    /// every operation is the history-independence baseline a single combined
+    /// batch must reproduce.
     async fn sequential(keys: &[u32], storage: &mut TestStorage) -> Result<TestTree> {
         let mut tree = TestTree::empty();
         for &k in keys {
             tree = tree
+                .edit()
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), storage)
-                .await?;
+                .await?
+                .persist()?;
         }
         for buffer in tree.flush() {
             storage
@@ -1244,8 +1379,9 @@ mod tests {
         Ok(())
     }
 
-    /// Build a tree from `keys` with [`Tree::insert`], delete `to_delete` with
-    /// [`Tree::delete`], flush, and return the resulting tree.
+    /// Build a tree from `keys`, then delete `to_delete`, each operation in its
+    /// own single-operation edit batch, flush, and return the resulting tree.
+    /// This is the per-operation-persist baseline for the delete oracles.
     async fn sequential_with_deletes(
         keys: &[u32],
         to_delete: &[u32],
@@ -1253,7 +1389,11 @@ mod tests {
     ) -> Result<TestTree> {
         let mut tree = sequential(keys, storage).await?;
         for &k in to_delete {
-            tree = tree.delete(&k.to_le_bytes(), storage).await?;
+            tree = tree
+                .edit()
+                .delete(&k.to_le_bytes(), storage)
+                .await?
+                .persist()?;
         }
         for buffer in tree.flush() {
             storage
@@ -1325,9 +1465,9 @@ mod tests {
     }
 
     /// A random interleaving of inserts and deletes in one batch must match the
-    /// same operations applied one at a time through [`Tree`]. This is the
-    /// strongest oracle: it exercises seams created and dissolved repeatedly
-    /// within a single edit.
+    /// same operations applied one at a time, each persisted in its own batch.
+    /// This is the strongest oracle: it exercises seams created and dissolved
+    /// repeatedly within a single edit.
     #[dialog_common::test]
     async fn it_matches_sequential_for_random_interleaved_ops() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
@@ -1348,10 +1488,15 @@ mod tests {
             let mut tree = TestTree::empty();
             for &(is_insert, key) in &ops {
                 tree = if is_insert {
-                    tree.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                    tree.edit()
+                        .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
                         .await?
+                        .persist()?
                 } else {
-                    tree.delete(&key.to_le_bytes(), &storage).await?
+                    tree.edit()
+                        .delete(&key.to_le_bytes(), &storage)
+                        .await?
+                        .persist()?
                 };
             }
             for buffer in tree.flush() {
@@ -1535,6 +1680,331 @@ mod tests {
                 "seed {seed}: bounded transient stream must match persisted stream"
             );
         }
+
+        Ok(())
+    }
+
+    /// Flushes a tree's pending nodes into `storage`, so its root becomes
+    /// reachable from storage alone. Used by the canonical-form tests, which
+    /// compare a flushed delete result against an independent from-scratch
+    /// rebuild.
+    async fn flush_into(tree: &mut TestTree, storage: &mut TestStorage) -> Result<()> {
+        for buffer in tree.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Deleting a boundary key must yield the same root as building a tree from
+    /// the surviving keys directly. The from-scratch rebuild is an independent
+    /// canonical oracle: it never touches the delete path, so a delete that
+    /// reshapes incorrectly cannot also corrupt the reference.
+    #[dialog_common::test]
+    async fn it_produces_canonical_tree_after_deleting_a_boundary_entry() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let all_keys: Vec<u32> = (0..1000).collect();
+        let boundaries = boundary_keys(0..1000);
+        assert!(
+            boundaries.len() >= 2,
+            "need at least 2 boundary keys for a meaningful test; got {}",
+            boundaries.len()
+        );
+
+        let full_tree = sequential(&all_keys, &mut storage).await?;
+
+        for &bk in boundaries.iter().take(5) {
+            let mut tree_via_delete = full_tree
+                .edit()
+                .delete(&bk.to_le_bytes(), &storage)
+                .await?
+                .persist()?;
+            flush_into(&mut tree_via_delete, &mut storage).await?;
+
+            let remaining: Vec<u32> = all_keys.iter().copied().filter(|&k| k != bk).collect();
+            let tree_from_scratch = sequential(&remaining, &mut storage).await?;
+
+            assert_eq!(
+                tree_via_delete.root(),
+                tree_from_scratch.root(),
+                "deleting boundary key {bk} should produce the same root \
+                 as building from scratch without it"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Deleting a non-boundary key must yield the same root as building from the
+    /// surviving keys directly.
+    #[dialog_common::test]
+    async fn it_produces_canonical_tree_after_deleting_a_non_boundary_entry() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let all_keys: Vec<u32> = (0..1000).collect();
+        let non_boundaries = interior_keys(0..1000);
+        assert!(!non_boundaries.is_empty());
+
+        let full_tree = sequential(&all_keys, &mut storage).await?;
+
+        for &key in non_boundaries.iter().take(5) {
+            let mut tree_via_delete = full_tree
+                .edit()
+                .delete(&key.to_le_bytes(), &storage)
+                .await?
+                .persist()?;
+            flush_into(&mut tree_via_delete, &mut storage).await?;
+
+            let remaining: Vec<u32> = all_keys.iter().copied().filter(|&k| k != key).collect();
+            let tree_from_scratch = sequential(&remaining, &mut storage).await?;
+
+            assert_eq!(
+                tree_via_delete.root(),
+                tree_from_scratch.root(),
+                "deleting non-boundary key {key} should produce the same root \
+                 as building from scratch without it"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Building a tree then pruning the extra keys must converge to the same
+    /// root as a direct build of the final key set.
+    #[dialog_common::test]
+    async fn it_produces_canonical_tree_after_bulk_deletion() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let final_keys: Vec<u32> = (0..200).collect();
+        let extra_keys: Vec<u32> = (200..400).collect();
+
+        let mut all_keys = final_keys.clone();
+        all_keys.extend(&extra_keys);
+
+        let tree_direct = sequential(&final_keys, &mut storage).await?;
+
+        let mut tree_pruned = sequential(&all_keys, &mut storage).await?;
+        for &ek in &extra_keys {
+            tree_pruned = tree_pruned
+                .edit()
+                .delete(&ek.to_le_bytes(), &storage)
+                .await?
+                .persist()?;
+        }
+        flush_into(&mut tree_pruned, &mut storage).await?;
+
+        assert_eq!(
+            tree_direct.root(),
+            tree_pruned.root(),
+            "build-then-prune must converge to the same root as a direct build"
+        );
+
+        Ok(())
+    }
+
+    /// Deleting a key then re-inserting it must restore the original root,
+    /// confirming an edit and its inverse cancel exactly.
+    #[dialog_common::test]
+    async fn it_restores_original_root_after_delete_then_reinsert() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let all_keys: Vec<u32> = (0..500).collect();
+        let original = sequential(&all_keys, &mut storage).await?;
+
+        // A mix of boundary and non-boundary keys.
+        let test_keys: Vec<u32> = {
+            let mut keys = boundary_keys(0..500);
+            keys.extend(interior_keys(0..500).into_iter().take(3));
+            keys.truncate(6);
+            keys
+        };
+
+        for &key in &test_keys {
+            let mut after_delete = original
+                .edit()
+                .delete(&key.to_le_bytes(), &storage)
+                .await?
+                .persist()?;
+            flush_into(&mut after_delete, &mut storage).await?;
+
+            let mut restored = after_delete
+                .edit()
+                .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                .await?
+                .persist()?;
+            flush_into(&mut restored, &mut storage).await?;
+
+            assert_eq!(
+                original.root(),
+                restored.root(),
+                "delete then re-insert of key {key} should restore the original root"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// An insert-only history and an insert-then-delete history that end with the
+    /// same entry set must converge to the same root (history independence).
+    #[dialog_common::test]
+    async fn it_converges_to_same_root_regardless_of_operation_history() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // History A: insert 0..100 directly.
+        let tree_a = sequential(&(0..100).collect::<Vec<_>>(), &mut storage).await?;
+
+        // History B: insert 0..200, then delete 100..200.
+        let mut tree_b = sequential(&(0..200).collect::<Vec<_>>(), &mut storage).await?;
+        for i in 100..200u32 {
+            tree_b = tree_b
+                .edit()
+                .delete(&i.to_le_bytes(), &storage)
+                .await?
+                .persist()?;
+        }
+        flush_into(&mut tree_b, &mut storage).await?;
+
+        assert_eq!(
+            tree_a.root(),
+            tree_b.root(),
+            "insert-only vs insert-then-delete must converge for the same entry set"
+        );
+
+        Ok(())
+    }
+
+    /// Deleting the sole entry of a single-entry segment (a boundary whose
+    /// segment holds only itself) must still produce a canonical tree.
+    #[dialog_common::test]
+    async fn it_produces_canonical_tree_after_emptying_a_segment() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let all_keys: Vec<u32> = (0..2000).collect();
+        let boundaries = boundary_keys(0..2000);
+
+        // Find a boundary that forms a single-entry segment: its predecessor in
+        // byte order is also a boundary, so no interior entry sits between them.
+        let mut byte_boundaries: Vec<(u32, [u8; 4])> =
+            boundaries.iter().map(|&k| (k, k.to_le_bytes())).collect();
+        byte_boundaries.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let mut solo_boundary = None;
+        for pair in byte_boundaries.windows(2) {
+            let (_, prev_bytes) = pair[0];
+            let (curr_u32, curr_bytes) = pair[1];
+
+            let entries_between = all_keys
+                .iter()
+                .filter(|&&k| {
+                    let kb = k.to_le_bytes();
+                    kb > prev_bytes && kb < curr_bytes
+                })
+                .count();
+
+            if entries_between == 0 {
+                solo_boundary = Some(curr_u32);
+                break;
+            }
+        }
+
+        // No single-entry segment in this key set is possible but unlikely with
+        // 2000 keys; nothing to assert if so.
+        let Some(solo_key) = solo_boundary else {
+            return Ok(());
+        };
+
+        let full_tree = sequential(&all_keys, &mut storage).await?;
+
+        let mut tree_via_delete = full_tree
+            .edit()
+            .delete(&solo_key.to_le_bytes(), &storage)
+            .await?
+            .persist()?;
+        flush_into(&mut tree_via_delete, &mut storage).await?;
+
+        let remaining: Vec<u32> = all_keys
+            .iter()
+            .copied()
+            .filter(|&k| k != solo_key)
+            .collect();
+        let tree_from_scratch = sequential(&remaining, &mut storage).await?;
+
+        assert_eq!(
+            tree_via_delete.root(),
+            tree_from_scratch.root(),
+            "deleting sole entry in segment (key {solo_key}) should produce a canonical tree"
+        );
+
+        Ok(())
+    }
+
+    /// Deleting the first entry (smallest key in byte order) must produce a
+    /// canonical tree.
+    #[dialog_common::test]
+    async fn it_produces_canonical_tree_after_deleting_first_entry() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let all_keys: Vec<u32> = (0..1000).collect();
+
+        let mut sorted: Vec<[u8; 4]> = all_keys.iter().map(|k| k.to_le_bytes()).collect();
+        sorted.sort();
+        let first_key = sorted[0];
+        let first_u32 = u32::from_le_bytes(first_key);
+
+        let full_tree = sequential(&all_keys, &mut storage).await?;
+
+        let mut tree_via_delete = full_tree.edit().delete(&first_key, &storage).await?.persist()?;
+        flush_into(&mut tree_via_delete, &mut storage).await?;
+
+        let remaining: Vec<u32> = all_keys
+            .iter()
+            .copied()
+            .filter(|&k| k != first_u32)
+            .collect();
+        let tree_from_scratch = sequential(&remaining, &mut storage).await?;
+
+        assert_eq!(
+            tree_via_delete.root(),
+            tree_from_scratch.root(),
+            "deleting first entry (key {first_u32}) should produce a canonical tree"
+        );
+
+        Ok(())
+    }
+
+    /// Deleting the last entry (largest key in byte order) must produce a
+    /// canonical tree. The rightmost segment is always a tail, so this verifies
+    /// tails at the end are left intact.
+    #[dialog_common::test]
+    async fn it_produces_canonical_tree_after_deleting_last_entry() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let all_keys: Vec<u32> = (0..1000).collect();
+
+        let mut sorted: Vec<[u8; 4]> = all_keys.iter().map(|k| k.to_le_bytes()).collect();
+        sorted.sort();
+        let last_key = *sorted.last().unwrap();
+        let last_u32 = u32::from_le_bytes(last_key);
+
+        let full_tree = sequential(&all_keys, &mut storage).await?;
+
+        let mut tree_via_delete = full_tree.edit().delete(&last_key, &storage).await?.persist()?;
+        flush_into(&mut tree_via_delete, &mut storage).await?;
+
+        let remaining: Vec<u32> = all_keys
+            .iter()
+            .copied()
+            .filter(|&k| k != last_u32)
+            .collect();
+        let tree_from_scratch = sequential(&remaining, &mut storage).await?;
+
+        assert_eq!(
+            tree_via_delete.root(),
+            tree_from_scratch.root(),
+            "deleting last entry (key {last_u32}) should produce a canonical tree"
+        );
 
         Ok(())
     }

@@ -39,7 +39,13 @@ fn bench_insert_batch_vs_sequential(c: &mut Criterion) {
                 let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
                 let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
                 for (key, value) in keys.iter().zip(values.iter()) {
-                    tree = tree.insert(*key, value.clone(), &storage).await.unwrap();
+                    tree = tree
+                        .edit()
+                        .insert(*key, value.clone(), &storage)
+                        .await
+                        .unwrap()
+                        .persist()
+                        .unwrap();
                 }
             });
         });
@@ -86,13 +92,31 @@ fn bench_mixed_batch_vs_sequential(c: &mut Criterion) {
                 let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
                 let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
                 for (key, value) in base_keys.iter().zip(base_values.iter()) {
-                    tree = tree.insert(*key, value.clone(), &storage).await.unwrap();
+                    tree = tree
+                        .edit()
+                        .insert(*key, value.clone(), &storage)
+                        .await
+                        .unwrap()
+                        .persist()
+                        .unwrap();
                 }
                 for (key, value) in fresh_keys.iter().zip(fresh_values.iter()) {
-                    tree = tree.insert(*key, value.clone(), &storage).await.unwrap();
+                    tree = tree
+                        .edit()
+                        .insert(*key, value.clone(), &storage)
+                        .await
+                        .unwrap()
+                        .persist()
+                        .unwrap();
                 }
                 for key in delete_keys.iter() {
-                    tree = tree.delete(key, &storage).await.unwrap();
+                    tree = tree
+                        .edit()
+                        .delete(key, &storage)
+                        .await
+                        .unwrap()
+                        .persist()
+                        .unwrap();
                 }
             });
         });
