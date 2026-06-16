@@ -9,8 +9,8 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Key, Node, SymmetryWith,
-    Value,
+    Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Key, PersistentNode,
+    SymmetryWith, Value,
 };
 
 /// Accessor for retrieving nodes from a three-tier storage hierarchy.
@@ -54,7 +54,7 @@ where
     pub async fn get_node<Key, Value>(
         &self,
         hash: &Blake3Hash,
-    ) -> Result<Node<Key, Value>, DialogSearchTreeError>
+    ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
     where
         Key: self::Key,
         Key::Archived: for<'a> CheckBytes<
@@ -84,6 +84,6 @@ where
             .ok_or_else(|| {
                 DialogSearchTreeError::Node(format!("Blob not found in storage: {}", hash))
             })
-            .map(|buffer| Node::new(buffer))
+            .map(|buffer| PersistentNode::new(buffer))
     }
 }

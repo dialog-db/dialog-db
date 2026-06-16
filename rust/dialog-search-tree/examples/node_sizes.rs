@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 
 use dialog_common::Blake3Hash;
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{ContentAddressedStorage, Distribution, Node, Rank, Tree};
+use dialog_search_tree::{
+    ContentAddressedStorage, Distribution, PersistentNode, PersistentTree, Rank,
+};
 use dialog_storage::MemoryStorageBackend;
 
 const BENCH_SEED: u64 = 42;
@@ -40,12 +42,15 @@ type Backend = MemoryStorageBackend<Blake3Hash, Vec<u8>>;
 
 async fn build<D: Distribution>(
     size: usize,
-) -> (Tree<[u8; 16], Vec<u8>, D>, ContentAddressedStorage<Backend>) {
+) -> (
+    PersistentTree<[u8; 16], Vec<u8>, D>,
+    ContentAddressedStorage<Backend>,
+) {
     let mut data = BenchData::new(BENCH_SEED);
     let keys = data.random_buffers::<16>(size);
     let values = data.random_buffers::<32>(size);
     let mut storage = ContentAddressedStorage::new(Backend::default());
-    let mut tree = Tree::<[u8; 16], Vec<u8>, D>::empty();
+    let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
     for (k, v) in keys.iter().zip(values.iter()) {
         tree = tree.insert(*k, v.to_vec(), &storage).await.unwrap();
     }
@@ -74,7 +79,7 @@ async fn report<const M: u64>(size: usize) {
         for hash in &frontier {
             let bytes = storage.retrieve(hash).await.unwrap().unwrap();
             sizes_by_depth.entry(depth).or_default().push(bytes.len());
-            let node = Node::<[u8; 16], Vec<u8>>::new(bytes.into());
+            let node = PersistentNode::<[u8; 16], Vec<u8>>::new(bytes.into());
             if let Ok(index) = node.as_index() {
                 if depth == 0 {
                     root_fanout = index.links.len();

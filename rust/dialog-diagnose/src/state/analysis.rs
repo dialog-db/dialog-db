@@ -6,7 +6,8 @@ use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Index, KeyBytes, State, Storage};
 use dialog_common::{Blake3Hash as NodeHash, NULL_BLAKE3_HASH};
 use dialog_search_tree::{
-    Accessor, ArchivedNodeBody, Cache, ContentAddressedStorage as TreeStorage, Delta, Node,
+    Accessor, ArchivedNodeBody, Cache, ContentAddressedStorage as TreeStorage, Delta,
+    PersistentNode,
 };
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 
@@ -83,7 +84,8 @@ impl ArtifactsTreeAnalysis {
                 let mut next_level = vec![];
 
                 for hash in level {
-                    let node: Node<KeyBytes, State<Datum>> = accessor.get_node(&hash).await?;
+                    let node: PersistentNode<KeyBytes, State<Datum>> =
+                        accessor.get_node(&hash).await?;
                     match node.body()? {
                         ArchivedNodeBody::Index(index) => {
                             for link in index.links.iter() {

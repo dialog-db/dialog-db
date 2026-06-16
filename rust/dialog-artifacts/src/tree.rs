@@ -19,14 +19,14 @@
 //! unchanged, while [`State<Datum>`] is the tree's value type directly,
 //! serialized into node buffers by the tree itself.
 //!
-//! `ArtifactTree` is a type alias for a `dialog_search_tree::Tree`, so the
+//! `ArtifactTree` is a type alias for a `dialog_search_tree::PersistentTree`, so the
 //! orphan rule rules out inherent methods — the operations are exposed as
 //! an extension trait instead.
 
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{ContentAddressedStorage, Entry, Tree, Value as TreeValue};
+use dialog_search_tree::{ContentAddressedStorage, Entry, PersistentTree, Value as TreeValue};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
 
@@ -40,7 +40,7 @@ use crate::{
 ///
 /// Keys are the raw fixed-size bytes of [`Key`]; values are [`State`]
 /// payloads stored in the tree's native (rkyv) encoding.
-pub type ArtifactTree = Tree<KeyBytes, State<Datum>>;
+pub type ArtifactTree = PersistentTree<KeyBytes, State<Datum>>;
 
 impl TreeValue for State<Datum> {}
 
@@ -74,7 +74,7 @@ where
 /// Shared mutation + scan operations on an [`ArtifactTree`].
 ///
 /// An extension trait rather than inherent methods because
-/// `ArtifactTree` aliases a foreign `dialog_search_tree::Tree` — the
+/// `ArtifactTree` aliases a foreign `dialog_search_tree::PersistentTree` — the
 /// orphan rule forbids `impl ArtifactTree { .. }`. Uses
 /// `#[async_trait]` (matching [`ArtifactStore`](crate::ArtifactStore))
 /// so the async `apply` desugars to a boxed future rather than a

@@ -1,3 +1,6 @@
+mod transient;
+pub use transient::*;
+
 use std::{marker::PhantomData, ops::RangeBounds};
 
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
@@ -16,8 +19,9 @@ use rkyv::{
 
 use crate::{
     Accessor, ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Node, SearchOptions,
-    SearchResult, SymmetryWith, TreeDifference, TreeShaper, TreeWalker, Value, into_owned,
+    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, PersistentNode,
+    SearchOptions, SearchResult, SymmetryWith, TreeDifference, TreeShaper, TreeWalker, Value,
+    into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -44,7 +48,7 @@ use crate::{
 /// This enables efficient versioning where multiple tree versions share the
 /// same cache for read operations, but maintain independent mutation state.
 #[derive(Debug)]
-pub struct Tree<Key, Value, D = Geometric>
+pub struct PersistentTree<Key, Value, D = Geometric>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -64,7 +68,7 @@ where
 
 // Manual impl: a derived `Clone` would demand `D: Clone`, but the
 // distribution is a pure type-level strategy that is never instantiated.
-impl<Key, Value, D> Clone for Tree<Key, Value, D>
+impl<Key, Value, D> Clone for PersistentTree<Key, Value, D>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -84,7 +88,7 @@ where
     }
 }
 
-impl<Key, Value, D> Tree<Key, Value, D>
+impl<Key, Value, D> PersistentTree<Key, Value, D>
 where
     Key: self::Key
         + ConditionalSync
@@ -265,7 +269,7 @@ where
         let accessor = Accessor::new(delta.clone(), Cache::new(), storage.clone());
 
         loop {
-            let node: Node<Key, Value> = accessor.get_node(&root).await?;
+            let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
             let child_hash = match node.body()? {
                 ArchivedNodeBody::Index(index) if index.links.len() == 1 => {
                     <&Blake3Hash>::from(&index.links[0].node).clone()
@@ -273,7 +277,7 @@ where
                 _ => break,
             };
 
-            let child: Node<Key, Value> = accessor.get_node(&child_hash).await?;
+            let child: PersistentNode<Key, Value> = accessor.get_node(&child_hash).await?;
             match child.body()? {
                 ArchivedNodeBody::Index(_) => {
                     // The wrapper is unreachable in the new tree; drop it
@@ -450,7 +454,7 @@ where
     /// modifications. The new tree shares the same cache as the original,
     /// enabling efficient structural sharing.
     fn advance(&self, root: Blake3Hash, delta: Delta<Blake3Hash, Buffer>) -> Self {
-        Tree {
+        PersistentTree {
             key: PhantomData,
             value: PhantomData,
             distribution: PhantomData,
@@ -458,6 +462,45 @@ where
             node_cache: self.node_cache.clone(),
             delta,
         }
+    }
+
+    /// Builds a persistent tree from a sealed root hash, a node cache, and a
+    /// delta of pending changes. Used by [`TransientTree::persist`] to turn a
+    /// finished edit batch back into a [`PersistentTree`] while carrying its
+    /// cache and accumulated delta forward.
+    pub(crate) fn seal(
+        root: Blake3Hash,
+        node_cache: Cache<Blake3Hash, Buffer>,
+        delta: Delta<Blake3Hash, Buffer>,
+    ) -> Self {
+        PersistentTree {
+            key: PhantomData,
+            value: PhantomData,
+            distribution: PhantomData,
+            root,
+            node_cache,
+            delta,
+        }
+    }
+
+    /// Opens a batch of in-place edits over this tree.
+    ///
+    /// The returned [`TransientTree`] holds the tree's spine in transient form;
+    /// apply [`insert`](TransientTree::insert) / [`delete`](TransientTree::delete)
+    /// to mutate it and [`persist`](TransientTree::persist) to seal the batch
+    /// back into a [`PersistentTree`]. A batch and the equivalent sequence of
+    /// [`insert`](Self::insert) / [`delete`](Self::delete) converge on the same
+    /// root.
+    ///
+    /// Opening is synchronous and touches no storage: the root is loaded lazily
+    /// by the first edit that descends into it. Equivalent to
+    /// [`TransientTree::from`].
+    pub fn edit(&self) -> TransientTree<Key, Value, D> {
+        TransientTree::new(
+            self.root.clone(),
+            self.node_cache.clone(),
+            self.delta.clone(),
+        )
     }
 
     /// Searches for the leaf segment that would contain `key`, recording the
@@ -491,7 +534,7 @@ where
     }
 }
 
-impl<Key, Value, D> From<Blake3Hash> for Tree<Key, Value, D>
+impl<Key, Value, D> From<Blake3Hash> for PersistentTree<Key, Value, D>
 where
     Key: self::Key + ConditionalSync + 'static,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -518,6 +561,33 @@ where
     }
 }
 
+impl<Key, Value, D> From<&PersistentTree<Key, Value, D>> for TransientTree<Key, Value, D>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord + ConditionalSync,
+    Key::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    Key::Archived: Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: for<'a> Serialize<
+        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+    >,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Value: for<'a> Serialize<
+        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+    >,
+    D: Distribution,
+{
+    fn from(tree: &PersistentTree<Key, Value, D>) -> Self {
+        tree.edit()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(unexpected_cfgs)]
@@ -525,7 +595,7 @@ mod tests {
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
-    use crate::{ContentAddressedStorage, Tree};
+    use crate::{ContentAddressedStorage, PersistentTree};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -533,7 +603,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_retrieves_inserted_values() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert a range of values
         for i in 0..100u32 {
@@ -565,7 +635,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_deletes_values() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert values
         for i in 0..50u32 {
@@ -618,7 +688,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert values in non-sequential order
         let values = [5u32, 2, 8, 1, 9, 3, 7, 4, 6, 0];
@@ -666,7 +736,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert values 0-99
         for i in 0..100u32 {
@@ -719,7 +789,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert values 0-9 and 90-99
         for i in 0..10u32 {
@@ -760,7 +830,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Get on empty tree should return None
         let value = tree.get(&1u32.to_le_bytes(), &storage).await?;
@@ -788,7 +858,7 @@ mod tests {
     async fn it_has_null_root_when_empty() -> Result<()> {
         use dialog_common::NULL_BLAKE3_HASH;
 
-        let tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         assert_eq!(tree.root(), &NULL_BLAKE3_HASH.clone());
 
         Ok(())
@@ -797,7 +867,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_updates_existing_keys() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert initial value
         tree = tree
@@ -837,7 +907,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_preserves_old_tree_after_insert() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree_v1 = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree_v1 = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert into v1
         tree_v1 = tree_v1
@@ -890,7 +960,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_creates_independent_tree_versions() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut base = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut base = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert base data
         for i in 0..10u32 {
@@ -950,7 +1020,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_changes_root_after_modification() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         let root_empty = tree.root().clone();
 
@@ -1001,7 +1071,7 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
         // Build tree A
-        let mut tree_a = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree_a = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         for i in 0..10u32 {
             tree_a = tree_a
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
@@ -1014,7 +1084,7 @@ mod tests {
         }
 
         // Build tree B with same data
-        let mut tree_b = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree_b = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         for i in 0..10u32 {
             tree_b = tree_b
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
@@ -1035,7 +1105,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_reads_unflushed_insertions() -> Result<()> {
         let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert without flushing
         tree = tree
@@ -1067,7 +1137,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_reads_through_delta_and_storage() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert and flush first batch
         for i in 0..5u32 {
@@ -1100,7 +1170,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_single_entry_tree() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert single entry
         tree = tree
@@ -1139,7 +1209,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_deletes_nonexistent_key_in_empty_tree() -> Result<()> {
         let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         let root_before = tree.root().clone();
 
@@ -1155,7 +1225,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_deletes_nonexistent_key_in_populated_tree() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert some data
         tree = tree.insert(1u32.to_le_bytes(), vec![1], &storage).await?;
@@ -1187,7 +1257,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_handles_mixed_operations() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert
         tree = tree.insert(1u32.to_le_bytes(), vec![1], &storage).await?;
@@ -1241,7 +1311,7 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
         // Build tree A with one insertion order
-        let mut tree_a = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree_a = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         tree_a = tree_a.insert(1u32.to_le_bytes(), vec![1], &storage).await?;
         tree_a = tree_a.insert(2u32.to_le_bytes(), vec![2], &storage).await?;
         tree_a = tree_a.insert(3u32.to_le_bytes(), vec![3], &storage).await?;
@@ -1253,7 +1323,7 @@ mod tests {
         }
 
         // Build tree B with different insertion order
-        let mut tree_b = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree_b = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         tree_b = tree_b.insert(3u32.to_le_bytes(), vec![3], &storage).await?;
         tree_b = tree_b.insert(1u32.to_le_bytes(), vec![1], &storage).await?;
         tree_b = tree_b.insert(2u32.to_le_bytes(), vec![2], &storage).await?;
@@ -1275,7 +1345,7 @@ mod tests {
         use dialog_common::NULL_BLAKE3_HASH;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert some entries
         tree = tree.insert(1u32.to_le_bytes(), vec![1], &storage).await?;
@@ -1325,7 +1395,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert values 10-20
         for i in 10..=20u32 {
@@ -1382,7 +1452,7 @@ mod tests {
         use rand::{Rng, thread_rng};
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut ledger = Vec::new();
 
         // Generate and insert random data
@@ -1419,7 +1489,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_gets_present_and_absent_keys_across_index_boundaries() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Even keys only, so every odd key probes a gap; spread wide enough to
         // force a multi-level index whose boundaries the descent must navigate.
@@ -1462,7 +1532,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_restores_tree_from_persisted_root_hash() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         for i in 0..100u32 {
             tree = tree
@@ -1478,7 +1548,7 @@ mod tests {
         }
 
         // Reconstruct from just the root hash — no shared delta or cache
-        let restored = Tree::<[u8; 4], Vec<u8>>::from_hash(root);
+        let restored = PersistentTree::<[u8; 4], Vec<u8>>::from_hash(root);
 
         for i in 0..100u32 {
             let value = restored.get(&i.to_le_bytes(), &storage).await?;
@@ -1500,7 +1570,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert and flush a base set
         for i in 0..10u32 {
@@ -1544,7 +1614,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Build and flush
         for i in 0..20u32 {
@@ -1587,7 +1657,7 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let all_keys: Vec<u32> = (0..1000).collect();
 
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         for &k in &all_keys {
             tree = tree
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -1643,7 +1713,7 @@ mod tests {
         use dialog_common::NULL_BLAKE3_HASH;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         for i in 0..500u32 {
             tree = tree
@@ -1678,7 +1748,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_preserves_root_when_upserting_identical_value() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         for i in 0..50u32 {
             tree = tree
@@ -1712,7 +1782,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Insert keys whose byte and numeric orders differ.
         // 1u32 = [1,0,0,0], 256u32 = [0,1,0,0], 512u32 = [0,2,0,0]
@@ -1766,7 +1836,7 @@ mod tests {
         use std::ops::Bound;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         for i in 0..20u32 {
             tree = tree
@@ -1806,7 +1876,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         for i in 0..20u32 {
             tree = tree
@@ -1838,7 +1908,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         for i in 0..20u32 {
             tree = tree
@@ -1887,7 +1957,7 @@ mod tests {
         );
 
         // Build tree A: forward insertion order
-        let mut tree_a = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree_a = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         for &k in &keys {
             tree_a = tree_a
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -1900,7 +1970,7 @@ mod tests {
         }
 
         // Build tree B: reverse insertion order
-        let mut tree_b = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree_b = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         for &k in keys.iter().rev() {
             tree_b = tree_b
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -1931,7 +2001,7 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
         // Create base tree
-        let mut base = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut base = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         for i in 0..20u32 {
             base = base
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
@@ -2008,7 +2078,7 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let all_keys: Vec<u32> = (0..1000).collect();
 
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         for &k in &all_keys {
             tree = tree
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
@@ -2068,7 +2138,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_removes_orphaned_hashes_from_delta_after_mutation() -> Result<()> {
         let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // After a single insert into an empty tree the delta holds
         // exactly the root's new subtree (here: one level-1 index and
@@ -2123,7 +2193,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_keeps_delta_bounded_across_unflushed_mutations() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
         // Build and flush a baseline so the delta starts empty.
         let base_size: u32 = 200;
@@ -2174,8 +2244,8 @@ mod tests {
         storage: &mut ContentAddressedStorage<
             MemoryStorageBackend<dialog_common::Blake3Hash, Vec<u8>>,
         >,
-    ) -> Result<Tree<[u8; 4], Vec<u8>>> {
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+    ) -> Result<PersistentTree<[u8; 4], Vec<u8>>> {
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         for &k in keys {
             tree = tree
                 .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), storage)
@@ -2302,7 +2372,7 @@ mod tests {
         use futures_util::StreamExt;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         for i in 0..5u32 {
             tree = tree
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)

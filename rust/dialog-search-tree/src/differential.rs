@@ -33,7 +33,7 @@ use rkyv::{
 
 use crate::{
     ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Entry,
-    Key, Link, Node, SymmetryWith, Tree, Value, into_owned,
+    Key, Link, PersistentNode, PersistentTree, SymmetryWith, Value, into_owned,
 };
 
 /// Represents a change in the key-value store.
@@ -72,7 +72,7 @@ where
     /// A fully loaded node together with its owned upper bound key.
     Loaded {
         /// The loaded node.
-        node: Node<Key, Value>,
+        node: PersistentNode<Key, Value>,
         /// The node's upper bound key (owned copy).
         upper_bound: Key,
     },
@@ -126,7 +126,7 @@ where
 {
     storage: &'a ContentAddressedStorage<Backend>,
     nodes: Vec<SparseTreeNode<Key, Value>>,
-    expanded: Vec<Node<Key, Value>>,
+    expanded: Vec<PersistentNode<Key, Value>>,
 }
 
 impl<'a, Key, Value, Backend> SparseTree<'a, Key, Value, Backend>
@@ -151,11 +151,11 @@ where
     async fn load(
         storage: &ContentAddressedStorage<Backend>,
         hash: &Blake3Hash,
-    ) -> Result<Node<Key, Value>, DialogSearchTreeError> {
+    ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         let bytes = storage.retrieve(hash).await?.ok_or_else(|| {
             DialogSearchTreeError::Node(format!("Blob not found in storage: {hash}"))
         })?;
-        Ok(Node::new(Buffer::from(bytes)))
+        Ok(PersistentNode::new(Buffer::from(bytes)))
     }
 
     /// Initializes a sparse tree from a root hash. The root is not loaded;
@@ -167,7 +167,7 @@ where
         let nodes = if root == NULL_BLAKE3_HASH {
             vec![]
         } else {
-            let node: Node<Key, Value> = Self::load(storage, root).await?;
+            let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
             let upper_bound = node.body()?.upper_bound().and_then(into_owned)?;
             vec![SparseTreeNode::Loaded { node, upper_bound }]
         };
@@ -389,8 +389,8 @@ where
     /// the trees: in particular, two identical trees are recognized by their
     /// root hashes alone, with zero reads.
     pub async fn compute<D>(
-        source_tree: &Tree<Key, Value, D>,
-        target_tree: &Tree<Key, Value, D>,
+        source_tree: &PersistentTree<Key, Value, D>,
+        target_tree: &PersistentTree<Key, Value, D>,
         source_storage: &'a ContentAddressedStorage<Backend>,
         target_storage: &'a ContentAddressedStorage<Backend>,
     ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
@@ -568,7 +568,7 @@ where
     /// tree.
     pub fn novel_nodes(
         &'a self,
-    ) -> impl Stream<Item = Result<Node<Key, Value>, DialogSearchTreeError>> + 'a {
+    ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a {
         try_stream! {
             for node in &self.target.expanded {
                 yield node.clone();
@@ -611,7 +611,7 @@ mod tests {
 
     use super::{Change, TreeDifference};
     use crate::helpers::{TestStorage, Traversable as _, TraversalOrder, TreeNodes as _};
-    use crate::{ContentAddressedStorage, Entry, Tree, tree_spec};
+    use crate::{ContentAddressedStorage, Entry, PersistentTree, tree_spec};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -658,7 +658,7 @@ mod tests {
         }
     }
 
-    type TestTree = Tree<[u8; 4], Vec<u8>>;
+    type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
 
     async fn build(
         keys: impl IntoIterator<Item = (u32, Vec<u8>)>,
