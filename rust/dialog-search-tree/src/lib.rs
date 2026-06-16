@@ -158,6 +158,9 @@ pub use storage::*;
 mod tree;
 pub use tree::*;
 
+mod buffered;
+pub use buffered::*;
+
 mod delta;
 pub use delta::*;
 
