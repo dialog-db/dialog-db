@@ -2,14 +2,17 @@
 
 //! A content-addressed search tree implementation.
 //!
-//! This crate provides [`Tree`], a persistent key-value store backed by a
-//! prolly tree with content-addressed storage. Trees support efficient lookups,
-//! insertions, deletions, and range queries while maintaining structural
-//! sharing across versions.
+//! This crate provides [`PersistentTree`], a persistent key-value store backed
+//! by a prolly tree with content-addressed storage. Trees support efficient
+//! lookups, insertions, deletions, and range queries while maintaining
+//! structural sharing across versions.
 //!
-//! Trees are immutable data structures. Operations like [`Tree::insert`] and
-//! [`Tree::delete`] return a new [`Tree`] instance rather than modifying in
-//! place. This enables:
+//! Trees are immutable data structures. A [`PersistentTree`] is read-only;
+//! mutations go through [`PersistentTree::edit`], which returns a
+//! [`TransientTree`] that applies a batch of [`insert`](TransientTree::insert)
+//! and [`delete`](TransientTree::delete) operations in memory. Sealing the batch
+//! with [`persist`](TransientTree::persist) yields a new [`PersistentTree`]
+//! rather than modifying the original in place. This enables:
 //!
 //! - **Version History**: Keep multiple versions of the tree simultaneously
 //! - **Efficient Copying**: Trees share unchanged nodes through content
@@ -32,21 +35,22 @@
 //!    found in the delta or cache.
 //!
 //! Tree modifications (insert, delete) accumulate in the delta buffer. You must
-//! call [`Tree::flush`] and store the returned buffers to persist changes.
-//! Unflushed changes remain queryable but are lost when the tree is dropped.
+//! call [`PersistentTree::flush`] and store the returned buffers to persist
+//! changes. Unflushed changes remain queryable but are lost when the tree is
+//! dropped.
 //!
 //! Basic usage:
 //!
 //! ```
 //! # tokio_test::block_on(async {
-//! use dialog_search_tree::{Tree, ContentAddressedStorage};
+//! use dialog_search_tree::{PersistentTree, ContentAddressedStorage};
 //! use dialog_storage::MemoryStorageBackend;
 //!
 //! let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-//! let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+//! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 //!
 //! // Insert entries
-//! tree = tree.insert([0, 0, 0, 1], vec![1, 2, 3], &storage).await.unwrap();
+//! tree = tree.edit().insert([0, 0, 0, 1], vec![1, 2, 3], &storage).await.unwrap().persist().unwrap();
 //!
 //! // Retrieve entries
 //! let value = tree.get(&[0, 0, 0, 1], &storage).await.unwrap();
@@ -58,15 +62,15 @@
 //!
 //! ```
 //! # tokio_test::block_on(async {
-//! use dialog_search_tree::{Tree, ContentAddressedStorage};
+//! use dialog_search_tree::{PersistentTree, ContentAddressedStorage};
 //! use dialog_storage::MemoryStorageBackend;
 //!
 //! let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-//! let mut tree = Tree::<[u8; 4], Vec<u8>>::empty();
+//! let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 //!
 //! // Make several modifications
 //! for i in 0..10u32 {
-//!     tree = tree.insert(i.to_le_bytes(), vec![i as u8], &storage).await.unwrap();
+//!     tree = tree.edit().insert(i.to_le_bytes(), vec![i as u8], &storage).await.unwrap().persist().unwrap();
 //! }
 //!
 //! // Changes are queryable immediately, even before flushing
@@ -80,7 +84,7 @@
 //!
 //! // After flushing, the tree can be reconstructed from its root hash
 //! // by loading nodes from storage as needed
-//! let tree = Tree::<[u8; 4], Vec<u8>>::from_hash(root_hash);
+//! let tree = PersistentTree::<[u8; 4], Vec<u8>>::from_hash(root_hash);
 //! assert_eq!(tree.get(&5u32.to_le_bytes(), &storage).await.unwrap(), Some(vec![5]));
 //! assert_eq!(tree.get(&9u32.to_le_bytes(), &storage).await.unwrap(), Some(vec![9]));
 //! # })
@@ -90,19 +94,19 @@
 //!
 //! ```
 //! # tokio_test::block_on(async {
-//! use dialog_search_tree::{Tree, ContentAddressedStorage};
+//! use dialog_search_tree::{PersistentTree, ContentAddressedStorage};
 //! use dialog_storage::MemoryStorageBackend;
 //!
 //! let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-//! let tree_v1 = Tree::<[u8; 4], Vec<u8>>::empty();
+//! let tree_v1 = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 //!
 //! // Create version 1 with some data
-//! let tree_v1 = tree_v1.insert([0, 0, 0, 1], vec![1], &storage).await.unwrap();
-//! let tree_v1 = tree_v1.insert([0, 0, 0, 2], vec![2], &storage).await.unwrap();
+//! let tree_v1 = tree_v1.edit().insert([0, 0, 0, 1], vec![1], &storage).await.unwrap().persist().unwrap();
+//! let tree_v1 = tree_v1.edit().insert([0, 0, 0, 2], vec![2], &storage).await.unwrap().persist().unwrap();
 //!
 //! // Create version 2 by modifying version 1
 //! // Note: tree_v1 remains unchanged
-//! let tree_v2 = tree_v1.insert([0, 0, 0, 3], vec![3], &storage).await.unwrap();
+//! let tree_v2 = tree_v1.edit().insert([0, 0, 0, 3], vec![3], &storage).await.unwrap().persist().unwrap();
 //!
 //! // Both versions can be queried independently
 //! assert_eq!(tree_v1.get(&[0, 0, 0, 3], &storage).await.unwrap(), None);
@@ -157,9 +161,6 @@ pub use encoding::*;
 
 mod walker;
 pub use walker::*;
-
-mod shaper;
-pub use shaper::*;
 
 mod compare;
 pub use compare::*;

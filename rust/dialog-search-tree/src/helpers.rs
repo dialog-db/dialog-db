@@ -563,8 +563,10 @@ impl TreeDescriptor {
         for key in &collection {
             let rank = ranks.get(key).copied().unwrap_or(1);
             tree = tree
+                .edit()
                 .insert(encode_key(key, rank), key.clone(), &storage)
-                .await?;
+                .await?
+                .persist()?;
         }
 
         // Persist all pending nodes so differentials read them through the

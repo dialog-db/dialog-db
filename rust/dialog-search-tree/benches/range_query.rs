@@ -27,7 +27,13 @@ fn bench_range_query(c: &mut Criterion) {
         let values = data.random_buffers::<32>(TREE_SIZE);
 
         for (key, value) in keys.iter().zip(values.iter()) {
-            tree = tree.insert(*key, value.to_vec(), &storage).await.unwrap();
+            tree = tree
+                .edit()
+                .insert(*key, value.to_vec(), &storage)
+                .await
+                .unwrap()
+                .persist()
+                .unwrap();
         }
 
         (tree, storage)

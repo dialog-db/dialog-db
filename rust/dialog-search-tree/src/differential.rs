@@ -666,7 +666,11 @@ mod tests {
     ) -> Result<TestTree> {
         let mut tree = TestTree::empty();
         for (key, value) in keys {
-            tree = tree.insert(key.to_le_bytes(), value, storage).await?;
+            tree = tree
+                .edit()
+                .insert(key.to_le_bytes(), value, storage)
+                .await?
+                .persist()?;
         }
         for buffer in tree.flush() {
             storage
@@ -768,7 +772,11 @@ mod tests {
         // tree with the target's root.
         let mut merged = source.clone();
         let changes = source.differentiate(&target, &storage, &storage);
-        merged.integrate(changes, &storage).await?;
+        merged = merged
+            .edit()
+            .integrate(changes, &storage)
+            .await?
+            .persist()?;
         for buffer in merged.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
@@ -796,8 +804,10 @@ mod tests {
         // leaf path on each side.
         let mut modified = base.clone();
         modified = modified
+            .edit()
             .insert(1000u32.to_le_bytes(), vec![0xFF], &storage)
-            .await?;
+            .await?
+            .persist()?;
         for buffer in modified.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
@@ -833,7 +843,11 @@ mod tests {
         let base = build(base_entries.clone(), &mut storage).await?;
 
         let mut ours = base.clone();
-        ours = ours.insert(99u32.to_le_bytes(), vec![1], &storage).await?;
+        ours = ours
+            .edit()
+            .insert(99u32.to_le_bytes(), vec![1], &storage)
+            .await?
+            .persist()?;
         for buffer in ours.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
@@ -842,8 +856,10 @@ mod tests {
 
         let mut theirs = base.clone();
         theirs = theirs
+            .edit()
             .insert(99u32.to_le_bytes(), vec![2], &storage)
-            .await?;
+            .await?
+            .persist()?;
         for buffer in theirs.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
@@ -854,11 +870,19 @@ mod tests {
         // both replicas must converge on the same value.
         let mut merged_ours = ours.clone();
         let their_changes = base.differentiate(&theirs, &storage, &storage);
-        merged_ours.integrate(their_changes, &storage).await?;
+        merged_ours = merged_ours
+            .edit()
+            .integrate(their_changes, &storage)
+            .await?
+            .persist()?;
 
         let mut merged_theirs = theirs.clone();
         let our_changes = base.differentiate(&ours, &storage, &storage);
-        merged_theirs.integrate(our_changes, &storage).await?;
+        merged_theirs = merged_theirs
+            .edit()
+            .integrate(our_changes, &storage)
+            .await?
+            .persist()?;
 
         for buffer in merged_ours.flush() {
             storage
@@ -892,8 +916,10 @@ mod tests {
         let mut extended = base.clone();
         for i in 1000..1020u32 {
             extended = extended
+                .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
-                .await?;
+                .await?
+                .persist()?;
         }
         for buffer in extended.flush() {
             storage
@@ -2028,8 +2054,11 @@ mod tests {
             value: vec![20],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist()?;
 
         assert_eq!(tree.get(&key(1), &storage).await?, Some(vec![10]));
         assert_eq!(tree.get(&key(2), &storage).await?, Some(vec![20]));
@@ -2049,8 +2078,11 @@ mod tests {
             value: vec![10],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist()?;
 
         assert_eq!(tree.get(&key(1), &storage).await?, Some(vec![10]));
         assert_eq!(
@@ -2076,8 +2108,11 @@ mod tests {
             value: new_value.clone(),
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist()?;
 
         // Check which value won based on identity hash comparison
         let winner = if value_identity(&new_value) > value_identity(&existing_value) {
@@ -2100,8 +2135,11 @@ mod tests {
             value: vec![10],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist()?;
 
         assert_eq!(tree.get(&key(1), &storage).await?, None);
         assert_eq!(tree.get(&key(2), &storage).await?, Some(vec![20]));
@@ -2120,8 +2158,11 @@ mod tests {
             value: vec![20],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist()?;
 
         assert_eq!(tree.get(&key(1), &storage).await?, Some(vec![10]));
         assert_eq!(tree.get(&key(2), &storage).await?, None);
@@ -2140,8 +2181,11 @@ mod tests {
             value: vec![20], // Wrong value
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist()?;
 
         // Entry should still exist with original value
         assert_eq!(tree.get(&key(1), &storage).await?, Some(vec![10]));
@@ -2156,11 +2200,19 @@ mod tests {
         // Initial state - both replicas start with same value, then each
         // updates the same key to a different value.
         let mut tree_a = build([(1, vec![10])], &mut storage).await?;
-        tree_a = tree_a.insert(key(1), vec![20], &storage).await?;
+        tree_a = tree_a
+            .edit()
+            .insert(key(1), vec![20], &storage)
+            .await?
+            .persist()?;
         flush(&mut tree_a, &mut storage).await?;
 
         let mut tree_b = build([(1, vec![10])], &mut storage).await?;
-        tree_b = tree_b.insert(key(1), vec![30], &storage).await?;
+        tree_b = tree_b
+            .edit()
+            .insert(key(1), vec![30], &storage)
+            .await?
+            .persist()?;
         flush(&mut tree_b, &mut storage).await?;
 
         // Both replicas exchange their changes (relative to an empty tree,
@@ -2170,12 +2222,16 @@ mod tests {
         let changes_b = collect_changes(&empty_tree, &tree_b, &storage).await?;
 
         // Integrate changes
-        tree_a
+        tree_a = tree_a
+            .edit()
             .integrate(iter(changes_b.into_iter().map(Ok)), &storage)
-            .await?;
-        tree_b
+            .await?
+            .persist()?;
+        tree_b = tree_b
+            .edit()
             .integrate(iter(changes_a.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist()?;
 
         // Both should converge to the same value (deterministic by hash)
         let final_a = tree_a.get(&key(1), &storage).await?;
@@ -2203,9 +2259,11 @@ mod tests {
         let mut start = TestTree::empty();
 
         let changes = collect_changes(&start, &target, &storage).await?;
-        start
+        start = start
+            .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist()?;
 
         // Verify start now matches target
         assert_eq!(start.get(&key(1), &storage).await?, Some(vec![10]));
@@ -2222,9 +2280,11 @@ mod tests {
         let mut start = build([(1, vec![10]), (2, vec![20]), (3, vec![30])], &mut storage).await?;
 
         let changes = collect_changes(&start, &target, &storage).await?;
-        start
+        start = start
+            .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist()?;
 
         // Verify start is now empty
         assert_eq!(start.get(&key(1), &storage).await?, None);
@@ -2244,9 +2304,11 @@ mod tests {
         let target = build([(2, vec![22]), (3, vec![30]), (4, vec![40])], &mut storage).await?;
 
         let changes = collect_changes(&start, &target, &storage).await?;
-        start
+        start = start
+            .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist()?;
 
         // Verify start now matches target
         assert_eq!(start.get(&key(1), &storage).await?, None);
@@ -2269,9 +2331,11 @@ mod tests {
         .await?;
 
         let changes = collect_changes(&start, &target, &storage).await?;
-        start
+        start = start
+            .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist()?;
 
         // Verify start now matches target
         for i in 0..50u32 {
@@ -2297,9 +2361,11 @@ mod tests {
         let mut start = build((10..30u32).map(|i| (i, vec![(i * 5) as u8])), &mut storage).await?;
 
         let changes = collect_changes(&start, &target, &storage).await?;
-        start
+        start = start
+            .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist()?;
 
         // Root hash should match after integration (canonical form)
         assert_eq!(start.root(), &target_root);

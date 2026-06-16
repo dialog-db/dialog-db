@@ -115,7 +115,9 @@ impl Pull<'_> {
         // blocks on paths where base and local actually differ.
         let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
         let local_changes = base.differentiate(&local, &tree_store, &tree_store);
-        Box::pin(merged.integrate(local_changes, &tree_store)).await?;
+        merged = Box::pin(merged.edit().integrate(local_changes, &tree_store))
+            .await?
+            .persist()?;
 
         // Persist the merged tree's pending nodes to the local archive
         // before referencing its root in a revision. The whole flush

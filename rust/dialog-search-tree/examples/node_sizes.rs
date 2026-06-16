@@ -52,7 +52,13 @@ async fn build<D: Distribution>(
     let mut storage = ContentAddressedStorage::new(Backend::default());
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
     for (k, v) in keys.iter().zip(values.iter()) {
-        tree = tree.insert(*k, v.to_vec(), &storage).await.unwrap();
+        tree = tree
+            .edit()
+            .insert(*k, v.to_vec(), &storage)
+            .await
+            .unwrap()
+            .persist()
+            .unwrap();
     }
     for buffer in tree.flush() {
         storage

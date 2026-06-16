@@ -21,12 +21,24 @@ fn bench_delete(c: &mut Criterion) {
 
                     // Insert all keys
                     for (key, value) in keys.iter().zip(values.iter()) {
-                        tree = tree.insert(*key, value.to_vec(), &storage).await.unwrap();
+                        tree = tree
+                            .edit()
+                            .insert(*key, value.to_vec(), &storage)
+                            .await
+                            .unwrap()
+                            .persist()
+                            .unwrap();
                     }
 
                     // Delete half of them
                     for key in keys.iter().take(size / 2) {
-                        tree = tree.delete(key, &storage).await.unwrap();
+                        tree = tree
+                            .edit()
+                            .delete(key, &storage)
+                            .await
+                            .unwrap()
+                            .persist()
+                            .unwrap();
                     }
                 });
         });

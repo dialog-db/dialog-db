@@ -20,7 +20,13 @@ fn bench_insert_sequential(c: &mut Criterion) {
                     let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
 
                     for (key, value) in keys.iter().zip(values.iter()) {
-                        tree = tree.insert(*key, value.to_vec(), &storage).await.unwrap();
+                        tree = tree
+                            .edit()
+                            .insert(*key, value.to_vec(), &storage)
+                            .await
+                            .unwrap()
+                            .persist()
+                            .unwrap();
                     }
                 });
         });
@@ -44,7 +50,13 @@ fn bench_insert_random(c: &mut Criterion) {
                     let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
 
                     for (key, value) in keys.iter().zip(values.iter()) {
-                        tree = tree.insert(*key, value.to_vec(), &storage).await.unwrap();
+                        tree = tree
+                            .edit()
+                            .insert(*key, value.to_vec(), &storage)
+                            .await
+                            .unwrap()
+                            .persist()
+                            .unwrap();
                     }
                 });
         });

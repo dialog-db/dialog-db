@@ -16,7 +16,7 @@ use crate::{
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
 /// key has rank >= 1; a child whose rank exceeds the level threshold ends the
-/// node it belongs to. Mirrors `shaper::BOTTOM_RANK`.
+/// node it belongs to.
 pub(crate) const BOTTOM_RANK: Rank = 1;
 
 /// A tree node held in live, editable form prior to serialization.
@@ -293,10 +293,10 @@ where
 /// rule: a group ends at the first child whose rank exceeds `level_threshold`.
 ///
 /// `level_threshold` is `BOTTOM_RANK + level` for the level being built. This
-/// is the same rule [`TreeShaper::collect`](crate::TreeShaper) applies; here it
-/// returns the children partitioned into groups (the leftmost-to-rightmost
-/// runs) rather than serialized nodes, so callers can wrap each run in the
-/// appropriate transient node.
+/// is the canonical cut rule applied while shaping a level; here it returns the
+/// children partitioned into groups (the leftmost-to-rightmost runs) rather than
+/// serialized nodes, so callers can wrap each run in the appropriate transient
+/// node.
 pub(crate) fn group_by_rank<Child>(
     children: Vec<(Child, Rank)>,
     level_threshold: Rank,
@@ -407,4 +407,138 @@ where
         .into_iter()
         .map(|group| TransientNode::Segment(TransientSegment { entries: group }).into())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(unexpected_cfgs)]
+
+    use anyhow::Result;
+    use dialog_common::Blake3Hash;
+
+    use super::{BOTTOM_RANK, regroup_entries};
+    use crate::{Entry, Geometric, Rank, distribution};
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// The geometric rank of a `u32` key, hashed the same way the tree hashes it.
+    fn rank_of(key: u32) -> Rank {
+        distribution::geometric::rank(&Blake3Hash::hash(&key.to_le_bytes()))
+    }
+
+    /// One regrouped leaf segment's worth of entries.
+    type Segment = Vec<Entry<[u8; 4], Vec<u8>>>;
+
+    /// Regroups `keys` (as little-endian `[u8; 4]` entries) into leaf segments
+    /// with the geometric distribution, returning each segment's entries.
+    fn segments_of(keys: &[u32]) -> Result<Vec<Segment>> {
+        let entries: Vec<Entry<[u8; 4], Vec<u8>>> = keys
+            .iter()
+            .map(|&i| Entry {
+                key: i.to_le_bytes(),
+                value: vec![i as u8],
+            })
+            .collect();
+
+        regroup_entries::<[u8; 4], Vec<u8>, Geometric>(entries)
+            .into_iter()
+            .map(|node| Ok(node.into_transient()?.as_segment()?.entries.clone()))
+            .collect()
+    }
+
+    /// Regrouping cuts a new segment exactly at every boundary entry (rank above
+    /// the leaf threshold): each segment but the last ends on a boundary, and no
+    /// boundary sits in a segment's interior. A trailing run with no terminating
+    /// boundary forms the final open segment.
+    #[dialog_common::test]
+    async fn it_partitions_entries_at_rank_boundaries() -> Result<()> {
+        let keys: Vec<u32> = (0..1000).collect();
+        let boundary_count = keys.iter().filter(|&&k| rank_of(k) > BOTTOM_RANK).count();
+        assert!(boundary_count > 0, "need at least one boundary in 0..1000");
+
+        // The entries are byte-lexicographically ordered, the order regrouping
+        // cuts in, so derive the expected count over the same order.
+        let mut sorted = keys.clone();
+        sorted.sort_by_key(|k| k.to_le_bytes());
+        let last_is_boundary = sorted
+            .last()
+            .map(|&k| rank_of(k) > BOTTOM_RANK)
+            .unwrap_or(false);
+
+        let segments = segments_of(&sorted)?;
+
+        // One segment per boundary, plus a trailing open segment unless the very
+        // last entry is itself a boundary.
+        let expected = if last_is_boundary {
+            boundary_count
+        } else {
+            boundary_count + 1
+        };
+        assert_eq!(segments.len(), expected, "wrong number of segments");
+
+        for (i, segment) in segments.iter().enumerate() {
+            // Every segment ends on a boundary except the trailing open segment,
+            // which exists only when the last entry overall is not a boundary.
+            let is_trailing_open = i == segments.len() - 1 && !last_is_boundary;
+            for (j, entry) in segment.iter().enumerate() {
+                let at_end = j == segment.len() - 1;
+                let key = u32::from_le_bytes(entry.key);
+                if at_end && !is_trailing_open {
+                    assert!(
+                        rank_of(key) > BOTTOM_RANK,
+                        "segment {i} must end on a boundary, key {key} has rank {}",
+                        rank_of(key)
+                    );
+                } else {
+                    assert!(
+                        rank_of(key) <= BOTTOM_RANK,
+                        "interior key {key} of segment {i} must not be a boundary"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Regrouping preserves key order: entries are sorted within every segment,
+    /// and segments are in ascending, non-overlapping key order.
+    #[dialog_common::test]
+    async fn it_preserves_entry_order_within_and_across_segments() -> Result<()> {
+        let mut keys: Vec<u32> = (0..500).collect();
+        keys.sort_by_key(|k| k.to_le_bytes());
+
+        let segments = segments_of(&keys)?;
+
+        let mut prev_upper: Option<[u8; 4]> = None;
+        for segment in &segments {
+            for pair in segment.windows(2) {
+                assert!(pair[0].key < pair[1].key, "entries within a segment must be sorted");
+            }
+            if let (Some(prev), Some(first)) = (prev_upper, segment.first()) {
+                assert!(prev < first.key, "segments must be in ascending key order");
+            }
+            if let Some(last) = segment.last() {
+                prev_upper = Some(last.key);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Regrouping conserves entries: the segments together hold exactly the input
+    /// entries, none dropped or duplicated.
+    #[dialog_common::test]
+    async fn it_preserves_total_entry_count_across_segments() -> Result<()> {
+        let n = 1000u32;
+        let keys: Vec<u32> = (0..n).collect();
+
+        let segments = segments_of(&keys)?;
+        let total: usize = segments.iter().map(|segment| segment.len()).sum();
+
+        assert_eq!(total, n as usize, "every entry must land in exactly one segment");
+
+        Ok(())
+    }
 }

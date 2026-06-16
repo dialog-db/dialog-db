@@ -212,7 +212,7 @@ where
 /// the searched key — a necessary condition for boundary-delete overflow. If
 /// the search path contains any layer with a right sibling, we follow the
 /// leftmost descent from the first such sibling down to the next leaf. This
-/// lets [`TreeShaper::delete`] fold orphan entries into that leaf in one
+/// lets a boundary delete fold orphan entries into that leaf in one
 /// pass when the deleted entry turns out to be the segment boundary.
 ///
 /// Returns `None` when either the key is not the leaf's last entry or the leaf
@@ -301,7 +301,7 @@ where
 
 /// Options controlling the behavior of [`TreeWalker::search`].
 ///
-/// `prefetch_right_neighbor` is only consumed by [`TreeShaper::delete`] to
+/// `prefetch_right_neighbor` is only consumed by a boundary delete to
 /// resolve boundary-delete overflow. All other call sites (reads, inserts,
 /// range streams) should leave it at its default of `false` to avoid the extra
 /// leftmost descent that the prefetch can trigger.
@@ -421,7 +421,7 @@ where
     pub path: SearchPath<Key, Value>,
     /// Prefetched right-adjacent segment, populated when the searched key
     /// matched the leaf's last entry and a right neighbor exists. Used by
-    /// [`TreeShaper::delete`] to resolve boundary-delete overflow in one pass.
+    /// a boundary delete to resolve boundary-delete overflow in one pass.
     pub right_neighbor: Option<RightNeighbor<Key, Value>>,
 }
 
@@ -431,7 +431,7 @@ where
 /// This is populated by [`TreeWalker::search`] only when the search key lands
 /// on the main leaf's last entry (a boundary-delete candidate) and a
 /// right-adjacent leaf exists. Its shape captures where the right-adjacent
-/// descent diverges from the main descent so [`TreeShaper::delete`] can rebuild
+/// descent diverges from the main descent so a boundary delete can rebuild
 /// both subtrees and stitch them together at the lowest common ancestor.
 ///
 /// For the common "same-parent" overflow case (the right-adjacent leaf shares
