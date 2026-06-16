@@ -17,10 +17,14 @@
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError,
     Distribution, Entry, Geometric, Key, Node, PersistentNode, PersistentTree, Rank, SymmetryWith,
-    TransientIndex, TransientNode, TransientSegment, Value, regroup_children, regroup_entries,
+    TransientIndex, TransientNode, TransientSegment, TreeWalker, Value, regroup_children,
+    regroup_entries,
 };
-use dialog_common::{Blake3Hash, ConditionalSync, NULL_BLAKE3_HASH};
+use async_stream::try_stream;
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
 use dialog_storage::{DialogStorageError, StorageBackend};
+use futures_core::Stream;
+use futures_util::StreamExt;
 use rkyv::{
     Deserialize, Serialize,
     bytecheck::CheckBytes,
@@ -30,7 +34,7 @@ use rkyv::{
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
-use std::marker::PhantomData;
+use std::{marker::PhantomData, ops::RangeBounds};
 
 /// The root of a [`TransientTree`].
 ///
@@ -197,6 +201,134 @@ where
             None => TransientRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
         };
         Ok(self)
+    }
+
+    /// Retrieves the value associated with `key` from the in-flight transient
+    /// tree, reading exactly what [`persist`](Self::persist) would produce.
+    ///
+    /// Untouched subtrees are still [`Node::Persistent`] references and are
+    /// fully persistent: a point lookup into one delegates to the same read
+    /// path [`PersistentTree::get`] uses. Only the edited
+    /// [`Node::Transient`] spine is descended in memory.
+    pub async fn get<Backend>(
+        &self,
+        key: &Key,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Option<Value>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        let mut node = match &self.root {
+            TransientRoot::Unloaded(hash) => {
+                return self.persistent_get(hash, key, storage).await;
+            }
+            TransientRoot::Loaded(node) => node,
+        };
+
+        loop {
+            match node {
+                TransientNode::Index(index) => {
+                    let at = child_for::<Key, Value>(&index.children, key);
+                    match &index.children[at] {
+                        Node::Persistent(link) => {
+                            return self.persistent_get(&link.node, key, storage).await;
+                        }
+                        Node::Transient(child) => node = child,
+                    }
+                }
+                TransientNode::Segment(segment) => {
+                    return match segment.entries.binary_search_by(|entry| entry.key.cmp(key)) {
+                        Ok(at) => Ok(Some(segment.entries[at].value.clone())),
+                        Err(_) => Ok(None),
+                    };
+                }
+            }
+        }
+    }
+
+    /// Delegates a point lookup over a fully persistent subtree rooted at
+    /// `hash` to [`PersistentTree::get`], so the transient read of an untouched
+    /// subtree is byte-for-byte the persistent read.
+    async fn persistent_get<Backend>(
+        &self,
+        hash: &Blake3Hash,
+        key: &Key,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Option<Value>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        let subtree: PersistentTree<Key, Value, D> =
+            PersistentTree::seal(hash.clone(), self.cache.clone(), self.delta.clone());
+        subtree.get(key, storage).await
+    }
+
+    /// Streams the entries of the in-flight transient tree whose keys fall in
+    /// `range`, in ascending key order, reading exactly what
+    /// [`persist`](Self::persist) would produce.
+    ///
+    /// Untouched subtrees are still [`Node::Persistent`] references and are
+    /// fully persistent: each streams through the same [`TreeWalker`] path
+    /// [`PersistentTree::stream_range`] uses. Only the edited
+    /// [`Node::Transient`] spine is traversed in memory.
+    pub fn stream_range<R, Backend>(
+        &self,
+        range: R,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
+    where
+        R: RangeBounds<Key> + ConditionalSend,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        // The transient spine borrows `self`, but the returned stream must own
+        // everything it touches. Snapshot the spine into an owned plan of steps
+        // (persistent subtree hashes to stream, transient leaf entries to
+        // yield), in ascending key order, before building the stream.
+        // Persistent subtrees stay as hashes, so the snapshot copies no
+        // untouched node.
+        let cache = self.cache.clone();
+        let delta = self.delta.clone();
+        let storage = storage.clone();
+
+        // Snapshot the range bounds to owned, cloneable form: the walker
+        // consumes a range per persistent subtree, and the transient leaves are
+        // filtered with the same bounds, so a borrow of the caller's range
+        // cannot outlive this method.
+        let bounds = (range.start_bound().cloned(), range.end_bound().cloned());
+
+        let plan = match &self.root {
+            TransientRoot::Unloaded(hash) => vec![StreamStep::Persistent(hash.clone())],
+            TransientRoot::Loaded(node) => {
+                let mut plan = Vec::new();
+                collect_stream_plan(node, &mut plan);
+                plan
+            }
+        };
+
+        try_stream! {
+            for step in plan {
+                match step {
+                    StreamStep::Persistent(hash) => {
+                        let accessor =
+                            Accessor::new(delta.clone(), cache.clone(), storage.clone());
+                        let inner = TreeWalker::<Key, Value>::new(hash)
+                            .stream(bounds.clone(), accessor);
+                        futures_util::pin_mut!(inner);
+                        while let Some(entry) = inner.next().await {
+                            yield entry?;
+                        }
+                    }
+                    StreamStep::Entry(entry) => {
+                        if bounds.contains(&entry.key) {
+                            yield entry;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Serializes the edited tree bottom-up and returns it as a
@@ -953,6 +1085,49 @@ where
     at
 }
 
+/// One step of an ascending traversal plan over a transient spine, captured so
+/// the streamed read owns everything it touches.
+///
+/// A [`StreamStep::Persistent`] is an untouched, fully persistent subtree to
+/// stream by hash; a [`StreamStep::Entry`] is an owned entry from an edited
+/// (transient) leaf to yield directly. The plan lists these left to right, so
+/// concatenating their outputs yields entries in ascending key order.
+enum StreamStep<Key, Value> {
+    /// A persistent subtree to stream by its root hash.
+    Persistent(Blake3Hash),
+    /// An owned entry from a transient leaf.
+    Entry(Entry<Key, Value>),
+}
+
+/// Walks the transient `node` left to right, appending each persistent subtree
+/// (as a hash) and each transient leaf entry (cloned) to `plan` in ascending
+/// key order.
+fn collect_stream_plan<Key, Value>(
+    node: &TransientNode<Key, Value>,
+    plan: &mut Vec<StreamStep<Key, Value>>,
+) where
+    Key: Clone,
+    Value: Clone,
+{
+    match node {
+        TransientNode::Index(index) => {
+            for child in &index.children {
+                match child {
+                    Node::Persistent(link) => {
+                        plan.push(StreamStep::Persistent(link.node.clone()));
+                    }
+                    Node::Transient(child) => collect_stream_plan(child, plan),
+                }
+            }
+        }
+        TransientNode::Segment(segment) => {
+            for entry in &segment.entries {
+                plan.push(StreamStep::Entry(entry.clone()));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(unexpected_cfgs)]
@@ -1203,6 +1378,164 @@ mod tests {
                 "seed {seed}: interleaved batched ops must match sequential"
             );
         }
+        Ok(())
+    }
+
+    /// The transient read path (`get` / `stream_range`) must see exactly the
+    /// tree `persist` would produce. For many random insert/delete batches,
+    /// build a transient tree WITHOUT persisting, then persist a clone of the
+    /// same batch to a [`PersistentTree`]; the transient `get` of every probed
+    /// key and the full ordered `stream_range(..)` must match the persistent
+    /// tree's `get` / `stream_range` exactly.
+    #[dialog_common::test]
+    async fn it_reads_in_flight_edits_like_persist() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        for seed in 0..200u64 {
+            let mut rng = Rng::new(seed);
+
+            // A randomized op stream over a small key domain so inserts and
+            // deletes collide on the same keys, churning boundaries and leaving
+            // a mix of transient and persistent subtrees in flight.
+            let mut ops: Vec<(bool, u32)> = Vec::new();
+            for _ in 0..400 {
+                let is_insert = !(rng.next_u32()).is_multiple_of(3); // ~2/3 inserts
+                let key = rng.next_u32() % 150;
+                ops.push((is_insert, key));
+            }
+
+            // Build the transient tree in flight, never persisting it here.
+            let mut transient = TestTree::empty().edit();
+            for &(is_insert, key) in &ops {
+                transient = if is_insert {
+                    transient
+                        .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                        .await?
+                } else {
+                    transient.delete(&key.to_le_bytes(), &storage).await?
+                };
+            }
+
+            // Build the same batch again and persist it, flushing to storage so
+            // the persistent reference reads are fully resolvable.
+            let mut reference = TestTree::empty().edit();
+            for &(is_insert, key) in &ops {
+                reference = if is_insert {
+                    reference
+                        .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                        .await?
+                } else {
+                    reference.delete(&key.to_le_bytes(), &storage).await?
+                };
+            }
+            let mut persistent = reference.persist()?;
+            for buffer in persistent.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+
+            // Every key in the domain (present or absent) must read identically.
+            for key in 0..160u32 {
+                let from_transient = transient.get(&key.to_le_bytes(), &storage).await?;
+                let from_persistent = persistent.get(&key.to_le_bytes(), &storage).await?;
+                assert_eq!(
+                    from_transient, from_persistent,
+                    "seed {seed}: transient get of key {key} must match persisted get"
+                );
+            }
+
+            // The full ordered stream must match entry for entry.
+            let mut transient_entries = Vec::new();
+            {
+                let stream = transient.stream_range(.., &storage);
+                futures_util::pin_mut!(stream);
+                while let Some(entry) = stream.next().await {
+                    let entry = entry?;
+                    transient_entries.push((entry.key, entry.value));
+                }
+            }
+
+            let mut persistent_entries = Vec::new();
+            {
+                let stream = persistent.stream_range(.., &storage);
+                futures_util::pin_mut!(stream);
+                while let Some(entry) = stream.next().await {
+                    let entry = entry?;
+                    persistent_entries.push((entry.key, entry.value));
+                }
+            }
+
+            assert_eq!(
+                transient_entries, persistent_entries,
+                "seed {seed}: transient stream must match persisted stream"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// A bounded `stream_range` over the in-flight transient tree must match the
+    /// same bounded range over the persisted tree, exercising the bound-clamping
+    /// in both the transient leaves and the delegated persistent subtrees.
+    #[dialog_common::test]
+    async fn it_streams_bounded_ranges_like_persist() -> Result<()> {
+        use futures_util::StreamExt;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        for seed in 0..50u64 {
+            let mut keys: Vec<u32> = (0..300).collect();
+            Rng::new(seed).shuffle(&mut keys);
+
+            let mut transient = TestTree::empty().edit();
+            for &k in &keys {
+                transient = transient
+                    .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                    .await?;
+            }
+
+            let mut reference = TestTree::empty().edit();
+            for &k in &keys {
+                reference = reference
+                    .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                    .await?;
+            }
+            let mut persistent = reference.persist()?;
+            for buffer in persistent.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+
+            let range = 73u32.to_le_bytes()..210u32.to_le_bytes();
+
+            let mut transient_entries = Vec::new();
+            {
+                let stream = transient.stream_range(range.clone(), &storage);
+                futures_util::pin_mut!(stream);
+                while let Some(entry) = stream.next().await {
+                    transient_entries.push(entry?.key);
+                }
+            }
+
+            let mut persistent_entries = Vec::new();
+            {
+                let stream = persistent.stream_range(range.clone(), &storage);
+                futures_util::pin_mut!(stream);
+                while let Some(entry) = stream.next().await {
+                    persistent_entries.push(entry?.key);
+                }
+            }
+
+            assert_eq!(
+                transient_entries, persistent_entries,
+                "seed {seed}: bounded transient stream must match persisted stream"
+            );
+        }
+
         Ok(())
     }
 }

@@ -146,6 +146,11 @@ impl ArtifactTreeExt for ArtifactTree {
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
 
+        // Open one transient edit batch over this tree's spine and apply every
+        // instruction's writes to it in flight, so the whole instruction stream
+        // costs a single persist instead of one full tree rebuild per key.
+        let mut transient = self.edit();
+
         tokio::pin!(instructions);
         while let Some(instruction) = instructions.next().await {
             match instruction {
@@ -156,23 +161,26 @@ impl ArtifactTreeExt for ArtifactTree {
 
                     let datum = Datum::from(artifact);
                     let added = State::Added(datum);
-                    *self = self
+                    transient = transient
                         .insert(entity_key.into_key().into(), added.clone(), &storage)
                         .await?;
-                    *self = self
+                    transient = transient
                         .insert(attribute_key.into_key().into(), added.clone(), &storage)
                         .await?;
-                    *self = self
+                    transient = transient
                         .insert(value_key.into_key().into(), added, &storage)
                         .await?;
                 }
                 Instruction::Replace(artifact) => {
                     let entity_key = EntityKey::from(&artifact);
 
-                    // Scan priors at this (entity, attribute).
-                    // Same-valued priors already represent the
-                    // desired state; only different-valued ones
-                    // need superseding.
+                    // Scan priors at this (entity, attribute) against the
+                    // in-flight transient tree, so writes from earlier
+                    // instructions in this batch are visible. Same-valued priors
+                    // already represent the desired state; only different-valued
+                    // ones need superseding. The scan borrows `transient`
+                    // immutably, so collect into owned vectors in a scope that
+                    // ends before the subsequent mutating reassignments.
                     let mut superseded_keys: Vec<Key> = Vec::new();
                     let mut found_same_value = false;
                     {
@@ -184,7 +192,7 @@ impl ArtifactTreeExt for ArtifactTree {
                             .set_entity(entity_key.entity())
                             .set_attribute(entity_key.attribute())
                             .into_key();
-                        let search_stream = self.stream_range(
+                        let search_stream = transient.stream_range(
                             KeyBytes::from(search_start)..=KeyBytes::from(search_end),
                             &storage,
                         );
@@ -207,9 +215,13 @@ impl ArtifactTreeExt for ArtifactTree {
                         let value_key = ValueKey::from_key(&entity_key);
                         let attribute_key = AttributeKey::from_key(&entity_key);
 
-                        *self = self.delete(&entity_key.into_key().into(), &storage).await?;
-                        *self = self.delete(&value_key.into_key().into(), &storage).await?;
-                        *self = self
+                        transient = transient
+                            .delete(&entity_key.into_key().into(), &storage)
+                            .await?;
+                        transient = transient
+                            .delete(&value_key.into_key().into(), &storage)
+                            .await?;
+                        transient = transient
                             .delete(&attribute_key.into_key().into(), &storage)
                             .await?;
                     }
@@ -223,13 +235,13 @@ impl ArtifactTreeExt for ArtifactTree {
                     let attribute_key = AttributeKey::from_key(&entity_key);
                     let datum = Datum::from(artifact);
                     let added = State::Added(datum);
-                    *self = self
+                    transient = transient
                         .insert(entity_key.into_key().into(), added.clone(), &storage)
                         .await?;
-                    *self = self
+                    transient = transient
                         .insert(attribute_key.into_key().into(), added.clone(), &storage)
                         .await?;
-                    *self = self
+                    transient = transient
                         .insert(value_key.into_key().into(), added, &storage)
                         .await?;
                 }
@@ -239,18 +251,21 @@ impl ArtifactTreeExt for ArtifactTree {
                     let attribute_key = AttributeKey::from_key(&entity_key);
 
                     let removed: State<Datum> = State::Removed;
-                    *self = self
+                    transient = transient
                         .insert(entity_key.into_key().into(), removed.clone(), &storage)
                         .await?;
-                    *self = self
+                    transient = transient
                         .insert(attribute_key.into_key().into(), removed.clone(), &storage)
                         .await?;
-                    *self = self
+                    transient = transient
                         .insert(value_key.into_key().into(), removed, &storage)
                         .await?;
                 }
             }
         }
+
+        // Seal the whole batch with a single bottom-up persist.
+        *self = transient.persist()?;
         Ok(())
     }
 
