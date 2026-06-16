@@ -131,9 +131,6 @@ pub use entry::*;
 mod node;
 pub use node::*;
 
-mod body;
-pub use body::*;
-
 mod storage;
 pub use storage::*;
 

@@ -17,8 +17,8 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, Node, SymmetryWith, Value,
-    into_owned,
+    Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, PersistentNode,
+    SymmetryWith, Value, into_owned,
 };
 
 /// A traversal mechanism for walking through a tree structure.
@@ -220,7 +220,7 @@ where
 /// tree).
 async fn prefetch_right_neighbor<Key, Value, Backend>(
     key: &Key,
-    leaf: &Node<Key, Value>,
+    leaf: &PersistentNode<Key, Value>,
     path: &[TreeLayer<Key, Value>],
     accessor: Accessor<Backend>,
 ) -> Result<Option<RightNeighbor<Key, Value>>, DialogSearchTreeError>
@@ -270,7 +270,7 @@ where
     let mut diverged_path: Vec<TreeLayer<Key, Value>> = Vec::new();
 
     let right_leaf = loop {
-        let node: Node<Key, Value> = accessor.get_node(&next_hash).await?;
+        let node: PersistentNode<Key, Value> = accessor.get_node(&next_hash).await?;
         match node.body()? {
             ArchivedNodeBody::Index(index) => {
                 let first = index.links.first().ok_or_else(|| {
@@ -333,7 +333,7 @@ where
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
 {
     /// The index node at this layer of the tree.
-    pub host: Node<Key, Value>,
+    pub host: PersistentNode<Key, Value>,
     /// Position within `host.links` of the child the descent followed.
     pub index: usize,
 }
@@ -401,7 +401,7 @@ where
 pub type SearchPath<Key, Value> = Vec<TreeLayer<Key, Value>>;
 
 /// An indexed path with nodes and their child indices.
-pub type IndexedPath<Key, Value> = Vec<(Node<Key, Value>, Option<usize>)>;
+pub type IndexedPath<Key, Value> = Vec<(PersistentNode<Key, Value>, Option<usize>)>;
 
 /// The result of a tree search, containing the leaf node and the path taken to
 /// reach it.
@@ -416,7 +416,7 @@ where
     >,
 {
     /// The leaf node found by the search.
-    pub leaf: Node<Key, Value>,
+    pub leaf: PersistentNode<Key, Value>,
     /// The path from root to leaf.
     pub path: SearchPath<Key, Value>,
     /// Prefetched right-adjacent segment, populated when the searched key
@@ -459,7 +459,7 @@ where
     /// leaf and the right-adjacent leaf share a parent.
     pub diverged_path: Vec<TreeLayer<Key, Value>>,
     /// The right-adjacent leaf segment.
-    pub leaf: Node<Key, Value>,
+    pub leaf: PersistentNode<Key, Value>,
 }
 
 impl<Key, Value> SearchResult<Key, Value>

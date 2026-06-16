@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{ContentAddressedStorage, Tree};
+use dialog_search_tree::{ContentAddressedStorage, PersistentTree};
 use dialog_storage::MemoryStorageBackend;
 
 const BENCH_SEED: u64 = 42;
@@ -17,7 +17,7 @@ fn bench_get(c: &mut Criterion) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (tree, storage, keys) = runtime.block_on(async {
             let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-            let mut tree = Tree::<[u8; 16], Vec<u8>>::empty();
+            let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
 
             for (key, value) in keys.iter().zip(values.iter()) {
                 tree = tree.insert(*key, value.to_vec(), &storage).await.unwrap();

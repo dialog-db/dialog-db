@@ -21,13 +21,13 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Geometric, Key, Link, Node,
-    NodeBody, Rank, RightNeighbor, SearchResult, Segment, SymmetryWith, TreeLayer, Value,
-    into_owned,
+    Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Geometric, Key, Link,
+    PersistentNode, PersistentNodeBody, PersistentSegment, Rank, RightNeighbor, SearchResult,
+    SymmetryWith, TreeLayer, Value, into_owned,
 };
 
 /// A collection of nodes with their ranks.
-type RankedNodes<Key, Value> = NonEmpty<(Node<Key, Value>, Rank)>;
+type RankedNodes<Key, Value> = NonEmpty<(PersistentNode<Key, Value>, Rank)>;
 
 /// The rank threshold for grouping entries into leaf segments (level 0 of
 /// the tree). Every key has a rank of at least 1; an entry whose key's rank
@@ -198,7 +198,8 @@ where
 
         let (entries, search_result) = match search_result {
             Some(search_result) => {
-                let segment = into_owned::<Segment<Key, Value>>(search_result.leaf.as_segment()?)?;
+                let segment =
+                    into_owned::<PersistentSegment<Key, Value>>(search_result.leaf.as_segment()?)?;
                 let mut entries: Vec<Entry<Key, Value>> = segment.entries;
 
                 match entries.binary_search_by(|probe| probe.key.cmp(new_entry_key)) {
@@ -282,7 +283,7 @@ where
         let entry_count = segment.entries.len();
         let deleted_boundary = removal_index == entry_count - 1;
 
-        let mut segment = into_owned::<Segment<Key, Value>>(segment)?;
+        let mut segment = into_owned::<PersistentSegment<Key, Value>>(segment)?;
         segment.entries.remove(removal_index);
 
         // Boundary-delete with a right-adjacent segment triggers overflow:
@@ -398,7 +399,7 @@ where
 
         // Merge orphans with the right-adjacent segment's entries and
         // redistribute by intrinsic rank.
-        let right_segment = into_owned::<Segment<Key, Value>>(right_leaf.as_segment()?)?;
+        let right_segment = into_owned::<PersistentSegment<Key, Value>>(right_leaf.as_segment()?)?;
         let mut combined_entries = orphans;
         combined_entries.extend(right_segment.entries);
         let combined = NonEmpty::from_vec(combined_entries).ok_or_else(|| {
@@ -598,7 +599,7 @@ where
     /// This is the shared path-reconstruction logic used by both insert (after
     /// distributing entries) and delete (after modifying a segment).
     fn merge_with_path(
-        mut nodes: NonEmpty<(Node<Key, Value>, Rank)>,
+        mut nodes: NonEmpty<(PersistentNode<Key, Value>, Rank)>,
         mut search_path: Vec<TreeLayer<Key, Value>>,
         mut context: MutationContext<Key, D>,
         initial_level_minimum_rank: Rank,
@@ -736,9 +737,9 @@ where
         minimum_rank: Rank,
     ) -> Result<RankedNodes<Key, Value>, DialogSearchTreeError>
     where
-        NodeBody<Key, Value>: TryFrom<Vec<Child>, Error = DialogSearchTreeError>,
+        PersistentNodeBody<Key, Value>: TryFrom<Vec<Child>, Error = DialogSearchTreeError>,
     {
-        let mut output: Vec<(Node<Key, Value>, Rank)> = vec![];
+        let mut output: Vec<(PersistentNode<Key, Value>, Rank)> = vec![];
         let mut pending = vec![];
 
         for (child, rank) in children {
@@ -749,8 +750,8 @@ where
                         "Attempted to collect empty child list into index node".into(),
                     ));
                 }
-                let node = Node::new(Buffer::from(
-                    NodeBody::try_from(std::mem::take(&mut pending))?.as_bytes()?,
+                let node = PersistentNode::new(Buffer::from(
+                    PersistentNodeBody::try_from(std::mem::take(&mut pending))?.as_bytes()?,
                 ));
 
                 output.push((node, rank));
@@ -758,7 +759,9 @@ where
         }
 
         if !pending.is_empty() {
-            let node = Node::new(Buffer::from(NodeBody::try_from(pending)?.as_bytes()?));
+            let node = PersistentNode::new(Buffer::from(
+                PersistentNodeBody::try_from(pending)?.as_bytes()?,
+            ));
             output.push((node, minimum_rank));
         }
 
@@ -775,7 +778,7 @@ where
 /// level: the nodes become children of a new higher-level index, so we must
 /// both commit them to the delta (by hash) and convert them to links.
 fn promote_to_ranked_links<Key, Value, D>(
-    nodes: NonEmpty<(Node<Key, Value>, Rank)>,
+    nodes: NonEmpty<(PersistentNode<Key, Value>, Rank)>,
     context: &mut MutationContext<Key, D>,
 ) -> Result<NonEmpty<(Link<Key>, Rank)>, DialogSearchTreeError>
 where
@@ -844,9 +847,9 @@ mod tests {
     use nonempty::NonEmpty;
 
     use super::TreeShaper;
-    use crate::{ContentAddressedStorage, Entry, Rank, Tree, distribution, into_owned};
+    use crate::{ContentAddressedStorage, Entry, PersistentTree, Rank, distribution, into_owned};
 
-    type TestTree = Tree<[u8; 4], Vec<u8>>;
+    type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
     type TestStorage = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
