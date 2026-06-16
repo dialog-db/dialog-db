@@ -116,7 +116,7 @@ impl Select<'_> {
             })?;
         }
 
-        let tree = Index::from_hash(NodeHash::from(tree_hash));
+        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), self.branch.node_cache());
 
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
