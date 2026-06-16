@@ -7,7 +7,7 @@ use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_search_tree::ContentAddressedStorage as TreeStorage;
+use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
 
 use crate::{
     Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, PullError, RemoteSite,
@@ -115,9 +115,10 @@ impl Pull<'_> {
         // blocks on paths where base and local actually differ.
         let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
         let local_changes = base.differentiate(&local, &tree_store, &tree_store);
+        let mut delta = Delta::zero();
         merged = Box::pin(merged.edit().integrate(local_changes, &tree_store))
             .await?
-            .persist()?;
+            .persist(&mut delta)?;
 
         // Persist the merged tree's pending nodes to the local archive
         // before referencing its root in a revision. The whole flush
@@ -128,7 +129,7 @@ impl Pull<'_> {
         branch
             .archive()
             .index()
-            .import(merged.flush())
+            .import(delta.flush().map(|(_, buffer)| buffer))
             .perform(env)
             .await
             .map_err(DialogArtifactsError::from)?;

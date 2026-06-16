@@ -9,22 +9,27 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Key, PersistentNode,
+    Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Key, PersistentNode,
     SymmetryWith, Value,
 };
 
-/// Accessor for retrieving nodes from a three-tier storage hierarchy.
+/// Accessor for retrieving durable nodes from cache and content-addressed
+/// storage.
 ///
 /// The accessor checks for nodes in the following order:
 /// 1. Cache - recently accessed nodes
-/// 2. Delta - uncommitted in-memory changes
-/// 3. Storage - persistent content-addressed storage backend
+/// 2. Storage - persistent content-addressed storage backend
+///
+/// Unflushed nodes are never read here: in-flight edits live in a
+/// [`TransientTree`](crate::TransientTree)'s spine, and a
+/// [`PersistentTree`](crate::PersistentTree) reads only what has been flushed to
+/// storage. The accumulating delta is purely a persist-time output and is not
+/// consulted on the read path.
 #[derive(Clone)]
 pub struct Accessor<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
 {
-    delta: Delta<Blake3Hash, Buffer>,
     cache: Cache<Blake3Hash, Buffer>,
     storage: ContentAddressedStorage<Backend>,
 }
@@ -34,23 +39,18 @@ where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSend,
 {
-    /// Creates a new accessor with the provided delta, cache, and storage backend.
+    /// Creates a new accessor over the given cache and storage backend.
     pub fn new(
-        delta: Delta<Blake3Hash, Buffer>,
         cache: Cache<Blake3Hash, Buffer>,
         storage: ContentAddressedStorage<Backend>,
     ) -> Self {
-        Self {
-            delta,
-            cache,
-            storage,
-        }
+        Self { cache, storage }
     }
 
     /// Retrieves a node by its content hash.
     ///
-    /// Checks the cache first, then the delta, and finally the storage backend.
-    /// Returns an error if the node is not found in any layer.
+    /// Checks the cache first, then the storage backend. Returns an error if the
+    /// node is in neither.
     pub async fn get_node<Key, Value>(
         &self,
         hash: &Blake3Hash,
@@ -71,14 +71,10 @@ where
     {
         self.cache
             .get_or_fetch(hash, async |key| {
-                if let Some(buffer) = self.delta.get(hash) {
-                    Ok(Some(buffer))
-                } else {
-                    self.storage
-                        .retrieve(key)
-                        .await
-                        .map(|maybe_bytes| maybe_bytes.map(Buffer::from))
-                }
+                self.storage
+                    .retrieve(key)
+                    .await
+                    .map(|maybe_bytes| maybe_bytes.map(Buffer::from))
             })
             .await?
             .ok_or_else(|| {

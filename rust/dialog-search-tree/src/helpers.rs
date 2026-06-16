@@ -51,8 +51,8 @@ use rkyv::{
 };
 
 use crate::{
-    ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Key,
-    Link, PersistentNode, PersistentTree, Rank, SymmetryWith, Value, into_owned,
+    ArchivedNodeBody, Buffer, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution,
+    Key, Link, PersistentNode, PersistentTree, Rank, SymmetryWith, Value, into_owned,
 };
 
 /// Traversal order for tree iteration.
@@ -560,21 +560,23 @@ impl TreeDescriptor {
         // the key bytes, where DistributionSimulator reads it back out.
         // Values carry the decoded base key.
         let mut tree = TestTree::empty();
+        let mut delta = Delta::zero();
         for key in &collection {
             let rank = ranks.get(key).copied().unwrap_or(1);
             tree = tree
                 .edit()
                 .insert(encode_key(key, rank), key.clone(), &storage)
                 .await?
-                .persist()?;
-        }
+                .persist(&mut delta)?;
 
-        // Persist all pending nodes so differentials read them through the
-        // journaled backend.
-        for buffer in tree.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            // Flush after each persist so the next edit (and the differentials
+            // that read afterwards) can load the nodes this persist created: a
+            // persist writes new nodes only into the delta, never into storage.
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
         }
 
         let root = tree.root().clone();

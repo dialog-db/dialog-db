@@ -13,7 +13,7 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{ContentAddressedStorage, PersistentTree};
+use dialog_search_tree::{ContentAddressedStorage, Delta, PersistentTree};
 use dialog_storage::MemoryStorageBackend;
 
 const BENCH_SEED: u64 = 42;
@@ -36,16 +36,24 @@ fn bench_insert_batch_vs_sequential(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("sequential", size), &size, |b, _| {
             b.to_async(runtime()).iter(|| async {
-                let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+                let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
                 let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
+                let mut delta = Delta::zero();
                 for (key, value) in keys.iter().zip(values.iter()) {
                     tree = tree
                         .edit()
                         .insert(*key, value.clone(), &storage)
                         .await
                         .unwrap()
-                        .persist()
+                        .persist(&mut delta)
                         .unwrap();
+                    // Flush after each persist so the next edit can load the nodes this persist created.
+                    for (_, buffer) in delta.flush() {
+                        storage
+                            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                            .await
+                            .unwrap();
+                    }
                 }
             });
         });
@@ -57,7 +65,8 @@ fn bench_insert_batch_vs_sequential(c: &mut Criterion) {
                 for (key, value) in keys.iter().zip(values.iter()) {
                     edit = edit.insert(*key, value.clone(), &storage).await.unwrap();
                 }
-                let _tree = edit.persist().unwrap();
+                let mut delta = Delta::zero();
+                let _tree = edit.persist(&mut delta).unwrap();
             });
         });
     }
@@ -89,16 +98,24 @@ fn bench_mixed_batch_vs_sequential(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("sequential", size), &size, |b, _| {
             b.to_async(runtime()).iter(|| async {
-                let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+                let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
                 let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
+                let mut delta = Delta::zero();
                 for (key, value) in base_keys.iter().zip(base_values.iter()) {
                     tree = tree
                         .edit()
                         .insert(*key, value.clone(), &storage)
                         .await
                         .unwrap()
-                        .persist()
+                        .persist(&mut delta)
                         .unwrap();
+                    // Flush after each persist so the next edit can load the nodes this persist created.
+                    for (_, buffer) in delta.flush() {
+                        storage
+                            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                            .await
+                            .unwrap();
+                    }
                 }
                 for (key, value) in fresh_keys.iter().zip(fresh_values.iter()) {
                     tree = tree
@@ -106,8 +123,15 @@ fn bench_mixed_batch_vs_sequential(c: &mut Criterion) {
                         .insert(*key, value.clone(), &storage)
                         .await
                         .unwrap()
-                        .persist()
+                        .persist(&mut delta)
                         .unwrap();
+                    // Flush after each persist so the next edit can load the nodes this persist created.
+                    for (_, buffer) in delta.flush() {
+                        storage
+                            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                            .await
+                            .unwrap();
+                    }
                 }
                 for key in delete_keys.iter() {
                     tree = tree
@@ -115,8 +139,15 @@ fn bench_mixed_batch_vs_sequential(c: &mut Criterion) {
                         .delete(key, &storage)
                         .await
                         .unwrap()
-                        .persist()
+                        .persist(&mut delta)
                         .unwrap();
+                    // Flush after each persist so the next edit can load the nodes this persist created.
+                    for (_, buffer) in delta.flush() {
+                        storage
+                            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                            .await
+                            .unwrap();
+                    }
                 }
             });
         });
@@ -134,7 +165,8 @@ fn bench_mixed_batch_vs_sequential(c: &mut Criterion) {
                 for key in delete_keys.iter() {
                     edit = edit.delete(key, &storage).await.unwrap();
                 }
-                let _tree = edit.persist().unwrap();
+                let mut delta = Delta::zero();
+                let _tree = edit.persist(&mut delta).unwrap();
             });
         });
     }

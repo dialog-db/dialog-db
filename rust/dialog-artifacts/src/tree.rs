@@ -26,7 +26,9 @@
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{ContentAddressedStorage, Entry, PersistentTree, Value as TreeValue};
+use dialog_search_tree::{
+    Buffer, ContentAddressedStorage, Delta, Entry, PersistentTree, Value as TreeValue,
+};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
 
@@ -92,12 +94,14 @@ pub trait ArtifactTreeExt {
     /// a same-valued prior is already in place — that's the
     /// cardinality-one no-op).
     ///
-    /// Callers own everything else: building the change stream,
-    /// choosing a base tree root, persisting a `Revision`, flushing
-    /// the tree's delta, etc.
+    /// The batch's new nodes are written into `delta`, the caller-owned
+    /// accumulator. Callers own everything else: building the change stream,
+    /// choosing a base tree root, persisting a `Revision`, and flushing
+    /// `delta`.
     async fn apply<S, I>(
         &mut self,
         store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
         instructions: I,
     ) -> Result<(), DialogArtifactsError>
     where
@@ -136,6 +140,7 @@ impl ArtifactTreeExt for ArtifactTree {
     async fn apply<S, I>(
         &mut self,
         store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
         instructions: I,
     ) -> Result<(), DialogArtifactsError>
     where
@@ -264,8 +269,9 @@ impl ArtifactTreeExt for ArtifactTree {
             }
         }
 
-        // Seal the whole batch with a single bottom-up persist.
-        *self = transient.persist()?;
+        // Seal the whole batch with a single bottom-up persist into the
+        // caller's delta.
+        *self = transient.persist(delta)?;
         Ok(())
     }
 

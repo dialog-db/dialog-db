@@ -36,7 +36,7 @@ use dialog_common::Blake3Hash;
 use dialog_common::helpers::BenchData;
 use dialog_search_tree::helpers::{Traversable as _, TraversalOrder};
 use dialog_search_tree::{
-    ContentAddressedStorage, Distribution, PersistentNode, PersistentTree, Rank,
+    ContentAddressedStorage, Delta, Distribution, PersistentNode, PersistentTree, Rank,
 };
 use dialog_storage::MemoryStorageBackend;
 use futures_util::StreamExt;
@@ -136,6 +136,7 @@ where
 
     let mut storage = ContentAddressedStorage::new(Backend::default());
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
+    let mut delta = Delta::zero();
 
     for (key, value) in keys.iter().zip(values.iter()) {
         tree = tree
@@ -143,14 +144,15 @@ where
             .insert(*key, value.to_vec(), &storage)
             .await
             .unwrap()
-            .persist()
+            .persist(&mut delta)
             .unwrap();
-    }
-    for buffer in tree.flush() {
-        storage
-            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-            .await
-            .unwrap();
+        // Flush after each persist so the next edit can load the nodes this persist created.
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await
+                .unwrap();
+        }
     }
 
     (tree, storage, keys)
@@ -162,16 +164,24 @@ async fn insert_all<D>(keys: &[[u8; 16]], values: &[Vec<u8>])
 where
     D: Distribution,
 {
-    let storage = ContentAddressedStorage::new(Backend::default());
+    let mut storage = ContentAddressedStorage::new(Backend::default());
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
+    let mut delta = Delta::zero();
     for (key, value) in keys.iter().zip(values.iter()) {
         tree = tree
             .edit()
             .insert(*key, value.clone(), &storage)
             .await
             .unwrap()
-            .persist()
+            .persist(&mut delta)
             .unwrap();
+        // Flush after each persist so the next edit can load the nodes this persist created.
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await
+                .unwrap();
+        }
     }
 }
 

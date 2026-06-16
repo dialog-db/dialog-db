@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{ContentAddressedStorage, PersistentTree};
+use dialog_search_tree::{ContentAddressedStorage, Delta, PersistentTree};
 use dialog_storage::MemoryStorageBackend;
 
 const BENCH_SEED: u64 = 42;
@@ -16,8 +16,9 @@ fn bench_delete(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
             b.to_async(tokio::runtime::Runtime::new().unwrap())
                 .iter(|| async {
-                    let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+                    let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
                     let mut tree = PersistentTree::<[u8; 16], Vec<u8>>::empty();
+                    let mut delta = Delta::zero();
 
                     // Insert all keys
                     for (key, value) in keys.iter().zip(values.iter()) {
@@ -26,8 +27,15 @@ fn bench_delete(c: &mut Criterion) {
                             .insert(*key, value.to_vec(), &storage)
                             .await
                             .unwrap()
-                            .persist()
+                            .persist(&mut delta)
                             .unwrap();
+                        // Flush after each persist so the next edit can load the nodes this persist created.
+                        for (_, buffer) in delta.flush() {
+                            storage
+                                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                                .await
+                                .unwrap();
+                        }
                     }
 
                     // Delete half of them
@@ -37,8 +45,15 @@ fn bench_delete(c: &mut Criterion) {
                             .delete(key, &storage)
                             .await
                             .unwrap()
-                            .persist()
+                            .persist(&mut delta)
                             .unwrap();
+                        // Flush after each persist so the next edit can load the nodes this persist created.
+                        for (_, buffer) in delta.flush() {
+                            storage
+                                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                                .await
+                                .unwrap();
+                        }
                     }
                 });
         });
