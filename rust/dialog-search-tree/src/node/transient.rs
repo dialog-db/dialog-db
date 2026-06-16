@@ -514,7 +514,10 @@ mod tests {
         let mut prev_upper: Option<[u8; 4]> = None;
         for segment in &segments {
             for pair in segment.windows(2) {
-                assert!(pair[0].key < pair[1].key, "entries within a segment must be sorted");
+                assert!(
+                    pair[0].key < pair[1].key,
+                    "entries within a segment must be sorted"
+                );
             }
             if let (Some(prev), Some(first)) = (prev_upper, segment.first()) {
                 assert!(prev < first.key, "segments must be in ascending key order");
@@ -537,7 +540,10 @@ mod tests {
         let segments = segments_of(&keys)?;
         let total: usize = segments.iter().map(|segment| segment.len()).sum();
 
-        assert_eq!(total, n as usize, "every entry must land in exactly one segment");
+        assert_eq!(
+            total, n as usize,
+            "every entry must land in exactly one segment"
+        );
 
         Ok(())
     }

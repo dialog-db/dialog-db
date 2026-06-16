@@ -43,7 +43,7 @@ use rand::{Rng, distributions::Alphanumeric};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
-use dialog_search_tree::ContentAddressedStorage as TreeStorage;
+use dialog_search_tree::{Buffer as TreeBuffer, ContentAddressedStorage as TreeStorage, Delta};
 pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
     MemoryStorageBackend, Storage, StorageBackend,
@@ -397,11 +397,14 @@ where
             // surrounding transaction bookkeeping — base-revision
             // capture, revision persistence, pointer advance, and the
             // rollback below.
-            index.apply(&mut self.storage, instructions).await?;
+            let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
+            index
+                .apply(&mut self.storage, &mut delta, instructions)
+                .await?;
 
             // Persist the tree's pending nodes before minting a revision;
             // a revision must only reference durable blocks.
-            stream::iter(index.flush())
+            stream::iter(delta.flush().map(|(_, buffer)| buffer))
                 .map(|buffer| {
                     let mut storage = self.storage.clone();
                     async move {

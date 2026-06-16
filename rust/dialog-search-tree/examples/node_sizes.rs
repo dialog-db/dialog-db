@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use dialog_common::Blake3Hash;
 use dialog_common::helpers::BenchData;
 use dialog_search_tree::{
-    ContentAddressedStorage, Distribution, PersistentNode, PersistentTree, Rank,
+    ContentAddressedStorage, Delta, Distribution, PersistentNode, PersistentTree, Rank,
 };
 use dialog_storage::MemoryStorageBackend;
 
@@ -51,20 +51,22 @@ async fn build<D: Distribution>(
     let values = data.random_buffers::<32>(size);
     let mut storage = ContentAddressedStorage::new(Backend::default());
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
+    let mut delta = Delta::zero();
     for (k, v) in keys.iter().zip(values.iter()) {
         tree = tree
             .edit()
             .insert(*k, v.to_vec(), &storage)
             .await
             .unwrap()
-            .persist()
+            .persist(&mut delta)
             .unwrap();
-    }
-    for buffer in tree.flush() {
-        storage
-            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-            .await
-            .unwrap();
+        // Flush after each persist so the next edit can load the nodes this persist created.
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await
+                .unwrap();
+        }
     }
     (tree, storage)
 }
