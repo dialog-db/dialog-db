@@ -1278,4 +1278,240 @@ mod tests {
         );
         Ok(())
     }
+
+    // --- Reconcile scenarios (two diverged buffered replicas syncing) ---
+    //
+    // These probe whether two buffered hitchhiker trees can be reconciled. The
+    // bar is the one the user named: after reconcile, canonicalizing both sides
+    // yields byte-identical roots representing the same fact set, with no
+    // resurrected deletes. They model the three regimes the user called out:
+    // both replicas overflow, neither overflows alone but the merge does, and a
+    // flushed delete on one replica colliding with the other's catch-up.
+
+    /// Persists a hitchhiker tree (novelty intact) and flushes it to storage,
+    /// returning the materialized root tree. Models a replica pushing its
+    /// buffered state to the shared store without canonicalizing.
+    async fn persist_buffered(tree: TestHitchhiker, storage: &mut TestStorage) -> Result<TestTree> {
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        flush(&mut delta, storage).await?;
+        Ok(TestTree::from_hash(root))
+    }
+
+    /// Canonicalizes a hitchhiker tree and flushes it, returning the canonical
+    /// root tree. Models a replica that flushes all novelty to leaves at the
+    /// sync boundary.
+    async fn canonicalize_flushed(
+        tree: TestHitchhiker,
+        storage: &mut TestStorage,
+    ) -> Result<TestTree> {
+        let mut delta = Delta::zero();
+        let canonical = tree.canonicalize(storage, &mut delta).await?;
+        flush(&mut delta, storage).await?;
+        Ok(canonical)
+    }
+
+    /// Reconciles `local` toward `other` relative to their common `base`, the way
+    /// the repository pull path does: differentiate base against other, integrate
+    /// those changes into an edit over local. Returns the merged root tree.
+    async fn reconcile(
+        base: &TestTree,
+        local: &TestTree,
+        other: &TestTree,
+        storage: &mut TestStorage,
+    ) -> Result<TestTree> {
+        let differential = base.differentiate(other, storage, storage);
+        let mut delta = Delta::zero();
+        let merged = local
+            .edit()
+            .integrate(differential, storage)
+            .await?
+            .persist(&mut delta)?;
+        flush(&mut delta, storage).await?;
+        Ok(merged)
+    }
+
+    /// Builds a hitchhiker tree over `base` applying `ops` (true = insert key as
+    /// its own value, false = delete), with the given buffer size.
+    async fn buffered_replica(
+        base: &TestTree,
+        ops: &[(bool, u32)],
+        op_buf_size: usize,
+        storage: &TestStorage,
+    ) -> Result<TestHitchhiker> {
+        let mut tree = TestHitchhiker::open(base).with_op_buf_size(op_buf_size);
+        for &(is_insert, key) in ops {
+            tree = if is_insert {
+                tree.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), storage)
+                    .await?
+            } else {
+                tree.delete(key.to_le_bytes(), storage).await?
+            };
+        }
+        Ok(tree)
+    }
+
+    /// Both replicas overflow their root buffer (disjoint key ranges), then
+    /// reconcile via canonicalize-at-sync. The merged canonical root must equal a
+    /// sequential build of the union of both replicas' fact sets.
+    #[dialog_common::test]
+    async fn it_reconciles_when_both_replicas_overflow() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // Shared base of 0..200.
+        let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
+
+        // Each replica adds enough disjoint keys to overflow a small buffer.
+        let a_ops: Vec<(bool, u32)> = (1000..1100u32).map(|k| (true, k)).collect();
+        let b_ops: Vec<(bool, u32)> = (2000..2100u32).map(|k| (true, k)).collect();
+
+        let a = buffered_replica(&base, &a_ops, 8, &storage).await?;
+        let b = buffered_replica(&base, &b_ops, 8, &storage).await?;
+
+        // Canonicalize both at the sync boundary, then reconcile B toward A.
+        let a_canon = canonicalize_flushed(a, &mut storage).await?;
+        let b_canon = canonicalize_flushed(b, &mut storage).await?;
+        let merged = reconcile(&base, &b_canon, &a_canon, &mut storage).await?;
+
+        // Oracle: a sequential build of the union.
+        let mut union: Vec<u32> = (0..200).collect();
+        union.extend(1000..1100);
+        union.extend(2000..2100);
+        let expected = sequential(&union, &mut storage).await?;
+
+        assert_eq!(
+            merged.root(),
+            expected.root(),
+            "both-overflow reconcile must equal the union build"
+        );
+        Ok(())
+    }
+
+    /// Neither replica overflows alone, but their combined novelty would. After
+    /// canonicalize-at-sync the merge must still equal the union build (the merge
+    /// triggering a flush is the point of interest).
+    #[dialog_common::test]
+    async fn it_reconciles_when_only_the_merge_overflows() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
+
+        // Buffer of 64; each replica adds 40 (fits alone), union adds 80 (would
+        // overflow a single root buffer).
+        let a_ops: Vec<(bool, u32)> = (1000..1040u32).map(|k| (true, k)).collect();
+        let b_ops: Vec<(bool, u32)> = (2000..2040u32).map(|k| (true, k)).collect();
+
+        let a = buffered_replica(&base, &a_ops, 64, &storage).await?;
+        let b = buffered_replica(&base, &b_ops, 64, &storage).await?;
+
+        let a_canon = canonicalize_flushed(a, &mut storage).await?;
+        let b_canon = canonicalize_flushed(b, &mut storage).await?;
+        let merged = reconcile(&base, &b_canon, &a_canon, &mut storage).await?;
+
+        let mut union: Vec<u32> = (0..200).collect();
+        union.extend(1000..1040);
+        union.extend(2000..2040);
+        let expected = sequential(&union, &mut storage).await?;
+
+        assert_eq!(
+            merged.root(),
+            expected.root(),
+            "merge-overflow reconcile must equal the union build"
+        );
+        Ok(())
+    }
+
+    /// The delete-resurrection scenario. Replica A buffers and overflows a delete
+    /// of a key K that exists in the base (so the delete flushes to a leaf), then
+    /// pushes. Replica B made an unrelated buffered change. When B catches up to
+    /// A via canonicalize-at-sync reconcile, K must STAY deleted: the canonical
+    /// merged root must equal a sequential build of (base + B's change) minus K.
+    #[dialog_common::test]
+    async fn it_does_not_resurrect_a_flushed_delete_on_catch_up() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // Base contains K = 50 along with 0..200.
+        let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
+        let victim = 50u32;
+
+        // Replica A: delete K plus enough other ops to overflow the root buffer,
+        // forcing the delete to flush down toward the leaf.
+        let mut a_ops: Vec<(bool, u32)> = vec![(false, victim)];
+        a_ops.extend((1000..1100u32).map(|k| (true, k)));
+        let a = buffered_replica(&base, &a_ops, 8, &storage).await?;
+
+        // Replica B: an unrelated buffered insert, no overflow.
+        let b_ops: Vec<(bool, u32)> = vec![(true, 3000u32)];
+        let b = buffered_replica(&base, &b_ops, 8, &storage).await?;
+
+        let a_canon = canonicalize_flushed(a, &mut storage).await?;
+        let b_canon = canonicalize_flushed(b, &mut storage).await?;
+        let merged = reconcile(&base, &b_canon, &a_canon, &mut storage).await?;
+
+        // K must not come back. Oracle: union of A's and B's effects.
+        let mut union: Vec<u32> = (0..200).filter(|&k| k != victim).collect();
+        union.extend(1000..1100);
+        union.push(3000);
+        let expected = sequential(&union, &mut storage).await?;
+
+        assert_eq!(
+            merged.root(),
+            expected.root(),
+            "a flushed delete of {victim} must not be resurrected on catch-up"
+        );
+
+        // And explicitly: K resolves to absent in the merged tree.
+        assert_eq!(
+            merged.get(&victim.to_le_bytes(), &storage).await?,
+            None,
+            "deleted key {victim} must remain absent after reconcile"
+        );
+        Ok(())
+    }
+
+    /// Guardrail: reconciling the buffered (non-canonicalized) trees directly is
+    /// NOT safe, and this pins exactly why. The current differential reads only
+    /// flushed leaf entries, never index novelty, so a key that lives only in a
+    /// replica's root novelty is invisible to it. Here replica A buffers an
+    /// insert that never overflows (stays in novelty); diffing the base against
+    /// A's buffered-but-uncanonicalized tree sees NO change, so the merged tree
+    /// is missing A's insert. Canonicalize-at-sync (the path the other tests use)
+    /// avoids this by flushing novelty to leaves before the differential runs.
+    ///
+    /// If this test ever starts failing because the differential learned to read
+    /// novelty, that is good news: delete this guardrail and the canonicalize
+    /// step may become optional.
+    #[dialog_common::test]
+    async fn it_shows_buffered_direct_reconcile_misses_novelty() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let base = sequential(&(0..200u32).collect::<Vec<_>>(), &mut storage).await?;
+
+        // Replica A buffers a single insert that stays in the root novelty (large
+        // buffer, no overflow), so it never reaches a leaf.
+        let a = buffered_replica(&base, &[(true, 5000u32)], 100_000, &storage).await?;
+        let a_buffered = persist_buffered(a, &mut storage).await?;
+
+        // Reconcile the base toward A's buffered tree directly (no canonicalize).
+        let merged = reconcile(&base, &base, &a_buffered, &mut storage).await?;
+
+        // The novelty-blind differential never saw key 5000, so the merged tree
+        // is missing it. This documents the unsafety of buffered-direct reconcile.
+        assert_eq!(
+            merged.get(&5000u32.to_le_bytes(), &storage).await?,
+            None,
+            "buffered-direct reconcile misses an op that lives only in novelty"
+        );
+
+        // Whereas canonicalizing A first surfaces the insert as a leaf change.
+        let a2 = buffered_replica(&base, &[(true, 5000u32)], 100_000, &storage).await?;
+        let a_canon = canonicalize_flushed(a2, &mut storage).await?;
+        let merged_safe = reconcile(&base, &base, &a_canon, &mut storage).await?;
+        assert_eq!(
+            merged_safe.get(&5000u32.to_le_bytes(), &storage).await?,
+            Some(5000u32.to_le_bytes().to_vec()),
+            "canonicalize-at-sync surfaces the buffered insert correctly"
+        );
+        Ok(())
+    }
 }
