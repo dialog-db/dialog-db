@@ -87,21 +87,24 @@ representation of the same logical fact set.
 
 ## Three modes as flush policies
 
-One core mechanism, three behaviors selected by how far a flush cascades:
+One core mechanism, three behaviors selected by how far a flush cascades. These
+are the `FlushPolicy` variants, set on a `HitchhikerTree` via
+`with_flush_policy`:
 
-- **OneLevel (true hitchhiker)**: an overflowing buffer flushes one level down.
+- **Amortized (true hitchhiker)**: an overflowing buffer flushes one level down.
   Write-optimal; work is amortized across levels. The default.
-- **Full**: a flush pushes ops straight through to the leaves rather than one
-  level at a time. This reproduces the earlier "drain the buffer into the
-  canonical tree" behavior: the tree stays close to canonical, with shallower
-  buffering. Equivalent to canonicalizing on each flush trigger.
-- **Never (passthrough)**: never buffer (or never flush); every write goes
-  straight to the canonical tree, i.e. today's unbuffered behavior. Mostly a
-  benchmark baseline and the trivial degenerate policy.
+- **Recursive**: an overflow pushes ops straight through to the leaves rather
+  than one level at a time (the cascade gives each descended child a zero-size
+  buffer, so it overflows on through). The tree stays close to canonical, with
+  shallower buffering. Equivalent to canonicalizing on each flush trigger.
+- **Immediate (passthrough)**: never buffer; every write goes straight to the
+  canonical edit path, i.e. the unbuffered behavior. A benchmark baseline and
+  the trivial degenerate policy.
 
-These are thin wrappers over the core's `flush_node` / `canonicalize` primitives,
-choosing the cascade depth. The core does not know which policy is in force; it
-just exposes the flush primitives.
+The policy only chooses the cascade depth of the one `enqueue` mechanism; the
+core does not branch on it beyond the per-child buffer size it passes down. All
+three are correctness-equivalent: they represent the same fact set and
+`canonicalize` to the same deterministic root.
 
 ---
 
@@ -120,9 +123,9 @@ index-derivation and merge semantics.
 
 ---
 
-## Open questions (to resolve while building the core)
+## Resolved while building the core
 
-- **Node format**: the per-node op buffer is a `novelty` field on the
+- **Node format** (done): the per-node op buffer is a `novelty` field on the
   content-addressed `Index` node: `PersistentIndex { links, novelty:
   Vec<NoveltyEntry<Key, Value>> }`. Only `Index` nodes carry novelty; leaf
   `Segment`s do not (ops flush into segment entries at the leaf). A node with
@@ -133,18 +136,30 @@ index-derivation and merge semantics.
   written before the change; it is a format revision, not an additive one. No
   stored data depends on the old layout.) This realizes the accepted
   node-hash-moves tradeoff.
-- **Flush primitive shape**: `flush_node` at inner levels moves ops from a node's
-  buffer into its children's buffers (new); at the leaf it is a `TransientTree`
-  batch-apply (exists). How these compose, and how a flush interacts with the
-  COW edit path and the caller-owned `Delta`.
-- **Buffer capacity** per node (the write-amplification knob); hitchhiker runs
-  buffers several times the fan-out (e.g. ~900-1000 against fan-out 100-200). For
-  our base fan-out Q=254, pick a starting value and make it tunable.
-- **Read merge** down a buffered path: descending the spine merging each node's
-  covering buffer ops, with tombstones, in key order. Reuse the existing
-  `merge_grouped` / `SortKey` / tombstone approach at the artifact layer.
-- **`canonicalize` cost and when callers invoke it** (every commit, on a
-  threshold, only at sync/publish), and how it relates to the Full policy.
+- **Flush primitive shape** (done): `enqueue` routes ops into a node's novelty;
+  on overflow it stable-sorts `novelty ++ msgs`, partitions by child upper bound,
+  and recurses one level (Amortized) or with a zero-size child buffer (Recursive).
+  Ops that reach a leaf are collected as `deferred` and applied through the
+  canonical `TransientTree` edit path **in memory** (via `from_loaded` /
+  `into_root`), with no serialization round-trip, so leaf landings reshape exactly
+  as a sequential edit. `canonicalize` drains all novelty (`drain_novelty`), sorts
+  by key, replays the same way, and serializes into the caller-owned `Delta`.
+- **Buffer capacity** (done): `op_buf_size` per node, default
+  `DEFAULT_OP_BUF_SIZE = 1024` (a few times the base fan-out Q=254), tunable via
+  `with_op_buf_size`.
+- **Read merge** (done): `HitchhikerTree::get` descends the spine; at each index
+  node the highest covering buffered op wins (`novelty_lookup`, last-op-wins
+  within a key), a `Retract` hides and an `Assert` shadows; with no covering op
+  the stored leaf value stands, read through `PersistentTree::get`. The artifact
+  layer will reuse `merge_grouped` / `SortKey` / tombstones for `Artifact`s.
+
+## Open questions (artifact consumer and sync)
+
+- **`canonicalize` cadence**: when callers invoke it (every commit, on a
+  threshold, only at sync/publish). The Recursive policy keeps the tree close to
+  canonical between explicit `canonicalize` calls.
 - **Sync reconcile** over buffered trees: same-base union vs different-base merge,
   and whether reconciliation operates on canonicalized forms or on buffered
   forms with buffer union.
+- **Artifact consumer**: EAV-only novelty deriving AEV/VAE; `Instruction` to
+  buffered ops; commit-path wiring; cardinality-one / `Replace` supersession.
