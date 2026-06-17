@@ -49,6 +49,17 @@ enum TransientRoot<Key, Value> {
     Loaded(TransientNode<Key, Value>),
 }
 
+/// The unwrapped root of a [`TransientTree`], exposed to the crate so the
+/// hitchhiker tree can take ownership of a finished batch's live spine without
+/// serializing it.
+pub(crate) enum TransientRootParts<Key, Value> {
+    /// The durable root hash (an unedited or emptied batch). `NULL_BLAKE3_HASH`
+    /// is an empty tree.
+    Unloaded(Blake3Hash),
+    /// The live transient node the batch edited.
+    Loaded(TransientNode<Key, Value>),
+}
+
 /// A batch of in-place edits over a tree's [`Node`] spine.
 ///
 /// The edit holds no storage handle: like [`PersistentTree`], every method that
@@ -113,6 +124,30 @@ where
             root: TransientRoot::Unloaded(root),
             cache,
             distribution: PhantomData,
+        }
+    }
+
+    /// Creates an edit batch over an already-loaded transient `node`, sharing
+    /// `cache`. Used by the hitchhiker tree to replay leaf-bound ops directly on
+    /// its live spine, with no serialization round-trip.
+    pub(crate) fn from_loaded(
+        node: TransientNode<Key, Value>,
+        cache: Cache<Blake3Hash, Buffer>,
+    ) -> Self {
+        Self {
+            root: TransientRoot::Loaded(node),
+            cache,
+            distribution: PhantomData,
+        }
+    }
+
+    /// Unwraps the batch into its root: the live transient node when one was
+    /// loaded (the common case after edits), or the durable root hash when the
+    /// batch was never edited or left the tree empty.
+    pub(crate) fn into_root(self) -> TransientRootParts<Key, Value> {
+        match self.root {
+            TransientRoot::Loaded(node) => TransientRootParts::Loaded(node),
+            TransientRoot::Unloaded(hash) => TransientRootParts::Unloaded(hash),
         }
     }
 

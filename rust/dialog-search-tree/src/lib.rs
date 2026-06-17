@@ -161,6 +161,9 @@ pub use tree::*;
 mod buffered;
 pub use buffered::*;
 
+mod hitchhiker;
+pub use hitchhiker::*;
+
 mod delta;
 pub use delta::*;
 

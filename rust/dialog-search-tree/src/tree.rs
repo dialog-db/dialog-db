@@ -124,6 +124,14 @@ where
         &self.root
     }
 
+    /// Returns a handle to this tree's node cache, shared by reference count.
+    ///
+    /// Used to open a [`HitchhikerTree`](crate::HitchhikerTree) over this tree
+    /// that shares its warm cache.
+    pub fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
+        self.node_cache.clone()
+    }
+
     /// Creates a new empty [`PersistentTree`] with no entries.
     ///
     /// The empty tree has a null root hash and an empty node cache.
