@@ -296,6 +296,80 @@ where
         edit.persist(delta)
     }
 
+    /// Retrieves the value associated with `key`, merging buffered ops over the
+    /// stored leaves.
+    ///
+    /// The descent reads exactly what [`canonicalize`](Self::canonicalize) would
+    /// produce. Ops flow root to leaf, so a buffered op closer to the root is
+    /// more recent: at each index node on the path the node's `novelty` is
+    /// consulted first, and the highest covering op wins. A buffered
+    /// [`Retract`](NoveltyOp::Retract) hides the underlying value; a buffered
+    /// [`Assert`](NoveltyOp::Assert) shadows it. With no covering buffered op the
+    /// stored leaf value stands, read through the same path
+    /// [`PersistentTree::get`] uses for untouched subtrees.
+    pub async fn get<Backend>(
+        &self,
+        key: &Key,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Option<Value>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        let mut node = match &self.root {
+            HitchhikerRoot::Unloaded(hash) => {
+                return self.persistent_get(hash, key, storage).await;
+            }
+            HitchhikerRoot::Loaded(node) => node,
+        };
+
+        loop {
+            match node {
+                TransientNode::Index(index) => {
+                    // A higher buffer holds the most recent op, so a covering op
+                    // here wins over anything deeper.
+                    if let Some(op) = novelty_lookup(&index.novelty, key) {
+                        return Ok(match op {
+                            NoveltyOp::Assert(value) => Some(value.clone()),
+                            NoveltyOp::Retract => None,
+                        });
+                    }
+                    let at = child_index::<Key, Value>(&index.children, key)?;
+                    match &index.children[at] {
+                        Node::Persistent(link) => {
+                            return self.persistent_get(&link.node, key, storage).await;
+                        }
+                        Node::Transient(child) => node = child,
+                    }
+                }
+                TransientNode::Segment(segment) => {
+                    return match segment.entries.binary_search_by(|entry| entry.key.cmp(key)) {
+                        Ok(at) => Ok(Some(segment.entries[at].value.clone())),
+                        Err(_) => Ok(None),
+                    };
+                }
+            }
+        }
+    }
+
+    /// Delegates a point lookup over a fully persistent subtree to
+    /// [`PersistentTree::get`], so reads of an untouched subtree match the
+    /// persistent read exactly.
+    async fn persistent_get<Backend>(
+        &self,
+        hash: &Blake3Hash,
+        key: &Key,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Option<Value>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        let subtree: PersistentTree<Key, Value, D> =
+            PersistentTree::seal(hash.clone(), self.cache.clone());
+        subtree.get(key, storage).await
+    }
+
     /// Serializes the buffered tree as-is (buffers intact) into `delta`,
     /// returning its root hash. The result is not canonical until
     /// [`canonicalize`](Self::canonicalize) has flushed the buffers.
@@ -463,6 +537,67 @@ fn merge_sorted<Key, Value>(
 {
     novelty.extend(incoming);
     novelty.sort_by(|a, b| a.key.cmp(&b.key));
+}
+
+/// Finds the authoritative buffered op for `key` in a node's (sorted) novelty,
+/// or `None` if the key is not buffered here.
+///
+/// Within a key the last entry wins (last-op-wins), so the search returns the
+/// last entry whose key equals `key`. The buffer is sorted by key and stable
+/// within equal keys, so the run of equal-key entries is contiguous and its last
+/// element is the most recent op.
+fn novelty_lookup<'a, Key, Value>(
+    novelty: &'a [NoveltyEntry<Key, Value>],
+    key: &Key,
+) -> Option<&'a NoveltyOp<Value>>
+where
+    Key: Ord,
+{
+    let at = novelty.partition_point(|entry| entry.key < *key);
+    if at < novelty.len() && novelty[at].key == *key {
+        // Walk to the last entry with this key (last op wins).
+        let mut last = at;
+        while last + 1 < novelty.len() && novelty[last + 1].key == *key {
+            last += 1;
+        }
+        Some(&novelty[last].op)
+    } else {
+        None
+    }
+}
+
+/// Index of the child whose subtree covers `key`: the first child whose upper
+/// bound is `>= key`, or the last child when the key exceeds every bound.
+///
+/// Mirrors the transient tree's routing so a buffered read descends the same way
+/// a canonical edit would.
+fn child_index<Key, Value>(
+    children: &[Node<Key, Value>],
+    key: &Key,
+) -> Result<usize, DialogSearchTreeError>
+where
+    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    let mut at = 0usize;
+    while at + 1 < children.len() {
+        if children[at].upper_bound_ref()? < key {
+            at += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(at)
 }
 
 /// Replays a list of buffered ops as canonical inserts/deletes on an edit batch.
@@ -833,6 +968,150 @@ mod tests {
                 "seed {seed}: interleaved buffered ops must canonicalize to sequential"
             );
         }
+        Ok(())
+    }
+
+    /// A buffered `get` must read exactly what canonicalize would produce: the
+    /// merge of buffered ops over the stored leaves. For a random insert/delete
+    /// stream over a small domain (so ops collide), every key's buffered `get`
+    /// must match the same key's `get` on the canonical reference tree, both for
+    /// present and absent keys.
+    #[dialog_common::test]
+    async fn it_reads_buffered_ops_like_canonicalized() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        for seed in 0..50u64 {
+            let mut rng = Rng::new(seed);
+            let mut ops: Vec<(bool, u32)> = Vec::new();
+            for _ in 0..400 {
+                let is_insert = !(rng.next_u32()).is_multiple_of(3);
+                let key = rng.next_u32() % 150;
+                ops.push((is_insert, key));
+            }
+
+            // Reference: replay the ops canonically and flush, so its reads are
+            // fully resolvable from storage.
+            let mut reference = TestTree::empty();
+            let mut delta = Delta::zero();
+            for &(is_insert, key) in &ops {
+                reference = if is_insert {
+                    reference
+                        .edit()
+                        .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                        .await?
+                        .persist(&mut delta)?
+                } else {
+                    reference
+                        .edit()
+                        .delete(&key.to_le_bytes(), &storage)
+                        .await?
+                        .persist(&mut delta)?
+                };
+                flush(&mut delta, &mut storage).await?;
+            }
+
+            // Buffered: the same ops through a cascading hitchhiker tree, never
+            // canonicalized; reads merge the live buffers over the leaves.
+            let mut tree = TestHitchhiker::empty().with_op_buf_size(8);
+            for &(is_insert, key) in &ops {
+                tree = if is_insert {
+                    tree.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                        .await?
+                } else {
+                    tree.delete(key.to_le_bytes(), &storage).await?
+                };
+            }
+
+            for key in 0..160u32 {
+                let buffered = tree.get(&key.to_le_bytes(), &storage).await?;
+                let canonical = reference.get(&key.to_le_bytes(), &storage).await?;
+                assert_eq!(
+                    buffered, canonical,
+                    "seed {seed}: buffered get of key {key} must match the canonical read"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A later buffered write to a key must shadow an earlier one on read
+    /// (last-op-wins), including a delete shadowing a prior insert and a
+    /// re-insert shadowing a prior delete, all while the ops sit in buffers.
+    #[dialog_common::test]
+    async fn it_reads_last_op_wins_for_buffered_writes() -> Result<()> {
+        let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // A large buffer keeps every op in the root buffer, so all collisions on
+        // a key resolve purely within one node's novelty.
+        let mut tree = TestHitchhiker::empty().with_op_buf_size(100_000);
+
+        tree = tree.insert(7u32.to_le_bytes(), vec![1], &storage).await?;
+        assert_eq!(
+            tree.get(&7u32.to_le_bytes(), &storage).await?,
+            Some(vec![1])
+        );
+
+        tree = tree.insert(7u32.to_le_bytes(), vec![2], &storage).await?;
+        assert_eq!(
+            tree.get(&7u32.to_le_bytes(), &storage).await?,
+            Some(vec![2]),
+            "a later assert must shadow an earlier one"
+        );
+
+        tree = tree.delete(7u32.to_le_bytes(), &storage).await?;
+        assert_eq!(
+            tree.get(&7u32.to_le_bytes(), &storage).await?,
+            None,
+            "a buffered retract must hide a prior assert"
+        );
+
+        tree = tree.insert(7u32.to_le_bytes(), vec![3], &storage).await?;
+        assert_eq!(
+            tree.get(&7u32.to_le_bytes(), &storage).await?,
+            Some(vec![3]),
+            "a re-insert must shadow a prior retract"
+        );
+
+        Ok(())
+    }
+
+    /// A buffered op must shadow a value stored in the persistent base: opening
+    /// over a flushed tree and buffering an update or delete to a based key must
+    /// be visible to `get` before any flush.
+    #[dialog_common::test]
+    async fn it_reads_buffered_ops_over_a_persistent_base() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let base_keys: Vec<u32> = (0..300).collect();
+        let base = sequential(&base_keys, &mut storage).await?;
+
+        let mut tree = TestHitchhiker::open(&base).with_op_buf_size(8);
+
+        // Update a based key and delete another, both buffered.
+        tree = tree
+            .insert(42u32.to_le_bytes(), vec![0xFF], &storage)
+            .await?;
+        tree = tree.delete(100u32.to_le_bytes(), &storage).await?;
+
+        assert_eq!(
+            tree.get(&42u32.to_le_bytes(), &storage).await?,
+            Some(vec![0xFF]),
+            "a buffered update must shadow the based value"
+        );
+        assert_eq!(
+            tree.get(&100u32.to_le_bytes(), &storage).await?,
+            None,
+            "a buffered delete must hide the based value"
+        );
+        // An untouched based key still reads from storage.
+        assert_eq!(
+            tree.get(&200u32.to_le_bytes(), &storage).await?,
+            Some(200u32.to_le_bytes().to_vec()),
+            "an untouched based key reads through to storage"
+        );
+        // An absent key is absent.
+        assert_eq!(tree.get(&999u32.to_le_bytes(), &storage).await?, None);
+
         Ok(())
     }
 }
