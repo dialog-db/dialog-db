@@ -45,7 +45,7 @@ impl From<FileSystemError> for MemoryError {
 struct PidlockGuard(Pidlock);
 
 impl PidlockGuard {
-    /// Acquire a PID lock at the given handle.
+    /// Acquire a PID lock at the given path.
     ///
     /// If a stale lock exists (from a dead process), it will be automatically
     /// cleaned up and the lock acquired.
@@ -55,40 +55,28 @@ impl PidlockGuard {
     /// the entire transaction, which is the correct behavior since the locked
     /// value will likely change anyway.
     fn acquire(path: PathBuf) -> Result<Self, FileSystemError> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| FileSystemError::Lock("Lock path is not valid UTF-8".to_string()))?;
-
-        // If something other than a regular file exists at the lock path
-        // (e.g. a directory from a previous bug), fail early. Pidlock
-        // panics if it tries to remove_file on a directory.
-        if path.exists() && !path.is_file() {
-            return Err(FileSystemError::Lock(format!(
-                "Lock path is not a regular file: {}",
-                path_str
-            )));
-        }
-
-        let mut lock = Pidlock::new(path_str);
+        // pidlock 0.2 handles stale-lock cleanup atomically inside acquire()
+        // and surfaces malformed paths (directory at lock path, etc.) as
+        // PidlockError::IOError instead of panicking — so no defensive
+        // pre-check or retry loop is needed. new_validated also rejects
+        // unusable paths up front and creates the parent directory.
+        let mut lock = Pidlock::new_validated(&path)
+            .map_err(|e| FileSystemError::Lock(format!("Invalid lock path: {e:?}")))?;
 
         match lock.acquire() {
             Ok(()) => Ok(Self(lock)),
             Err(pidlock::PidlockError::LockExists) => {
-                // get_owner() checks if the PID in the lock file is still
-                // alive. If not, it removes the stale file so a retry can
-                // succeed. If the process is alive, we fail immediately
-                // and let the STM layer retry the whole transaction.
-                match lock.get_owner() {
-                    Some(pid) => Err(FileSystemError::Lock(format!(
-                        "Concurrent write in progress (lock held by pid {pid})",
-                    ))),
-                    None => {
-                        // Stale lock was removed by get_owner(). Retry once.
-                        lock.acquire().map(|()| Self(lock)).map_err(|e| {
-                            FileSystemError::Lock(format!("Failed to acquire lock: {e:?}"))
-                        })
-                    }
-                }
+                // Holder is alive. Look up its PID for diagnostics; if we
+                // can't read it, just say so.
+                let holder = lock
+                    .get_owner()
+                    .ok()
+                    .flatten()
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "<unknown>".into());
+                Err(FileSystemError::Lock(format!(
+                    "Concurrent write in progress (lock held by pid {holder})",
+                )))
             }
             Err(e) => Err(FileSystemError::Lock(format!(
                 "Failed to acquire lock: {e:?}"
