@@ -61,6 +61,18 @@ base = 10000 entries, op_buf_size = 1024.
   repository sync round-trips, not the repository push/pull protocol end to end.
   A full repo+remote benchmark needs the hitchhiker tree wired through
   `dialog-artifacts` and `dialog-repository` first.
+- **The differential is novelty-blind.** `TreeDifference` reads only `index.links`
+  and leaf `segment.entries`; it never reads `index.novelty`. So the round-trip
+  and novel-block counts above are valid as *structural* (node-hash) churn, but
+  the differential's entry-level `changes()` does NOT see buffered ops. Two
+  buffered trees therefore cannot be reconciled by diffing them directly: a key
+  living only in a node's novelty is invisible, and a flushed delete on one side
+  vs a still-buffered key on the other would resurrect the delete. The safe model
+  is **canonicalize-at-sync**: flush novelty to leaves before the differential
+  runs, after which the existing frugal differentiate/integrate is correct and
+  unchanged. See the reconcile tests in `src/hitchhiker.rs`
+  (`it_reconciles_when_*`, `it_does_not_resurrect_a_flushed_delete_on_catch_up`,
+  `it_shows_buffered_direct_reconcile_misses_novelty`).
 - The buffered tree's reads are non-canonical between syncs (node hashes move as
   buffers fill); the byte-exact canonical root exists only after `canonicalize`.
   The numbers above assume sync exchanges the buffered roots as they are.
