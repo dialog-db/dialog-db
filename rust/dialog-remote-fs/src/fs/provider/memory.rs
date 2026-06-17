@@ -1,9 +1,9 @@
 //! Memory providers for FS-remote.
 //!
-//! Delegates the memory capability to the
+//! Delegates the memory capability to the verified
 //! [`FileSystem`](dialog_storage::provider::FileSystem) the authorization
-//! resolved from the directory grant. CAS semantics, edition hashing,
-//! cross-writer locking, and atomic writes all live in `dialog_storage`.
+//! carries. CAS semantics, edition hashing, cross-writer locking, and atomic
+//! writes all live in `dialog_storage`.
 
 use dialog_capability::{ForkInvocation, Provider};
 use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};

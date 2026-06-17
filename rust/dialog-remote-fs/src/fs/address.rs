@@ -93,14 +93,23 @@ where
     // Read the directory's own identity, the same way Repository load derives a
     // space's subject from its stored credential. The chain subject is a
     // placeholder — key("self") reads credential/key/self regardless.
+    //
+    // A missing/unreadable credential is a *precondition* failure, not a denial:
+    // the directory isn't a space yet (it must be created with
+    // `Repository::create` first), so it surfaces as a configuration error.
     let credential = did!("local:storage")
         .credential()
         .key(SELF)
         .load()
         .perform(filesystem)
         .await
-        .map_err(|e| AuthorizeError::Denied(format!("directory has no usable credential: {e}")))?;
+        .map_err(|e| {
+            AuthorizeError::Configuration(format!(
+                "directory is not an initialized space (no readable credential/key/self): {e}"
+            ))
+        })?;
 
+    // A subject the directory is not the space for IS a denial.
     let expected = capability.subject();
     let actual = credential.did();
     if &actual != expected {

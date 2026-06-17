@@ -1,9 +1,9 @@
 //! Archive providers for FS-remote.
 //!
-//! Delegates the archive capability to the
+//! Delegates the archive capability to the verified
 //! [`FileSystem`](dialog_storage::provider::FileSystem) the authorization
-//! resolved from the directory grant. The on-disk layout, idempotent
-//! content-addressed writes, and atomic temp+rename all live in `dialog_storage`.
+//! carries. The on-disk layout, idempotent content-addressed writes, and atomic
+//! temp+rename all live in `dialog_storage`.
 
 use dialog_capability::{ForkInvocation, Provider};
 use dialog_effects::archive::*;

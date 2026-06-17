@@ -105,6 +105,12 @@ impl WebRoot {
     ///
     /// [opfs]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system
     pub async fn opfs(id: &str) -> Result<Self, FileSystemError> {
+        Self::opfs_path(id, std::slice::from_ref(&id.to_string())).await
+    }
+
+    /// A root at the OPFS subdirectory reached by walking `segments` (creating
+    /// missing levels). `id` anchors the synthetic base URL the layout uses.
+    async fn opfs_path(id: &str, segments: &[String]) -> Result<Self, FileSystemError> {
         let global = js_sys::global();
         let navigator = js_sys::Reflect::get(&global, &JsValue::from_str("navigator"))
             .map_err(|e| js_io_error("reading navigator", e))?;
@@ -119,16 +125,11 @@ impl WebRoot {
             .dyn_into()
             .map_err(|_| FileSystemError::Io("expected FileSystemDirectoryHandle".into()))?;
 
-        // Scope this root to a subdirectory so independent tests/consumers
-        // don't collide in the shared OPFS namespace.
-        let opts = FileSystemGetDirectoryOptions::new();
-        opts.set_create(true);
-        let scoped: FileSystemDirectoryHandle =
-            JsFuture::from(root.get_directory_handle_with_options(id, &opts))
-                .await
-                .map_err(|e| js_io_error(&format!("opening OPFS subdir '{id}'"), e))?
-                .dyn_into()
-                .map_err(|_| FileSystemError::Io("expected FileSystemDirectoryHandle".into()))?;
+        // Scope this root to a subdirectory (creating missing levels) so
+        // independent consumers don't collide in the shared OPFS namespace.
+        let scoped = navigate_directory(&root, segments, true)
+            .await?
+            .ok_or_else(|| FileSystemError::Io("OPFS subdirectory navigation failed".into()))?;
 
         Ok(Self::new(id, scoped))
     }
@@ -196,6 +197,39 @@ impl WebRoot {
     fn handle_at_base(&self) -> FileSystemHandle {
         FileSystemHandle::from_root(self.base.as_ref().clone(), self.clone())
     }
+}
+
+use crate::resource::Resource;
+use dialog_effects::storage::{Directory, Location};
+
+/// Resolve a [`Location`] to a web [`FileSystem`], mirroring the native
+/// `Resource<Location>` impl so `Storage`/`Space` compose identically.
+///
+/// `Profile`/`Current`/`Temp` map to OPFS subdirectories (`{category}/{name}`);
+/// `At` looks up a directory handle previously registered (e.g. from
+/// `showDirectoryPicker()`) in IndexedDB under the given key.
+#[async_trait::async_trait(?Send)]
+impl Resource<Location> for FileSystem {
+    type Error = FileSystemError;
+
+    async fn open(location: &Location) -> Result<Self, FileSystemError> {
+        let root = match &location.directory {
+            Directory::Profile => opfs_category("profile", &location.name).await?,
+            Directory::Current => opfs_category("current", &location.name).await?,
+            Directory::Temp => opfs_category("temp", &location.name).await?,
+            // `At` names a directory the host granted and registered in IDB.
+            Directory::At(key) => WebRoot::open(key).await?,
+        };
+        Ok(root.provider())
+    }
+}
+
+/// A web root at OPFS `{category}/{name}`. `id` (the joined path) anchors the
+/// synthetic base URL so distinct locations don't collide.
+async fn opfs_category(category: &str, name: &str) -> Result<WebRoot, FileSystemError> {
+    let id = format!("{category}/{name}");
+    let segments = vec![category.to_string(), name.to_string()];
+    WebRoot::opfs_path(&id, &segments).await
 }
 
 /// IndexedDB store name and key under which a directory handle is persisted.
@@ -727,6 +761,46 @@ mod tests {
             .await?;
         let edition = resolved.expect("nested cell should resolve");
         assert_eq!(edition.content, content);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_opens_a_location_under_opfs() -> anyhow::Result<()> {
+        use crate::resource::Resource;
+        use dialog_effects::storage::{Directory, Location};
+
+        // FileSystem::open(Location) resolves to an OPFS directory on web, the
+        // same entry point as native, so a round-trip works through it.
+        let location = Location::new(Directory::Temp, unique_name("web-location"));
+        let provider = crate::provider::FileSystem::open(&location).await?;
+        let did = unique_did().await;
+        let content = b"opened via Location".to_vec();
+        let digest = dialog_common::Blake3Hash::hash(&content);
+
+        did.clone()
+            .archive()
+            .catalog("index")
+            .put(content.clone())
+            .perform(&provider)
+            .await?;
+        let result = did
+            .clone()
+            .archive()
+            .catalog("index")
+            .get(digest.clone())
+            .perform(&provider)
+            .await?;
+        assert_eq!(result, Some(content));
+
+        // Re-opening the same Location must reach the same directory.
+        let reopened = crate::provider::FileSystem::open(&location).await?;
+        let again = did
+            .archive()
+            .catalog("index")
+            .get(digest)
+            .perform(&reopened)
+            .await?;
+        assert!(again.is_some(), "same Location should reopen the same dir");
         Ok(())
     }
 }

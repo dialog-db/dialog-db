@@ -1,11 +1,11 @@
 //! Provider implementations for the [`Fs`](super::Fs) site.
 //!
-//! Each [`Provider<ForkInvocation<Fs, Fx>>`](dialog_capability::Provider) impl
-//! resolves the invocation's [`FsAddress`](crate::FsAddress) to the registered
-//! [`FileSystem`](dialog_storage::provider::FileSystem) provider and delegates
-//! the capability to it. All filesystem I/O — layout, atomic writes, CAS
-//! locking — lives in `dialog_storage`'s isomorphic provider; this crate only
-//! does the credential (directory) resolution.
+//! By the time these run, [`authorize`](crate::fs::FsFork) has opened and
+//! verified the directory and attested the resolved
+//! [`FileSystem`](dialog_storage::provider::FileSystem) into the invocation. So
+//! each [`Provider<ForkInvocation<Fs, Fx>>`](dialog_capability::Provider) impl
+//! just delegates the capability to that provider. All filesystem I/O — layout,
+//! atomic writes, CAS locking — lives in `dialog_storage`'s isomorphic provider.
 
 pub mod archive;
 pub mod memory;
