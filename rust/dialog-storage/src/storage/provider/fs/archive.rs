@@ -3,7 +3,6 @@
 //! Layout: `{space_root}/archive/{catalog}/{base58(digest)}`
 
 use super::{FileSystem, FileSystemError, FileSystemHandle};
-use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
@@ -25,7 +24,8 @@ impl From<FileSystemError> for ArchiveError {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Get> for FileSystem {
     async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         let catalog = effect.catalog();
@@ -40,7 +40,8 @@ impl Provider<Get> for FileSystem {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Put> for FileSystem {
     async fn execute(&self, effect: Capability<Put>) -> Result<(), ArchiveError> {
         let catalog = effect.catalog();
@@ -66,7 +67,8 @@ impl Provider<Put> for FileSystem {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Import> for FileSystem {
     async fn execute(&self, effect: Capability<Import>) -> Result<(), ArchiveError> {
         let catalog = effect.catalog();
@@ -105,7 +107,7 @@ impl Provider<Import> for FileSystem {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::helpers::{unique_did, unique_name};

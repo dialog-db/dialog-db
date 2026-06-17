@@ -66,8 +66,25 @@ dirs = { workspace = true }
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true }
 rexie = { workspace = true }
+url = { workspace = true }
 wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
 web-time = { workspace = true }
+web-sys = { workspace = true, features = [
+  "Blob",
+  "File",
+  "FileSystemCreateWritableOptions",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemGetFileOptions",
+  "FileSystemHandle",
+  "FileSystemRemoveOptions",
+  "FileSystemWritableFileStream",
+  "LockManager",
+  "Navigator",
+  "StorageManager",
+] }
 
 [dev-dependencies]
 anyhow = { workspace = true }

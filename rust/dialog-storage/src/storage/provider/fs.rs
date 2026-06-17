@@ -1,6 +1,14 @@
-//! Filesystem-based storage provider for native environments.
+//! Filesystem-based storage provider.
 //!
-//! Each space is a directory with the following layout:
+//! This provider is isomorphic across targets: on native platforms it is
+//! backed by [`tokio::fs`], and in the browser by the
+//! [File System Access API][fsapi] (`web_sys::FileSystemDirectoryHandle`).
+//! The capability implementations (archive, memory, credential, certificate)
+//! are written once against [`FileSystemHandle`] and shared by both.
+//!
+//! Each space is a directory with the following layout, byte-identical on
+//! both targets so a vault written on native can be read in the browser and
+//! vice versa:
 //!
 //! ```text
 //! {space_root}/
@@ -10,33 +18,46 @@
 //!   certificate/{audience}/{subject}/{issuer}.{hash}
 //! ```
 //!
-//! Compare-And-Swap (CAS) semantics are accomplished through PID-based file
-//! locking for cross-process coordination and BLAKE3 content hashing for
-//! enforcing ensuring invariantns.
+//! Compare-And-Swap (CAS) semantics are accomplished through cross-writer
+//! locking (PID-based file locks on native, the [Web Locks API][weblocks] in
+//! the browser) and BLAKE3 content hashing for enforcing edition invariants.
+//!
+//! [fsapi]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API
+//! [weblocks]: https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API
 
 mod archive;
-mod certificate;
-mod credential;
 mod error;
 mod memory;
 
+// Credential and certificate storage are native-only. On the web a signer
+// credential is a non-extractable WebCrypto key handle with no byte
+// serialization, so the byte-compatible on-disk format these providers rely on
+// cannot be honoured there; browsers persist credentials through the IndexedDb
+// provider instead. The archive and memory providers above are isomorphic and
+// are what the FS-remote sync use case actually needs.
+#[cfg(not(target_arch = "wasm32"))]
+mod certificate;
+#[cfg(not(target_arch = "wasm32"))]
+mod credential;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod web;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub use web::WebRoot;
+
 pub use error::FileSystemError;
 
-use std::env;
-use std::io;
-use std::path::PathBuf;
-use tokio::fs;
 use url::Url;
-
-/// Subdirectory name used to namespace dialog storage inside the
-/// platform's data and temp directories.
-const STORAGE_NAMESPACE: &str = "dialog";
 
 /// Filesystem-based storage provider.
 ///
-/// A transparent wrapper over a [`Location`] that manages storage directories
-/// keyed by subject DID. Each subject gets its own directory with subdirectories
-/// for archive and memory operations.
+/// A transparent wrapper over a [`FileSystemHandle`] that manages storage
+/// directories keyed by subject DID. Each subject gets its own directory with
+/// subdirectories for archive and memory operations.
 ///
 /// Uses URL semantics for path joining, which provides automatic containment
 /// validation - attempts to escape the root via `..` or absolute paths will fail.
@@ -58,55 +79,33 @@ impl FileSystem {
     }
 }
 
-use crate::resource::Resource;
-use dialog_effects::storage::{Directory, Location};
-
-#[async_trait::async_trait]
-impl Resource<Location> for FileSystem {
-    type Error = FileSystemError;
-
-    async fn open(location: &Location) -> Result<Self, FileSystemError> {
-        Ok(Self(FileSystemHandle::try_from(location)?))
-    }
-}
-
-/// Resolve a `Location` (Directory + name) to a filesystem handle.
-impl TryFrom<&Location> for FileSystemHandle {
-    type Error = FileSystemError;
-
-    fn try_from(location: &Location) -> Result<Self, FileSystemError> {
-        let base = match &location.directory {
-            Directory::Profile => {
-                let data_dir = dirs::data_dir().ok_or_else(|| {
-                    FileSystemError::Io("could not determine platform data directory".into())
-                })?;
-                data_dir.join(STORAGE_NAMESPACE)
-            }
-            Directory::Current => {
-                env::current_dir().map_err(|e| FileSystemError::Io(e.to_string()))?
-            }
-            Directory::Temp => env::temp_dir(),
-            Directory::At(path) => PathBuf::from(path),
-        };
-
-        let path = if location.name.is_empty() {
-            base
-        } else {
-            base.join(&location.name)
-        };
-
-        path.try_into()
+impl From<FileSystemHandle> for FileSystem {
+    fn from(handle: FileSystemHandle) -> Self {
+        Self(handle)
     }
 }
 
 /// A location in the filesystem, represented as a `file:` URL.
 ///
-/// Provides methods for resolving child paths with containment validation,
-/// and converting to native filesystem paths.
+/// The URL is the single source of truth for path layout and containment on
+/// every target; child paths resolved through [`resolve`](Self::resolve) are
+/// validated against the root so segments can never escape it. On the web a
+/// [`WebRoot`] is carried alongside so the same URL path can be walked through
+/// the File System Access API.
 #[derive(Clone, Debug)]
-#[repr(transparent)]
-pub struct FileSystemHandle(Url);
+pub struct FileSystemHandle {
+    /// The `file:` URL describing this handle's position in the layout.
+    url: Url,
+    /// The web root this handle navigates from. The URL path relative to the
+    /// root's URL gives the segment list to walk through the FS Access API.
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    root: web::WebRoot,
+}
 
+/// Constructing a handle from a bare `file:` URL is native-only; on the web a
+/// handle must be created through [`WebRoot::handle`] so it carries the JS
+/// directory handle it navigates from.
+#[cfg(not(target_arch = "wasm32"))]
 impl TryFrom<Url> for FileSystemHandle {
     type Error = FileSystemError;
 
@@ -123,10 +122,11 @@ impl TryFrom<Url> for FileSystemHandle {
             url.set_path(&format!("{}/", url.path()));
         }
 
-        Ok(Self(url))
+        Ok(Self { url })
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl TryFrom<String> for FileSystemHandle {
     type Error = FileSystemError;
 
@@ -136,6 +136,7 @@ impl TryFrom<String> for FileSystemHandle {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl TryFrom<&str> for FileSystemHandle {
     type Error = FileSystemError;
 
@@ -145,65 +146,36 @@ impl TryFrom<&str> for FileSystemHandle {
     }
 }
 
-impl TryFrom<PathBuf> for FileSystemHandle {
-    type Error = FileSystemError;
+/// The active I/O backend for the current target. `native` is backed by
+/// [`tokio::fs`]; `web` by the File System Access API. Both expose the same
+/// free functions taking a [`FileSystemHandle`], plus a `LockGuard` type and
+/// `lock` function for CAS critical sections.
+#[cfg(not(target_arch = "wasm32"))]
+use native as backend;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use web as backend;
 
-    fn try_from(path: PathBuf) -> Result<Self, Self::Error> {
-        // Ensure the path is absolute for proper URL conversion
-        let absolute = if path.is_absolute() {
-            path
-        } else {
-            env::current_dir()
-                .map_err(|e| FileSystemError::Io(e.to_string()))?
-                .join(path)
-        };
-
-        // Convert to file: URL, ensuring trailing slash for directory
-        let mut url = Url::from_file_path(&absolute)
-            .map_err(|_| FileSystemError::Io("Invalid path for URL conversion".to_string()))?;
-
-        // Ensure trailing slash so joins work correctly
-        if !url.path().ends_with('/') {
-            url.set_path(&format!("{}/", url.path()));
-        }
-
-        Ok(Self(url))
-    }
-}
-
-impl TryFrom<FileSystemHandle> for PathBuf {
-    type Error = FileSystemError;
-
-    fn try_from(location: FileSystemHandle) -> Result<Self, Self::Error> {
-        let path = location
-            .0
-            .to_file_path()
-            .map_err(|_| FileSystemError::Io("Failed to convert URL to path".to_string()))?;
-
-        // Strip trailing slash added by FileSystemHandle for URL semantics.
-        // Filesystem operations (read, write, rename) need clean file paths.
-        // Use `to_str` (not `to_string_lossy`) so non-UTF-8 paths don't
-        // collide via lossy substitutions; require UTF-8 for the trim.
-        let s = path.to_str().ok_or_else(|| {
-            FileSystemError::Io("Path is not valid UTF-8 and cannot be normalized".to_string())
-        })?;
-        if s.ends_with('/') && s.len() > 1 {
-            Ok(PathBuf::from(s.trim_end_matches('/')))
-        } else {
-            Ok(path)
-        }
-    }
-}
+pub(crate) use backend::{LockGuard, lock};
 
 impl FileSystemHandle {
     /// Returns the underlying URL.
     pub fn url(&self) -> &Url {
-        &self.0
+        &self.url
     }
 
     /// Returns the URL path component of this location.
     pub fn path(&self) -> &str {
         self.url().path()
+    }
+
+    /// Build a child handle that shares this handle's web root (if any) but
+    /// points at the given URL. Keeps the root attached across `resolve`.
+    pub(super) fn with_url(&self, url: Url) -> Self {
+        Self {
+            url,
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            root: self.root.clone(),
+        }
     }
 
     /// Resolves a path segment relative to this location, validating containment.
@@ -243,106 +215,61 @@ impl FileSystemHandle {
             )));
         }
 
-        Ok(Self(joined))
+        Ok(self.with_url(joined))
     }
 
     /// Ensures this location exists as a directory.
     pub async fn ensure_dir(&self) -> Result<(), FileSystemError> {
-        let path: PathBuf = self.clone().try_into()?;
-        fs::create_dir_all(&path)
-            .await
-            .map_err(|e| FileSystemError::Io(e.to_string()))
+        backend::ensure_dir(self).await
     }
 
     /// Read the contents of the file at this location.
     pub async fn read(&self) -> Result<Vec<u8>, FileSystemError> {
-        let path: PathBuf = self.clone().try_into()?;
-        fs::read(&path)
-            .await
-            .map_err(|e| FileSystemError::Io(e.to_string()))
+        backend::read(self).await
     }
 
     /// Read the contents of the file at this location, returning `None` if
     /// the file does not exist.
     pub async fn read_optional(&self) -> Result<Option<Vec<u8>>, FileSystemError> {
-        let path: PathBuf = self.clone().try_into()?;
-        match fs::read(&path).await {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(FileSystemError::Io(e.to_string())),
-        }
+        backend::read_optional(self).await
     }
 
     /// Write contents to the file at this location, creating parent dirs.
     pub async fn write(&self, contents: &[u8]) -> Result<(), FileSystemError> {
-        let path: PathBuf = self.clone().try_into()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| FileSystemError::Io(e.to_string()))?;
-        }
-        fs::write(&path, contents)
-            .await
-            .map_err(|e| FileSystemError::Io(e.to_string()))
+        backend::write(self, contents).await
     }
 
     /// Atomically rename this location to another.
     pub async fn rename(&self, to: &FileSystemHandle) -> Result<(), FileSystemError> {
-        let from_path: PathBuf = self.clone().try_into()?;
-        let to_path: PathBuf = to.clone().try_into()?;
-        fs::rename(&from_path, &to_path)
-            .await
-            .map_err(|e| FileSystemError::Io(e.to_string()))
+        backend::rename(self, to).await
     }
 
     /// Remove the file at this location, returning Ok if already absent.
     pub async fn remove(&self) -> Result<(), FileSystemError> {
-        let path: PathBuf = self.clone().try_into()?;
-        match fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(FileSystemError::Io(e.to_string())),
-        }
+        backend::remove(self).await
     }
 
     /// List file names in this directory. Returns an empty vec if the
     /// directory does not exist.
     pub async fn list(&self) -> Result<Vec<String>, FileSystemError> {
-        let path: PathBuf = self.clone().try_into()?;
-        let mut entries = match fs::read_dir(&path).await {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(FileSystemError::Io(e.to_string())),
-        };
-
-        let mut names = Vec::new();
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| FileSystemError::Io(e.to_string()))?
-        {
-            if let Some(name) = entry.file_name().to_str() {
-                names.push(name.to_string());
-            }
-        }
-        Ok(names)
+        backend::list(self).await
     }
 
     /// Check if this location exists.
     pub async fn exists(&self) -> bool {
-        let Ok(path) = <PathBuf as TryFrom<FileSystemHandle>>::try_from(self.clone()) else {
-            return false;
-        };
-        path.exists()
+        backend::exists(self).await
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use super::native::STORAGE_NAMESPACE;
     use super::*;
     use crate::helpers::unique_name;
     use crate::resource::Resource;
     use dialog_effects::storage::{Directory, Location as StorageLocation};
+    use std::env;
+    use std::path::PathBuf;
 
     /// Create a test FileSystem at a temp location.
     async fn test_space(name: &str) -> FileSystem {
