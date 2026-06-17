@@ -1194,7 +1194,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base58",
- "blake3",
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
@@ -1202,15 +1201,11 @@ dependencies = [
  "dialog-storage",
  "dialog-varsig",
  "getrandom 0.2.16",
- "js-sys",
- "pidlock",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
 ]
@@ -1407,7 +1402,9 @@ dependencies = [
  "tower-http",
  "url",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "web-sys",
  "web-time",
 ]
 

@@ -1,83 +1,35 @@
 //! Native round-trip and byte-compat tests for the archive providers.
 //!
-//! The byte-compat tests are the load-bearing assertion of this crate:
-//! a directory written by `dialog-remote-fs` must be a valid
-//! `dialog-storage::FileSystem` vault and vice versa. Without that,
-//! consumers can't share a directory across the two providers — which
-//! is the whole point of the FS-remote.
+//! The byte-compat tests are the load-bearing assertion of this crate: a
+//! directory written through the FS-remote site must be a valid
+//! `dialog_storage::FileSystem` vault and vice versa. Since the FS-remote now
+//! delegates straight to that provider, "byte-compat" is structural — but the
+//! tests guard against a future divergence in the resolution layer.
 
 #![cfg(not(target_arch = "wasm32"))]
 
+mod helpers;
+
 use anyhow::Result;
 use base58::ToBase58;
-use dialog_capability::Subject;
 use dialog_common::Blake3Hash;
+use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::prelude::*;
-use dialog_effects::archive::{Archive, ArchiveError, Catalog, Get, Put};
 use dialog_effects::storage::{Directory, Location};
-use dialog_remote_fs::{Fs, FsAuthorization, IntoRequest, registry};
+use dialog_remote_fs::register_directory;
 use dialog_storage::provider::FileSystem;
 use dialog_storage::resource::Resource;
 use dialog_storage::{unique_did, unique_name};
+use helpers::execute;
 use tempfile::TempDir;
-
-/// Build a `Capability<Get>` for the given catalog + digest under a subject.
-fn build_get(
-    subject: Subject,
-    catalog: &str,
-    digest: Blake3Hash,
-) -> dialog_capability::Capability<Get> {
-    subject
-        .attenuate(Archive)
-        .attenuate(Catalog::new(catalog))
-        .invoke(Get::new(digest))
-}
-
-/// Build a `Capability<Put>` for the given catalog + content. The digest is
-/// content-addressed: it's derived from the bytes, so the caller doesn't
-/// supply one.
-fn build_put(
-    subject: Subject,
-    catalog: &str,
-    content: Vec<u8>,
-) -> dialog_capability::Capability<Put> {
-    subject
-        .attenuate(Archive)
-        .attenuate(Catalog::new(catalog))
-        .invoke(Put::new(content))
-}
 
 /// Set up a tempdir registered under a unique handle id. The returned
 /// `TempDir` keeps the directory alive for the test's lifetime.
 fn setup() -> (TempDir, String) {
     let tmp = tempfile::tempdir().unwrap();
     let id = unique_name("fs-remote-archive");
-    registry::register_directory(id.clone(), tmp.path().to_path_buf());
+    register_directory(id.clone(), tmp.path().to_path_buf()).unwrap();
     (tmp, id)
-}
-
-/// Execute a capability through the full FS-remote ForkInvocation pipeline
-/// (auth redeem → permit → invocation → I/O). Bypasses the operator-level
-/// `Network` dispatch because these tests want to exercise the Fs site
-/// directly, not the composite.
-async fn execute_get(
-    handle_id: &str,
-    capability: dialog_capability::Capability<Get>,
-) -> Result<Option<Vec<u8>>, ArchiveError> {
-    let request = capability.to_request();
-    let auth = FsAuthorization::new(request);
-    let permit = auth.redeem(&dialog_remote_fs::FsAddress::new(handle_id));
-    permit.invoke(capability).perform(&Fs).await
-}
-
-async fn execute_put(
-    handle_id: &str,
-    capability: dialog_capability::Capability<Put>,
-) -> Result<(), ArchiveError> {
-    let request = capability.to_request();
-    let auth = FsAuthorization::new(request);
-    let permit = auth.redeem(&dialog_remote_fs::FsAddress::new(handle_id));
-    permit.invoke(capability).perform(&Fs).await
 }
 
 #[dialog_common::test]
@@ -86,7 +38,7 @@ async fn it_returns_none_for_missing_blob() -> Result<()> {
     let did = unique_did().await;
     let digest = Blake3Hash::hash(b"never written");
 
-    let result = execute_get(&id, build_get(did.into(), "index", digest)).await?;
+    let result = execute(&id, did.archive().catalog("index").get(digest)).await?;
     assert_eq!(result, None);
     Ok(())
 }
@@ -98,24 +50,31 @@ async fn it_writes_and_reads_back_a_blob() -> Result<()> {
     let content = b"hello fs-remote".to_vec();
     let digest = Blake3Hash::hash(&content);
 
-    execute_put(&id, build_put(did.clone().into(), "index", content.clone())).await?;
+    execute(
+        &id,
+        did.clone().archive().catalog("index").put(content.clone()),
+    )
+    .await?;
 
-    let result = execute_get(&id, build_get(did.into(), "index", digest)).await?;
+    let result = execute(&id, did.archive().catalog("index").get(digest)).await?;
     assert_eq!(result, Some(content));
     Ok(())
 }
 
 #[dialog_common::test]
 async fn it_writes_byte_compatibly_with_native_space() -> Result<()> {
-    // Write via FS-remote, then read back via dialog-storage's
-    // NativeSpace pointed at the same directory. This is the
-    // FS-remote -> native-dialog-storage direction.
+    // Write via FS-remote, then read back via dialog-storage's FileSystem
+    // pointed at the same directory.
     let (tmp, id) = setup();
     let did = unique_did().await;
-    let content = b"compat: fs-remote -> NativeSpace".to_vec();
+    let content = b"compat: fs-remote -> FileSystem".to_vec();
     let digest = Blake3Hash::hash(&content);
 
-    execute_put(&id, build_put(did.clone().into(), "index", content.clone())).await?;
+    execute(
+        &id,
+        did.clone().archive().catalog("index").put(content.clone()),
+    )
+    .await?;
 
     // The expected layout on disk:
     let expected_path = tmp
@@ -128,15 +87,14 @@ async fn it_writes_byte_compatibly_with_native_space() -> Result<()> {
         "fs-remote should have written {expected_path:?}",
     );
 
-    // Open the same directory as a NativeSpace and read the blob through
-    // its archive provider.
+    // Open the same directory as a FileSystem and read the blob through it.
     let location = Location::new(Directory::At(tmp.path().to_string_lossy().into_owned()), "");
-    let native_space = FileSystem::open(&location).await?;
+    let native = FileSystem::open(&location).await?;
     let loaded = did
         .archive()
         .catalog("index")
         .get(digest)
-        .perform(&native_space)
+        .perform(&native)
         .await?;
     assert_eq!(loaded, Some(content));
     Ok(())
@@ -144,23 +102,23 @@ async fn it_writes_byte_compatibly_with_native_space() -> Result<()> {
 
 #[dialog_common::test]
 async fn it_reads_byte_compatibly_from_native_space() -> Result<()> {
-    // Reverse direction: a native consumer writes via NativeSpace, and
+    // Reverse direction: a native consumer writes via FileSystem, and
     // FS-remote reads the same vault.
     let (tmp, id) = setup();
     let did = unique_did().await;
-    let content = b"compat: NativeSpace -> fs-remote".to_vec();
+    let content = b"compat: FileSystem -> fs-remote".to_vec();
     let digest = Blake3Hash::hash(&content);
 
     let location = Location::new(Directory::At(tmp.path().to_string_lossy().into_owned()), "");
-    let native_space = FileSystem::open(&location).await?;
+    let native = FileSystem::open(&location).await?;
     did.clone()
         .archive()
         .catalog("index")
         .put(content.clone())
-        .perform(&native_space)
+        .perform(&native)
         .await?;
 
-    let result = execute_get(&id, build_get(did.into(), "index", digest)).await?;
+    let result = execute(&id, did.archive().catalog("index").get(digest)).await?;
     assert_eq!(result, Some(content));
     Ok(())
 }
@@ -172,10 +130,18 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
     let content = b"idempotent".to_vec();
     let digest = Blake3Hash::hash(&content);
 
-    execute_put(&id, build_put(did.clone().into(), "index", content.clone())).await?;
-    execute_put(&id, build_put(did.clone().into(), "index", content.clone())).await?;
+    execute(
+        &id,
+        did.clone().archive().catalog("index").put(content.clone()),
+    )
+    .await?;
+    execute(
+        &id,
+        did.clone().archive().catalog("index").put(content.clone()),
+    )
+    .await?;
 
-    let result = execute_get(&id, build_get(did.into(), "index", digest)).await?;
+    let result = execute(&id, did.archive().catalog("index").get(digest)).await?;
     assert_eq!(result, Some(content));
     Ok(())
 }
@@ -185,11 +151,11 @@ async fn it_errors_on_unregistered_handle() -> Result<()> {
     let did = unique_did().await;
     let digest = Blake3Hash::hash(b"anything");
 
-    let result = execute_get(
+    let result = execute(
         "not-a-registered-handle",
-        build_get(did.into(), "index", digest),
+        did.archive().catalog("index").get(digest),
     )
     .await;
-    assert!(matches!(result, Err(ArchiveError::Io(_))));
+    assert!(matches!(result, Err(ArchiveError::Storage(_))));
     Ok(())
 }

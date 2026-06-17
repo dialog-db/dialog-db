@@ -1,20 +1,18 @@
 //! Fs site type and Provider plumbing.
 //!
 //! Mirrors the shape of [`dialog_remote_s3::s3`]. The site marker is [`Fs`];
-//! site-bound fork is [`FsFork<Fx>`]. The actual I/O lives in [`provider`],
-//! and capability-to-request translation lives in
-//! [`crate::request`](crate::request).
+//! the site-bound fork is [`FsFork<Fx>`]. There is no on-the-wire
+//! authorization for a local directory, so this crate is a thin credential
+//! resolution wrapper: [`provider`] resolves the [`FsAddress`] to a registered
+//! directory and delegates the capability to `dialog_storage`'s isomorphic
+//! [`FileSystem`](dialog_storage::provider::FileSystem) provider.
 
 mod address;
 mod authorization;
-mod invocation;
-mod permit;
 pub mod provider;
 
 pub use address::FsAddress;
 pub use authorization::FsAuthorization;
-pub use invocation::FsInvocation;
-pub use permit::FsPermit;
 
 use dialog_capability::Effect;
 use dialog_capability::Fork;
@@ -22,20 +20,20 @@ use dialog_capability::Site;
 
 /// Local-filesystem-backed site.
 ///
-/// Marker for fork dispatch — actual I/O is performed by
-/// [`Provider`](dialog_capability::Provider) impls in [`provider`]. The
-/// site is host-trusted: there is no on-the-wire authorization step. The
-/// directory handle referenced by an [`FsAddress`] must be registered with
-/// the provider before any invocation fires.
+/// Marker for fork dispatch — the actual I/O is performed by `dialog_storage`'s
+/// [`FileSystem`](dialog_storage::provider::FileSystem) provider, to which the
+/// [`Provider`](dialog_capability::Provider) impls in [`provider`] delegate.
+/// The site is host-trusted: there is no on-the-wire authorization step. The
+/// directory referenced by an [`FsAddress`] must be registered with the
+/// provider (via [`crate::register_directory`]) before any invocation fires.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Fs;
 
 /// Site-owned fork wrapper for [`Fs`].
 ///
 /// Thin newtype around [`Fork<Fs, Fx>`] that carries the site-specific
-/// [`Authorize`](dialog_capability::SiteFork) impl. For FS there are no
-/// credentials to fetch — the fork captures the request shape and seals
-/// it into an [`FsAuthorization`].
+/// [`SiteFork`](dialog_capability::SiteFork) impl. For FS there are no
+/// credentials to fetch — authorization is a unit marker.
 pub struct FsFork<Fx: Effect>(Fork<Fs, Fx>);
 
 impl<Fx: Effect> From<Fork<Fs, Fx>> for FsFork<Fx> {

@@ -7,11 +7,8 @@
 //! handle id, but the crate doesn't care.
 
 use super::{Fs, FsAuthorization, FsFork};
-use crate::request::IntoRequest;
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::{
-    Capability, Constraint, Effect, ForkInvocation, SiteAddress, SiteFork, SiteId,
-};
+use dialog_capability::{Constraint, Effect, ForkInvocation, SiteAddress, SiteFork, SiteId};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 
@@ -53,7 +50,6 @@ impl<Fx, Env> SiteFork<Env> for FsFork<Fx>
 where
     Fx: Effect + ConditionalSend + ConditionalSync + 'static,
     Fx::Of: Constraint<Capability: ConditionalSend + ConditionalSync>,
-    Capability<Fx>: IntoRequest,
     Env: ConditionalSync,
     FsFork<Fx>: ConditionalSend,
 {
@@ -61,11 +57,10 @@ where
     type Effect = Fx;
 
     async fn authorize(self, _env: &Env) -> Result<ForkInvocation<Fs, Fx>, AuthorizeError> {
-        // FS-remote has no over-the-wire authorization step. Capture the
-        // request description and seal it into an `FsAuthorization`; the
-        // provider does the actual I/O against the registered handle when
-        // the invocation fires.
-        let request = self.0.capability().to_request();
-        Ok(self.0.attest(FsAuthorization::new(request)))
+        // FS-remote has no over-the-wire authorization step: the host already
+        // granted access by registering the directory. Attest a unit
+        // authorization; the provider resolves the address and delegates the
+        // capability to the registered directory when the invocation fires.
+        Ok(self.0.attest(FsAuthorization))
     }
 }

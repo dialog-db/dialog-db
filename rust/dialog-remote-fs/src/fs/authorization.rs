@@ -1,40 +1,17 @@
 //! FS authorization material.
 //!
-//! Mirrors [`dialog_remote_s3::S3Authorization`] structurally even though
-//! FS has no credentials: redeeming produces an [`FsPermit`] that names
-//! the registered handle and carries the captured request.
+//! FS-remote has no credentials: the host already authorized access by handing
+//! the consumer a directory handle through the File System Access API (or via a
+//! native path). Authorization is therefore a unit marker, kept for structural
+//! parity with credential-based sites like [`dialog_remote_s3::S3Authorization`].
 
-use super::{FsAddress, FsPermit};
-use crate::request::FsRequest;
 use serde::{Deserialize, Serialize};
 
-/// FS authorization material — a captured request, ready to be paired with
-/// an [`FsAddress`] for execution.
+/// FS authorization material — a unit marker.
 ///
-/// Unlike S3's `S3Authorization`, no credential is involved: the host
-/// already authorized access by handing the consumer a directory handle
-/// through the FS Access API (or via a native path).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FsAuthorization {
-    request: FsRequest,
-}
-
-impl FsAuthorization {
-    /// Construct an authorization bound to a captured request.
-    pub fn new(request: FsRequest) -> Self {
-        Self { request }
-    }
-
-    /// The captured request this authorization is bound to.
-    pub fn request(&self) -> &FsRequest {
-        &self.request
-    }
-
-    /// Redeem this authorization for a permit against the given address.
-    ///
-    /// For FS there is no signing step — this is a passthrough constructor
-    /// that pairs the captured request with the registered handle id.
-    pub fn redeem(&self, address: &FsAddress) -> FsPermit {
-        FsPermit::new(address.id().to_string(), self.request.clone())
-    }
-}
+/// Present only to satisfy the [`Site::Authorization`](dialog_capability::Site)
+/// contract. The [`provider`](crate::fs::provider) resolves the
+/// [`FsAddress`](crate::FsAddress) directly and delegates to the registered
+/// directory, so no authorization material is needed.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct FsAuthorization;
