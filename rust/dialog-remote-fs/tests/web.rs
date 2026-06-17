@@ -12,6 +12,7 @@
 use dialog_capability::Subject;
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::archive::prelude::*;
+use dialog_effects::credential::prelude::*;
 use dialog_remote_fs::FsAddress;
 use dialog_remote_fs::helpers::FsNetwork;
 use dialog_storage::provider::{WebRoot, register_web_directory};
@@ -30,19 +31,20 @@ async fn setup() -> (FsNetwork, FsAddress, Subject) {
     let handle = root.handle();
     let filesystem = root.provider();
 
-    // Make the directory the space for `signer` by writing its identity to
-    // credential/key/self, in the byte-compatible storage form.
+    // Make the directory the space for `signer` the normal way — through the
+    // credential capability. On the web this stores the public identity (a
+    // signer can't persist its non-extractable key), which is what the subject
+    // check reads.
     let signer = Ed25519Signer::generate().await.unwrap();
     let did = Principal::did(&signer);
     let credential = Credential::Signer(SignerCredential::from(signer));
-    filesystem
-        .resolve("credential")
-        .and_then(|c| c.resolve("key"))
-        .and_then(|c| c.resolve("self"))
-        .expect("resolve credential/key/self")
-        .write(&credential.to_identity_bytes())
+    did.clone()
+        .credential()
+        .key("self")
+        .save(credential)
+        .perform(&filesystem)
         .await
-        .expect("write directory identity");
+        .expect("save directory identity");
 
     // Persist the handle under an IndexedDB database; that database name is the
     // address. open_web reads the handle back from it.
