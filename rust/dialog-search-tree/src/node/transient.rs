@@ -11,7 +11,8 @@ use rkyv::{
 
 use crate::{
     ArchivedNodeBody, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Key, Link, Node,
-    PersistentNode, PersistentNodeBody, Rank, SymmetryWith, Value, into_owned,
+    NoveltyEntry, PersistentIndex, PersistentNode, PersistentNodeBody, Rank, SymmetryWith, Value,
+    into_owned,
 };
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
@@ -34,11 +35,17 @@ pub enum TransientNode<Key, Value> {
     Segment(TransientSegment<Key, Value>),
 }
 
-/// An index node holding live child nodes.
+/// An index node holding live child nodes and a novelty buffer.
 #[derive(Debug)]
 pub struct TransientIndex<Key, Value> {
     /// The child nodes, each persistent or transient.
     pub children: Vec<Node<Key, Value>>,
+    /// Ops pending against this subtree, sorted by key (the node's novelty).
+    ///
+    /// A canonical edit (insert/delete) never introduces novelty, so on that
+    /// path this is always empty and flows through reshape untouched. It becomes
+    /// non-empty only on the hitchhiker write/flush path.
+    pub novelty: Vec<NoveltyEntry<Key, Value>>,
 }
 
 /// A leaf segment holding live key-value entries.
@@ -158,8 +165,8 @@ where
         + Ord,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
 {
     /// Opens an index [`PersistentNode`] one level into a [`TransientIndex`].
     ///
@@ -171,13 +178,21 @@ where
     pub fn open_index(
         node: &PersistentNode<Key, Value>,
     ) -> Result<TransientIndex<Key, Value>, DialogSearchTreeError> {
-        let children = node
-            .as_index()?
+        let index = node.as_index()?;
+        let children = index
             .links
             .iter()
             .map(|link| Ok(Node::Persistent(into_owned::<Link<Key>>(link)?)))
             .collect::<Result<Vec<Node<Key, Value>>, DialogSearchTreeError>>()?;
-        Ok(TransientIndex { children })
+        // Carry the node's novelty across to the transient form so a flush or
+        // canonicalize can act on it. The deserialized ops are owned copies of
+        // the archived novelty.
+        let novelty = index
+            .novelty
+            .iter()
+            .map(into_owned::<NoveltyEntry<Key, Value>>)
+            .collect::<Result<Vec<NoveltyEntry<Key, Value>>, DialogSearchTreeError>>()?;
+        Ok(TransientIndex { children, novelty })
     }
 }
 
@@ -247,9 +262,10 @@ where
     /// For a segment, the entries are encoded directly. For an index, each
     /// child is resolved to a [`Link`] first (a [`Node::Transient`] child
     /// recurses and serializes; a [`Node::Persistent`] child already is a
-    /// link), so the index's body holds only links. This makes no shape
-    /// decisions: the children and entries are encoded exactly as the edits
-    /// left them.
+    /// link), and the node's novelty is carried through unchanged, so the
+    /// index's body holds its links and its novelty. This makes no shape
+    /// decisions: the children, novelty, and entries are encoded exactly as the
+    /// edits left them.
     pub fn persist(
         self,
         delta: &mut Delta<Blake3Hash, Buffer>,
@@ -262,7 +278,15 @@ where
                     .into_iter()
                     .map(|child| child.into_link(delta))
                     .collect::<Result<Vec<Link<Key>>, DialogSearchTreeError>>()?;
-                PersistentNodeBody::try_from(links)?
+                if links.is_empty() {
+                    return Err(DialogSearchTreeError::Node(
+                        "Attempted to persist an index with zero links".into(),
+                    ));
+                }
+                PersistentNodeBody::Index(PersistentIndex {
+                    links,
+                    novelty: index.novelty,
+                })
             }
         };
 
@@ -377,7 +401,13 @@ where
 
     Ok(group_by_rank(ranked, BOTTOM_RANK + level)
         .into_iter()
-        .map(|group| TransientNode::Index(TransientIndex { children: group }).into())
+        .map(|group| {
+            TransientNode::Index(TransientIndex {
+                children: group,
+                novelty: Vec::new(),
+            })
+            .into()
+        })
         .collect())
 }
 

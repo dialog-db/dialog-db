@@ -158,6 +158,7 @@ where
                 children: vec![Node::Transient(TransientNode::Segment(TransientSegment {
                     entries: vec![entry],
                 }))],
+                novelty: Vec::new(),
             }),
             Some(root) => Edit::Upsert(entry)
                 .apply::<Backend, D>(root, &accessor)
@@ -1008,6 +1009,7 @@ where
         Some(Node::Persistent(link)) => {
             return Ok(Some(TransientNode::Index(TransientIndex {
                 children: vec![Node::Persistent(link)],
+                novelty: Vec::new(),
             })));
         }
         None => return Ok(None),
