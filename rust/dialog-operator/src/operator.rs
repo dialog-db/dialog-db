@@ -15,7 +15,7 @@ use crate::Authority;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_effects::authority::{Identify, Operator as AuthOperator};
-use dialog_effects::credential::Secret;
+use dialog_effects::credential::{Grant, Secret};
 use dialog_effects::storage as storage_fx;
 use dialog_effects::{archive, credential, memory};
 use dialog_network::Network;
@@ -43,6 +43,8 @@ pub struct Operator<S: Clone> {
         credential::Save<Credential>,
         credential::Load<Secret>,
         credential::Save<Secret>,
+        credential::Load<Grant>,
+        credential::Save<Grant>,
         memory::Resolve,
         memory::Publish,
         memory::Retract

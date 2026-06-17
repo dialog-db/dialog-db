@@ -14,7 +14,7 @@ use dialog_capability::access::{AuthorizeError, Protocol, Prove, Retain};
 use dialog_capability::{Capability, Did, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
-use dialog_effects::credential::Secret;
+use dialog_effects::credential::{Grant, Secret};
 use dialog_effects::{archive, credential, memory, storage};
 
 use loader::Loader;
@@ -44,7 +44,9 @@ pub struct Storage<S: Clone> {
         credential::Load<Credential>,
         credential::Save<Credential>,
         credential::Load<Secret>,
-        credential::Save<Secret>
+        credential::Save<Secret>,
+        credential::Load<Grant>,
+        credential::Save<Grant>
     )]
     router: Router<S>,
 }

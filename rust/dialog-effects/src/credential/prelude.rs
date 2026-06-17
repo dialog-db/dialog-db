@@ -5,7 +5,7 @@
 //! use dialog_effects::credential::prelude::*;
 //! ```
 
-use super::{Credential, Key, Load, Save, Secret, Site};
+use super::{Credential, Grant, Key, Load, Save, Secret, Site};
 use dialog_capability::{Capability, Did, Policy, SiteId, Subject};
 use dialog_credentials::Credential as KeyCredential;
 
@@ -163,5 +163,55 @@ impl SaveSecretExt for Capability<Save<Secret>> {
 
     fn secret(&self) -> &Secret {
         &Save::<Secret>::of(self).credential
+    }
+}
+
+/// Load/save a directory [`Grant`] at a site address. A grant is the host's
+/// durable authorization to access a local directory (a path on native, a
+/// `FileSystemDirectoryHandle` on the web).
+pub trait CredentialGrantExt {
+    /// Load the directory grant for this site.
+    fn load_grant(self) -> Capability<Load<Grant>>;
+    /// Save a directory grant for this site.
+    fn save_grant(self, grant: Grant) -> Capability<Save<Grant>>;
+}
+
+impl CredentialGrantExt for Capability<Site> {
+    fn load_grant(self) -> Capability<Load<Grant>> {
+        self.invoke(Load::new())
+    }
+
+    fn save_grant(self, grant: Grant) -> Capability<Save<Grant>> {
+        self.invoke(Save::new(grant))
+    }
+}
+
+/// Field accessor on `Capability<Load<Grant>>`.
+pub trait LoadGrantExt {
+    /// Get the site address from the capability chain.
+    fn address(&self) -> &SiteId;
+}
+
+impl LoadGrantExt for Capability<Load<Grant>> {
+    fn address(&self) -> &SiteId {
+        &Site::of(self).address
+    }
+}
+
+/// Field accessors on `Capability<Save<Grant>>`.
+pub trait SaveGrantExt {
+    /// Get the site address from the capability chain.
+    fn address(&self) -> &SiteId;
+    /// Get the grant to save.
+    fn grant(&self) -> &Grant;
+}
+
+impl SaveGrantExt for Capability<Save<Grant>> {
+    fn address(&self) -> &SiteId {
+        &Site::of(self).address
+    }
+
+    fn grant(&self) -> &Grant {
+        &Save::<Grant>::of(self).credential
     }
 }

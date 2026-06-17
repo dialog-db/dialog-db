@@ -45,7 +45,7 @@ use dialog_capability::access::{AuthorizeError, Protocol, Prove, Retain as Acces
 use dialog_capability::{Capability, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
-use dialog_effects::credential::Secret;
+use dialog_effects::credential::{Grant, Secret};
 use dialog_effects::storage::{Location, StorageError};
 use dialog_effects::{archive, credential, memory};
 
@@ -65,6 +65,8 @@ pub trait SpaceProvider:
     + Provider<credential::Save<Credential>>
     + Provider<credential::Load<Secret>>
     + Provider<credential::Save<Secret>>
+    + Provider<credential::Load<Grant>>
+    + Provider<credential::Save<Grant>>
     + ConditionalSend
     + ConditionalSync
     + Clone
@@ -83,6 +85,8 @@ impl<T> SpaceProvider for T where
         + Provider<credential::Save<Credential>>
         + Provider<credential::Load<Secret>>
         + Provider<credential::Save<Secret>>
+        + Provider<credential::Load<Grant>>
+        + Provider<credential::Save<Grant>>
         + ConditionalSend
         + ConditionalSync
         + Clone
@@ -106,7 +110,9 @@ pub struct Space<A, M, C, D> {
         credential::Load<Credential>,
         credential::Save<Credential>,
         credential::Load<Secret>,
-        credential::Save<Secret>
+        credential::Save<Secret>,
+        credential::Load<Grant>,
+        credential::Save<Grant>
     )]
     pub credential: C,
 

@@ -6,9 +6,9 @@ use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_credentials::credential::CredentialExport;
 use dialog_effects::credential::prelude::{
-    LoadCredentialExt, LoadSecretExt, SaveCredentialExt, SaveSecretExt,
+    LoadCredentialExt, LoadGrantExt, LoadSecretExt, SaveCredentialExt, SaveGrantExt, SaveSecretExt,
 };
-use dialog_effects::credential::{CredentialError, Load, Save, Secret};
+use dialog_effects::credential::{CredentialError, Grant, Load, Save, Secret};
 use js_sys::Uint8Array;
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -107,6 +107,55 @@ impl Provider<Save<Secret>> for IndexedDb {
     async fn execute(&self, input: Capability<Save<Secret>>) -> Result<(), CredentialError> {
         let idb_key = format!("site/{}", input.address());
         let js_val: JsValue = to_uint8array(input.secret().as_bytes()).into();
+
+        let store = self.store(CREDENTIAL).await?;
+        let key = JsValue::from_str(&idb_key);
+
+        store
+            .transact(|object_store| async move {
+                object_store
+                    .put(&js_val, Some(&key))
+                    .await
+                    .map_err(|e| CredentialError::Storage(e.to_string()))?;
+                Ok(())
+            })
+            .await
+    }
+}
+
+#[async_trait(?Send)]
+impl Provider<Load<Grant>> for IndexedDb {
+    async fn execute(&self, input: Capability<Load<Grant>>) -> Result<Grant, CredentialError> {
+        let idb_key = format!("grant/{}", input.address());
+
+        let store = self.store(CREDENTIAL).await?;
+        let key = JsValue::from_str(&idb_key);
+
+        let value = store
+            .query(|object_store| async move {
+                object_store
+                    .get(key)
+                    .await
+                    .map_err(|e| CredentialError::Storage(e.to_string()))
+            })
+            .await?;
+
+        match value {
+            // The stored value is the structured-cloned FileSystemDirectoryHandle.
+            Some(js_val) => Ok(Grant::from_js(js_val)),
+            None => Err(CredentialError::NotFound(idb_key)),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl Provider<Save<Grant>> for IndexedDb {
+    async fn execute(&self, input: Capability<Save<Grant>>) -> Result<(), CredentialError> {
+        let idb_key = format!("grant/{}", input.address());
+        // The directory handle is structured-cloneable, so IndexedDB stores it
+        // directly — no byte serialization. It persists across sessions, so the
+        // grant survives a reload without re-prompting the user.
+        let js_val: JsValue = input.grant().as_js().clone();
 
         let store = self.store(CREDENTIAL).await?;
         let key = JsValue::from_str(&idb_key);

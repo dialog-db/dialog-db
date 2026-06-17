@@ -85,6 +85,43 @@ impl From<FileSystemHandle> for FileSystem {
     }
 }
 
+impl FileSystem {
+    /// Build a provider rooted at the directory a [`Grant`] authorizes.
+    ///
+    /// `id` identifies the grant (typically the site/`FsAddress` id); on the
+    /// web it anchors the synthetic base URL the handle is walked from. On
+    /// native a grant is a path, so `id` is unused.
+    ///
+    /// [`Grant`]: dialog_effects::credential::Grant
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_grant(
+        _id: &str,
+        grant: &dialog_effects::credential::Grant,
+    ) -> Result<Self, FileSystemError> {
+        let handle = FileSystemHandle::try_from(std::path::PathBuf::from(grant.as_path()))?;
+        Ok(Self(handle))
+    }
+
+    /// Build a provider rooted at the directory a [`Grant`] authorizes.
+    ///
+    /// On the web the grant wraps a `FileSystemDirectoryHandle`; `id` anchors
+    /// the synthetic base URL it is walked from.
+    ///
+    /// [`Grant`]: dialog_effects::credential::Grant
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    pub fn from_grant(
+        id: &str,
+        grant: &dialog_effects::credential::Grant,
+    ) -> Result<Self, FileSystemError> {
+        use wasm_bindgen::JsCast;
+        let handle: web_sys::FileSystemDirectoryHandle =
+            grant.as_js().clone().dyn_into().map_err(|_| {
+                FileSystemError::Io("grant is not a FileSystemDirectoryHandle".into())
+            })?;
+        Ok(WebRoot::new(id, handle).provider())
+    }
+}
+
 /// A location in the filesystem, represented as a `file:` URL.
 ///
 /// The URL is the single source of truth for path layout and containment on
