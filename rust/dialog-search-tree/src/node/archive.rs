@@ -13,10 +13,11 @@ use crate::{
     SymmetryWith, Value,
 };
 
-impl<Key> ArchivedIndex<Key>
+impl<Key, Value> ArchivedIndex<Key, Value>
 where
     Key: self::Key,
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Value: self::Value,
 {
     /// Returns the upper bound key of the last link in this index.
     pub fn upper_bound(&self) -> Option<&Key::Archived> {

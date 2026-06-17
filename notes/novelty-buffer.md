@@ -123,12 +123,16 @@ index-derivation and merge semantics.
 ## Open questions (to resolve while building the core)
 
 - **Node format**: the per-node op buffer is a `novelty` field on the
-  content-addressed `Index` node: `PersistentIndex { links, novelty: Vec<(Key,
-  Op<Value>)> }`. Empty `novelty` is byte-identical to today's canonical node, so
-  `canonicalize` reproduces today's exact hashes. Only `Index` nodes carry
-  novelty; leaf `Segment`s do not (ops flush into segment entries at the leaf).
-  This realizes the accepted node-hash-moves tradeoff. Exact rkyv encoding still
-  to pin.
+  content-addressed `Index` node: `PersistentIndex { links, novelty:
+  Vec<NoveltyEntry<Key, Value>> }`. Only `Index` nodes carry novelty; leaf
+  `Segment`s do not (ops flush into segment entries at the leaf). A node with
+  empty `novelty` is the canonical form of that node: deterministic and
+  order-free, so `canonicalize` (which empties all novelty) yields the
+  history-independent root. (Adding the field does change the node's serialized
+  bytes versus the pre-novelty format, so this is not wire-compatible with trees
+  written before the change; it is a format revision, not an additive one. No
+  stored data depends on the old layout.) This realizes the accepted
+  node-hash-moves tradeoff.
 - **Flush primitive shape**: `flush_node` at inner levels moves ops from a node's
   buffer into its children's buffers (new); at the leaf it is a `TransientTree`
   batch-apply (exists). How these compose, and how a flush interacts with the

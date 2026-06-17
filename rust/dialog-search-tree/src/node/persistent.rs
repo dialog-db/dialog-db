@@ -87,7 +87,7 @@ where
 
     /// Interprets this node as an index node, returning an error if it's a
     /// segment.
-    pub fn as_index(&self) -> Result<&ArchivedIndex<Key>, DialogSearchTreeError> {
+    pub fn as_index(&self) -> Result<&ArchivedIndex<Key, Value>, DialogSearchTreeError> {
         self.body().and_then(|body| match body {
             ArchivedNodeBody::Index(index) => Ok(index),
             ArchivedNodeBody::Segment(_) => Err(DialogSearchTreeError::Access(
@@ -125,22 +125,57 @@ where
     }
 }
 
-/// An index node containing links to child nodes.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[rkyv(archived = ArchivedIndex)]
-pub struct PersistentIndex<Key> {
-    /// The child node links stored in this index.
-    pub links: Vec<Link<Key>>,
+/// A pending operation buffered at an index node (the node's novelty).
+///
+/// An insert or update is an [`Assert`](NoveltyOp::Assert) carrying the value;
+/// a delete is a [`Retract`](NoveltyOp::Retract) tombstone. Both flow down the
+/// tree with a flush and are resolved against the leaf segment; within a key the
+/// last op wins.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedNoveltyOp)]
+pub enum NoveltyOp<Value> {
+    /// Assert (insert or update) the value.
+    Assert(Value),
+    /// Retract (delete) the key.
+    Retract,
 }
 
-impl<Key> PersistentIndex<Key>
+/// A single buffered op together with the key it applies to.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedNoveltyEntry)]
+pub struct NoveltyEntry<Key, Value> {
+    /// The key this op applies to.
+    pub key: Key,
+    /// The buffered op.
+    pub op: NoveltyOp<Value>,
+}
+
+/// An index node containing links to child nodes and a novelty buffer.
+///
+/// `novelty` holds ops pending against the subtree rooted at this node, sorted
+/// by key. An empty `novelty` makes this node byte-identical to a canonical
+/// (fully flushed) index, so [`canonicalize`](crate::HitchhikerTree::canonicalize)
+/// reproduces the canonical tree exactly.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedIndex)]
+pub struct PersistentIndex<Key, Value> {
+    /// The child node links stored in this index.
+    pub links: Vec<Link<Key>>,
+    /// Ops pending against this subtree, sorted by key (the node's novelty).
+    pub novelty: Vec<NoveltyEntry<Key, Value>>,
+}
+
+impl<Key, Value> PersistentIndex<Key, Value>
 where
     Key: self::Key,
     Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
 {
-    /// Creates a new [`PersistentIndex`] containing a single link.
+    /// Creates a new [`PersistentIndex`] containing a single link and no novelty.
     pub fn new(link: Link<Key>) -> Self {
-        Self { links: vec![link] }
+        Self {
+            links: vec![link],
+            novelty: Vec::new(),
+        }
     }
 }
 
@@ -176,7 +211,7 @@ where
 #[rkyv(archived = ArchivedNodeBody)]
 pub enum PersistentNodeBody<Key, Value> {
     /// An index node containing links to child nodes.
-    Index(PersistentIndex<Key>),
+    Index(PersistentIndex<Key, Value>),
     /// A leaf segment containing key-value entries.
     Segment(PersistentSegment<Key, Value>),
 }
@@ -212,7 +247,10 @@ impl<Key, Value> TryFrom<Vec<Link<Key>>> for PersistentNodeBody<Key, Value> {
                 "Attempted to create an index from zero links".into(),
             ));
         }
-        Ok(PersistentNodeBody::Index(PersistentIndex { links }))
+        Ok(PersistentNodeBody::Index(PersistentIndex {
+            links,
+            novelty: Vec::new(),
+        }))
     }
 }
 
