@@ -68,6 +68,11 @@ name = "batch"
 harness = false
 required-features = ["helpers"]
 
+[[bench]]
+name = "sync"
+harness = false
+required-features = ["helpers"]
+
 [[example]]
 name = "node_sizes"
 required-features = ["helpers"]
