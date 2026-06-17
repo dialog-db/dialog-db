@@ -1,37 +1,40 @@
 //! Test helpers for FS-remote.
 //!
-//! Provides [`FsNetwork`] for exercising `Fork<Fs, Fx>` capabilities without a
-//! full Operator: it carries an already-resolved
-//! [`FileSystem`](dialog_storage::provider::FileSystem) and attests it directly,
-//! bypassing the `Identify` + `Load<Grant>` credential resolution the real
-//! [`Fs`](crate::Fs) fork performs.
+//! [`FsNetwork`] drives `Fork<Fs, Fx>` through the real
+//! [`SiteFork::authorize`](dialog_capability::SiteFork) path — including the
+//! subject-verification against the directory's stored credential — without a
+//! full Operator. On native `authorize` needs no environment (it opens the
+//! directory straight from the `file:` URL address), so `FsNetwork` is a unit
+//! env.
 
 use async_trait::async_trait;
-use dialog_capability::{Capability, Constraint, Effect, Fork, ForkInvocation, Provider};
+use dialog_capability::access::AuthorizeError;
+use dialog_capability::{Ability, Constraint, Effect, Fork, ForkInvocation, Provider, SiteFork};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_storage::provider::FileSystem;
 
-use crate::fs::{Fs, FsAuthorization};
+use crate::fs::Fs;
 
-/// Test environment for FS-remote fork execution.
-///
-/// Handles `Fork<Fs, Fx>` for any effect by attesting the carried provider as
-/// the authorization and delegating to the [`Fs`] site provider.
-#[derive(Clone)]
-pub struct FsNetwork {
-    filesystem: FileSystem,
+/// Flatten an [`AuthorizeError`] into an effect's `Result` output, the way the
+/// Operator's fork dispatch does (its equivalent helper is private).
+trait FromAuthError {
+    fn from_auth_error(error: AuthorizeError) -> Self;
 }
 
-impl FsNetwork {
-    /// Create a test network rooted at the given provider.
-    pub fn new(filesystem: FileSystem) -> Self {
-        Self { filesystem }
+impl<T, E: From<AuthorizeError>> FromAuthError for Result<T, E> {
+    fn from_auth_error(error: AuthorizeError) -> Self {
+        Err(E::from(error))
     }
 }
 
-impl From<FileSystem> for FsNetwork {
-    fn from(filesystem: FileSystem) -> Self {
-        Self::new(filesystem)
+/// Test environment for FS-remote fork execution. Authorizes each fork against
+/// the directory its address names, then performs it.
+#[derive(Clone, Copy, Default)]
+pub struct FsNetwork;
+
+impl FsNetwork {
+    /// Create a test network.
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -41,15 +44,19 @@ impl<Fx> Provider<Fork<Fs, Fx>> for FsNetwork
 where
     Fx: Effect + 'static,
     Fx::Of: Constraint,
-    Fx::Output: ConditionalSend,
+    Fx::Output: ConditionalSend + FromAuthError,
     Fork<Fs, Fx>: ConditionalSend,
+    crate::fs::FsFork<Fx>: SiteFork<Self, Site = Fs, Effect = Fx> + ConditionalSend,
     ForkInvocation<Fs, Fx>: ConditionalSend,
-    Capability<Fx>: ConditionalSend + ConditionalSync,
+    dialog_capability::Capability<Fx>: Ability,
     Fs: Provider<ForkInvocation<Fs, Fx>> + ConditionalSync,
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, fork: Fork<Fs, Fx>) -> Fx::Output {
-        let authorization = FsAuthorization::new(self.filesystem.clone());
-        fork.attest(authorization).perform(&Fs).await
+        let site_fork = crate::fs::FsFork::from(fork);
+        match site_fork.authorize(self).await {
+            Ok(invocation) => invocation.perform(&Fs).await,
+            Err(error) => Fx::Output::from_auth_error(error),
+        }
     }
 }

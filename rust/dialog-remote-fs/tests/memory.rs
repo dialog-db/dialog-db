@@ -8,15 +8,15 @@ use anyhow::Result;
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::prelude::*;
 use dialog_effects::memory::{MemoryError, Version};
-use dialog_storage::unique_did;
 use helpers::{open_at, setup};
 
 #[dialog_common::test]
 async fn it_resolves_none_for_missing_cell() -> Result<()> {
     let env = setup().await;
-    let did = unique_did().await;
 
-    let result = did
+    let result = env
+        .subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -31,11 +31,11 @@ async fn it_resolves_none_for_missing_cell() -> Result<()> {
 #[dialog_common::test]
 async fn it_publishes_initial_content() -> Result<()> {
     let env = setup().await;
-    let did = unique_did().await;
     let content = b"first revision".to_vec();
     let expected_version = Version::from(Blake3Hash::hash(&content).as_bytes());
 
-    let version = did
+    let version = env
+        .subject
         .clone()
         .memory()
         .space("local")
@@ -46,7 +46,9 @@ async fn it_publishes_initial_content() -> Result<()> {
         .await?;
     assert_eq!(version, expected_version);
 
-    let resolved = did
+    let resolved = env
+        .subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -63,9 +65,9 @@ async fn it_publishes_initial_content() -> Result<()> {
 #[dialog_common::test]
 async fn it_rejects_initial_publish_when_cell_exists() -> Result<()> {
     let env = setup().await;
-    let did = unique_did().await;
 
-    did.clone()
+    env.subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -74,8 +76,9 @@ async fn it_rejects_initial_publish_when_cell_exists() -> Result<()> {
         .perform(&env.network)
         .await?;
 
-    // Second publish with `when: None` (IfNoneMatch) must fail: the cell exists.
-    let result = did
+    let result = env
+        .subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -90,10 +93,10 @@ async fn it_rejects_initial_publish_when_cell_exists() -> Result<()> {
 #[dialog_common::test]
 async fn it_updates_with_correct_ifmatch_version() -> Result<()> {
     let env = setup().await;
-    let did = unique_did().await;
     let second = b"second".to_vec();
 
-    let v1 = did
+    let v1 = env
+        .subject
         .clone()
         .memory()
         .space("local")
@@ -103,7 +106,8 @@ async fn it_updates_with_correct_ifmatch_version() -> Result<()> {
         .perform(&env.network)
         .await?;
 
-    let v2 = did
+    let v2 = env
+        .subject
         .clone()
         .memory()
         .space("local")
@@ -113,7 +117,9 @@ async fn it_updates_with_correct_ifmatch_version() -> Result<()> {
         .perform(&env.network)
         .await?;
 
-    let resolved = did
+    let resolved = env
+        .subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -130,10 +136,10 @@ async fn it_updates_with_correct_ifmatch_version() -> Result<()> {
 #[dialog_common::test]
 async fn it_rejects_update_with_wrong_ifmatch() -> Result<()> {
     let env = setup().await;
-    let did = unique_did().await;
     let bogus_version = Version::from(Blake3Hash::hash(b"never-published").as_bytes());
 
-    did.clone()
+    env.subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -142,7 +148,9 @@ async fn it_rejects_update_with_wrong_ifmatch() -> Result<()> {
         .perform(&env.network)
         .await?;
 
-    let result = did
+    let result = env
+        .subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -157,10 +165,10 @@ async fn it_rejects_update_with_wrong_ifmatch() -> Result<()> {
 #[dialog_common::test]
 async fn it_is_idempotent_when_republishing_same_content() -> Result<()> {
     let env = setup().await;
-    let did = unique_did().await;
     let content = b"same".to_vec();
 
-    let v1 = did
+    let v1 = env
+        .subject
         .clone()
         .memory()
         .space("local")
@@ -170,9 +178,9 @@ async fn it_is_idempotent_when_republishing_same_content() -> Result<()> {
         .perform(&env.network)
         .await?;
 
-    // Republishing identical content returns the existing version even under an
-    // IfNoneMatch precondition (matches dialog_storage's FileSystem provider).
-    let v2 = did
+    let v2 = env
+        .subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -187,9 +195,9 @@ async fn it_is_idempotent_when_republishing_same_content() -> Result<()> {
 #[dialog_common::test]
 async fn it_retracts_with_correct_version() -> Result<()> {
     let env = setup().await;
-    let did = unique_did().await;
 
-    let version = did
+    let version = env
+        .subject
         .clone()
         .memory()
         .space("local")
@@ -199,7 +207,8 @@ async fn it_retracts_with_correct_version() -> Result<()> {
         .perform(&env.network)
         .await?;
 
-    did.clone()
+    env.subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -208,7 +217,9 @@ async fn it_retracts_with_correct_version() -> Result<()> {
         .perform(&env.network)
         .await?;
 
-    let resolved = did
+    let resolved = env
+        .subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -223,10 +234,10 @@ async fn it_retracts_with_correct_version() -> Result<()> {
 #[dialog_common::test]
 async fn it_writes_byte_compatibly_with_native_space() -> Result<()> {
     let env = setup().await;
-    let did = unique_did().await;
     let content = b"memory: fs-remote -> FileSystem".to_vec();
 
-    did.clone()
+    env.subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -235,14 +246,16 @@ async fn it_writes_byte_compatibly_with_native_space() -> Result<()> {
         .perform(&env.network)
         .await?;
 
-    let expected_path = env._tmp.path().join("memory").join("local").join("head");
+    let expected_path = env.tmp.path().join("memory").join("local").join("head");
     assert!(
         expected_path.is_file(),
         "expected memory cell at {expected_path:?}",
     );
 
-    let native = open_at(env._tmp.path()).await;
-    let resolved = did
+    let native = open_at(env.tmp.path()).await;
+    let resolved = env
+        .subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -259,10 +272,10 @@ async fn it_writes_a_nested_cell_path() -> Result<()> {
     // Dialog repository stores branch heads at `branch/{name}` under the
     // space's `memory/`, so the cell name itself contains a `/`.
     let env = setup().await;
-    let did = unique_did().await;
     let content = b"branch head".to_vec();
 
-    did.clone()
+    env.subject
+        .clone()
         .memory()
         .space("local")
         .cell("branch/main")
@@ -272,7 +285,7 @@ async fn it_writes_a_nested_cell_path() -> Result<()> {
         .await?;
 
     let expected_path = env
-        ._tmp
+        .tmp
         .path()
         .join("memory")
         .join("local")
@@ -283,7 +296,9 @@ async fn it_writes_a_nested_cell_path() -> Result<()> {
         "expected nested cell at {expected_path:?}",
     );
 
-    let resolved = did
+    let resolved = env
+        .subject
+        .clone()
         .memory()
         .space("local")
         .cell("branch/main")
@@ -299,12 +314,12 @@ async fn it_writes_a_nested_cell_path() -> Result<()> {
 #[dialog_common::test]
 async fn it_reads_byte_compatibly_from_native_space() -> Result<()> {
     let env = setup().await;
-    let did = unique_did().await;
     let content = b"memory: FileSystem -> fs-remote".to_vec();
     let expected_version = Version::from(Blake3Hash::hash(&content).as_bytes());
 
-    let native = open_at(env._tmp.path()).await;
-    did.clone()
+    let native = open_at(env.tmp.path()).await;
+    env.subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")
@@ -312,7 +327,9 @@ async fn it_reads_byte_compatibly_from_native_space() -> Result<()> {
         .perform(&native)
         .await?;
 
-    let resolved = did
+    let resolved = env
+        .subject
+        .clone()
         .memory()
         .space("local")
         .cell("head")

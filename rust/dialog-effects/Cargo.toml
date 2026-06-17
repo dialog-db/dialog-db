@@ -19,10 +19,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
 thiserror = { workspace = true }
 
-[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-wasm-bindgen = { workspace = true }
-web-sys = { workspace = true, features = ["FileSystemDirectoryHandle"] }
-
 [lints.rust]
 missing_docs = "warn"
 

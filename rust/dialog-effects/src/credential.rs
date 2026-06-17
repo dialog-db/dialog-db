@@ -21,8 +21,6 @@ pub use dialog_capability::{
 };
 pub use dialog_credentials;
 use serde::{Deserialize, Serialize};
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-use serde::{Deserializer, Serializer, de::Error as DeError, ser::Error as SerError};
 use std::convert::Infallible;
 use std::marker::PhantomData;
 use thiserror::Error;
@@ -52,86 +50,6 @@ impl From<Vec<u8>> for Secret {
 impl From<Secret> for Vec<u8> {
     fn from(secret: Secret) -> Self {
         secret.into_bytes()
-    }
-}
-
-/// A host-granted reference to a local directory, stored as a site credential.
-///
-/// This is the durable proof that the host authorized access to a directory —
-/// the filesystem analogue of an API key. Its representation is target-specific,
-/// mirroring how a signer [`Credential`](dialog_credentials::Credential) is bytes
-/// on native and a non-extractable key handle on the web:
-///
-/// - **native**: the directory's filesystem path.
-/// - **web**: the structured-cloneable [`web_sys::FileSystemDirectoryHandle`]
-///   the host obtained from `showDirectoryPicker()` (or OPFS). It persists in
-///   IndexedDB across sessions, so the directory grant survives a reload without
-///   re-prompting.
-///
-/// A grant is resolved locally and never travels over the wire, so on the web
-/// its `Serialize`/`Deserialize` impls error at runtime (as the signer
-/// credential's do) — the value only round-trips through structured-clone
-/// storage, not serde.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Grant(String);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Grant {
-    /// Create a grant for the directory at the given path.
-    pub fn path(path: impl Into<String>) -> Self {
-        Self(path.into())
-    }
-
-    /// The granted directory path.
-    pub fn as_path(&self) -> &str {
-        &self.0
-    }
-}
-
-/// A host-granted reference to a local directory, stored as a site credential.
-///
-/// See the native variant for the full contract. On the web a grant wraps the
-/// structured-cloneable [`web_sys::FileSystemDirectoryHandle`].
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-#[derive(Debug, Clone)]
-pub struct Grant(wasm_bindgen::JsValue);
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-impl Grant {
-    /// Wrap a host-supplied directory handle as a grant.
-    pub fn handle(handle: web_sys::FileSystemDirectoryHandle) -> Self {
-        Self(handle.into())
-    }
-
-    /// The granted directory handle as a `JsValue` (a `FileSystemDirectoryHandle`).
-    pub fn as_js(&self) -> &wasm_bindgen::JsValue {
-        &self.0
-    }
-
-    /// Reconstruct a grant from a stored `JsValue` (e.g. from IndexedDB).
-    pub fn from_js(value: wasm_bindgen::JsValue) -> Self {
-        Self(value)
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-impl Serialize for Grant {
-    fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
-        Err(SerError::custom(
-            "a web directory grant is a live handle and cannot be serialized; \
-             it round-trips through structured-clone storage instead",
-        ))
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-impl<'de> Deserialize<'de> for Grant {
-    fn deserialize<D: Deserializer<'de>>(_deserializer: D) -> Result<Self, D::Error> {
-        Err(DeError::custom(
-            "a web directory grant is a live handle and cannot be deserialized; \
-             it round-trips through structured-clone storage instead",
-        ))
     }
 }
 
@@ -243,16 +161,6 @@ impl Effect for Load<dialog_credentials::Credential> {
 impl Effect for Load<Secret> {
     type Of = Site;
     type Output = Result<Secret, CredentialError>;
-}
-
-impl Effect for Save<Grant> {
-    type Of = Site;
-    type Output = Result<(), CredentialError>;
-}
-
-impl Effect for Load<Grant> {
-    type Of = Site;
-    type Output = Result<Grant, CredentialError>;
 }
 
 /// Errors that can occur during credential operations.

@@ -6,9 +6,7 @@ use dialog_credentials::Credential;
 use dialog_effects::credential::prelude::{
     LoadCredentialExt, LoadSecretExt, SaveCredentialExt, SaveSecretExt,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use dialog_effects::credential::prelude::{LoadGrantExt, SaveGrantExt};
-use dialog_effects::credential::{CredentialError, Grant, Load, Save, Secret};
+use dialog_effects::credential::{CredentialError, Load, Save, Secret};
 use dialog_varsig::Principal;
 
 use super::Volatile;
@@ -98,62 +96,5 @@ where
         let session = sessions.entry(subject).or_default();
         session.secrets.insert(key, secret);
         Ok(())
-    }
-}
-
-// Grant providers. On native a grant is a path, stored in the (thread-safe)
-// secret store under a `grant/` key. On the web a grant is a `!Send`
-// `FileSystemDirectoryHandle` that cannot live in `Volatile`'s shared store, so
-// it is unsupported there — browsers persist grants through the IndexedDb
-// provider instead.
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait::async_trait]
-impl Provider<Load<Grant>> for Volatile {
-    async fn execute(&self, input: Capability<Load<Grant>>) -> Result<Grant, CredentialError> {
-        let key = self.scoped_key(&format!("grant/{}", input.address()));
-
-        let sessions = self.sessions.read();
-        let bytes = sessions
-            .values()
-            .find_map(|session| session.secrets.get(&key).cloned())
-            .ok_or_else(|| CredentialError::NotFound(key.clone()))?;
-        let path = String::from_utf8(bytes)
-            .map_err(|e| CredentialError::Corrupted(format!("grant path is not UTF-8: {e}")))?;
-        Ok(Grant::path(path))
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait::async_trait]
-impl Provider<Save<Grant>> for Volatile {
-    async fn execute(&self, input: Capability<Save<Grant>>) -> Result<(), CredentialError> {
-        let key = self.scoped_key(&format!("grant/{}", input.address()));
-        let bytes = input.grant().as_path().as_bytes().to_vec();
-
-        let subject = input.subject().clone();
-        let mut sessions = self.sessions.write();
-        let session = sessions.entry(subject).or_default();
-        session.secrets.insert(key, bytes);
-        Ok(())
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-#[async_trait::async_trait(?Send)]
-impl Provider<Load<Grant>> for Volatile {
-    async fn execute(&self, _input: Capability<Load<Grant>>) -> Result<Grant, CredentialError> {
-        Err(CredentialError::Storage(
-            "volatile storage cannot hold a web directory grant; use the IndexedDb provider".into(),
-        ))
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-#[async_trait::async_trait(?Send)]
-impl Provider<Save<Grant>> for Volatile {
-    async fn execute(&self, _input: Capability<Save<Grant>>) -> Result<(), CredentialError> {
-        Err(CredentialError::Storage(
-            "volatile storage cannot hold a web directory grant; use the IndexedDb provider".into(),
-        ))
     }
 }

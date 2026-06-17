@@ -54,13 +54,13 @@ mod tests {
 
     #[dialog_common::test]
     fn it_builds_an_address() {
-        let address = FsAddress::new("did:key:zAbc");
-        assert_eq!(address.id(), "did:key:zAbc");
+        let address = FsAddress::new("file:///vault");
+        assert_eq!(address.target(), "file:///vault");
     }
 
     #[dialog_common::test]
     fn it_roundtrips_address_through_serde() {
-        let address = FsAddress::new("did:key:zAbc");
+        let address = FsAddress::new("file:///vault");
         let json = serde_json::to_string(&address).unwrap();
         let parsed: FsAddress = serde_json::from_str(&json).unwrap();
         assert_eq!(address, parsed);

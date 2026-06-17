@@ -85,6 +85,46 @@ impl Credential {
             CredentialExport::Verifier(v) => Ok(Self::Verifier(VerifierCredential::import(v)?)),
         }
     }
+
+    /// Recover a verifier-only credential (public key, hence DID) from the
+    /// byte-compatible on-disk storage form, on any target.
+    ///
+    /// The stored form is multicodec-tagged bytes — `{PUBLIC_TAG|pubkey}` for a
+    /// verifier, `{PRIVATE_TAG|seed|PUBLIC_TAG|pubkey}` for a signer. Only the
+    /// public key is read, so this works in the browser too (no WebCrypto
+    /// import of a non-extractable signing key). The result can verify and
+    /// yields the credential's [`Did`](dialog_varsig::Did), which is all that
+    /// subject checks need; it cannot sign.
+    pub fn identity(bytes: &[u8]) -> Result<Self, CredentialExportError> {
+        use constants::{
+            KEY_SIZE, PRIVATE_TAG, PUBLIC_KEY_OFFSET, PUBLIC_TAG, PUBLIC_TAG_SIZE,
+            SIGNER_EXPORT_SIZE, VERIFIER_EXPORT_SIZE,
+        };
+
+        let pubkey: &[u8] = if bytes.len() == VERIFIER_EXPORT_SIZE && bytes.starts_with(PUBLIC_TAG)
+        {
+            &bytes[PUBLIC_TAG_SIZE..]
+        } else if bytes.len() == SIGNER_EXPORT_SIZE
+            && bytes.starts_with(PRIVATE_TAG)
+            && bytes[PUBLIC_KEY_OFFSET..].starts_with(PUBLIC_TAG)
+        {
+            &bytes[PUBLIC_KEY_OFFSET + PUBLIC_TAG_SIZE..]
+        } else {
+            return Err(CredentialExportError::InvalidFormat(format!(
+                "unrecognized credential format: length={}",
+                bytes.len()
+            )));
+        };
+
+        let key: [u8; KEY_SIZE] = pubkey
+            .try_into()
+            .map_err(|_| CredentialExportError::InvalidFormat("invalid public key".into()))?;
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&key)
+            .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
+        Ok(Self::Verifier(VerifierCredential::from(
+            crate::Ed25519Verifier(crate::ed25519::Ed25519VerifyingKey::Native(vk)),
+        )))
+    }
 }
 
 impl Serialize for Credential {

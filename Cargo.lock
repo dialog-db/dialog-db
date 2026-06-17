@@ -1074,9 +1074,7 @@ dependencies = [
  "serde_bytes",
  "serde_ipld_dagcbor",
  "thiserror 2.0.18",
- "wasm-bindgen",
  "wasm-bindgen-test",
- "web-sys",
 ]
 
 [[package]]
@@ -1208,6 +1206,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "url",
  "wasm-bindgen-test",
  "web-sys",
 ]

@@ -126,10 +126,84 @@ impl WebRoot {
         Ok(Self::new(id, scoped))
     }
 
+    /// A root backed by a directory handle persisted in IndexedDB under the
+    /// database named `name`.
+    ///
+    /// This is the durable web equivalent of a native `file:` path: the
+    /// IndexedDB database is the address, and it stores the
+    /// `FileSystemDirectoryHandle` (structured-cloneable, so it survives a
+    /// reload). The handle must have been saved once via
+    /// [`register`](Self::register) — typically right after the user picked the
+    /// directory through `showDirectoryPicker()`.
+    pub async fn open(name: &str) -> Result<Self, FileSystemError> {
+        let db = open_directory_db(name).await?;
+        let tx = db
+            .transaction(&[DIRECTORY_STORE], rexie::TransactionMode::ReadOnly)
+            .map_err(|e| FileSystemError::Io(format!("opening directory transaction: {e}")))?;
+        let store = tx
+            .store(DIRECTORY_STORE)
+            .map_err(|e| FileSystemError::Io(format!("opening directory store: {e}")))?;
+        let value = store
+            .get(JsValue::from_str(HANDLE_KEY))
+            .await
+            .map_err(|e| FileSystemError::Io(format!("reading directory handle: {e}")))?;
+        tx.done()
+            .await
+            .map_err(|e| FileSystemError::Io(format!("closing directory transaction: {e}")))?;
+
+        let handle: FileSystemDirectoryHandle = value
+            .filter(|v| !v.is_undefined() && !v.is_null())
+            .ok_or_else(|| FileSystemError::Io(format!("no directory registered for '{name}'")))?
+            .dyn_into()
+            .map_err(|_| {
+                FileSystemError::Io("stored value is not a FileSystemDirectoryHandle".into())
+            })?;
+        Ok(Self::new(name, handle))
+    }
+
+    /// Persist a directory handle under the IndexedDB database named `name`, so
+    /// it can later be reopened with [`open`](Self::open). Replaces any handle
+    /// previously registered under the same name.
+    pub async fn register(
+        name: &str,
+        handle: FileSystemDirectoryHandle,
+    ) -> Result<(), FileSystemError> {
+        let db = open_directory_db(name).await?;
+        let tx = db
+            .transaction(&[DIRECTORY_STORE], rexie::TransactionMode::ReadWrite)
+            .map_err(|e| FileSystemError::Io(format!("opening directory transaction: {e}")))?;
+        let store = tx
+            .store(DIRECTORY_STORE)
+            .map_err(|e| FileSystemError::Io(format!("opening directory store: {e}")))?;
+        store
+            .put(handle.as_ref(), Some(&JsValue::from_str(HANDLE_KEY)))
+            .await
+            .map_err(|e| FileSystemError::Io(format!("storing directory handle: {e}")))?;
+        tx.done()
+            .await
+            .map_err(|e| FileSystemError::Io(format!("committing directory handle: {e}")))?;
+        Ok(())
+    }
+
     /// The [`FileSystemHandle`] for this root's base URL.
     fn handle_at_base(&self) -> FileSystemHandle {
         FileSystemHandle::from_root(self.base.as_ref().clone(), self.clone())
     }
+}
+
+/// IndexedDB store name and key under which a directory handle is persisted.
+const DIRECTORY_STORE: &str = "directory";
+const HANDLE_KEY: &str = "handle";
+
+/// Open (creating if needed) the IndexedDB database that backs an FS-remote
+/// directory, ensuring its single object store exists.
+async fn open_directory_db(name: &str) -> Result<rexie::Rexie, FileSystemError> {
+    rexie::Rexie::builder(name)
+        .version(1)
+        .add_object_store(rexie::ObjectStore::new(DIRECTORY_STORE).auto_increment(false))
+        .build()
+        .await
+        .map_err(|e| FileSystemError::Io(format!("opening directory database '{name}': {e}")))
 }
 
 impl FileSystemHandle {

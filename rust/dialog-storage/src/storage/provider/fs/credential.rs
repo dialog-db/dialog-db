@@ -7,14 +7,13 @@ use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::{Credential, CredentialExport};
 use dialog_effects::credential::prelude::{
-    LoadCredentialExt, LoadGrantExt, LoadSecretExt, SaveCredentialExt, SaveGrantExt, SaveSecretExt,
+    LoadCredentialExt, LoadSecretExt, SaveCredentialExt, SaveSecretExt,
 };
-use dialog_effects::credential::{CredentialError, Grant, Load, Save, Secret};
+use dialog_effects::credential::{CredentialError, Load, Save, Secret};
 
 const CREDENTIAL: &str = "credential";
 const KEY: &str = "key";
 const SITE: &str = "site";
-const GRANT: &str = "grant";
 
 impl FileSystem {
     /// Returns the handle for a key credential at the given address.
@@ -28,15 +27,6 @@ impl FileSystem {
     pub fn credential_site(&self, address: &str) -> Result<FileSystemHandle, FileSystemError> {
         let key = blake3::hash(address.as_bytes()).as_bytes().to_base58();
         self.resolve(CREDENTIAL)?.resolve(SITE)?.resolve(&key)
-    }
-
-    /// Returns the handle for a directory grant at the given site address.
-    /// Layout: `{space_root}/credential/grant/{hash(address)}`. A separate
-    /// namespace from `site` so a grant and an opaque secret for the same
-    /// site don't collide.
-    pub fn credential_grant(&self, address: &str) -> Result<FileSystemHandle, FileSystemError> {
-        let key = blake3::hash(address.as_bytes()).as_bytes().to_base58();
-        self.resolve(CREDENTIAL)?.resolve(GRANT)?.resolve(&key)
     }
 }
 
@@ -86,26 +76,6 @@ impl Provider<Save<Secret>> for FileSystem {
     async fn execute(&self, input: Capability<Save<Secret>>) -> Result<(), CredentialError> {
         let handle = self.credential_site(input.address().as_str())?;
         handle.write(input.secret().as_bytes()).await?;
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl Provider<Load<Grant>> for FileSystem {
-    async fn execute(&self, input: Capability<Load<Grant>>) -> Result<Grant, CredentialError> {
-        let handle = self.credential_grant(input.address().as_str())?;
-        let data = handle.read().await?;
-        let path = String::from_utf8(data)
-            .map_err(|e| CredentialError::Corrupted(format!("grant path is not UTF-8: {e}")))?;
-        Ok(Grant::path(path))
-    }
-}
-
-#[async_trait::async_trait]
-impl Provider<Save<Grant>> for FileSystem {
-    async fn execute(&self, input: Capability<Save<Grant>>) -> Result<(), CredentialError> {
-        let handle = self.credential_grant(input.address().as_str())?;
-        handle.write(input.grant().as_path().as_bytes()).await?;
         Ok(())
     }
 }
@@ -241,34 +211,6 @@ mod tests {
 
         assert_eq!(loaded1.did(), expected_did1);
         assert_eq!(loaded2.did(), expected_did2);
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_saves_and_loads_a_directory_grant() -> anyhow::Result<()> {
-        use dialog_capability::SiteId;
-        use dialog_effects::credential::Grant;
-
-        let location = StorageLocation::new(Directory::Temp, unique_name("fs-grant-save-load"));
-        let provider = FileSystem::open(&location).await?;
-        let did = unique_did().await;
-        let site = SiteId::from("did:key:zVault");
-
-        did.clone()
-            .credential()
-            .site(site.clone())
-            .save_grant(Grant::path("/path/to/vault"))
-            .perform(&provider)
-            .await?;
-
-        let loaded = did
-            .credential()
-            .site(site)
-            .load_grant()
-            .perform(&provider)
-            .await?;
-
-        assert_eq!(loaded.as_path(), "/path/to/vault");
         Ok(())
     }
 }

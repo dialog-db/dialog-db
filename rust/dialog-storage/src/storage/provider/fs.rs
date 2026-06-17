@@ -29,16 +29,22 @@ mod archive;
 mod error;
 mod memory;
 
-// Credential and certificate storage are native-only. On the web a signer
+// Full credential and certificate storage are native-only. On the web a signer
 // credential is a non-extractable WebCrypto key handle with no byte
-// serialization, so the byte-compatible on-disk format these providers rely on
-// cannot be honoured there; browsers persist credentials through the IndexedDb
-// provider instead. The archive and memory providers above are isomorphic and
-// are what the FS-remote sync use case actually needs.
+// serialization, so saving one byte-compatibly is impossible there; browsers
+// persist credentials through the IndexedDb provider instead. The archive and
+// memory providers above are isomorphic and are what the FS-remote sync use
+// case actually needs.
 #[cfg(not(target_arch = "wasm32"))]
 mod certificate;
 #[cfg(not(target_arch = "wasm32"))]
 mod credential;
+
+// On the web we still need to READ a directory's identity (its
+// `credential/key/self` DID) to authorize against it — only the public key is
+// needed, so this works without a WebCrypto import. A DID-only `Load<Credential>`.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod credential_web;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -85,41 +91,29 @@ impl From<FileSystemHandle> for FileSystem {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 impl FileSystem {
-    /// Build a provider rooted at the directory a [`Grant`] authorizes.
+    /// Open the provider for a directory persisted in IndexedDB under `name`.
     ///
-    /// `id` identifies the grant (typically the site/`FsAddress` id); on the
-    /// web it anchors the synthetic base URL the handle is walked from. On
-    /// native a grant is a path, so `id` is unused.
-    ///
-    /// [`Grant`]: dialog_effects::credential::Grant
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn from_grant(
-        _id: &str,
-        grant: &dialog_effects::credential::Grant,
-    ) -> Result<Self, FileSystemError> {
-        let handle = FileSystemHandle::try_from(std::path::PathBuf::from(grant.as_path()))?;
-        Ok(Self(handle))
+    /// `name` is the FS-remote address: an IndexedDB database holding the
+    /// directory's `FileSystemDirectoryHandle`. The handle must have been saved
+    /// once with [`register_web_directory`]. This is the web analogue of opening
+    /// a native directory from its `file:` URL.
+    pub async fn open_web(name: &str) -> Result<Self, FileSystemError> {
+        Ok(WebRoot::open(name).await?.provider())
     }
+}
 
-    /// Build a provider rooted at the directory a [`Grant`] authorizes.
-    ///
-    /// On the web the grant wraps a `FileSystemDirectoryHandle`; `id` anchors
-    /// the synthetic base URL it is walked from.
-    ///
-    /// [`Grant`]: dialog_effects::credential::Grant
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    pub fn from_grant(
-        id: &str,
-        grant: &dialog_effects::credential::Grant,
-    ) -> Result<Self, FileSystemError> {
-        use wasm_bindgen::JsCast;
-        let handle: web_sys::FileSystemDirectoryHandle =
-            grant.as_js().clone().dyn_into().map_err(|_| {
-                FileSystemError::Io("grant is not a FileSystemDirectoryHandle".into())
-            })?;
-        Ok(WebRoot::new(id, handle).provider())
-    }
+/// Persist a host-granted directory handle under the IndexedDB database `name`,
+/// so a [`FileSystem`] for it can later be opened with
+/// [`FileSystem::open_web`]. Typically called once, right after the user picks
+/// the directory through `showDirectoryPicker()`.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub async fn register_web_directory(
+    name: &str,
+    handle: web_sys::FileSystemDirectoryHandle,
+) -> Result<(), FileSystemError> {
+    WebRoot::register(name, handle).await
 }
 
 /// A location in the filesystem, represented as a `file:` URL.
