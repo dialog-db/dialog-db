@@ -43,6 +43,9 @@ url = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 wasm-bindgen-test = { workspace = true }
 
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+web-sys = { workspace = true, features = ["FileSystemDirectoryHandle"] }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
   "cfg(feature, values(\"web-integration-tests\", \"helpers\"))",

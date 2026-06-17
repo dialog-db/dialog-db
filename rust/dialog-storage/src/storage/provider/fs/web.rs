@@ -88,6 +88,13 @@ impl WebRoot {
         FileSystem::from(self.handle_at_base())
     }
 
+    /// The underlying directory handle (cheap clone — JS handles are
+    /// reference-counted). Useful for [`register`](Self::register)ing an
+    /// OPFS-obtained root for later [`open`](Self::open).
+    pub fn handle(&self) -> FileSystemDirectoryHandle {
+        self.handle.clone()
+    }
+
     /// A root backed by the [Origin Private File System][opfs] subdirectory
     /// named `id`, obtained via `navigator.storage.getDirectory()`.
     ///

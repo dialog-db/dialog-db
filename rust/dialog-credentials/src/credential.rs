@@ -125,6 +125,28 @@ impl Credential {
             crate::Ed25519Verifier(crate::ed25519::Ed25519VerifyingKey::Native(vk)),
         )))
     }
+
+    /// The identity (public-key) bytes for this credential, in the
+    /// byte-compatible verifier storage form `{PUBLIC_TAG|pubkey}`, on any
+    /// target.
+    ///
+    /// This is the inverse of [`identity`](Self::identity): writing these bytes
+    /// to a directory's `credential/key/self` is what makes that directory the
+    /// space for this credential's [`Did`](dialog_varsig::Did). Only the public
+    /// key is emitted, so it works in the browser too.
+    pub fn to_identity_bytes(&self) -> Vec<u8> {
+        use constants::{KEY_SIZE, PUBLIC_TAG, PUBLIC_TAG_SIZE, VERIFIER_EXPORT_SIZE};
+
+        let pubkey: [u8; KEY_SIZE] = match self {
+            Self::Signer(s) => s.0.ed25519_did().0.to_bytes(),
+            Self::Verifier(v) => v.0.0.to_bytes(),
+        };
+        let mut buffer = Vec::with_capacity(VERIFIER_EXPORT_SIZE);
+        buffer.extend_from_slice(PUBLIC_TAG);
+        buffer.extend_from_slice(&pubkey);
+        debug_assert_eq!(buffer.len(), PUBLIC_TAG_SIZE + KEY_SIZE);
+        buffer
+    }
 }
 
 impl Serialize for Credential {
