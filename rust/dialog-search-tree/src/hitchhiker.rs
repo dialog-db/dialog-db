@@ -62,6 +62,25 @@ type NodeFuture<'a, Key, Value> = std::pin::Pin<
     >,
 >;
 
+/// How far an overflowing buffer cascades, selecting the tree's write behavior.
+///
+/// One core mechanism (route ops into novelty, flush on overflow) yields three
+/// behaviors by choosing the cascade depth:
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FlushPolicy {
+    /// True hitchhiker buffering: an overflowing buffer flushes one level down,
+    /// so work is amortized across levels. The write-optimal default.
+    #[default]
+    Amortized,
+    /// An overflowing buffer flushes straight through to the leaves rather than
+    /// one level at a time, keeping the tree close to canonical with shallower
+    /// buffering. Equivalent to canonicalizing on each flush trigger.
+    Recursive,
+    /// Never buffer: every write goes straight to the canonical tree, i.e. the
+    /// unbuffered behavior. A baseline and the trivial degenerate policy.
+    Immediate,
+}
+
 /// The root of a [`HitchhikerTree`], loaded lazily like a [`TransientTree`]'s.
 enum HitchhikerRoot<Key, Value> {
     /// The durable root hash, not yet loaded. `NULL_BLAKE3_HASH` is an empty
@@ -88,6 +107,7 @@ where
     root: HitchhikerRoot<Key, Value>,
     cache: Cache<Blake3Hash, Buffer>,
     op_buf_size: usize,
+    policy: FlushPolicy,
     distribution: PhantomData<D>,
 }
 
@@ -131,6 +151,7 @@ where
             root: HitchhikerRoot::Unloaded(tree.root().clone()),
             cache: tree.node_cache(),
             op_buf_size: DEFAULT_OP_BUF_SIZE,
+            policy: FlushPolicy::default(),
             distribution: PhantomData,
         }
     }
@@ -141,6 +162,7 @@ where
             root: HitchhikerRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
             cache: Cache::new(),
             op_buf_size: DEFAULT_OP_BUF_SIZE,
+            policy: FlushPolicy::default(),
             distribution: PhantomData,
         }
     }
@@ -148,6 +170,12 @@ where
     /// Sets the per-node novelty capacity (the write-amplification knob).
     pub fn with_op_buf_size(mut self, op_buf_size: usize) -> Self {
         self.op_buf_size = op_buf_size.max(1);
+        self
+    }
+
+    /// Sets the [`FlushPolicy`] selecting how far an overflowing buffer cascades.
+    pub fn with_flush_policy(mut self, policy: FlushPolicy) -> Self {
+        self.policy = policy;
         self
     }
 
@@ -224,11 +252,18 @@ where
 
         let mut deferred = Vec::new();
         let node = match loaded {
+            // Immediate never buffers: every op goes straight to the canonical
+            // edit path, the unbuffered baseline behavior.
+            Some(node) if self.policy == FlushPolicy::Immediate => {
+                deferred = msgs;
+                Some(node)
+            }
             Some(node) => Some(
                 enqueue::<Key, Value, D, Backend>(
                     node,
                     msgs,
                     self.op_buf_size,
+                    self.policy,
                     &mut deferred,
                     &accessor,
                 )
@@ -402,6 +437,7 @@ fn enqueue<'a, Key, Value, D, Backend>(
     node: TransientNode<Key, Value>,
     msgs: Vec<NoveltyEntry<Key, Value>>,
     op_buf_size: usize,
+    policy: FlushPolicy,
     deferred: &'a mut Vec<NoveltyEntry<Key, Value>>,
     accessor: &'a Accessor<Backend>,
 ) -> NodeFuture<'a, Key, Value>
@@ -487,9 +523,23 @@ where
                 })),
             )
             .into_transient()?;
-            let updated =
-                enqueue::<Key, Value, D, Backend>(child, took, op_buf_size, deferred, accessor)
-                    .await?;
+            // Amortized cascades one level: the child buffers normally. Recursive
+            // flushes through to the leaves: the child gets a zero-size buffer so
+            // it overflows immediately and keeps pushing down until the ops land
+            // in leaves.
+            let child_buf_size = match policy {
+                FlushPolicy::Recursive => 0,
+                _ => op_buf_size,
+            };
+            let updated = enqueue::<Key, Value, D, Backend>(
+                child,
+                took,
+                child_buf_size,
+                policy,
+                deferred,
+                accessor,
+            )
+            .await?;
             index.children[at] = Node::Transient(updated);
         }
 
@@ -679,8 +729,16 @@ mod tests {
     use dialog_common::Blake3Hash;
     use dialog_storage::MemoryStorageBackend;
 
-    use super::HitchhikerTree;
+    use super::{FlushPolicy, HitchhikerTree};
     use crate::{Buffer, ContentAddressedStorage, Delta, PersistentTree};
+
+    /// The three flush policies, so an oracle can assert behavior is identical
+    /// across all of them (the canonical form is policy-independent).
+    const POLICIES: [FlushPolicy; 3] = [
+        FlushPolicy::Amortized,
+        FlushPolicy::Recursive,
+        FlushPolicy::Immediate,
+    ];
 
     type TestStorage = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
     type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
@@ -1112,6 +1170,112 @@ mod tests {
         // An absent key is absent.
         assert_eq!(tree.get(&999u32.to_le_bytes(), &storage).await?, None);
 
+        Ok(())
+    }
+
+    /// All three flush policies are correctness-equivalent: under each, a random
+    /// insert/delete stream through a cascading buffer must canonicalize to the
+    /// same sequential root, and reads before canonicalize must match the
+    /// canonical reference. They differ only in how far overflow cascades, not in
+    /// the fact set they represent.
+    #[dialog_common::test]
+    async fn it_is_correctness_equivalent_across_flush_policies() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        for seed in 0..30u64 {
+            let mut rng = Rng::new(seed);
+            let mut ops: Vec<(bool, u32)> = Vec::new();
+            for _ in 0..300 {
+                let is_insert = !(rng.next_u32()).is_multiple_of(3);
+                let key = rng.next_u32() % 150;
+                ops.push((is_insert, key));
+            }
+
+            // Canonical reference via the sequential edit path, flushed.
+            let mut reference = TestTree::empty();
+            let mut delta = Delta::zero();
+            for &(is_insert, key) in &ops {
+                reference = if is_insert {
+                    reference
+                        .edit()
+                        .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                        .await?
+                        .persist(&mut delta)?
+                } else {
+                    reference
+                        .edit()
+                        .delete(&key.to_le_bytes(), &storage)
+                        .await?
+                        .persist(&mut delta)?
+                };
+                flush(&mut delta, &mut storage).await?;
+            }
+
+            for policy in POLICIES {
+                // A small buffer forces cascades for Amortized and Recursive; for
+                // Immediate the buffer is never used.
+                let mut tree = TestHitchhiker::empty()
+                    .with_op_buf_size(8)
+                    .with_flush_policy(policy);
+                for &(is_insert, key) in &ops {
+                    tree = if is_insert {
+                        tree.insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                            .await?
+                    } else {
+                        tree.delete(key.to_le_bytes(), &storage).await?
+                    };
+                }
+
+                // Reads before canonicalize must match the canonical reference.
+                for key in 0..160u32 {
+                    let buffered = tree.get(&key.to_le_bytes(), &storage).await?;
+                    let canonical = reference.get(&key.to_le_bytes(), &storage).await?;
+                    assert_eq!(
+                        buffered, canonical,
+                        "seed {seed}, policy {policy:?}: buffered get of key {key} \
+                         must match the canonical read"
+                    );
+                }
+
+                // Canonicalize must reproduce the sequential root under any policy.
+                let mut canon_delta = Delta::zero();
+                let canonical = tree.canonicalize(&storage, &mut canon_delta).await?;
+                assert_eq!(
+                    canonical.root(),
+                    reference.root(),
+                    "seed {seed}, policy {policy:?}: canonicalize must match the sequential root"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The Immediate policy keeps the tree canonical at all times: its persisted
+    /// root after every write equals the sequential root, with no canonicalize
+    /// step needed. This pins that Immediate is the unbuffered baseline.
+    #[dialog_common::test]
+    async fn it_keeps_immediate_policy_canonical_without_flush() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let keys: Vec<u32> = (0..200).collect();
+        let expected = sequential(&keys, &mut storage).await?;
+
+        let mut tree = TestHitchhiker::empty().with_flush_policy(FlushPolicy::Immediate);
+        for &k in &keys {
+            tree = tree
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+
+        // persist (buffers intact) already equals the canonical root, because
+        // Immediate never buffers.
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        assert_eq!(
+            &root,
+            expected.root(),
+            "Immediate persist must equal the sequential root without canonicalize"
+        );
         Ok(())
     }
 }
