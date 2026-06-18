@@ -1,7 +1,7 @@
 //! Web filesystem backend for [`FileSystemHandle`], backed by the
 //! [File System Access API][fsapi].
 //!
-//! A [`WebRoot`] wraps a host-supplied [`web_sys::FileSystemDirectoryHandle`]
+//! A [`MountedDirectory`] wraps a host-supplied [`web_sys::FileSystemDirectoryHandle`]
 //! (typically from `showDirectoryPicker()` or, in tests,
 //! `navigator.storage.getDirectory()`). The handle's `file:` URL is the source
 //! of truth for layout and containment, exactly as on native; the path
@@ -27,34 +27,41 @@ use web_sys::{
     FileSystemGetFileOptions, FileSystemWritableFileStream,
 };
 
-/// A user-picked directory exposed through the File System Access API,
-/// together with the base `file:` URL the layout is anchored at.
+/// A directory mounted through the File System Access API — its
+/// [`web_sys::FileSystemDirectoryHandle`] together with the base `file:` URL
+/// the layout is anchored at. Capabilities operate *within* it.
 ///
-/// Cloning is cheap: the JS handle is reference-counted by the engine and the
-/// base URL is shared behind an [`Rc`].
+/// The directory may come from the user picker (`showDirectoryPicker()`), OPFS
+/// (`navigator.storage.getDirectory()`), or the directory registry. Cloning is
+/// cheap: the JS handle is reference-counted by the engine and the base URL is
+/// shared behind an [`Rc`].
 #[derive(Clone)]
-pub struct WebRoot {
-    /// The user-picked root directory handle.
+pub struct MountedDirectory {
+    /// The mounted directory's handle.
     handle: FileSystemDirectoryHandle,
-    /// The `file:` URL the root is anchored at (always ends with `/`). Path
-    /// segments under this prefix are what we walk through the FS Access API.
+    /// The `file:` URL the directory is anchored at (always ends with `/`).
+    /// Path segments under this prefix are what we walk through the FS Access
+    /// API.
     base: Rc<Url>,
 }
 
-impl std::fmt::Debug for WebRoot {
+impl std::fmt::Debug for MountedDirectory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The JS directory handle has no meaningful Debug; the base URL is the
         // identifying part.
-        f.debug_struct("WebRoot").field("base", &self.base).finish()
+        f.debug_struct("MountedDirectory")
+            .field("base", &self.base)
+            .finish()
     }
 }
 
-impl WebRoot {
-    /// Wrap a host-supplied directory handle as a storage root.
+impl MountedDirectory {
+    /// Mount a host-supplied directory handle.
     ///
     /// `id` is used only to synthesize a stable base URL (and, through it,
     /// Web Locks identifiers); it does not need to correspond to anything on
-    /// disk. Typically the subject DID or vault id.
+    /// disk. It is the directory's reproducible identity: its OPFS logical path,
+    /// or its registry UUID for a picked directory.
     pub fn new(id: &str, handle: FileSystemDirectoryHandle) -> Self {
         // Synthesize an opaque but stable base URL for this root. The path is
         // never touched on disk — only its suffix relative to this prefix is
@@ -89,8 +96,10 @@ impl WebRoot {
     }
 
     /// The underlying directory handle (cheap clone — JS handles are
-    /// reference-counted). Useful for [`register`](Self::register)ing an
-    /// OPFS-obtained root for later [`open`](Self::open).
+    /// reference-counted). Test-only: production roots come from OPFS
+    /// ([`opfs_category`]) or the IndexedDB registry ([`open`](Self::open)),
+    /// neither of which needs to hand the raw handle back out.
+    #[cfg(test)]
     pub fn handle(&self) -> FileSystemDirectoryHandle {
         self.handle.clone()
     }
@@ -98,12 +107,13 @@ impl WebRoot {
     /// A root backed by the [Origin Private File System][opfs] subdirectory
     /// named `id`, obtained via `navigator.storage.getDirectory()`.
     ///
-    /// Unlike a directory picked through `showDirectoryPicker()`, OPFS needs no
-    /// user gesture and is available in workers, which makes it the backing
-    /// store for headless browser tests of this provider. It is also a valid
-    /// production root for browsers that prefer private, origin-scoped storage.
+    /// Test-only single-segment helper: OPFS needs no user gesture and is
+    /// available in workers, which makes it the backing store for headless
+    /// browser tests. Production OPFS roots go through [`opfs_category`], which
+    /// calls [`opfs_path`](Self::opfs_path) directly.
     ///
     /// [opfs]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system
+    #[cfg(test)]
     pub async fn opfs(id: &str) -> Result<Self, FileSystemError> {
         Self::opfs_path(id, std::slice::from_ref(&id.to_string())).await
     }
@@ -134,68 +144,71 @@ impl WebRoot {
         Ok(Self::new(id, scoped))
     }
 
-    /// A root backed by a directory handle persisted in IndexedDB under the
-    /// database named `name`.
+    /// A root for the mounted directory identified by `id` in the directory
+    /// registry (see [`FileSystemDirectoryHandleExt::mount`]).
     ///
-    /// This is the durable web equivalent of a native `file:` path: the
-    /// IndexedDB database is the address, and it stores the
-    /// `FileSystemDirectoryHandle` (structured-cloneable, so it survives a
-    /// reload). The handle must have been saved once via
-    /// [`register`](Self::register) — typically right after the user picked the
-    /// directory through `showDirectoryPicker()`.
-    pub async fn open(name: &str) -> Result<Self, FileSystemError> {
-        let db = open_directory_db(name).await?;
-        let tx = db
-            .transaction(&[DIRECTORY_STORE], rexie::TransactionMode::ReadOnly)
-            .map_err(|e| FileSystemError::Io(format!("opening directory transaction: {e}")))?;
-        let store = tx
-            .store(DIRECTORY_STORE)
-            .map_err(|e| FileSystemError::Io(format!("opening directory store: {e}")))?;
-        let value = store
-            .get(JsValue::from_str(HANDLE_KEY))
-            .await
-            .map_err(|e| FileSystemError::Io(format!("reading directory handle: {e}")))?;
-        tx.done()
-            .await
-            .map_err(|e| FileSystemError::Io(format!("closing directory transaction: {e}")))?;
-
-        let handle: FileSystemDirectoryHandle = value
-            .filter(|v| !v.is_undefined() && !v.is_null())
-            .ok_or_else(|| FileSystemError::Io(format!("no directory registered for '{name}'")))?
-            .dyn_into()
-            .map_err(|_| {
-                FileSystemError::Io("stored value is not a FileSystemDirectoryHandle".into())
-            })?;
-        Ok(Self::new(name, handle))
-    }
-
-    /// Persist a directory handle under the IndexedDB database named `name`, so
-    /// it can later be reopened with [`open`](Self::open). Replaces any handle
-    /// previously registered under the same name.
-    pub async fn register(
-        name: &str,
-        handle: FileSystemDirectoryHandle,
-    ) -> Result<(), FileSystemError> {
-        let db = open_directory_db(name).await?;
-        let tx = db
-            .transaction(&[DIRECTORY_STORE], rexie::TransactionMode::ReadWrite)
-            .map_err(|e| FileSystemError::Io(format!("opening directory transaction: {e}")))?;
-        let store = tx
-            .store(DIRECTORY_STORE)
-            .map_err(|e| FileSystemError::Io(format!("opening directory store: {e}")))?;
-        store
-            .put(handle.as_ref(), Some(&JsValue::from_str(HANDLE_KEY)))
-            .await
-            .map_err(|e| FileSystemError::Io(format!("storing directory handle: {e}")))?;
-        tx.done()
-            .await
-            .map_err(|e| FileSystemError::Io(format!("committing directory handle: {e}")))?;
-        Ok(())
+    /// `id` is a stable, registry-assigned identifier (a UUID) for one physical
+    /// directory — the durable web equivalent of a native `file:` path. The
+    /// registry stores the directory's `FileSystemDirectoryHandle`
+    /// (structured-cloneable, so it survives a reload) under that id.
+    pub async fn open(id: &str) -> Result<Self, FileSystemError> {
+        let handle = registry::handle(id)
+            .await?
+            .ok_or_else(|| FileSystemError::Io(format!("no directory registered for '{id}'")))?;
+        Ok(Self::new(id, handle))
     }
 
     /// The [`FileSystemHandle`] for this root's base URL.
     fn handle_at_base(&self) -> FileSystemHandle {
         FileSystemHandle::from_root(self.base.as_ref().clone(), self.clone())
+    }
+}
+
+/// Mount and unmount a host-supplied directory through the directory registry.
+///
+/// The host obtains a [`FileSystemDirectoryHandle`] however it can —
+/// `showDirectoryPicker()`, drag-and-drop's
+/// `DataTransferItem.getAsFileSystemHandle()`, or a PWA launch handler (all
+/// require a user gesture and a main-thread context, none of which this crate
+/// can or should drive). This trait turns such a handle into a durable,
+/// serializable [`Location`] that [`FileSystem::open`] reopens, and back again.
+///
+/// Only the *real-directory* case needs this: OPFS directories are addressed by
+/// their deterministic [`Location`] path directly, with no registry.
+#[async_trait::async_trait(?Send)]
+pub trait FileSystemDirectoryHandleExt {
+    /// Persist this directory in the registry and return the [`Location`] that
+    /// reopens it via [`FileSystem::open`].
+    ///
+    /// The registry is deduplicated by physical directory (compared with
+    /// [`FileSystemHandle.isSameEntry`][isSameEntry]): mounting the same
+    /// directory again — re-picked, or restored from a different handle —
+    /// returns the same [`Location`]. That stable identity is what the Web Locks
+    /// CAS name derives from, so independent handles to one directory mutually
+    /// exclude. The File System Access API exposes no identity string of its
+    /// own, so the registry is the authority.
+    ///
+    /// [isSameEntry]: https://developer.mozilla.org/en-US/docs/Web/API/FileSystemHandle/isSameEntry
+    async fn mount(&self) -> Result<Location, FileSystemError>;
+
+    /// Drop a mounted directory from the registry. After this, [`FileSystem::open`]
+    /// on the same [`Location`] fails until it is mounted again. A `Location`
+    /// that names no registry entry (e.g. an OPFS path) is a no-op.
+    async fn unmount(location: &Location) -> Result<(), FileSystemError>;
+}
+
+#[async_trait::async_trait(?Send)]
+impl FileSystemDirectoryHandleExt for FileSystemDirectoryHandle {
+    async fn mount(&self) -> Result<Location, FileSystemError> {
+        let id = registry::register(self.clone()).await?;
+        Ok(Location::at(id))
+    }
+
+    async fn unmount(location: &Location) -> Result<(), FileSystemError> {
+        if let Directory::At(id) = &location.directory {
+            registry::unmount(id).await?;
+        }
+        Ok(())
     }
 }
 
@@ -218,7 +231,7 @@ impl Resource<Location> for FileSystem {
             Directory::Current => opfs_category("current", &location.name).await?,
             Directory::Temp => opfs_category("temp", &location.name).await?,
             // `At` names a directory the host granted and registered in IDB.
-            Directory::At(key) => WebRoot::open(key).await?,
+            Directory::At(key) => MountedDirectory::open(key).await?,
         };
         Ok(root.provider())
     }
@@ -226,35 +239,187 @@ impl Resource<Location> for FileSystem {
 
 /// A web root at OPFS `{category}/{name}`. `id` (the joined path) anchors the
 /// synthetic base URL so distinct locations don't collide.
-async fn opfs_category(category: &str, name: &str) -> Result<WebRoot, FileSystemError> {
+async fn opfs_category(category: &str, name: &str) -> Result<MountedDirectory, FileSystemError> {
     let id = format!("{category}/{name}");
     let segments = vec![category.to_string(), name.to_string()];
-    WebRoot::opfs_path(&id, &segments).await
+    MountedDirectory::opfs_path(&id, &segments).await
 }
 
-/// IndexedDB store name and key under which a directory handle is persisted.
-const DIRECTORY_STORE: &str = "directory";
-const HANDLE_KEY: &str = "handle";
+/// The directory registry: a single IndexedDB database mapping a stable id (a
+/// UUID) to a picked directory's `FileSystemDirectoryHandle`, deduplicated by
+/// physical directory via [`FileSystemHandle.isSameEntry`][isSameEntry].
+///
+/// This is the identity authority for picked directories. The File System
+/// Access API gives no readable identity string for a handle (only async
+/// pairwise `isSameEntry`), so two handles for the same folder can't agree on a
+/// derived name on their own. By assigning each physical directory one UUID
+/// here — reused on any subsequent handle that `isSameEntry`-matches — the
+/// registry produces an identity both can resolve to, which the Web Locks name
+/// keys on for cross-tab CAS.
+///
+/// OPFS roots need none of this: their logical path (`{category}/{name}`) is
+/// already a reproducible identity, so they are anchored directly on it.
+///
+/// [isSameEntry]: https://developer.mozilla.org/en-US/docs/Web/API/FileSystemHandle/isSameEntry
+mod registry {
+    use super::{FileSystemDirectoryHandle, FileSystemError, js_io_error, random_uuid};
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_futures::JsFuture;
 
-/// Open (creating if needed) the IndexedDB database that backs an FS-remote
-/// directory, ensuring its single object store exists.
-async fn open_directory_db(name: &str) -> Result<rexie::Rexie, FileSystemError> {
-    rexie::Rexie::builder(name)
-        .version(1)
-        .add_object_store(rexie::ObjectStore::new(DIRECTORY_STORE).auto_increment(false))
-        .build()
-        .await
-        .map_err(|e| FileSystemError::Io(format!("opening directory database '{name}': {e}")))
+    const DB: &str = "dialog-fs-directories";
+    const STORE: &str = "directories";
+
+    async fn open_db() -> Result<rexie::Rexie, FileSystemError> {
+        rexie::Rexie::builder(DB)
+            .version(1)
+            .add_object_store(rexie::ObjectStore::new(STORE).auto_increment(false))
+            .build()
+            .await
+            .map_err(|e| FileSystemError::Io(format!("opening directory registry: {e}")))
+    }
+
+    /// Whether two directory handles refer to the same physical directory.
+    async fn is_same_entry(
+        a: &FileSystemDirectoryHandle,
+        b: &FileSystemDirectoryHandle,
+    ) -> Result<bool, FileSystemError> {
+        let same = JsFuture::from(a.is_same_entry(b))
+            .await
+            .map_err(|e| js_io_error("comparing directory handles", e))?;
+        Ok(same.is_truthy())
+    }
+
+    /// Read the handle registered under `id`, if any.
+    pub(super) async fn handle(
+        id: &str,
+    ) -> Result<Option<FileSystemDirectoryHandle>, FileSystemError> {
+        let db = open_db().await?;
+        let tx = db
+            .transaction(&[STORE], rexie::TransactionMode::ReadOnly)
+            .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
+        let store = tx
+            .store(STORE)
+            .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
+        let value = store
+            .get(JsValue::from_str(id))
+            .await
+            .map_err(|e| FileSystemError::Io(format!("reading registry entry: {e}")))?;
+        tx.done()
+            .await
+            .map_err(|e| FileSystemError::Io(format!("closing registry transaction: {e}")))?;
+
+        value
+            .filter(|v| !v.is_undefined() && !v.is_null())
+            .map(|v| {
+                v.dyn_into::<FileSystemDirectoryHandle>().map_err(|_| {
+                    FileSystemError::Io("registry value is not a FileSystemDirectoryHandle".into())
+                })
+            })
+            .transpose()
+    }
+
+    /// Register `handle`, returning the id of the physical directory it refers
+    /// to: an existing id if a registered handle `isSameEntry`-matches, else a
+    /// freshly minted UUID stored under the handle.
+    pub(super) async fn register(
+        handle: FileSystemDirectoryHandle,
+    ) -> Result<String, FileSystemError> {
+        let db = open_db().await?;
+
+        // Scan existing entries for a handle pointing at the same directory.
+        let tx = db
+            .transaction(&[STORE], rexie::TransactionMode::ReadOnly)
+            .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
+        let store = tx
+            .store(STORE)
+            .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
+        let keys = store
+            .get_all_keys(None, None)
+            .await
+            .map_err(|e| FileSystemError::Io(format!("listing registry keys: {e}")))?;
+        let values = store
+            .get_all(None, None)
+            .await
+            .map_err(|e| FileSystemError::Io(format!("listing registry entries: {e}")))?;
+        tx.done()
+            .await
+            .map_err(|e| FileSystemError::Io(format!("closing registry transaction: {e}")))?;
+
+        for (key, value) in keys.into_iter().zip(values) {
+            let Ok(stored) = value.dyn_into::<FileSystemDirectoryHandle>() else {
+                continue;
+            };
+            if is_same_entry(&handle, &stored).await? {
+                return key
+                    .as_string()
+                    .ok_or_else(|| FileSystemError::Io("registry key is not a string".into()));
+            }
+        }
+
+        // New directory: mint an id and store the handle under it.
+        let id = random_uuid()?;
+        let tx = db
+            .transaction(&[STORE], rexie::TransactionMode::ReadWrite)
+            .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
+        let store = tx
+            .store(STORE)
+            .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
+        store
+            .put(handle.as_ref(), Some(&JsValue::from_str(&id)))
+            .await
+            .map_err(|e| FileSystemError::Io(format!("storing registry entry: {e}")))?;
+        tx.done()
+            .await
+            .map_err(|e| FileSystemError::Io(format!("committing registry entry: {e}")))?;
+        Ok(id)
+    }
+
+    /// Drop the registry entry for `id`. Absent ids are a no-op.
+    pub(super) async fn unmount(id: &str) -> Result<(), FileSystemError> {
+        let db = open_db().await?;
+        let tx = db
+            .transaction(&[STORE], rexie::TransactionMode::ReadWrite)
+            .map_err(|e| FileSystemError::Io(format!("opening registry transaction: {e}")))?;
+        let store = tx
+            .store(STORE)
+            .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
+        store
+            .delete(JsValue::from_str(id))
+            .await
+            .map_err(|e| FileSystemError::Io(format!("deleting registry entry: {e}")))?;
+        tx.done()
+            .await
+            .map_err(|e| FileSystemError::Io(format!("committing registry deletion: {e}")))?;
+        Ok(())
+    }
+}
+
+/// A v4-shaped UUID string from the platform's `crypto.randomUUID()`, reached
+/// through `js_sys::Reflect` on the global so it works in both window and
+/// worker scopes (where `crypto` is a global) without the `web_sys::Crypto`
+/// feature.
+fn random_uuid() -> Result<String, FileSystemError> {
+    let global = js_sys::global();
+    let crypto = js_sys::Reflect::get(&global, &JsValue::from_str("crypto"))
+        .map_err(|e| js_io_error("reading crypto", e))?;
+    let func: js_sys::Function = js_sys::Reflect::get(&crypto, &JsValue::from_str("randomUUID"))
+        .map_err(|e| js_io_error("reading crypto.randomUUID", e))?
+        .dyn_into()
+        .map_err(|_| FileSystemError::Io("crypto.randomUUID is unavailable".into()))?;
+    func.call0(&crypto)
+        .map_err(|e| js_io_error("calling crypto.randomUUID", e))?
+        .as_string()
+        .ok_or_else(|| FileSystemError::Io("crypto.randomUUID did not return a string".into()))
 }
 
 impl FileSystemHandle {
     /// Construct a handle from an already-anchored URL and its web root.
-    pub(super) fn from_root(url: Url, root: WebRoot) -> Self {
+    pub(super) fn from_root(url: Url, root: MountedDirectory) -> Self {
         Self { url, root }
     }
 
     /// The web root this handle navigates from.
-    fn root(&self) -> &WebRoot {
+    fn root(&self) -> &MountedDirectory {
         &self.root
     }
 
@@ -625,7 +790,7 @@ fn lock_manager() -> Result<web_sys::LockManager, FileSystemError> {
 
 #[cfg(test)]
 mod tests {
-    use super::WebRoot;
+    use super::MountedDirectory;
     use crate::helpers::{unique_did, unique_name};
     use dialog_effects::archive::prelude::*;
     use dialog_effects::memory::prelude::*;
@@ -636,7 +801,7 @@ mod tests {
     /// available in the dedicated-worker test runner without a user gesture and
     /// exercises the real web (File System Access API) code path.
     async fn opfs_provider(label: &str) -> crate::provider::FileSystem {
-        WebRoot::opfs(&unique_name(label))
+        MountedDirectory::opfs(&unique_name(label))
             .await
             .expect("OPFS root should be available in the worker test runner")
             .provider()
@@ -801,6 +966,88 @@ mod tests {
             .perform(&reopened)
             .await?;
         assert!(again.is_some(), "same Location should reopen the same dir");
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_opens_a_mounted_location() -> anyhow::Result<()> {
+        use super::FileSystemDirectoryHandleExt;
+        use crate::resource::Resource;
+
+        // The host obtains a directory handle (showDirectoryPicker / drag-drop /
+        // PWA launch — all gesture-bound, untestable headlessly) and mounts it.
+        // We stand in with an OPFS handle, mount it, then open the Location it
+        // yields.
+        let granted = MountedDirectory::opfs(&unique_name("web-mount-source")).await?;
+        let location = granted.handle().mount().await?;
+
+        let provider = crate::provider::FileSystem::open(&location).await?;
+        let did = unique_did().await;
+        let content = b"opened via mounted Location".to_vec();
+        let digest = dialog_common::Blake3Hash::hash(&content);
+
+        did.clone()
+            .archive()
+            .catalog("index")
+            .put(content.clone())
+            .perform(&provider)
+            .await?;
+
+        // Re-opening the same Location must reach the same directory.
+        let reopened = crate::provider::FileSystem::open(&location).await?;
+        let result = did
+            .archive()
+            .catalog("index")
+            .get(digest)
+            .perform(&reopened)
+            .await?;
+        assert_eq!(result, Some(content));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_deduplicates_the_same_directory_on_mount() -> anyhow::Result<()> {
+        use super::FileSystemDirectoryHandleExt;
+
+        // Mounting two handles for the same physical directory must return the
+        // same Location, so a Web Lock derived from it mutually excludes them.
+        // Distinct directories must get distinct Locations.
+        let dir = MountedDirectory::opfs(&unique_name("web-dedup")).await?;
+        let first = dir.handle().mount().await?;
+        let again = dir.handle().mount().await?;
+        assert_eq!(
+            first, again,
+            "same directory must reuse its mounted Location"
+        );
+
+        let other = MountedDirectory::opfs(&unique_name("web-dedup-other")).await?;
+        let other_loc = other.handle().mount().await?;
+        assert_ne!(
+            first, other_loc,
+            "distinct directories must get distinct Locations"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_unmounts_a_directory() -> anyhow::Result<()> {
+        use super::FileSystemDirectoryHandleExt;
+        use crate::resource::Resource;
+
+        let dir = MountedDirectory::opfs(&unique_name("web-unmount")).await?;
+        let location = dir.handle().mount().await?;
+
+        // Mounted: opens fine.
+        crate::provider::FileSystem::open(&location).await?;
+
+        // Unmounted: the Location no longer resolves.
+        <web_sys::FileSystemDirectoryHandle as FileSystemDirectoryHandleExt>::unmount(&location)
+            .await?;
+        let reopened = crate::provider::FileSystem::open(&location).await;
+        assert!(
+            reopened.is_err(),
+            "an unmounted Location must no longer resolve"
+        );
         Ok(())
     }
 }
