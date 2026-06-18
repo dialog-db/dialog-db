@@ -503,6 +503,13 @@ fn js_io_error(op: &str, error: JsValue) -> FileSystemError {
     FileSystemError::Io(format!("{op}: {}", display_js_value(&error)))
 }
 
+/// Whether a JS object exposes `name` as a callable method.
+fn has_method(object: &JsValue, name: &str) -> bool {
+    js_sys::Reflect::get(object, &JsValue::from_str(name))
+        .map(|v| v.is_function())
+        .unwrap_or(false)
+}
+
 async fn navigate_directory(
     from: &FileSystemDirectoryHandle,
     segments: &[String],
@@ -600,6 +607,21 @@ pub(super) async fn write(
         .await?
         .ok_or_else(|| FileSystemError::Io(format!("could not create file '{name}'")))?;
 
+    // `createWritable` is the async writable-stream path (Chrome, Firefox,
+    // Safari 26+). Where it is absent — Safari ≤ 18, whose OPFS only exposes the
+    // synchronous, worker-scoped `createSyncAccessHandle` — fall back to that.
+    if has_method(&file_handle, "createWritable") {
+        write_via_writable(&file_handle, contents).await
+    } else {
+        write_via_sync_access(&file_handle, contents).await
+    }
+}
+
+/// Write through `FileSystemWritableFileStream` (async, main-thread-capable).
+async fn write_via_writable(
+    file_handle: &FileSystemFileHandle,
+    contents: &[u8],
+) -> Result<(), FileSystemError> {
     let writable: FileSystemWritableFileStream = JsFuture::from(file_handle.create_writable())
         .await
         .map_err(|e| js_io_error("creating writable stream", e))?
@@ -617,6 +639,43 @@ pub(super) async fn write(
         .await
         .map_err(|e| js_io_error("closing writable stream", e))?;
     Ok(())
+}
+
+/// Write through `FileSystemSyncAccessHandle` (synchronous, OPFS-only, and
+/// available only in a worker — the only OPFS write path on Safari ≤ 18). The
+/// handle is exclusive, so it is acquired, used, and closed within this call;
+/// truncating to the content length drops any stale tail from a shorter
+/// rewrite.
+async fn write_via_sync_access(
+    file_handle: &FileSystemFileHandle,
+    contents: &[u8],
+) -> Result<(), FileSystemError> {
+    let access: web_sys::FileSystemSyncAccessHandle =
+        JsFuture::from(file_handle.create_sync_access_handle())
+            .await
+            .map_err(|e| js_io_error("creating sync access handle", e))?
+            .dyn_into()
+            .map_err(|_| FileSystemError::Io("expected FileSystemSyncAccessHandle".into()))?;
+
+    let result = (|| {
+        let options = web_sys::FileSystemReadWriteOptions::new();
+        options.set_at(0.0);
+        // `write` auto-extends, but a shorter rewrite would leave stale bytes;
+        // truncate to exactly the content length.
+        access
+            .truncate_with_f64(contents.len() as f64)
+            .map_err(|e| js_io_error("truncating file", e))?;
+        access
+            .write_with_u8_array_and_options(contents, &options)
+            .map_err(|e| js_io_error("writing file contents", e))?;
+        access
+            .flush()
+            .map_err(|e| js_io_error("flushing file", e))?;
+        Ok(())
+    })();
+    // Always release the exclusive lock, even on error.
+    access.close();
+    result
 }
 
 pub(super) async fn rename(
@@ -1048,6 +1107,36 @@ mod tests {
             reopened.is_err(),
             "an unmounted Location must no longer resolve"
         );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_writes_via_sync_access_handle() -> anyhow::Result<()> {
+        // The Safari ≤ 18 write path: createSyncAccessHandle. Force it directly
+        // (regardless of whether createWritable is also present, as on Chrome)
+        // and read the bytes back through the normal read path — proving the two
+        // write paths are byte-compatible. Sync access handles are worker-only,
+        // which the dedicated-worker test runner provides.
+        let provider = opfs_provider("web-sync-access").await;
+        let handle = provider.resolve("archive")?.resolve("cell.bin")?;
+
+        let (parent, name) = handle
+            .navigate_parent(true)
+            .await?
+            .expect("file path has a parent");
+        let file_handle = super::get_file_handle(&parent, &name, true)
+            .await?
+            .expect("file handle is created");
+
+        // First write.
+        let first = b"sync access write".to_vec();
+        super::write_via_sync_access(&file_handle, &first).await?;
+        assert_eq!(super::read_optional(&handle).await?, Some(first));
+
+        // Shorter rewrite must truncate the stale tail, not leave old bytes.
+        let second = b"short".to_vec();
+        super::write_via_sync_access(&file_handle, &second).await?;
+        assert_eq!(super::read_optional(&handle).await?, Some(second));
         Ok(())
     }
 }
