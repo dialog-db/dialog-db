@@ -51,16 +51,18 @@ impl Site for Fs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dialog_effects::storage::{Directory, Location};
 
     #[dialog_common::test]
     fn it_builds_an_address() {
-        let address = FsAddress::new("file:///vault");
-        assert_eq!(address.target(), "file:///vault");
+        let location = Location::temp("vault");
+        let address = FsAddress::new(location.clone());
+        assert_eq!(address.location(), &location);
     }
 
     #[dialog_common::test]
     fn it_roundtrips_address_through_serde() {
-        let address = FsAddress::new("file:///vault");
+        let address = FsAddress::new(Location::new(Directory::At("/vault".into()), "space"));
         let json = serde_json::to_string(&address).unwrap();
         let parsed: FsAddress = serde_json::from_str(&json).unwrap();
         assert_eq!(address, parsed);

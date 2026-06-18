@@ -1,35 +1,37 @@
-//! Native round-trip, byte-compat, and authorization tests for the archive
-//! providers.
+//! Cross-target byte-compat tests for the archive providers.
 //!
-//! The byte-compat tests are the load-bearing assertion of this crate: a
-//! directory written through the FS-remote site must be a valid
-//! `dialog_storage::FileSystem` vault and vice versa.
-
-#![cfg(not(target_arch = "wasm32"))]
+//! The load-bearing assertion of this crate: a directory written through the
+//! FS-remote provider must be a valid `dialog_storage::FileSystem` vault and
+//! vice versa. These drive the [`Fs`](dialog_remote_fs) provider directly via
+//! [`perform`](dialog_remote_fs::helpers::perform) -- the env-bound
+//! `authorize`/`prove` path (read-vs-write gating, subject verification) is
+//! covered by the Operator-driven tests in `e2e.rs`. They run on native (a
+//! tempdir) and in the browser (an OPFS subdirectory) alike.
 
 mod helpers;
 
 use anyhow::Result;
-use base58::ToBase58;
 use dialog_common::Blake3Hash;
 use dialog_effects::archive::prelude::*;
-use dialog_storage::unique_did;
-use helpers::{file_url, open_at, setup};
+use helpers::{perform, setup};
+
+#[cfg(target_arch = "wasm32")]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 #[dialog_common::test]
 async fn it_returns_none_for_missing_blob() -> Result<()> {
     let env = setup().await;
     let digest = Blake3Hash::hash(b"never written");
 
-    let result = env
-        .subject
-        .clone()
-        .archive()
-        .catalog("index")
-        .get(digest)
-        .fork(&env.address)
-        .perform(&env.network)
-        .await?;
+    let result = perform(
+        env.subject
+            .clone()
+            .archive()
+            .catalog("index")
+            .get(digest)
+            .fork(&env.address),
+    )
+    .await??;
     assert_eq!(result, None);
     Ok(())
 }
@@ -40,94 +42,84 @@ async fn it_writes_and_reads_back_a_blob() -> Result<()> {
     let content = b"hello fs-remote".to_vec();
     let digest = Blake3Hash::hash(&content);
 
-    env.subject
-        .clone()
-        .archive()
-        .catalog("index")
-        .put(content.clone())
-        .fork(&env.address)
-        .perform(&env.network)
-        .await?;
+    perform(
+        env.subject
+            .clone()
+            .archive()
+            .catalog("index")
+            .put(content.clone())
+            .fork(&env.address),
+    )
+    .await??;
 
-    let result = env
-        .subject
-        .clone()
-        .archive()
-        .catalog("index")
-        .get(digest)
-        .fork(&env.address)
-        .perform(&env.network)
-        .await?;
+    let result = perform(
+        env.subject
+            .clone()
+            .archive()
+            .catalog("index")
+            .get(digest)
+            .fork(&env.address),
+    )
+    .await??;
     assert_eq!(result, Some(content));
     Ok(())
 }
 
 #[dialog_common::test]
-async fn it_writes_byte_compatibly_with_native_space() -> Result<()> {
-    // Write via FS-remote, then read back via dialog-storage's FileSystem
-    // pointed at the same directory.
+async fn it_writes_byte_compatibly_with_a_direct_filesystem() -> Result<()> {
+    // Write via FS-remote, then read back via a dialog-storage FileSystem rooted
+    // at the same directory: the vault fs-remote writes is a valid FileSystem
+    // vault.
     let env = setup().await;
     let content = b"compat: fs-remote -> FileSystem".to_vec();
     let digest = Blake3Hash::hash(&content);
 
-    env.subject
-        .clone()
-        .archive()
-        .catalog("index")
-        .put(content.clone())
-        .fork(&env.address)
-        .perform(&env.network)
-        .await?;
+    perform(
+        env.subject
+            .clone()
+            .archive()
+            .catalog("index")
+            .put(content.clone())
+            .fork(&env.address),
+    )
+    .await??;
 
-    let expected_path = env
-        .tmp
-        .path()
-        .join("archive")
-        .join("index")
-        .join(digest.as_bytes().to_base58());
-    assert!(
-        expected_path.is_file(),
-        "fs-remote should have written {expected_path:?}",
-    );
-
-    let native = open_at(env.tmp.path()).await;
     let loaded = env
         .subject
         .clone()
         .archive()
         .catalog("index")
         .get(digest)
-        .perform(&native)
+        .perform(&env.filesystem)
         .await?;
     assert_eq!(loaded, Some(content));
     Ok(())
 }
 
 #[dialog_common::test]
-async fn it_reads_byte_compatibly_from_native_space() -> Result<()> {
-    // Reverse direction: a native consumer writes via FileSystem, FS-remote reads.
+async fn it_reads_byte_compatibly_from_a_direct_filesystem() -> Result<()> {
+    // Reverse direction: a direct FileSystem writes, FS-remote reads.
     let env = setup().await;
     let content = b"compat: FileSystem -> fs-remote".to_vec();
     let digest = Blake3Hash::hash(&content);
 
-    let native = open_at(env.tmp.path()).await;
     env.subject
         .clone()
         .archive()
         .catalog("index")
         .put(content.clone())
-        .perform(&native)
+        .perform(&env.filesystem)
         .await?;
 
-    let result = env
-        .subject
-        .clone()
-        .archive()
-        .catalog("index")
-        .get(digest)
-        .fork(&env.address)
-        .perform(&env.network)
-        .await?;
+    let result = perform(
+        env.subject
+            .clone()
+            .archive()
+            .catalog("index")
+            .get(digest)
+            .fork(&env.address),
+    )
+    .await??;
     assert_eq!(result, Some(content));
     Ok(())
 }
@@ -138,72 +130,34 @@ async fn it_is_idempotent_for_repeated_puts() -> Result<()> {
     let content = b"idempotent".to_vec();
     let digest = Blake3Hash::hash(&content);
 
-    env.subject
-        .clone()
-        .archive()
-        .catalog("index")
-        .put(content.clone())
-        .fork(&env.address)
-        .perform(&env.network)
-        .await?;
-    env.subject
-        .clone()
-        .archive()
-        .catalog("index")
-        .put(content.clone())
-        .fork(&env.address)
-        .perform(&env.network)
-        .await?;
+    perform(
+        env.subject
+            .clone()
+            .archive()
+            .catalog("index")
+            .put(content.clone())
+            .fork(&env.address),
+    )
+    .await??;
+    perform(
+        env.subject
+            .clone()
+            .archive()
+            .catalog("index")
+            .put(content.clone())
+            .fork(&env.address),
+    )
+    .await??;
 
-    let result = env
-        .subject
-        .clone()
-        .archive()
-        .catalog("index")
-        .get(digest)
-        .fork(&env.address)
-        .perform(&env.network)
-        .await?;
+    let result = perform(
+        env.subject
+            .clone()
+            .archive()
+            .catalog("index")
+            .get(digest)
+            .fork(&env.address),
+    )
+    .await??;
     assert_eq!(result, Some(content));
-    Ok(())
-}
-
-#[dialog_common::test]
-async fn it_denies_when_subject_is_not_the_directory() -> Result<()> {
-    // A directory authorizes only its own subject. An invocation scoped to a
-    // different subject must be denied — the directory is not that space.
-    let env = setup().await;
-    let stranger = unique_did().await;
-    let digest = Blake3Hash::hash(b"anything");
-
-    let result = stranger
-        .archive()
-        .catalog("index")
-        .get(digest)
-        .fork(&env.address)
-        .perform(&env.network)
-        .await;
-    assert!(result.is_err(), "mismatched subject must be denied");
-    Ok(())
-}
-
-#[dialog_common::test]
-async fn it_denies_when_directory_is_not_a_space() -> Result<()> {
-    // A bare directory with no credential/key/self can't authorize anyone.
-    let env = setup().await;
-    let empty = tempfile::tempdir()?;
-    let address = dialog_remote_fs::FsAddress::new(file_url(empty.path()));
-    let digest = Blake3Hash::hash(b"anything");
-
-    let result = env
-        .subject
-        .clone()
-        .archive()
-        .catalog("index")
-        .get(digest)
-        .fork(&address)
-        .perform(&env.network)
-        .await;
-    assert!(result.is_err(), "directory without a credential must deny");
     Ok(())
 }

@@ -1,42 +1,49 @@
-//! Shared setup for the FS-remote integration tests.
+//! Shared, cross-target setup for the FS-remote provider integration tests.
 //!
-//! Builds a tempdir that is a valid space for a generated signer (its
-//! `credential/key/self` holds that signer's credential), the matching
-//! `file:`-URL [`FsAddress`], and an [`FsNetwork`] that drives the real
-//! `authorize` path (including the subject-verification). Native-only: the
-//! integration tests it serves use a tempdir-backed vault.
+//! Builds a directory that is a valid space for a generated signer (its
+//! `credential/key/self` holds that signer's credential), the [`FsAddress`]
+//! naming it, the subject the directory belongs to, and a [`FileSystem`] rooted
+//! at the same directory for byte-compat cross-checks.
+//!
+//! The vault is a [`Location`] opened through [`FileSystem::open`], the same way
+//! the rest of the system opens storage — so the tests run on native (a path
+//! under the platform temp dir) and on the web (an OPFS subdirectory) alike,
+//! with no platform-specific setup.
 
-#![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
 
-use dialog_capability::Subject;
+use dialog_capability::{
+    Ability, Capability, Constraint, Effect, Fork, ForkInvocation, Provider, Subject,
+};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::credential::prelude::*;
-use dialog_effects::storage::{Directory, Location};
-use dialog_remote_fs::FsAddress;
-use dialog_remote_fs::helpers::FsNetwork;
+use dialog_effects::storage::Location;
+use dialog_remote_fs::{Fs, FsAddress, FsAuthorization};
 use dialog_storage::provider::FileSystem;
 use dialog_storage::resource::Resource;
+use dialog_storage::unique_name;
 use dialog_varsig::Principal;
-use tempfile::TempDir;
 
-/// A tempdir vault, the FS-remote network, the `file:` URL address naming it,
-/// and the subject the vault belongs to (whose credential is stored in it).
+/// A vault directory: the FS-remote address naming it, the subject it is the
+/// space for, and a [`FileSystem`] rooted at the same directory (so tests can
+/// read/write it directly to assert byte-compatibility).
 pub struct Setup {
-    pub tmp: TempDir,
-    pub network: FsNetwork,
     pub address: FsAddress,
     pub subject: Subject,
+    pub filesystem: FileSystem,
 }
 
-/// Open a fresh FS-remote test environment over a tempdir that is the space for
-/// a freshly generated signer.
+/// Open a fresh FS-remote test environment over a directory that is the space
+/// for a freshly generated signer.
 pub async fn setup() -> Setup {
-    let tmp = tempfile::tempdir().unwrap();
-    let filesystem = open_at(tmp.path()).await;
+    let location = Location::temp(unique_name("fs-remote"));
+    let filesystem = FileSystem::open(&location).await.unwrap();
 
     // Make the directory the space for `signer`: store its credential at
-    // credential/key/self, exactly as Repository::create would.
+    // credential/key/self, exactly as Repository::create would. On the web a
+    // signer can't persist its non-extractable key, so this stores the public
+    // identity, which is what the subject check reads.
     let signer = Ed25519Signer::generate().await.unwrap();
     let did = Principal::did(&signer);
     let credential = Credential::Signer(SignerCredential::from(signer));
@@ -49,22 +56,28 @@ pub async fn setup() -> Setup {
         .unwrap();
 
     Setup {
-        address: FsAddress::new(file_url(tmp.path())),
-        network: FsNetwork::new(),
+        address: FsAddress::new(location),
         subject: Subject::from(did),
-        tmp,
+        filesystem,
     }
 }
 
-/// Open a `dialog_storage::FileSystem` rooted at the given directory.
-pub async fn open_at(path: &std::path::Path) -> FileSystem {
-    let location = Location::new(Directory::At(path.to_string_lossy().into_owned()), "");
-    FileSystem::open(&location).await.unwrap()
-}
-
-/// The `file:` URL for a directory path.
-pub fn file_url(path: &std::path::Path) -> String {
-    url::Url::from_file_path(path)
-        .expect("tempdir path is absolute")
-        .to_string()
+/// Run a forked capability against the directory its address names, exercising
+/// the [`Fs`] provider directly.
+///
+/// Resolves the directory (its [`Location`] opens the same way on every target)
+/// and hands it to the provider, standing in for the attested authorization an
+/// Operator would produce. The env-bound `authorize`/`prove` path is covered by
+/// the Operator-driven `e2e` tests.
+pub async fn perform<Fx>(fork: Fork<Fs, Fx>) -> anyhow::Result<Fx::Output>
+where
+    Fx: Effect + 'static,
+    Fx::Of: Constraint,
+    Capability<Fx>: Ability,
+    ForkInvocation<Fs, Fx>: ConditionalSend,
+    Fs: Provider<ForkInvocation<Fs, Fx>> + ConditionalSync,
+{
+    let filesystem = FileSystem::open(fork.address().location()).await?;
+    let invocation = fork.attest(FsAuthorization::new(filesystem));
+    Ok(invocation.perform(&Fs).await)
 }

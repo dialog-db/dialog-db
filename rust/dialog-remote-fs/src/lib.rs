@@ -2,15 +2,18 @@
 //!
 //! This crate provides the [`Fs`] site type for syncing dialog repository data
 //! to a local directory that backs a space. An [`FsAddress`] names that
-//! directory; at authorize time the [`Fs`] fork opens it, checks that the
-//! directory's stored `credential/key/self` DID matches the invocation's
-//! subject, and hands the resolved `dialog_storage`
+//! directory; at authorize time the [`Fs`] fork (1) proves the operator holds a
+//! delegation for the requested effect, (2) opens the directory and checks that
+//! its stored `credential/key/self` DID matches the invocation's subject, then
+//! (3) hands the resolved `dialog_storage`
 //! [`FileSystem`](dialog_storage::provider::FileSystem) to the provider, which
-//! performs the capability against it. This mirrors the *shape* of
-//! [`dialog-remote-s3`](https://docs.rs/dialog-remote-s3)'s presign step — check,
-//! then yield the means to act — locally, with no network. All filesystem I/O
-//! (layout, atomic writes, CAS locking) lives in that isomorphic provider
-//! (`tokio::fs` on native, the [File System Access API][fsapi] in the browser).
+//! performs the capability against it. This mirrors
+//! [`dialog-remote-ucan-s3`](https://docs.rs/dialog-remote-ucan-s3): the same
+//! `Identify` + delegation-proof step a UCAN fork runs before redeeming an
+//! invocation, done locally against the operator's own stored delegations with
+//! no network. All filesystem I/O (layout, atomic writes, CAS locking) lives in
+//! that isomorphic provider (`tokio::fs` on native, the
+//! [File System Access API][fsapi] in the browser).
 //!
 //! # Trust model
 //!
@@ -24,9 +27,11 @@
 //! `FileSystemDirectoryHandle` on the web); this crate trusts that grant and
 //! does not defend a shared directory against other writers.
 //!
-//! Access is **all-or-nothing**: once the subject matches, every effect
-//! (`Get`/`Put`/`Resolve`/`Publish`/`Retract`) is permitted. There is no
-//! read-only-vs-read-write distinction at this layer.
+//! Access is **per-effect**: the operator must hold a delegation covering the
+//! invoked command. Because the proof matches on command prefix, a delegation
+//! granting only `/archive/get` authorizes reads but not `/archive/put` writes
+//! — the same read-vs-write gating a UCAN remote enforces. A self-owned
+//! operator (it *is* the subject) is authorized for every effect.
 //!
 //! # Preconditions
 //!
@@ -39,22 +44,19 @@
 //!
 //! # Addressing a directory
 //!
-//! The address resolves to a directory per target:
-//!
-//! - **native**: a `file:` URL, opened directly.
-//! - **web**: an IndexedDB database name holding the directory's
-//!   `FileSystemDirectoryHandle`. Register it once (typically right after
-//!   `showDirectoryPicker()`) with
-//!   [`register_web_directory`](dialog_storage::provider::register_web_directory);
-//!   afterwards the database is the durable, self-contained address.
+//! The address is a [`Location`](dialog_effects::storage::Location) — the same
+//! target-agnostic locator the rest of the system uses to open storage. It
+//! resolves to a platform directory through
+//! [`FileSystem::open`](dialog_storage::provider::FileSystem), so one address
+//! works on native (a path under the platform layout) and the web (an OPFS
+//! subdirectory) alike.
 //!
 //! ```no_run
-//! # #[cfg(not(target_arch = "wasm32"))]
 //! # fn example() {
+//! use dialog_effects::storage::Location;
 //! use dialog_remote_fs::FsAddress;
 //!
-//! // Native: the address is the directory's file: URL.
-//! let _address = FsAddress::new("file:///path/to/vault");
+//! let _address = FsAddress::new(Location::temp("my-vault"));
 //! # }
 //! ```
 //!
@@ -63,6 +65,5 @@
 #![warn(missing_docs)]
 
 pub mod fs;
-pub mod helpers;
 
 pub use fs::*;

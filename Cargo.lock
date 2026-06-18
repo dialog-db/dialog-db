@@ -1193,22 +1193,24 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base58",
+ "dialog-artifacts",
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
+ "dialog-network",
+ "dialog-operator",
+ "dialog-repository",
  "dialog-storage",
+ "dialog-ucan",
  "dialog-varsig",
+ "futures-util",
  "getrandom 0.2.16",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "url",
  "wasm-bindgen-test",
- "web-sys",
 ]
 
 [[package]]
