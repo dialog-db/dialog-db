@@ -26,7 +26,7 @@ use crate::resource::Pool;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::NativeSpace;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub use web::WebSpace;
+pub use web::{WebOpfsSpace, WebSpace};
 
 /// Storage: the runtime context for capability dispatch.
 #[derive(Provider)]
@@ -380,6 +380,94 @@ mod tests {
                 .perform(&env)
                 .await;
             assert!(result.is_err(), "duplicate create should fail");
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    mod web_tests {
+        use super::*;
+        use crate::helpers::unique_name;
+
+        // `Storage::opfs()` mounts a Space that keeps archive and memory in OPFS
+        // and credential/certificate on IndexedDB. These exercise the full
+        // mixed-backend round-trip: create (credential -> IndexedDB), archive a
+        // blob and publish a cell (-> OPFS), read them back, then reload the
+        // profile (credential read back from IndexedDB).
+        #[dialog_common::test]
+        async fn it_round_trips_archive_and_memory_on_opfs() {
+            let env = Storage::opfs();
+            let name = unique_name("opfs-roundtrip");
+
+            let did = StorageFx::profile(&name)
+                .create(test_credential().await)
+                .perform(&env)
+                .await
+                .unwrap()
+                .did();
+
+            // Archive (-> OPFS).
+            let content = b"opfs archive blob".to_vec();
+            let digest = Blake3Hash::hash(&content);
+            did.clone()
+                .archive()
+                .catalog("index")
+                .put(Buffer::from(content.clone()))
+                .perform(&env)
+                .await
+                .unwrap();
+            let got = did
+                .clone()
+                .archive()
+                .catalog("index")
+                .get(digest)
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(got, Some(content));
+
+            // Memory (-> OPFS).
+            let cell = b"opfs cell value".to_vec();
+            did.clone()
+                .memory()
+                .space("data")
+                .cell("head")
+                .publish(cell.clone(), None)
+                .perform(&env)
+                .await
+                .unwrap();
+            let resolved = did
+                .memory()
+                .space("data")
+                .cell("head")
+                .resolve()
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(resolved.unwrap().content, cell);
+        }
+
+        #[dialog_common::test]
+        async fn it_loads_the_credential_from_indexeddb() {
+            let env = Storage::opfs();
+            let name = unique_name("opfs-credential");
+            let credential = test_credential().await;
+            let expected_did = credential.did();
+
+            StorageFx::profile(&name)
+                .create(credential)
+                .perform(&env)
+                .await
+                .unwrap();
+
+            // The credential lives on IndexedDB; loading the profile reads it
+            // back, proving the credential slot is wired to IndexedDB while
+            // archive/memory above used OPFS.
+            let loaded = StorageFx::profile(&name)
+                .load()
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(loaded.did(), expected_did);
         }
     }
 }
