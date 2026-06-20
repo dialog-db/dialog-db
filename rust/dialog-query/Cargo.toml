@@ -30,6 +30,8 @@ futures-util = { workspace = true }
 futures-core = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+auto_enums = { workspace = true }
+futures = { workspace = true }
 
 # Macro utilities
 dialog-macros = { workspace = true }

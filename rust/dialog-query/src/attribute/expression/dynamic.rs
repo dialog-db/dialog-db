@@ -20,8 +20,8 @@ use std::ops::Not;
 /// from the input.
 ///
 /// Implemented for:
-/// - Concrete scalar values (`String`, `u32`, etc.) — produces a constant term.
-/// - [`Term<T>`] variables — passes through unchanged.
+/// - Concrete scalar values (`String`, `u32`, etc.): produces a constant term.
+/// - [`Term<T>`] variables: passes through unchanged.
 pub trait IntoTerm {
     /// The scalar type this value represents.
     type Type: Typed;
@@ -74,11 +74,11 @@ impl<T, Of> DynamicAttributeExpressionBuilder<T, Of> {
 /// A dynamic attribute expression binding an attribute name to an entity
 /// and a value.
 ///
-/// All three positions use deferred conversion — raw values are stored
+/// All three positions use deferred conversion: raw values are stored
 /// as-is and converted only when needed for queries or statements.
 ///
 /// - [`Statement`] requires `Relation = The`, `Of = Entity`, `Is: Scalar`
-///   — all concrete positions.
+///   (all concrete positions).
 /// - [`From<...> for Premise`] requires each position to convert into
 ///   the corresponding [`Term`].
 #[derive(Clone, Debug)]
@@ -228,7 +228,11 @@ mod tests {
 
     use super::*;
 
-    use crate::{Changes, Match, the};
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
+    use crate::{Changes, Environment, Match, Planner, the};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use futures_util::TryStreamExt;
 
     #[dialog_common::test]
     fn it_asserts_with_string() {
@@ -420,11 +424,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-        use futures_util::TryStreamExt;
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -447,13 +446,12 @@ mod tests {
             .is(Term::<String>::var("name"))
             .into();
 
-        let prop = match premise {
-            Premise::Assert(prop) => prop,
-            _ => panic!("Expected Assert"),
-        };
+        let plan = Planner::from(vec![premise])
+            .plan(&Environment::new())
+            .expect("premise should plan");
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
-        let results = prop
+        let results = plan
             .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;
@@ -465,11 +463,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_finds_all_relations_between_entities() -> anyhow::Result<()> {
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-        use futures_util::TryStreamExt;
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -493,13 +486,12 @@ mod tests {
             .is(bob.clone())
             .into();
 
-        let prop = match premise {
-            Premise::Assert(prop) => prop,
-            _ => panic!("Expected Assert"),
-        };
+        let plan = Planner::from(vec![premise])
+            .plan(&Environment::new())
+            .expect("premise should plan");
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
-        let results = prop
+        let results = plan
             .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;

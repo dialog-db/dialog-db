@@ -3,8 +3,9 @@ use std::fmt::{self, Display};
 
 use crate::error::{FieldTypeError, TypeError};
 use crate::term::Term;
+use crate::type_system::Type as Kind;
 use crate::types::Any;
-use crate::{Parameters, Requirement, Schema, Type};
+use crate::{Cardinality, Field, Parameters, Requirement, Schema, Type};
 use serde::{Deserialize, Serialize};
 
 /// A single named parameter slot in a formula's schema.
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// Each `Cell` declares its name, an optional value type, and whether it is
 /// required (must be bound before the formula runs) or optional/output
 /// (will be produced by the formula). The `#[derive(Formula)]` macro
-/// generates a [`Cells`] collection from a formula struct's fields —
+/// generates a [`Cells`] collection from a formula struct's fields:
 /// non-`#[output]` fields become required cells, `#[output]` fields
 /// become optional cells.
 ///
@@ -248,14 +249,13 @@ impl<T: Iterator<Item = Cell>> From<T> for Cells {
 
 impl From<&Cells> for Schema {
     fn from(cells: &Cells) -> Self {
-        use crate::{Cardinality, Field};
         let mut schema = Schema::new();
         for (name, cell) in cells.iter() {
             schema.insert(
                 name.into(),
                 Field {
                     description: cell.description.clone(),
-                    content_type: cell.content_type,
+                    content_type: cell.content_type.map(Kind::from),
                     requirement: cell.requirement.clone(),
                     cardinality: Cardinality::One,
                 },
@@ -307,5 +307,26 @@ mod tests {
             &Requirement::Optional
         );
         Ok(())
+    }
+
+    /// `From<&Cells> for Schema` lifts each cell's
+    /// `Option<Type>` content_type into the unified
+    /// `Option<type_system::Type>`. Typed cells produce
+    /// `Some(Primitive(singleton(vt)))`; untyped cells produce
+    /// `None` (unknown).
+    #[dialog_common::test]
+    fn schema_from_cells_lifts_content_types() {
+        let cells = Cells::define(|builder| {
+            builder.cell("name", Some(Type::String)).required();
+            builder.cell("untyped", None).required();
+        });
+        let schema = Schema::from(&cells);
+
+        let name = schema.get("name").expect("name field present");
+        let content = name.content_type().expect("name kind present");
+        assert_eq!(content.as_value_type(), Some(Type::String));
+
+        let untyped = schema.get("untyped").expect("untyped field present");
+        assert!(untyped.content_type().is_none());
     }
 }

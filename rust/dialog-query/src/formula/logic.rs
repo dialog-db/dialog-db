@@ -99,6 +99,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
         );
@@ -125,6 +126,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
         );
@@ -151,6 +153,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
         );
@@ -177,6 +180,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
         );
@@ -203,6 +207,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
         );
@@ -227,6 +232,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| bool::try_from(v).ok()),
             Some(false)
         );
@@ -252,6 +258,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
         );
@@ -290,6 +297,7 @@ mod tests {
             final_result
                 .lookup(&Term::var("final_result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| bool::try_from(v).ok()),
             Some(true)
         );

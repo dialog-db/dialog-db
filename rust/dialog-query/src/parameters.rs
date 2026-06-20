@@ -7,7 +7,7 @@ use std::collections::HashMap;
 ///
 /// Every premise type (relation, concept, formula, constraint) exposes its
 /// inputs and outputs as named parameters. A `Parameters` instance binds
-/// each parameter name to a [`Term<Any>`] — either a concrete constant
+/// each parameter name to a [`Term<Any>`]: either a concrete constant
 /// or a named variable that will be resolved during query evaluation.
 ///
 /// During planning, the [`Schema`](crate::Schema) is consulted to determine
@@ -211,8 +211,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_preserves_type_info_from_typed_terms() {
-        use crate::Term;
-
         let mut params = Parameters::new();
         params.insert("name".to_string(), Term::<String>::var("x").into());
 
@@ -221,7 +219,7 @@ mod tests {
             param,
             &Term::Variable {
                 name: Some("x".into()),
-                descriptor: Any(Some(Type::String))
+                descriptor: Some(Type::String).into(),
             }
         );
     }

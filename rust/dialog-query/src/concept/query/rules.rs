@@ -60,7 +60,7 @@ impl ConceptRules {
     ///
     /// Used when combining two rule sources (e.g. a primary registry and an
     /// overlay) so all installed rules contribute to planning. The implicit
-    /// rule is the same in both — it is derived from the concept descriptor —
+    /// rule is the same in both (it is derived from the concept descriptor)
     /// so only the `installed` set is merged.
     pub fn extend(&mut self, other: &ConceptRules) {
         for rule in &other.installed {
@@ -100,7 +100,7 @@ mod tests {
     use crate::the;
 
     fn person_concept() -> ConceptDescriptor {
-        ConceptDescriptor::from([(
+        ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -109,6 +109,7 @@ mod tests {
                 Some(Type::String),
             ),
         )])
+        .unwrap()
     }
 
     fn alt_rule(descriptor: &ConceptDescriptor) -> DeductiveRule {
