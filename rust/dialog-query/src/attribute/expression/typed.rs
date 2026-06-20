@@ -60,7 +60,7 @@ where
 
     /// Set the value for this attribute expression.
     ///
-    /// Accepts **both** concrete values and query terms — the `Is` type
+    /// Accepts **both** concrete values and query terms; the `Is` type
     /// parameter is preserved unevaluated in the resulting
     /// [`StaticAttributeExpression`]. Downstream trait impls then impose
     /// additional constraints based on how the expression is used:
@@ -71,8 +71,8 @@ where
     ///   so both concrete values and [`Term`] variables work.
     ///
     /// The `Into<Term<A::Type>>` bound here provides *construction-time*
-    /// type safety — e.g. passing an `i32` for a `String` attribute is a
-    /// compile error — without eagerly converting the value, which would
+    /// type safety (e.g. passing an `i32` for a `String` attribute is a
+    /// compile error) without eagerly converting the value, which would
     /// erase the distinction between concrete and term values.
     pub fn is<Is: Into<Term<A::Type>>>(self, value: Is) -> StaticAttributeExpression<A, Of, Is> {
         StaticAttributeExpression {
@@ -84,7 +84,7 @@ where
     }
 }
 
-/// A fully concrete attribute expression — entity and value are both known.
+/// A fully concrete attribute expression: entity and value are both known.
 ///
 /// This is the form that implements [`Statement`] for assert/retract operations.
 pub type StaticAttributeStatement<A> = StaticAttributeExpression<A, Entity, A>;
@@ -95,16 +95,16 @@ pub type StaticAttributeStatement<A> = StaticAttributeExpression<A, Entity, A>;
 /// passed to [`.is()`](StaticAttributeBuilder::is) is stored as-is. This lets
 /// downstream trait impls impose their own constraints:
 ///
-/// - [`Statement`] requires `Is: Into<A>` — only concrete values.
-/// - [`From<...> for Premise`] requires `Is: Into<Term<A::Type>>` — concrete
+/// - [`Statement`] requires `Is: Into<A>`: only concrete values.
+/// - [`From<...> for Premise`] requires `Is: Into<Term<A::Type>>`: concrete
 ///   values or [`Term`] variables.
 ///
 /// # Type Parameters
 ///
-/// - `A` — the attribute type
-/// - `Of` — entity position (`Entity` or `Term<Entity>`)
-/// - `Is` — value position (deferred; e.g. `&str`, `A`, `Term<A::Type>`)
-/// - `Because` — cause position (`Option<Cause>` or `Term<Cause>`)
+/// - `A`: the attribute type
+/// - `Of`: entity position (`Entity` or `Term<Entity>`)
+/// - `Is`: value position (deferred; e.g. `&str`, `A`, `Term<A::Type>`)
+/// - `Because`: cause position (`Option<Cause>` or `Term<Cause>`)
 pub struct StaticAttributeExpression<A: Attribute, Of, Is, Because: ExpressionCause = Option<Cause>>
 {
     /// The entity (or entity term) this attribute belongs to.
@@ -275,7 +275,12 @@ mod tests {
     use crate::artifact::Value;
     use crate::premise::Premise;
     use crate::proposition::Proposition;
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
     use crate::statement::Statement;
+    use crate::{Environment, Planner};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use futures_util::TryStreamExt;
 
     mod person {
         use crate::Attribute;
@@ -472,12 +477,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
-        use crate::Term;
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-        use futures_util::TryStreamExt;
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -495,13 +494,12 @@ mod tests {
             .is(Term::<String>::var("name"))
             .into();
 
-        let prop = match premise {
-            Premise::Assert(prop) => prop,
-            _ => panic!("Expected Assert"),
-        };
+        let plan = Planner::from(vec![premise])
+            .plan(&Environment::new())
+            .expect("premise should plan");
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
-        let results = prop
+        let results = plan
             .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;

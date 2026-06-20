@@ -7,14 +7,13 @@ pub use rules::ConceptRules;
 
 use std::fmt;
 
-use crate::attribute::AttributeDescriptor;
-use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
 use crate::source::SelectRules;
 use crate::{
-    Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
+    Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
 };
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
@@ -22,10 +21,10 @@ use dialog_common::ConditionalSync;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-/// Extract a Match with parameter names from a Match with user variable names
-///
-/// This maps values from user-specified variable names to internal parameter names
-/// for scoped evaluation. All factors are copied with their original provenance.
+/// Extract a Match with parameter names from a Match with user
+/// variable names. Maps values from user-specified variable names
+/// to internal parameter names for scoped evaluation. Both Present
+/// and Absent bindings are propagated.
 fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, EvaluationError> {
     let mut matched = Match::new();
 
@@ -33,8 +32,21 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
         match user_param {
             Term::Variable { name: Some(_), .. } => {
                 let param = Term::var(param_name);
-                if let Ok(value) = source.lookup(user_param) {
-                    matched.bind(&param, value)?;
+                match source.lookup(user_param) {
+                    Ok(Binding::Present(value)) => {
+                        matched.bind(&param, value)?;
+                    }
+                    Ok(Binding::Absent) => {
+                        matched.bind_absent(&param)?;
+                    }
+                    // Unbound is expected here: the user supplied a
+                    // placeholder term (e.g. `Term::var("alice")` in
+                    // `Query<Person> { this: ..., ... }`) that the
+                    // concept query is about to bind. Skip it:
+                    // downstream evaluation fills it in. Propagate
+                    // any other error.
+                    Err(EvaluationError::UnboundVariable { .. }) => {}
+                    Err(e) => return Err(e),
                 }
             }
             Term::Constant(value) => {
@@ -48,10 +60,9 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     Ok(matched)
 }
 
-/// Merge a Match with parameter names back into a Match with user variable names
-///
-/// This maps values from internal parameter names back to user-specified variable names
-/// after evaluation. All factors are copied with their original provenance.
+/// Merge a Match with parameter names back into a Match with user
+/// variable names after evaluation. Both Present and Absent
+/// bindings are propagated.
 fn merge_parameters(
     base: &Match,
     result: &Match,
@@ -65,8 +76,19 @@ fn merge_parameters(
         }
 
         let param = Term::var(param_name);
-        if let Ok(value) = result.lookup(&param) {
-            merged.bind(user_param, value)?;
+        match result.lookup(&param) {
+            Ok(Binding::Present(value)) => {
+                merged.bind(user_param, value)?;
+            }
+            Ok(Binding::Absent) => {
+                merged.bind_absent(user_param)?;
+            }
+            // Unbound is expected: not every parameter survives the
+            // concept evaluation (e.g. a blank slot the rule never
+            // touched). Skip and let the user variable stay
+            // un-extended. Propagate any other error.
+            Err(EvaluationError::UnboundVariable { .. }) => {}
+            Err(e) => return Err(e),
         }
     }
 
@@ -129,10 +151,10 @@ impl ConceptQuery {
             Some(total)
         } else {
             // Entity is not bound - categorize attributes to find best execution strategy
-            let mut bound_one: Option<&AttributeDescriptor> = None;
-            let mut bound_many: Option<&AttributeDescriptor> = None;
-            let mut unbound_one: Option<&AttributeDescriptor> = None;
-            let mut unbound_many: Option<&AttributeDescriptor> = None;
+            let mut bound_one: Option<&ConceptFieldDescriptor> = None;
+            let mut bound_many: Option<&ConceptFieldDescriptor> = None;
+            let mut unbound_one: Option<&ConceptFieldDescriptor> = None;
+            let mut unbound_many: Option<&ConceptFieldDescriptor> = None;
 
             for (name, attribute) in self.predicate.with().iter() {
                 if let Some(param) = self.terms.get(name) {
@@ -292,18 +314,23 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::Binding;
     use crate::attribute::query::AttributeQuery;
     use crate::concept::descriptor::ConceptDescriptor;
+    use crate::error::{AnalyzerError, TypeError};
     use crate::the;
     use crate::types::Any;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
 
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::{
         AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters, Premise,
-        Proposition, Term, Type, Value,
+        Proposition, Query, Term, Type, Value,
     };
+    use dialog_artifacts::Entity;
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use futures_util::TryStreamExt;
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
     // with deeply nested async streams. The functionality is tested indirectly through integration
@@ -311,9 +338,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_concept_query() -> anyhow::Result<()> {
-        use dialog_artifacts::Entity;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -338,7 +362,7 @@ mod tests {
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -357,7 +381,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("person"));
@@ -370,10 +395,9 @@ mod tests {
         };
 
         // Execute the query
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(Match::new().seed(), &source),
-        )
-        .await?;
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(application.evaluate(Match::new().seed(), &source))
+                .await?;
 
         // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");
@@ -385,8 +409,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let name = match_result.lookup(&name_param)?;
-            let age = match_result.lookup(&age_param)?;
+            let name = match_result.lookup(&name_param)?.content()?;
+            let age = match_result.lookup(&age_param)?.content()?;
 
             match name {
                 Value::String(n) if n == "Alice" => {
@@ -407,11 +431,322 @@ mod tests {
         Ok(())
     }
 
+    /// End-to-end: a concept with a `maybe` attribute returns
+    /// rows for entities that lack the optional fact, with the
+    /// optional slot bound to `Binding::Absent`. Entities that
+    /// have the fact get `Binding::Present(value)` for the slot.
+    /// This is the v2 set-widening behavior at the concept
+    /// projection layer, realized by the `OptionalAttributeQuery` left-join the
+    /// concept lowering emits for `maybe` fields.
+    #[dialog_common::test]
+    async fn it_executes_concept_with_optional_field() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        // Alice has both name and nickname; Bob has only name.
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+        ])
+        .unwrap();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("nickname".to_string(), Term::var("nickname"));
+
+        let application = ConceptQuery {
+            terms,
+            predicate: concept,
+        };
+
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(application.evaluate(Match::new().seed(), &source))
+                .await?;
+
+        assert_eq!(
+            selection.len(),
+            2,
+            "Should find 2 people (both Alice and Bob)"
+        );
+
+        let nickname_param = Term::var("nickname");
+        let name_param = Term::var("name");
+
+        let mut found_alice_with_nickname = false;
+        let mut found_bob_without_nickname = false;
+        for match_result in selection.iter() {
+            let name = match_result.lookup(&name_param)?.content()?;
+            let nickname = match_result.lookup(&nickname_param)?;
+            match (&name, nickname) {
+                (Value::String(n), Binding::Present(Value::String(nick)))
+                    if n == "Alice" && nick == "Ali" =>
+                {
+                    found_alice_with_nickname = true;
+                }
+                (Value::String(n), Binding::Absent) if n == "Bob" => {
+                    found_bob_without_nickname = true;
+                }
+                _ => panic!(
+                    "unexpected (name, nickname): ({:?}, {:?})",
+                    name,
+                    match_result.lookup(&nickname_param)
+                ),
+            }
+        }
+        assert!(
+            found_alice_with_nickname,
+            "Alice should have nickname Present"
+        );
+        assert!(
+            found_bob_without_nickname,
+            "Bob should have nickname Absent"
+        );
+
+        Ok(())
+    }
+
+    /// Regression (PR #348): a `this`-unbound concept query whose
+    /// alphabetically-first field is *optional* must still set-widen
+    /// it, not drop entities that lack the optional fact. `bio`
+    /// (optional) sorts before `name` (required); Alice has only
+    /// `name`, Bob has both. Both must be returned (Alice's `bio`
+    /// Absent, Bob's Present).
+    ///
+    /// Fixed by making an optional attribute *require* its entity
+    /// (`of`) bound rather than letting the choice group bind it: an
+    /// unbound-entity optional scan suppresses its `Absent` fallback,
+    /// so it must never lead an unbound scan. Feasibility now forces a
+    /// required premise (`name`) to bind `this` first; the optional
+    /// `bio` then runs with `this` known and set-widens correctly.
+    #[dialog_common::test]
+    async fn it_set_widens_optional_field_sorted_before_required() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        // Alice has only name; Bob has both name and bio.
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("person/bio").of(bob.clone()).is("Hi".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        // `bio` (optional) sorts before `name` (required).
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "bio".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/bio"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+        ])
+        .unwrap();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("bio".to_string(), Term::var("bio"));
+
+        let application = ConceptQuery {
+            terms,
+            predicate: concept,
+        };
+
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(application.evaluate(Match::new().seed(), &source))
+                .await?;
+
+        assert_eq!(
+            selection.len(),
+            2,
+            "Should find 2 people (both Alice and Bob), even though the \
+             optional `bio` field sorts before the required `name`"
+        );
+
+        let name_param = Term::var("name");
+        let bio_param = Term::var("bio");
+
+        let mut found_alice_without_bio = false;
+        let mut found_bob_with_bio = false;
+        for match_result in selection.iter() {
+            let name = match_result.lookup(&name_param)?.content()?;
+            let bio = match_result.lookup(&bio_param)?;
+            match (&name, bio) {
+                (Value::String(n), Binding::Absent) if n == "Alice" => {
+                    found_alice_without_bio = true;
+                }
+                (Value::String(n), Binding::Present(Value::String(b)))
+                    if n == "Bob" && b == "Hi" =>
+                {
+                    found_bob_with_bio = true;
+                }
+                _ => panic!(
+                    "unexpected (name, bio): ({:?}, {:?})",
+                    name,
+                    match_result.lookup(&bio_param)
+                ),
+            }
+        }
+        assert!(found_alice_without_bio, "Alice should have bio Absent");
+        assert!(found_bob_with_bio, "Bob should have bio Present");
+
+        Ok(())
+    }
+
+    /// End-to-end: a `#[derive(Concept)]` struct with an `Option<T>`
+    /// field round-trips through the full query pipeline. Alice has
+    /// both `name` and `nickname`; Bob has only `name`. The macro
+    /// emits `Term<Option<String>>` for the `nickname` field; at
+    /// realize time, Alice's nickname appears as `Some(_)` and Bob's
+    /// as `None`.
+    #[dialog_common::test]
+    async fn it_executes_macro_concept_with_optional_field() -> anyhow::Result<()> {
+        mod employee {
+            use crate::Attribute;
+
+            /// Employee given name
+            #[derive(Attribute, Clone, PartialEq)]
+            #[domain("person")]
+            pub struct Name(pub String);
+
+            /// Employee preferred nickname
+            #[derive(Attribute, Clone, PartialEq)]
+            #[domain("person")]
+            pub struct Nickname(pub String);
+        }
+
+        /// Employee with required name and optional nickname.
+        #[derive(crate::Concept, Debug, Clone)]
+        pub struct Employee {
+            /// Employee entity
+            pub this: Entity,
+            /// Required given name
+            pub name: employee::Name,
+            /// Optional nickname
+            pub nickname: Option<employee::Nickname>,
+        }
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let query = Query::<Employee>::default();
+        let employees: Vec<Employee> = query.perform(&source).try_collect().await?;
+
+        assert_eq!(employees.len(), 2);
+
+        let mut found_alice = false;
+        let mut found_bob = false;
+        for emp in employees {
+            match emp.name.0.as_str() {
+                "Alice" => {
+                    assert_eq!(
+                        emp.nickname.as_ref().map(|n| n.0.as_str()),
+                        Some("Ali"),
+                        "Alice should have nickname Some(Ali)"
+                    );
+                    found_alice = true;
+                }
+                "Bob" => {
+                    assert!(emp.nickname.is_none(), "Bob should have nickname None");
+                    found_bob = true;
+                }
+                other => panic!("Unexpected name: {other}"),
+            }
+        }
+        assert!(found_alice && found_bob);
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
-        use dialog_artifacts::Entity;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -433,7 +768,7 @@ mod tests {
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -452,7 +787,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("person"));
@@ -480,7 +816,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_operates_on_concept_conclusion() {
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -499,7 +835,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // Test that attributes are present
         let param_names: Vec<&str> = concept.with().keys().collect();
@@ -511,7 +848,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_creates_concept_descriptor() {
-        let concept = ConceptDescriptor::from(vec![(
+        let concept = ConceptDescriptor::try_from(vec![(
             "name".to_string(),
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -519,7 +856,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         // Operator is now a computed URI
         assert!(
@@ -532,7 +870,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_analyzes_concept_application() {
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name".to_string(),
                 AttributeDescriptor::new(
@@ -551,7 +889,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("name".to_string(), Term::var("person_name"));
@@ -575,9 +914,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_extracts_deductive_rule_parameters() {
-        use std::collections::HashSet;
-
-        let predicate = ConceptDescriptor::from([
+        let predicate = ConceptDescriptor::try_from([
             (
                 "name".to_string(),
                 AttributeDescriptor::new(
@@ -596,7 +933,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let rule = DeductiveRule::from(&predicate);
 
         let params: HashSet<&str> = rule.parameters().collect();
@@ -628,13 +966,12 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_expected_error_types() {
-        use crate::error::{AnalyzerError, TypeError};
-
         // Test AnalyzerError creation
-        let predicate = ConceptDescriptor::from(vec![(
+        let predicate = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(the!("test/name"), "", Cardinality::One, Some(Type::String)),
-        )]);
+        )])
+        .unwrap();
         let rule = DeductiveRule::from(&predicate);
 
         let analyzer_error = AnalyzerError::UnusedParameter {
@@ -681,7 +1018,7 @@ mod tests {
         terms.insert("test".to_string(), Term::var("test_var"));
         let concept_app = Proposition::Concept(ConceptQuery {
             terms,
-            predicate: ConceptDescriptor::from([(
+            predicate: ConceptDescriptor::try_from([(
                 "name",
                 AttributeDescriptor::new(
                     the!("test/name"),
@@ -689,7 +1026,8 @@ mod tests {
                     Cardinality::One,
                     Some(Type::String),
                 ),
-            )]),
+            )])
+            .unwrap(),
         });
 
         match concept_app {
@@ -723,9 +1061,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_constant_entity_parameter() -> anyhow::Result<()> {
-        use dialog_artifacts::Entity;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -745,7 +1080,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let concept = ConceptDescriptor::from(vec![(
+        let concept = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -753,7 +1088,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         // Query with constant entity - should only return Alice
         let mut terms = Parameters::new();
@@ -768,10 +1104,8 @@ mod tests {
             terms,
             predicate: concept,
         };
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Match::new().seed(), &source),
-        )
-        .await?;
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(app.evaluate(Match::new().seed(), &source)).await?;
 
         assert_eq!(
             selection.len(),
@@ -779,7 +1113,7 @@ mod tests {
             "Should find only Alice, not both people"
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("name"))?,
+            selection[0].lookup(&Term::var("name"))?.content()?,
             Value::String("Alice".to_string())
         );
 
@@ -788,9 +1122,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_constant_attribute_parameter() -> anyhow::Result<()> {
-        use dialog_artifacts::Entity;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -812,7 +1143,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -831,7 +1162,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // Query with constant name value - should only return Bob
         let mut terms = Parameters::new();
@@ -844,18 +1176,16 @@ mod tests {
             terms,
             predicate: concept,
         };
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Match::new().seed(), &source),
-        )
-        .await?;
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(app.evaluate(Match::new().seed(), &source)).await?;
 
         assert_eq!(selection.len(), 1, "Should find only Bob");
         assert_eq!(
-            selection[0].lookup(&Term::var("entity"))?,
+            selection[0].lookup(&Term::var("entity"))?.content()?,
             Value::Entity(bob.clone())
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("age"))?,
+            selection[0].lookup(&Term::var("age"))?.content()?,
             Value::UnsignedInt(30)
         );
 
@@ -864,9 +1194,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_multiple_constant_parameters() -> anyhow::Result<()> {
-        use dialog_artifacts::Entity;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -888,7 +1215,7 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -907,7 +1234,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // Query with both name and age constants - should only match Alice
         let mut terms = Parameters::new();
@@ -920,10 +1248,8 @@ mod tests {
             terms,
             predicate: concept,
         };
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Match::new().seed(), &source),
-        )
-        .await?;
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(app.evaluate(Match::new().seed(), &source)).await?;
 
         assert_eq!(
             selection.len(),
@@ -931,7 +1257,7 @@ mod tests {
             "Should find only Alice with exact name and age match"
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("entity"))?,
+            selection[0].lookup(&Term::var("entity"))?.content()?,
             Value::Entity(alice.clone())
         );
 
@@ -941,7 +1267,7 @@ mod tests {
     /// Build a representative two-attribute Person concept query with mixed
     /// variable / constant bindings for the serde round-trip tests.
     fn sample_concept_query() -> ConceptQuery {
-        let predicate = ConceptDescriptor::from(vec![
+        let predicate = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -960,7 +1286,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::<Any>::var("entity"));

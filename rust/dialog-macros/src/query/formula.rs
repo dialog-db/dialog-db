@@ -170,7 +170,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Generate Query struct fields — each field becomes Term<T> for pattern matching
+    // Generate Query struct fields: each field becomes Term<T> for pattern matching
     let query_struct_fields: Vec<_> = all_fields
         .iter()
         .map(|(name, ty, doc, _is_output, _cost)| {
@@ -240,7 +240,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Generate Formula::write() statements — only output fields are written
+    // Generate Formula::write() statements: only output fields are written
     // back to the bindings after computation.
     let write_statements: Vec<_> = output_fields
         .iter()
@@ -259,7 +259,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .iter()
         .map(|(name, ty, _, _, _)| {
             quote! {
-                #name: #ty::try_from(source.lookup(&dialog_query::Term::from(&self.#name))?)?
+                #name: #ty::try_from(source.lookup(&dialog_query::Term::from(&self.#name))?.content()?)?
             }
         })
         .collect();

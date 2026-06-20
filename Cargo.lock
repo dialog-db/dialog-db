@@ -191,6 +191,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "auto_enums"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e4487600931c9a89f8db7ffbdf3fbdd45bb7bd85e26861f659a463cd0dff966"
+dependencies = [
+ "derive_utils",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -882,6 +894,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive_utils"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "362f47930db19fe7735f527e6595e4900316b893ebf6d48ad3d31be928d57dd6"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "dialog-artifacts"
 version = "0.1.0"
 dependencies = [
@@ -1164,6 +1187,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "auto_enums",
  "base58",
  "blake3",
  "dialog-artifacts",
@@ -1174,6 +1198,7 @@ dependencies = [
  "dialog-operator",
  "dialog-repository",
  "dialog-storage",
+ "futures",
  "futures-core",
  "futures-util",
  "serde",

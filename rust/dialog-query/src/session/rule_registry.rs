@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 /// Thread-safe registry of *deductive* rules, keyed by the
 /// conclusion entity. Inductive rules
 /// ([`InductiveRule`](crate::rule::InductiveRule)) have a
-/// different lifecycle — they participate in transactions rather
+/// different lifecycle: they participate in transactions rather
 /// than queries, and will be installed via a separate path in the
 /// future.
 ///
@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 /// attributes) plus any explicitly installed rules, together with a
 /// per-adornment plan cache.
 ///
-/// Cloning a registry is cheap — the underlying `HashMap` is wrapped in
+/// Cloning a registry is cheap: the underlying `HashMap` is wrapped in
 /// `Arc<RwLock<…>>` so all clones share the same rule set and caches.
 #[derive(Debug, Clone, Default)]
 pub struct RuleRegistry {
@@ -49,7 +49,7 @@ impl RuleRegistry {
     }
 
     /// Acquire rules for the given concept. Creates the default rule from
-    /// the predicate's attributes on first access — so this always returns
+    /// the predicate's attributes on first access, so this always returns
     /// a ConceptRules regardless of whether any rules were explicitly installed.
     pub fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let entity = predicate.this();
@@ -99,11 +99,13 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::Term;
+    use crate::attribute::query::AttributeQuery;
     use crate::attribute::{AttributeDescriptor, Cardinality, Type};
     use crate::the;
 
     fn person_concept() -> ConceptDescriptor {
-        ConceptDescriptor::from([(
+        ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -112,6 +114,7 @@ mod tests {
                 Some(Type::String),
             ),
         )])
+        .unwrap()
     }
 
     #[dialog_common::test]
@@ -157,13 +160,10 @@ mod tests {
     async fn it_merges_installed_rules_for_a_shared_concept_on_extend() {
         // Two registries with different rules for the same concept; extend
         // should produce a registry where both rules are installed.
-        use crate::Term;
-        use crate::attribute::query::AttributeQuery;
-
         let descriptor = person_concept();
         let rule_a = DeductiveRule::from(&descriptor);
         // Same conclusion, body uses `None` cardinality (`All` variant)
-        // instead of the implicit `One` — produces a distinct rule.
+        // instead of the implicit `One`, produces a distinct rule.
         let rule_b = DeductiveRule::new(
             descriptor.clone(),
             vec![

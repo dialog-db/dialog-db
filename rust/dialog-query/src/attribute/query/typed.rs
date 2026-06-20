@@ -94,8 +94,8 @@ where
     fn realize(&self, input: Match) -> Result<Self::Conclusion, EvaluationError> {
         let of_term = &self.of;
         let is_param = Term::<Any>::from(&self.is);
-        let entity: Entity = Entity::try_from(input.lookup(&Term::from(of_term))?)?;
-        let value: Value = input.lookup(&is_param)?;
+        let entity: Entity = Entity::try_from(input.lookup(&Term::from(of_term))?.content()?)?;
+        let value: Value = input.lookup(&is_param)?.content()?;
         let typed_value = A::Type::try_from(value).map_err(|_| {
             EvaluationError::Store(format!(
                 "cannot convert value to {}",
@@ -172,6 +172,9 @@ mod tests {
 
     use super::*;
     use crate::query::Output;
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
     mod person {
         use crate::Attribute;
@@ -208,10 +211,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_performs_typed_query() -> anyhow::Result<()> {
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -244,10 +243,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_typed_query() -> anyhow::Result<()> {
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;

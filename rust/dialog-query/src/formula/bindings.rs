@@ -47,7 +47,15 @@ impl Bindings {
         Ok(T::try_from(self.resolve(key)?)?)
     }
 
-    /// Resolve a parameter to its Value
+    /// Resolve a parameter to its [`Value`].
+    ///
+    /// Returns [`EvaluationError::UnboundFormulaVariable`] if the
+    /// parameter is not bound. An [`EvaluationError::Absent`]
+    /// propagates if the binding exists but is
+    /// [`Binding::Absent`](crate::Binding::Absent): formulas
+    /// don't tolerate absent inputs by default; consumers that
+    /// want to handle absence should pattern-match on
+    /// [`Binding`](crate::Binding) via the source match directly.
     pub fn resolve(&mut self, key: &str) -> Result<Value, EvaluationError> {
         let param = self
             .terms
@@ -56,12 +64,14 @@ impl Bindings {
                 parameter: key.into(),
             })?;
 
-        self.source
-            .lookup(param)
-            .map_err(|_| EvaluationError::UnboundFormulaVariable {
-                term: Box::new(param.clone()),
-                parameter: key.into(),
-            })
+        let binding =
+            self.source
+                .lookup(param)
+                .map_err(|_| EvaluationError::UnboundFormulaVariable {
+                    term: Box::new(param.clone()),
+                    parameter: key.into(),
+                })?;
+        binding.content()
     }
 
     /// Get an immutable reference to the source match
