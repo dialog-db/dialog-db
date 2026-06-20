@@ -7,7 +7,6 @@
 //! content hashing for edition tracking.
 
 use super::{FileSystem, FileSystemError, FileSystemHandle};
-use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
@@ -45,26 +44,6 @@ fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
 impl FileSystemHandle {
     fn cell(&self, name: &str) -> Result<Self, FileSystemError> {
         self.resolve(name)
-    }
-
-    /// A sibling handle to this one with `.{hash}.tmp` appended to the final
-    /// path segment. The hash in the name keeps concurrent writers' temp files
-    /// from colliding even if a previous writer's cleanup was skipped.
-    fn temp(&self, hash: &[u8; 32]) -> Result<Self, FileSystemError> {
-        let leaf = self
-            .url()
-            .path_segments()
-            .and_then(|mut s| s.next_back())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("cell");
-        let tmp_name = format!("{leaf}.{}.tmp", hash.to_base58());
-
-        let mut url = self.url().clone();
-        url.path_segments_mut()
-            .map_err(|_| FileSystemError::Io("handle URL cannot be a base".to_string()))?
-            .pop()
-            .push(&tmp_name);
-        Ok(self.with_url(url))
     }
 
     /// Acquire a cross-writer lock on this handle for a CAS critical section.
@@ -161,11 +140,11 @@ impl Provider<Publish> for FileSystem {
             (None, None) => {}
         }
 
-        // Write to temp file (hash in name prevents conflicts if cleanup fails),
-        // then atomic rename to final location. write() creates parent dirs.
-        let tmp_handle = cell_handle.temp(&new_edition)?;
-        tmp_handle.write(&content).await?;
-        tmp_handle.rename(&cell_handle).await?;
+        // Publish atomically so a concurrent reader sees either the old edition
+        // or the complete new one. The surrounding CAS lock already serializes
+        // writers; `write_atomic` keeps the swap atomic against readers (a
+        // direct createWritable on the web, a staged temp+rename on native).
+        cell_handle.write_atomic(&content).await?;
 
         Ok(Version::from(new_edition.as_slice()))
     }

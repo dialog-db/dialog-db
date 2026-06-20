@@ -594,6 +594,18 @@ pub(super) async fn read_optional(
     Ok(Some(Uint8Array::new(&buffer).to_vec()))
 }
 
+/// On the web, a plain `write` is already atomic: `createWritable().close()`
+/// stages the data and swaps it into place on close (and the sync-access path
+/// truncates+writes a single handle), so a reader never observes a partial
+/// file. No temp+rename is needed — that would just add a full read, a second
+/// write, and a delete.
+pub(super) async fn write_atomic(
+    handle: &FileSystemHandle,
+    contents: &[u8],
+) -> Result<(), FileSystemError> {
+    write(handle, contents).await
+}
+
 pub(super) async fn write(
     handle: &FileSystemHandle,
     contents: &[u8],

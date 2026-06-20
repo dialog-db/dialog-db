@@ -148,6 +148,46 @@ pub(super) async fn write(
         .map_err(|e| FileSystemError::Io(e.to_string()))
 }
 
+/// Write `contents` to `handle` atomically: stage into a sibling temp file,
+/// then `fs::rename` it into place (one atomic syscall on the same filesystem),
+/// so a concurrent reader never sees a partial write. A plain `fs::write` is
+/// not atomic, which is why the temp+rename is kept on native.
+pub(super) async fn write_atomic(
+    handle: &FileSystemHandle,
+    contents: &[u8],
+) -> Result<(), FileSystemError> {
+    let path: PathBuf = handle.try_into()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))?;
+    }
+
+    // A sibling temp path so the rename stays on the same filesystem (atomic).
+    // The unique suffix keeps concurrent writers of the same target from
+    // clobbering each other's staging file.
+    let tmp = path.with_extension(format!("{}.tmp", unique_suffix()));
+    fs::write(&tmp, contents)
+        .await
+        .map_err(|e| FileSystemError::Io(e.to_string()))?;
+    match fs::rename(&tmp, &path).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Don't leak the staging file if the rename failed.
+            let _ = fs::remove_file(&tmp).await;
+            Err(FileSystemError::Io(e.to_string()))
+        }
+    }
+}
+
+/// A process-unique suffix for staging temp files.
+fn unique_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{n}", std::process::id())
+}
+
 pub(super) async fn rename(
     from: &FileSystemHandle,
     to: &FileSystemHandle,

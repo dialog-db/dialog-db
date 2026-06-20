@@ -246,6 +246,19 @@ impl FileSystemHandle {
         backend::write(self, contents).await
     }
 
+    /// Write contents to this location atomically: a concurrent reader sees
+    /// either the old file or the complete new one, never a partial write.
+    ///
+    /// Each backend does the cheapest thing that gives that guarantee — on the
+    /// web `createWritable().close()` already swaps the file atomically, so this
+    /// is a direct write; on native it stages a temp file and `rename`s it into
+    /// place (one atomic syscall). Callers that need atomicity should prefer
+    /// this over a manual temp+rename, which on the web degrades to a full
+    /// read+rewrite+delete.
+    pub async fn write_atomic(&self, contents: &[u8]) -> Result<(), FileSystemError> {
+        backend::write_atomic(self, contents).await
+    }
+
     /// Atomically rename this location to another.
     pub async fn rename(&self, to: &FileSystemHandle) -> Result<(), FileSystemError> {
         backend::rename(self, to).await
