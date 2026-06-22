@@ -1,5 +1,8 @@
 use super::memory::Cell;
-use crate::Revision;
+use crate::{ResolveError, Revision};
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use dialog_effects::memory;
 
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Capability, Did, Subject};
@@ -97,6 +100,26 @@ impl Branch {
     /// Returns the upstream state, or `None` if no upstream is configured.
     pub fn upstream(&self) -> Option<Upstream> {
         self.upstream.content()
+    }
+
+    /// Re-resolve this handle's head and upstream from storage, updating its
+    /// caches to the current versions.
+    ///
+    /// The recovery path for a stale handle. [`pull`](Self::pull) publishes the
+    /// new head CAS'd against the version it merged from; if a concurrent write
+    /// advanced the head in between, that publish fails with a version mismatch
+    /// rather than clobbering the concurrent change. A caller that hits such a
+    /// mismatch calls `refresh` to pick up the current head, then re-pulls —
+    /// the re-pull merges from the now-current snapshot and its blocks are
+    /// already in the local archive, so it does not re-hit the network for what
+    /// the first attempt already fetched.
+    pub async fn refresh<Env>(&self, env: &Env) -> Result<(), ResolveError>
+    where
+        Env: Provider<memory::Resolve> + ConditionalSync,
+    {
+        self.revision.resolve().perform(env).await?;
+        self.upstream.resolve().perform(env).await?;
+        Ok(())
     }
 
     /// Returns the DID of the host repository.
