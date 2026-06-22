@@ -10,8 +10,8 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
 
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, PullError, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
+    Branch, Checkpoint, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, PullError,
+    RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
 
 /// Command struct for pulling from upstream (auto-dispatches local/remote).
@@ -32,9 +32,44 @@ impl Branch {
     }
 }
 
-impl Pull<'_> {
-    /// Execute the pull operation.
+impl<'a> Pull<'a> {
+    /// Execute the pull operation: [`prepare`](Self::prepare) the merge, then
+    /// [`commit`](PreparedPull::commit) it.
+    ///
+    /// The one-shot form. To hold an exclusive lock over only the (instant)
+    /// cell-advancing step while the (network-bound) fetch + rebase run
+    /// lock-free, drive the two phases separately:
+    ///
+    /// ```ignore
+    /// let prepared = branch.pull().prepare(&env).await?; // fetch + rebase, no cell writes
+    /// let revision = prepared.commit(&env).await?;       // advance the cells
+    /// ```
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        self.prepare(env).await?.commit(env).await
+    }
+
+    /// Phase one: fetch the upstream, rebase local changes onto it, and persist
+    /// the merged tree's blocks — **without** writing any branch cell.
+    ///
+    /// All the network and CPU work lives here (resolve/fetch upstream,
+    /// differentiate, integrate, import), so a caller can run it under a shared
+    /// lock concurrently with everything else. The returned [`PreparedPull`]
+    /// carries the merged revision and a checkpoint of the head it rebased on;
+    /// [`PreparedPull::commit`] does the instant cell advance and can be run
+    /// under a brief exclusive lock.
+    pub async fn prepare<Env>(self, env: &Env) -> Result<PreparedPull<'a>, PullError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -76,7 +111,7 @@ impl Pull<'_> {
         // Upstream has never received a revision yet — nothing to
         // merge in, so the pull is a no-op.
         let Some(upstream_revision) = upstream_revision else {
-            return Ok(None);
+            return Ok(PreparedPull::NoOp);
         };
 
         // `base` is the upstream tree at our last sync point (the
@@ -88,15 +123,15 @@ impl Pull<'_> {
             .unwrap_or_default();
 
         if base == upstream_revision.tree {
-            return Ok(None);
+            return Ok(PreparedPull::NoOp);
         }
 
         // Checkpoint the head cell up front, capturing the version we read the
         // local revision at. The merge below is computed from this snapshot;
-        // publishing through the checkpoint CAS's against *this* version, not
-        // whatever the cell holds at publish time. So a commit that advances
-        // the head mid-pull makes our publish fail rather than silently adopt
-        // the new version and drop the commit (see `Cell::checkpoint`).
+        // the commit phase publishes through this checkpoint, CAS'ing against
+        // *this* version. So a commit that advances the head between now and
+        // the cell write makes that publish fail rather than silently adopt the
+        // new version and drop the commit (see `Cell::checkpoint`).
         let head = branch.revision.checkpoint();
         let local_revision = branch.revision();
         let local_tree_hash = local_revision
@@ -164,6 +199,67 @@ impl Pull<'_> {
             }
         };
 
+        Ok(PreparedPull::Merged(Box::new(Merged {
+            branch,
+            head,
+            new_revision,
+            upstream_tree: upstream_revision.tree,
+        })))
+    }
+}
+
+/// A rebased pull awaiting its cell advance — the output of
+/// [`Pull::prepare`].
+///
+/// All the network + CPU work is already done and the merged tree's blocks are
+/// persisted locally; [`commit`](Self::commit) does only the (instant) cell
+/// publishes. Splitting the two lets a caller hold an exclusive lock over just
+/// the cell-advancing step while the prepare ran lock-free.
+pub enum PreparedPull<'a> {
+    /// Nothing to pull — upstream is empty or hasn't moved since the last sync.
+    /// `commit` is a no-op returning `Ok(None)`.
+    NoOp,
+    /// A merge to land: advance the head to `new_revision` and the sync-base
+    /// marker to `upstream_tree`. Boxed so the no-op variant stays small.
+    Merged(Box<Merged<'a>>),
+}
+
+/// The payload of a [`PreparedPull::Merged`] — a rebased merge ready to land.
+pub struct Merged<'a> {
+    /// The branch whose cells the commit advances.
+    branch: &'a Branch,
+    /// Checkpoint of the head captured at prepare time — the commit publishes
+    /// through it, CAS'ing against the version the merge built on, so a write
+    /// that landed in between fails rather than clobbers.
+    head: Checkpoint<Revision>,
+    /// The merged revision to publish as the new head.
+    new_revision: Revision,
+    /// The upstream tree just merged in — the new sync-base marker.
+    upstream_tree: TreeReference,
+}
+
+impl PreparedPull<'_> {
+    /// Phase two: advance the branch cells — the head to the merged revision
+    /// and the sync-base marker to the merged upstream tree.
+    ///
+    /// Instant (no network): just two cell CAS publishes. A caller can hold an
+    /// exclusive lock over only this. On a head-version mismatch (a commit
+    /// advanced the head since prepare) the publish fails so the caller can
+    /// refresh and re-pull. A no-op prepare returns `Ok(None)`.
+    pub async fn commit<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
+    where
+        Env: Provider<Publish> + Provider<Resolve> + ConditionalSync + 'static,
+    {
+        let Merged {
+            branch,
+            head,
+            new_revision,
+            upstream_tree,
+        } = match self {
+            PreparedPull::NoOp => return Ok(None),
+            PreparedPull::Merged(merged) => *merged,
+        };
+
         // Publish the merged revision as the branch's new head, through the
         // checkpoint — so the CAS is against the version we merged from. If a
         // commit advanced the head while we were merging, this fails with
@@ -188,9 +284,7 @@ impl Pull<'_> {
         // rather than the revision we published (which has been superseded).
         if let Some(upstream) = branch.upstream() {
             let marker = branch.upstream.checkpoint();
-            let publish = marker
-                .publish(upstream.with_tree(upstream_revision.tree.clone()), env)
-                .await;
+            let publish = marker.publish(upstream.with_tree(upstream_tree), env).await;
 
             if let Err(PublishError::VersionMismatch { .. }) = publish {
                 // Re-read the head a concurrent pull left in place and return
@@ -413,6 +507,85 @@ mod tests {
             1,
             "the pulled upstream change must survive too"
         );
+
+        Ok(())
+    }
+
+    /// Driving the two phases explicitly (`prepare` then `commit`) lands the
+    /// same result as the one-shot `perform`. This is the split a consumer uses
+    /// to run the network-bound prepare lock-free and hold an exclusive lock
+    /// over only the instant cell advance.
+    #[dialog_common::test]
+    async fn it_pulls_in_two_phases_prepare_then_commit() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:main".parse()?,
+            is: Value::String("Main data".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+        let main_revision = main.revision().expect("main should have a revision");
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        // Phase one: fetch + rebase, no cell writes yet — the head is unchanged.
+        let prepared = feature.pull().prepare(&operator).await?;
+        assert!(
+            feature.revision().is_none(),
+            "prepare must not advance the head"
+        );
+
+        // Phase two: advance the cells.
+        let pulled = prepared.commit(&operator).await?;
+        assert!(pulled.is_some(), "commit should land the merged revision");
+        assert_eq!(
+            feature
+                .revision()
+                .expect("feature has a revision after commit")
+                .tree,
+            main_revision.tree
+        );
+
+        Ok(())
+    }
+
+    /// A no-op pull (upstream hasn't moved) prepares to `NoOp` and commits to
+    /// `Ok(None)` without touching the cells.
+    #[dialog_common::test]
+    async fn it_prepares_a_noop_when_upstream_has_not_moved() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:main".parse()?,
+            is: Value::String("Main data".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        // First pull lands main's change.
+        feature.pull().perform(&operator).await?;
+
+        // Upstream hasn't moved since, so a second pull is a no-op.
+        let pulled = feature
+            .pull()
+            .prepare(&operator)
+            .await?
+            .commit(&operator)
+            .await?;
+        assert!(pulled.is_none(), "a no-op pull commits to None");
 
         Ok(())
     }
