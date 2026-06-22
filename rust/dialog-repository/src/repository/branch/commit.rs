@@ -60,6 +60,12 @@ where
     {
         let branch = self.branch;
         let changes = self.changes;
+        // Checkpoint the head: capture the version we build this commit on top
+        // of, so the publish below CAS's against it. A concurrent commit or
+        // pull that advances the head while we apply changes then makes this
+        // publish fail with `VersionMismatch` rather than silently overwriting
+        // it — the caller refreshes and retries. See `Cell::checkpoint`.
+        let head = branch.revision.checkpoint();
         let base_revision = branch.revision();
 
         // If the branch tracks a remote upstream, commits must be able
@@ -119,11 +125,7 @@ where
             None => Revision::new(tree, branch.of().clone(), issuer, profile),
         };
 
-        branch
-            .revision
-            .publish(revision.clone())
-            .perform(env)
-            .await?;
+        head.publish(revision.clone(), env).await?;
 
         Ok(revision)
     }
@@ -169,6 +171,94 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].the, artifact.the);
         assert_eq!(results[0].is, artifact.is);
+
+        Ok(())
+    }
+
+    /// A commit made through one handle, while another handle to the same
+    /// branch commits from a stale snapshot, must not be silently lost — the
+    /// stale commit fails loudly, and refreshing then re-committing reconciles.
+    ///
+    /// `commit` checkpoints the head it builds on, then publishes CAS'd against
+    /// that version. Two independent handles (the shape the service worker hits
+    /// once `/transact` no longer serializes writes under a single lock) both
+    /// snapshot the same head; one commits and advances storage, so the other's
+    /// publish CAS fails with a `VersionMismatch` rather than overwriting the
+    /// first commit with a tree built from the now-stale snapshot. Recovery is
+    /// refresh + re-commit.
+    #[dialog_common::test]
+    async fn it_fails_a_commit_racing_another_then_reconciles_on_refresh() -> Result<()> {
+        use crate::PublishError;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // Two independent handles to the same branch — both snapshot the same
+        // (empty) head at open time.
+        let writer_a = repo.branch("main").open().perform(&operator).await?;
+        let writer_b = repo.branch("main").open().perform(&operator).await?;
+
+        // A commits first, advancing the head in storage. B's cache is now
+        // stale.
+        writer_a
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:a".parse()?,
+                is: Value::String("Alice".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        // B commits from its stale snapshot — must fail loudly, not silently
+        // drop A's commit.
+        let raced = writer_b
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:b".parse()?,
+                is: Value::String("Bob".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(
+                raced,
+                Err(crate::CommitError::Publish(
+                    PublishError::VersionMismatch { .. }
+                ))
+            ),
+            "a commit racing another must fail with a version mismatch; got {raced:?}"
+        );
+
+        // Recovery: refresh B's view of the head, then re-commit.
+        writer_b.refresh(&operator).await?;
+        writer_b
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:b".parse()?,
+                is: Value::String("Bob".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        // Both commits survive.
+        let fresh = repo.branch("main").open().perform(&operator).await?;
+        let results: Vec<_> = fresh
+            .claims()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            results.len(),
+            2,
+            "both racing commits must survive recovery"
+        );
 
         Ok(())
     }
