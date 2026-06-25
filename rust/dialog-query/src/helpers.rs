@@ -389,7 +389,6 @@ where
     /// the implicit two-attribute rule can join over. Exposed so benches can
     /// seed once at setup and time only the query.
     pub async fn seed_stuff(&self, entity_count: usize) -> Result<()> {
-        let descriptor: ConceptDescriptor = Stuff::descriptor().clone();
         let branch = self
             .repo
             .branch(&self.branch)
@@ -399,12 +398,11 @@ where
 
         let mut transaction = branch.transaction();
         for index in 0..entity_count {
-            let statement = descriptor
-                .create()
-                .with("name", format!("name-{index}"))
-                .with("role", format!("role-{}", index % 8))
-                .build()?;
-            transaction = transaction.assert(statement);
+            transaction = transaction.assert(Stuff {
+                this: Entity::new()?,
+                name: stuff::Name(format!("name-{index}")),
+                role: stuff::Role(format!("role-{}", index % 8)),
+            });
         }
         transaction.commit().perform(&self.operator).await?;
         Ok(())
