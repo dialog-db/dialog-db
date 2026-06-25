@@ -71,6 +71,10 @@ helpers = []
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
 
+[[example]]
+name = "profile_join"
+required-features = ["helpers"]
+
 [[bench]]
 name = "query_reads"
 harness = false
