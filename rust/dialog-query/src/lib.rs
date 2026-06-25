@@ -40,6 +40,12 @@ pub mod environment;
 pub mod error;
 /// Built-in formulas for data transformations and computations.
 pub mod formula;
+/// Benchmark helpers (`BenchEnv`). Available to the crate's own tests;
+/// the benches include this same source via `#[path]` so they can build
+/// it against the dev-dependency cycle (dialog-repository depends on
+/// dialog-query, so it can only ever be a dev-dependency here).
+#[cfg(test)]
+pub mod helpers;
 /// Negation support for excluding matching results.
 pub mod negation;
 /// Left-join projection realizing optional (`maybe`) concept fields.
