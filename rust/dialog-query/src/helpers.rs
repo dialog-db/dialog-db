@@ -14,13 +14,15 @@
 //!    via an [`BenchEnv::temp`] environment backed by the platform temp
 //!    directory.
 
-// The query types below are imported through `::dialog_query::…` so the
-// same source resolves in both build contexts: in the bench build this file
-// is `#[path]`-included into a separate bench crate where `dialog-query` is
-// an ordinary dependency, and in the crate's own (test) build the self-alias
-// makes `::dialog_query` name the crate itself.
-#[cfg(test)]
-extern crate self as dialog_query;
+// The runtime imports below use `::dialog_query::…`, but the
+// `#[derive(Concept)]`/`#[derive(Attribute)]` expansions emit bare
+// `dialog_query::…` paths, so the name must also resolve without the
+// leading `::`. No declaration is needed here in either build context: in
+// the crate's own (test) build the lib root already aliases itself with
+// `extern crate self as dialog_query`, and in the bench build this file is
+// `#[path]`-included into a separate target where Cargo links the package's
+// own lib under the `dialog_query` name (its extern prelude), so bare
+// `dialog_query::…` resolves to the real crate in both.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -50,10 +52,40 @@ use std::sync::{Arc, Mutex};
 use ::dialog_query::concept::query::ConceptRules;
 use ::dialog_query::error::EvaluationError;
 use ::dialog_query::source::SelectRules;
-use ::dialog_query::{
-    AttributeDescriptor, AttributeQuery, Cardinality, ConceptDescriptor, DeductiveRule,
-    Environment, Match, Parameters, Planner, Premise, RuleRegistry, Term, Type, the,
-};
+use ::dialog_query::{Concept, ConceptDescriptor, Entity, Output, Query, RuleRegistry, Term};
+
+/// Attribute markers backing the [`Stuff`] concept. Each derives the
+/// query-engine `Attribute` trait, giving it a stable `stuff/<field>`
+/// attribute identifier the derived concept and its implicit rule use.
+mod stuff {
+    use ::dialog_query::Attribute;
+
+    /// The `stuff/name` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Name(pub String);
+
+    /// The `stuff/role` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Role(pub String);
+}
+
+/// The source concept seeded into the branch and queried in the join
+/// benchmark: each entity carries a `stuff/name` and a `stuff/role`.
+///
+/// Querying [`Stuff`] with both fields free drives the planner's implicit
+/// two-attribute (`name` + `role`) rule, joined on the shared `this`
+/// entity — the ordering choice that makes this exercise round-trip
+/// optimization. No rule needs to be registered: the [`RuleRegistry`]
+/// synthesizes the default rule for an unregistered concept on demand.
+#[derive(Clone, Debug, PartialEq, Concept)]
+pub struct Stuff {
+    /// The entity the stuff facts hang off.
+    pub this: Entity,
+    /// Name of the stuff member.
+    pub name: stuff::Name,
+    /// Role of the stuff member.
+    pub role: stuff::Role,
+}
 
 /// The outcome of running a single query through [`BenchEnv::run_query`].
 #[derive(Debug, Clone)]
@@ -239,96 +271,6 @@ impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
     }
 }
 
-// The join concepts are built through the runtime descriptor API rather
-// than `#[derive(Concept)]`. The derive expands to bare `dialog_query::…`
-// paths, which the crate's own (test) build resolves via the self-alias but
-// a separate bench crate cannot (the package can't dev-depend on itself to
-// put the lib in its extern prelude as a bare name). The runtime API needs
-// only ordinary `::dialog_query::…` imports and produces the same two-premise
-// `DeductiveRule` the planner must order.
-
-/// The source concept seeded into the branch: each entity carries a
-/// `stuff/name` and a `stuff/role`.
-fn stuff_descriptor() -> ConceptDescriptor {
-    ConceptDescriptor::try_from([
-        (
-            "name",
-            AttributeDescriptor::new(
-                the!("stuff/name"),
-                "Name of the stuff member",
-                Cardinality::One,
-                Some(Type::String),
-            ),
-        ),
-        (
-            "role",
-            AttributeDescriptor::new(
-                the!("stuff/role"),
-                "Role of the stuff member",
-                Cardinality::One,
-                Some(Type::String),
-            ),
-        ),
-    ])
-    .expect("stuff descriptor is well-formed")
-}
-
-/// The derived concept queried in the benchmark. No `Employee` facts are
-/// stored — every result is inferred by the two-premise join over `Stuff`.
-fn employee_descriptor() -> ConceptDescriptor {
-    ConceptDescriptor::try_from([
-        (
-            "name",
-            AttributeDescriptor::new(
-                the!("employee/name"),
-                "Employee name",
-                Cardinality::One,
-                Some(Type::String),
-            ),
-        ),
-        (
-            "job",
-            AttributeDescriptor::new(
-                the!("employee/job"),
-                "The job title of the employee",
-                Cardinality::One,
-                Some(Type::String),
-            ),
-        ),
-    ])
-    .expect("employee descriptor is well-formed")
-}
-
-/// Build the two-premise rule deriving an employee from stuff.
-///
-/// Two `AttributeQuery` premises (`stuff/name` then `stuff/role`) joined on
-/// the shared `this` entity. With two premises the planner has an ordering
-/// choice — the whole reason this query exercises round-trip optimization.
-fn employee_from_stuff() -> Result<DeductiveRule> {
-    let rule = DeductiveRule::new(
-        employee_descriptor(),
-        vec![
-            AttributeQuery::new(
-                Term::from(the!("stuff/name")),
-                Term::var("this"),
-                Term::var("name"),
-                Term::blank(),
-                None,
-            )
-            .into(),
-            AttributeQuery::new(
-                Term::from(the!("stuff/role")),
-                Term::var("this"),
-                Term::var("job"),
-                Term::blank(),
-                None,
-            )
-            .into(),
-        ],
-    )?;
-    Ok(rule)
-}
-
 /// A benchmark environment wrapping an operator, repository, and branch.
 ///
 /// Generic over the operator's space type `Env` so the same seeding and
@@ -443,11 +385,11 @@ where
     /// `stuff/role`, in a single transaction.
     ///
     /// Like [`seed`](Self::seed) this is intentionally off the measured
-    /// path; it exists so [`query_employees`](Self::query_employees) has a
-    /// fact base the two-premise rule can join over. Exposed so benches can
+    /// path; it exists so [`query_stuff`](Self::query_stuff) has a fact base
+    /// the implicit two-attribute rule can join over. Exposed so benches can
     /// seed once at setup and time only the query.
     pub async fn seed_stuff(&self, entity_count: usize) -> Result<()> {
-        let descriptor = stuff_descriptor();
+        let descriptor: ConceptDescriptor = Stuff::descriptor().clone();
         let branch = self
             .repo
             .branch(&self.branch)
@@ -468,23 +410,25 @@ where
         Ok(())
     }
 
-    /// Register the two-premise `employee_from_stuff` join rule, then run
-    /// the planned employee concept query and report the block reads of the
-    /// *whole* query. Does not seed — the caller seeds via
+    /// Run the public [`Stuff`] concept query and report the block reads of
+    /// the *whole* query. Does not seed — the caller seeds via
     /// [`seed_stuff`](Self::seed_stuff) first (so benches can seed once at
     /// setup and time only this query).
     ///
-    /// The employee concept is applied with free `name`/`job` parameters
-    /// and lowered through the planner — the same operator IR production
-    /// uses — so the planner picks the join order. Every premise scan it
-    /// issues routes through a [`CountingStore`] over one shared
+    /// The query is the ordinary public surface: a [`Query<Stuff>`] with
+    /// both fields free, driven through [`Application::perform`]. With two
+    /// free attributes the planner has a join-ordering choice — the whole
+    /// reason this query exercises round-trip optimization. No rule is
+    /// registered: the [`RuleRegistry`] synthesizes the implicit default
+    /// rule for the unregistered concept on demand. Every premise scan the
+    /// plan issues routes through a [`CountingStore`] over one shared
     /// [`ReadJournal`], so the reported counts aggregate all reads across
     /// the join. The journal is cleared once before evaluation and read
     /// once after, excluding the rule-registry warm-up.
-    pub async fn query_employees(&self) -> Result<JoinRun> {
-        let mut rules = RuleRegistry::new();
-        rules.register(employee_from_stuff()?)?;
-
+    ///
+    /// [`Query<Stuff>`]: Query
+    /// [`Application::perform`]: ::dialog_query::Application::perform
+    pub async fn query_stuff(&self) -> Result<JoinRun> {
         let branch = self
             .repo
             .branch(&self.branch)
@@ -495,21 +439,19 @@ where
         let env = JoinEnv {
             branch: &branch,
             operator: &self.operator,
-            rules,
+            rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
         };
 
-        let mut parameters = Parameters::new();
-        parameters.insert("name".into(), Term::var("name"));
-        parameters.insert("job".into(), Term::var("job"));
-        let proposition = employee_descriptor().apply(parameters)?;
-        let plan = Planner::from(vec![Premise::Assert(proposition)]).plan(&Environment::new())?;
-
         env.journal().clear();
-        let results: Vec<Match> = plan
-            .evaluate(Match::new().seed(), &env)
-            .try_collect()
-            .await?;
+        let results = Query::<Stuff> {
+            this: Term::var("this"),
+            name: Term::var("name"),
+            role: Term::var("role"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
 
         Ok(JoinRun {
             results_len: results.len(),
@@ -518,14 +460,14 @@ where
         })
     }
 
-    /// Seed `entity_count` stuff entities and run the planned employee
-    /// concept query in one call, reporting the join's block reads.
+    /// Seed `entity_count` stuff entities and run the public concept query
+    /// in one call, reporting the join's block reads.
     ///
     /// Convenience over [`seed_stuff`](Self::seed_stuff) +
-    /// [`query_employees`](Self::query_employees) for one-shot reporting.
+    /// [`query_stuff`](Self::query_stuff) for one-shot reporting.
     pub async fn run_join(&self, entity_count: usize) -> Result<JoinRun> {
         self.seed_stuff(entity_count).await?;
-        self.query_employees().await
+        self.query_stuff().await
     }
 
     /// Open the repository under `profile` and assemble the environment.
@@ -597,7 +539,7 @@ mod test {
         let env = BenchEnv::volatile().await?;
 
         let run = env.run_join(50).await?;
-        // Every seeded `Stuff` entity derives exactly one `Employee`.
+        // Every seeded `Stuff` entity matches the concept query exactly once.
         assert_eq!(run.results_len, 50);
         // A two-premise join must fetch blocks across both premise scans.
         assert!(run.reads > 0, "expected non-zero reads, got {}", run.reads);
