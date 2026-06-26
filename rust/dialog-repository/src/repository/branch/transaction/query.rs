@@ -214,8 +214,12 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env: ConditionalSync> Provider<SelectRules> for TransactionEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        // Surfaces only the implicit per-descriptor rule each
-        // `ConceptDescriptor` carries.
+        // Surfaces only the implicit per-descriptor rule. Unlike
+        // [`Branch::query`](crate::Branch::query), a transaction query is
+        // non-composable (no `.with_rules(..)`), so there is no
+        // [`RuleSource`](crate::RuleSource) to consult here. Deductive
+        // rules stored as facts resolve once the transaction is
+        // committed and queried via the branch session.
         Ok(ConceptRules::new(&input))
     }
 }

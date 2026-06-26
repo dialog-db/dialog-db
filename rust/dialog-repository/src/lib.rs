@@ -43,6 +43,10 @@ pub(crate) mod layer;
 /// (origins, branches, branch revisions, sessions).
 pub mod schema;
 
+/// Pluggable deductive-rule resolution seam for query sessions.
+pub mod rules;
+pub use rules::{RuleClaims, RuleSource};
+
 pub use dialog_artifacts::{Exporter, Importer};
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.
