@@ -44,8 +44,8 @@ pub(crate) mod layer;
 pub mod schema;
 
 /// Pluggable deductive-rule resolution seam for query sessions.
-pub mod rules;
-pub use rules::{RuleClaims, RuleSource};
+pub(crate) mod rules;
+pub use rules::RuleCache;
 
 pub use dialog_artifacts::{Exporter, Importer};
 

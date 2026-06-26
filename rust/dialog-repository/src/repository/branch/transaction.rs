@@ -1,9 +1,6 @@
 mod query;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 
-use std::sync::Arc;
-
-use crate::rules::RuleSource;
 use crate::{Branch, Commit};
 use dialog_artifacts::{ChangeStream, Changes, Instruction, Statement, Update};
 
@@ -14,7 +11,6 @@ use dialog_artifacts::{ChangeStream, Changes, Instruction, Statement, Update};
 pub struct Transaction<'a> {
     branch: &'a Branch,
     changes: Changes,
-    rule_source: Option<Arc<dyn RuleSource>>,
 }
 
 impl<'a> Transaction<'a> {
@@ -30,17 +26,6 @@ impl<'a> Transaction<'a> {
     /// Retract a claim from this transaction.
     pub fn retract<C: Statement>(mut self, claim: C) -> Self {
         claim.retract(&mut self.changes);
-        self
-    }
-
-    /// Install a [`RuleSource`](crate::RuleSource) so queries run against
-    /// this transaction's view (via [`query`](Self::query)) resolve
-    /// deductive rules stored as facts — the same way a committed
-    /// [`Branch::query`](crate::Branch::query) does. Propagated to every
-    /// `query()` handle, so a mid-transaction or dry-run read returns the
-    /// same deductions a post-commit read would.
-    pub fn with_rules(mut self, source: Arc<dyn RuleSource>) -> Self {
-        self.rule_source = Some(source);
         self
     }
 
@@ -78,11 +63,7 @@ impl<'a> Transaction<'a> {
     /// the branch's stream before the merge. The transaction itself
     /// stays open and committable.
     pub fn query(&self) -> TransactionQuery<'_> {
-        let query = TransactionQuery::new(self.branch, &self.changes);
-        match &self.rule_source {
-            Some(source) => query.with_rules(Arc::clone(source)),
-            None => query,
-        }
+        TransactionQuery::new(self.branch, &self.changes)
     }
 
     /// Finalize the transaction into a commit command.
@@ -100,7 +81,6 @@ impl Branch {
         Transaction {
             branch: self,
             changes: Changes::new(),
-            rule_source: None,
         }
     }
 }

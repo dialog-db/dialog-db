@@ -43,13 +43,11 @@
 //! compose more sources, commit the transaction first and use
 //! [`Branch::query`](crate::Branch::query).
 //!
-//! It does, however, accept [`with_rules`](TransactionQuery::with_rules)
-//! and resolves through the same single [`QueryEnv`] the branch session
-//! uses — so deductive rules resolve identically whether a concept is
-//! queried mid-transaction or after commit. Rule resolution is part of
-//! evaluating a query correctly, not an optional composition.
-
-use std::sync::Arc;
+//! Deductive-rule resolution is built into the shared [`QueryEnv`] this
+//! routes through (a durable layer per branch + the overlay as a
+//! transient layer), so rules resolve identically whether a concept is
+//! queried mid-transaction or after commit — it's part of evaluating a
+//! query, not an optional composition.
 
 use dialog_artifacts::{Changes, DialogArtifactsError};
 use dialog_capability::{Fork, Provider};
@@ -62,7 +60,6 @@ use dialog_query::query::{Application, Output};
 use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
-use crate::rules::RuleSource;
 use crate::{Branch, RemoteSite};
 
 /// A non-composable query handle returned by
@@ -76,7 +73,6 @@ use crate::{Branch, RemoteSite};
 pub struct TransactionQuery<'a> {
     branch: &'a Branch,
     changes: Changes,
-    rule_source: Option<Arc<dyn RuleSource>>,
 }
 
 impl<'a> TransactionQuery<'a> {
@@ -84,20 +80,7 @@ impl<'a> TransactionQuery<'a> {
         Self {
             branch,
             changes: changes.clone(),
-            rule_source: None,
         }
-    }
-
-    /// Install a [`RuleSource`](crate::RuleSource) so this transaction
-    /// query resolves deductive rules stored as facts, exactly as
-    /// [`Branch::query`](crate::Branch::query) does. Without it, only
-    /// implicit per-descriptor rules participate. This is what keeps a
-    /// mid-transaction / dry-run query consistent with a committed
-    /// read: the same query against the same facts returns the same
-    /// rows on every path.
-    pub fn with_rules(mut self, source: Arc<dyn RuleSource>) -> Self {
-        self.rule_source = Some(source);
-        self
     }
 
     /// Stage a query against this transaction's view. Call
@@ -106,7 +89,6 @@ impl<'a> TransactionQuery<'a> {
         TransactionSelectQuery {
             branch: self.branch,
             changes: self.changes,
-            rule_source: self.rule_source,
             query,
         }
     }
@@ -116,7 +98,6 @@ impl<'a> TransactionQuery<'a> {
 pub struct TransactionSelectQuery<'a, Q> {
     branch: &'a Branch,
     changes: Changes,
-    rule_source: Option<Arc<dyn RuleSource>>,
     query: Q,
 }
 
@@ -146,7 +127,6 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
         let TransactionSelectQuery {
             branch,
             changes,
-            rule_source,
             query,
         } = self;
         async_stream::try_stream! {
@@ -172,8 +152,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let query_env =
-                QueryEnv::new(vec![branch], overlay, tombstones, rule_source, env);
+            let query_env = QueryEnv::new(vec![branch], overlay, tombstones, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
