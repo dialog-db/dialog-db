@@ -230,13 +230,8 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
 
-            let query_env = QueryEnv {
-                branches: layer.branches,
-                changes: overlay,
-                tombstones,
-                rule_source: layer.rule_source,
-                env,
-            };
+            let query_env =
+                QueryEnv::new(layer.branches, overlay, tombstones, layer.rule_source, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
@@ -265,6 +260,33 @@ pub(crate) struct QueryEnv<'a, Env> {
     env: &'a Env,
 }
 
+impl<'a, Env> QueryEnv<'a, Env> {
+    /// Build a runtime env from already-resolved parts: the branches to
+    /// read, the per-query overlay (caller changes + injected metadata),
+    /// the tombstones lifted from it, an optional rule source, and the
+    /// underlying capability env.
+    ///
+    /// Both `Branch::query` and the transaction-query path construct
+    /// through here so there is exactly one query env — a transaction
+    /// query is just a single-branch `QueryEnv`, which makes the two
+    /// paths impossible to diverge (e.g. on rule resolution).
+    pub(crate) fn new(
+        branches: Vec<&'a Branch>,
+        changes: Changes,
+        tombstones: HashSet<SortKey>,
+        rule_source: Option<Arc<dyn RuleSource>>,
+        env: &'a Env,
+    ) -> Self {
+        Self {
+            branches,
+            changes,
+            tombstones,
+            rule_source,
+            env,
+        }
+    }
+}
+
 impl<Env> Clone for QueryEnv<'_, Env> {
     fn clone(&self) -> Self {
         Self {
@@ -279,8 +301,8 @@ impl<Env> Clone for QueryEnv<'_, Env> {
 
 /// Execute a select against a single branch, transparently routing through
 /// the branch's remote upstream when configured. Extracted as a freestanding
-/// helper so both [`QueryEnv`] and the transaction-time `TransactionEnv`
-/// share the exact same branch-read path.
+/// helper so every branch in a [`QueryEnv`] shares the exact same branch-read
+/// path (a transaction query is itself a single-branch `QueryEnv`).
 pub(crate) async fn select_from_branch<'a, Env>(
     branch: &'a Branch,
     env: &'a Env,
