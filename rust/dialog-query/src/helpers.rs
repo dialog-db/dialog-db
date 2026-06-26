@@ -42,9 +42,12 @@ use dialog_operator::helpers::{generate_data, unique_name};
 use dialog_operator::{Operator, Profile};
 use dialog_repository::{Branch, NetworkedIndex, RemoteSite, Repository, RepositoryExt as _};
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
-use dialog_storage::{
-    Blake3Hash, DialogStorageError, JournaledStorage, NativeTempSpace, StorageBackend,
-};
+use dialog_storage::{Blake3Hash, DialogStorageError, JournaledStorage, StorageBackend};
+// The platform temp filesystem (and the on-disk `BenchEnv::temp` variant
+// built on it) only exists off wasm — there is no native temp directory in
+// the browser, so the whole on-disk path is gated to non-wasm targets.
+#[cfg(not(target_arch = "wasm32"))]
+use dialog_storage::NativeTempSpace;
 use futures_util::{TryStreamExt as _, stream};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -292,6 +295,7 @@ impl BenchEnv<Operator<VolatileSpace>> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl BenchEnv<Operator<NativeTempSpace>> {
     /// Build an on-disk benchmark environment rooted in the platform
     /// temp directory.
@@ -498,6 +502,7 @@ impl BenchEnv<Operator<VolatileSpace>> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl BenchEnv<Operator<NativeTempSpace>> {
     async fn with_storage(storage: Storage<NativeTempSpace>) -> Result<Self> {
         let profile = Profile::open(unique_name("bench"))
