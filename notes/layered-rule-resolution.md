@@ -37,6 +37,7 @@ struct LayerComposition<'a> { durable: Vec<DurableLayer<'a>>, transient: Transie
    - Replaces `ConceptRules`' per-instance `plans` map (which `install` clears — defeating caching once layers reassemble ConceptRules per query).
    - PREREQ: `DeductiveRule` has NO identity in dialog-query today (it lives in tonk-schema's storage wrapper as `rule:<base58(blake3(canonical-json(descriptor)))>`). The plan cache needs a stable identity INSIDE dialog-query. Move the canonical-JSON identity into dialog-query (comes naturally with moving the db.rule/* read path into dialog). NOTE: descriptor does NOT dag-cbor encode and serde_json is non-deterministic (HashMap term order) — must canonicalize (sort keys) before hashing. See tonk-schema deductive_rule.rs `content_entity`/`source_string` for the working impl to port.
    - Content-addressed ⇒ never stale; LRU evict only (memory, not correctness).
+   - SOUNDNESS RESOLVED (2026-06-26): the `(rule.this(), adornment)` key IS sound. The concern was that `Adornment::into_environment` binds CALLER variable names into the scope, but the empirical probe `it_plans_independently_of_caller_variable_names` (concept/query/rules.rs tests) PROVES `rule.plan` produces identical `Conjunction`s for the same adornment regardless of caller var names. (Why: the rule's premises use the rule's OWN internal var names; the planner orders by which rule PARAMETERS are bound = the adornment; caller names are just bound-slot markers, not plan inputs.) So the global cache is safe to implement.
 
 ## Implicit rule boundary
 

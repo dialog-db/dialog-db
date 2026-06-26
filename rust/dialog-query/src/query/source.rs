@@ -25,8 +25,6 @@ pub trait Source: ArtifactStore + Clone + ConditionalSend + ConditionalSync + 's
     /// from the predicate's attributes) plus any rules the layers
     /// resolve for this concept. Always returns a value; with no
     /// installed rules, only the implicit rule participates.
-    async fn acquire(
-        &self,
-        predicate: &ConceptDescriptor,
-    ) -> Result<ConceptRules, EvaluationError>;
+    async fn acquire(&self, predicate: &ConceptDescriptor)
+    -> Result<ConceptRules, EvaluationError>;
 }

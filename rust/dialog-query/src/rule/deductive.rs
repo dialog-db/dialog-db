@@ -114,39 +114,62 @@ impl DeductiveRule {
         }
     }
 
-    /// Canonical JSON form of this rule's descriptor — a stable byte
-    /// string independent of map iteration order.
+    /// Canonical JSON form of this rule's descriptor, if it has one —
+    /// a stable byte string independent of map iteration order.
+    ///
+    /// Returns `None` when the rule body can't be expressed in formal
+    /// notation: the implicit per-descriptor rule and any rule built
+    /// directly from raw [`AttributeQuery`] premises serialize to
+    /// nothing, because `Proposition`'s formal-notation `Serialize`
+    /// rejects attribute propositions. Only rules with concept/formula
+    /// bodies (what `rule!:` notation and stored `db.rule/*` rules
+    /// produce) have a canonical source.
     ///
     /// Canonicalization is load-bearing: a premise's `where` terms
     /// serialize from a [`Parameters`] `HashMap`, whose iteration order
     /// is non-deterministic, so serializing the descriptor directly
     /// would vary across compilations of the same rule. Round-tripping
     /// through a [`serde_json::Value`] with every object's keys sorted
-    /// gives a deterministic form. This is the value stored under a
-    /// rule's `source` claim and the input to [`this`](Self::this).
-    pub fn canonical_source(&self) -> String {
-        let mut value = serde_json::to_value(self.descriptor())
-            .expect("DeductiveRuleDescriptor always serializes to JSON");
+    /// gives a deterministic form.
+    pub fn try_canonical_source(&self) -> Option<String> {
+        let mut value = serde_json::to_value(self.descriptor()).ok()?;
         sort_json_keys(&mut value);
-        serde_json::to_string(&value).expect("a serde_json::Value always re-serializes")
+        serde_json::to_string(&value).ok()
     }
 
-    /// This rule's content-addressed identity:
-    /// `rule:<base58(blake3(canonical_source))>`.
+    /// This rule's content-addressed identity, if it has a canonical
+    /// source: `rule:<base58(blake3(canonical_source))>`.
     ///
-    /// A pure function of the rule body, stable across compilations
-    /// (via [`canonical_source`](Self::canonical_source)). Used as a
-    /// collision-free key for plan caching and as the entity a rule's
+    /// `None` for rules with no serializable body (implicit /
+    /// attribute-query rules — see
+    /// [`try_canonical_source`](Self::try_canonical_source)). A pure
+    /// function of the rule body, stable across compilations, so it is
+    /// a collision-free key for plan caching and the entity a rule's
     /// facts are stored under. Hashes canonical JSON rather than
-    /// dag-cbor because a [`DeductiveRuleDescriptor`]'s premise
-    /// propositions don't dag-cbor encode.
-    pub fn this(&self) -> Entity {
+    /// dag-cbor because the descriptor's premise propositions don't
+    /// dag-cbor encode.
+    pub fn try_this(&self) -> Option<Entity> {
         use base58::ToBase58;
-        let hash = blake3::hash(self.canonical_source().as_bytes());
+        let hash = blake3::hash(self.try_canonical_source()?.as_bytes());
         let encoded = hash.as_bytes().as_ref().to_base58();
-        format!("rule:{encoded}")
-            .parse()
-            .expect("rule:<base58> is a valid entity URI")
+        format!("rule:{encoded}").parse().ok()
+    }
+
+    /// Canonical source, panicking if the rule has no serializable body.
+    /// Use on the storage path where the rule is known to be storable
+    /// (concept/formula bodies). Prefer
+    /// [`try_canonical_source`](Self::try_canonical_source) otherwise.
+    pub fn canonical_source(&self) -> String {
+        self.try_canonical_source()
+            .expect("rule body must serialize in formal notation")
+    }
+
+    /// Content-addressed identity, panicking if the rule has no
+    /// serializable body. Use on the storage path; prefer
+    /// [`try_this`](Self::try_this) otherwise.
+    pub fn this(&self) -> Entity {
+        self.try_this()
+            .expect("storable rule must have a content-addressed identity")
     }
 }
 

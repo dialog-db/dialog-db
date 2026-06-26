@@ -1,5 +1,7 @@
 /// Adornment types for parameter binding pattern caching.
 pub mod adornment;
+/// Process-global plan cache keyed by (rule identity, adornment).
+mod plan_cache;
 /// Per-concept rule management with adornment-keyed plan caching.
 pub mod rules;
 
