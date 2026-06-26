@@ -113,6 +113,61 @@ impl DeductiveRule {
             unless,
         }
     }
+
+    /// Canonical JSON form of this rule's descriptor — a stable byte
+    /// string independent of map iteration order.
+    ///
+    /// Canonicalization is load-bearing: a premise's `where` terms
+    /// serialize from a [`Parameters`] `HashMap`, whose iteration order
+    /// is non-deterministic, so serializing the descriptor directly
+    /// would vary across compilations of the same rule. Round-tripping
+    /// through a [`serde_json::Value`] with every object's keys sorted
+    /// gives a deterministic form. This is the value stored under a
+    /// rule's `source` claim and the input to [`this`](Self::this).
+    pub fn canonical_source(&self) -> String {
+        let mut value = serde_json::to_value(self.descriptor())
+            .expect("DeductiveRuleDescriptor always serializes to JSON");
+        sort_json_keys(&mut value);
+        serde_json::to_string(&value).expect("a serde_json::Value always re-serializes")
+    }
+
+    /// This rule's content-addressed identity:
+    /// `rule:<base58(blake3(canonical_source))>`.
+    ///
+    /// A pure function of the rule body, stable across compilations
+    /// (via [`canonical_source`](Self::canonical_source)). Used as a
+    /// collision-free key for plan caching and as the entity a rule's
+    /// facts are stored under. Hashes canonical JSON rather than
+    /// dag-cbor because a [`DeductiveRuleDescriptor`]'s premise
+    /// propositions don't dag-cbor encode.
+    pub fn this(&self) -> Entity {
+        use base58::ToBase58;
+        let hash = blake3::hash(self.canonical_source().as_bytes());
+        let encoded = hash.as_bytes().as_ref().to_base58();
+        format!("rule:{encoded}")
+            .parse()
+            .expect("rule:<base58> is a valid entity URI")
+    }
+}
+
+/// Recursively sort every JSON object's keys so serialization is a pure
+/// function of the value, independent of map iteration order.
+fn sort_json_keys(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut sorted = serde_json::Map::new();
+            let mut keys: Vec<String> = map.keys().cloned().collect();
+            keys.sort();
+            for key in keys {
+                let mut child = map.remove(&key).expect("key present");
+                sort_json_keys(&mut child);
+                sorted.insert(key, child);
+            }
+            *map = sorted;
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(sort_json_keys),
+        _ => {}
+    }
 }
 
 impl Serialize for DeductiveRule {
@@ -310,6 +365,45 @@ mod tests {
             analysis.graph,
             DependencyGraph::from_premises(&analysis.premises),
             "retained graph must match the premises' dependency graph"
+        );
+    }
+
+    /// A concept-bodied rule (the storable kind) has a deterministic,
+    /// content-addressed `this()` — same body ⇒ same `rule:` entity
+    /// across independent compilations, regardless of premise-term map
+    /// iteration order. This is the plan-cache / storage key.
+    #[dialog_common::test]
+    fn it_has_a_deterministic_content_addressed_identity() {
+        use serde_json::json;
+        let json = json!({
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "when": [
+                {
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                }
+            ]
+        });
+        let build = || {
+            let d: DeductiveRuleDescriptor =
+                serde_json::from_value(json.clone()).expect("descriptor parses");
+            d.compile().expect("rule compiles")
+        };
+        let a = build();
+        let b = build();
+        assert_eq!(a.this(), b.this(), "same rule body ⇒ same identity");
+        assert_eq!(
+            a.canonical_source(),
+            b.canonical_source(),
+            "canonical source is stable across compilations"
+        );
+        assert!(
+            a.this().to_string().starts_with("rule:"),
+            "identity is a rule: URI, got {}",
+            a.this()
         );
     }
 

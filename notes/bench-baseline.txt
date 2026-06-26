@@ -1,0 +1,4 @@
+BASELINE (dialog feat/rule-source dd8eedf3, before (a) layer refactor) — 2026-06-26
+Tests: dialog-query 690 pass, dialog-repository 114 pass.
+query_join/100   reads=103  unique_reads=2   time=1.367 ms
+query_join/1000  reads=1015 unique_reads=14  time=14.03 ms
