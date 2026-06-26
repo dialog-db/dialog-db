@@ -55,11 +55,19 @@ The shipped `RuleSource`/`RuleClaims`/`Arc<dyn>` + per-call `with_rules` works b
 
 `ConceptQuery::evaluate` (dialog-query concept/query.rs:~276) does `Provider::<SelectRules>::execute(env, descriptor)` → `rules.plan(&terms, &input)` → Disjunction. The ONLY use is `.plan(...)`. Everything (composition, discovery cache, plan cache) sits behind this one call. Replace `Provider<SelectRules>` with the composition's async `acquire`.
 
-## Build order
+## Build order + STATUS (2026-06-26)
 
-1. async `Source` + typed DurableLayer/TransientLayer/LayerComposition; QueryEnv routes through it. (task #7)
-2. move db.rule/* read path + canonical rule identity into dialog (durable layer reads it). (task #9)
-3. global per-(rule,adornment) plan cache, replace ConceptRules per-instance plans. (task #8 — needs #9's identity)
-4. delete RuleSource/RuleClaims/Arc<dyn>/with_rules/ReactorRuleSource + reactor wiring; tonk-schema keeps only the Statement writer + notation. (task #10)
+DONE (committed on this branch, all green, read-counts unchanged):
+- [x] async `Source` (commit dd8eedf3) — trait is async, still no impls.
+- [x] canonical rule identity in dialog-query: `DeductiveRule::try_this()`/`try_canonical_source()` (Option — None for implicit/attribute-bodied rules) + panicking `this()`/`canonical_source()` for the storage path (commit 77bc6ce3). Soundness of (rule,adornment) proven (it_plans_independently_of_caller_variable_names).
+- [x] global per-(rule,adornment) plan cache: `concept/query/plan_cache.rs`, wired into `ConceptRules::plan` (commit 6f50a16d). Implicit rule planned directly (no identity). 692 tests pass.
 
-Then: full workspace build + tests + browser verify search/candidate.
+REMAINING (the live-path rewire — left for review, browser-verify needed):
+1. Typed DurableLayer{&Branch}/TransientLayer{Changes}/LayerComposition in dialog-repository; impl async Source / rule-resolution on them. (task #7 cutover)
+2. Move db.rule/* read path into the DurableLayer (lookup db.rule/conclusion on the TREE + hydrate via DeductiveRuleDescriptor::compile, which is pure dialog-query). Identity already moved. Per-layer discovery cache: durable=by-head, transient=overlay (never head-cached). (task #9)
+3. Rewire QueryEnv's Provider<SelectRules> + ConceptQuery::evaluate (dialog-query concept/query.rs:~276) to route through the composition instead of Arc<dyn> SelectRules. (task #7)
+4. Delete RuleSource/RuleClaims/Arc<dyn>/with_rules/ReactorRuleSource + reactor wiring; tonk-schema keeps only the Statement writer + notation. tonk-schema's content_entity/source_string can now delegate to dialog's DeductiveRule::this/canonical_source. (task #10)
+
+Then: full workspace build + tests + benches (read-count is the reliable signal; wall-clock noisy on a loaded machine) + browser verify search/candidate.
+
+NOTE: the (b) fix (committed, tonk 8bf0b9f3) already makes the feature work correctly via the Arc<dyn> seam — the remaining (a) work is pure architecture (no behavior change), replacing the dyn seam with the layer model.
