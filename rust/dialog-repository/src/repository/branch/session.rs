@@ -1,16 +1,16 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey,
-    Statement,
+    Artifact, ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Entity, Select,
+    SortKey, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
+use dialog_query::DeductiveRule;
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::ConceptRules;
 use dialog_query::error::EvaluationError;
@@ -19,7 +19,10 @@ use dialog_query::source::SelectRules;
 use futures_util::TryStreamExt as _;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
-use crate::rules::{RuleClaims, RuleSource};
+use crate::rules::{
+    assemble, conclusion_selector, hydrate, overlay_rules, rule_entities, source_selector,
+    source_string,
+};
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
 use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 
@@ -61,7 +64,6 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 pub struct QueryLayer<'a> {
     branches: Vec<&'a Branch>,
     changes: Changes,
-    rule_source: Option<Arc<dyn RuleSource>>,
 }
 
 impl<'a> QueryLayer<'a> {
@@ -75,17 +77,12 @@ impl<'a> QueryLayer<'a> {
     /// `Changes` itself implements `Statement`, so `.with(changes)`
     /// merges an existing batch in. Any concept instance, attribute
     /// expression, or other `Statement` works too. Chainable.
+    ///
+    /// A deductive rule is a `Statement` too, so `.with(rule)` folds it
+    /// into the overlay — the query resolves it as a transient rule
+    /// without persisting it.
     pub fn with<S: Statement>(mut self, statement: S) -> Self {
         statement.assert(&mut self.changes);
-        self
-    }
-
-    /// Install a [`RuleSource`](crate::RuleSource) so the session
-    /// resolves deductive rules stored as facts, not just the implicit
-    /// per-descriptor rule. Without this, queries see only implicit
-    /// rules (unchanged default behavior). Chainable.
-    pub fn with_rules(mut self, source: Arc<dyn RuleSource>) -> Self {
-        self.rule_source = Some(source);
         self
     }
 
@@ -96,7 +93,6 @@ impl<'a> QueryLayer<'a> {
         let other = other.into();
         self.branches.extend(other.branches);
         other.changes.assert(&mut self.changes);
-        self.rule_source = self.rule_source.or(other.rule_source);
         self
     }
 
@@ -171,7 +167,6 @@ impl<'a> From<&'a Branch> for QueryLayer<'a> {
         Self {
             branches: vec![branch],
             changes: Changes::new(),
-            rule_source: None,
         }
     }
 }
@@ -181,7 +176,6 @@ impl From<Changes> for QueryLayer<'_> {
         Self {
             branches: Vec::new(),
             changes,
-            rule_source: None,
         }
     }
 }
@@ -231,7 +225,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             let tombstones = tombstones_from(&overlay);
 
             let query_env =
-                QueryEnv::new(layer.branches, overlay, tombstones, layer.rule_source, env);
+                QueryEnv::new(layer.branches, overlay, tombstones, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
@@ -254,34 +248,29 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// stream is filtered against these before the merge so retracts
     /// in the overlay suppress matching facts in the source.
     tombstones: HashSet<SortKey>,
-    /// Optional consumer-supplied resolver for deductive rules stored
-    /// as facts. `None` means only implicit per-descriptor rules.
-    rule_source: Option<Arc<dyn RuleSource>>,
     env: &'a Env,
 }
 
 impl<'a, Env> QueryEnv<'a, Env> {
     /// Build a runtime env from already-resolved parts: the branches to
     /// read, the per-query overlay (caller changes + injected metadata),
-    /// the tombstones lifted from it, an optional rule source, and the
-    /// underlying capability env.
+    /// the tombstones lifted from it, and the underlying capability env.
     ///
     /// Both `Branch::query` and the transaction-query path construct
     /// through here so there is exactly one query env — a transaction
-    /// query is just a single-branch `QueryEnv`, which makes the two
-    /// paths impossible to diverge (e.g. on rule resolution).
+    /// query is just a single-branch `QueryEnv`. Deductive-rule
+    /// resolution is built in (a durable layer per branch + the overlay
+    /// as a transient layer), so the two paths can never diverge on it.
     pub(crate) fn new(
         branches: Vec<&'a Branch>,
         changes: Changes,
         tombstones: HashSet<SortKey>,
-        rule_source: Option<Arc<dyn RuleSource>>,
         env: &'a Env,
     ) -> Self {
         Self {
             branches,
             changes,
             tombstones,
-            rule_source,
             env,
         }
     }
@@ -293,7 +282,6 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             branches: self.branches.clone(),
             changes: self.changes.clone(),
             tombstones: self.tombstones.clone(),
-            rule_source: self.rule_source.clone(),
             env: self.env,
         }
     }
@@ -364,9 +352,7 @@ where
     }
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env> RuleClaims for QueryEnv<'_, Env>
+impl<'a, Env> QueryEnv<'a, Env>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -376,14 +362,71 @@ where
         + ConditionalSync
         + 'static,
 {
-    async fn select_claims(
+    /// Read a `db.rule/*` selector against a single branch's committed
+    /// tree only (NOT the overlay) and collect the matching artifacts.
+    /// The durable layer's reads must be tree-only so the head-keyed
+    /// discovery cache stays correct — overlay rules are handled
+    /// separately, fresh, by the transient layer.
+    async fn select_tree(
         &self,
+        branch: &'a Branch,
         selector: ArtifactSelector<Constrained>,
     ) -> Result<Vec<Artifact>, DialogArtifactsError> {
-        // Read rule facts through the same branch + overlay union as
-        // any other fact, so rules asserted via `.with(..)` are visible.
-        let stream = Provider::<Select<'_>>::execute(self, selector).await?;
+        let stream = select_from_branch(branch, self.env, selector).await?;
         stream.try_collect().await
+    }
+
+    /// The durable rules concluding `concept` on `branch`: the committed
+    /// `db.rule/*` rules, read from the tree and cached by branch head
+    /// (re-scanned only when the head moves), with hydrated bodies
+    /// cached by content-addressed rule entity.
+    async fn durable_rules(
+        &self,
+        branch: &'a Branch,
+        concept: &Entity,
+    ) -> Result<Vec<DeductiveRule>, EvaluationError> {
+        let cache = branch.rule_cache();
+        let head = branch.revision();
+
+        // Discovery: which rule entities conclude this concept (committed).
+        // Cached per (concept, head); a head move (commit/pull) re-scans.
+        let rule_entities = match head.as_ref().and_then(|h| cache.discovered(concept, h)) {
+            Some(entities) => entities,
+            None => {
+                let claims = self
+                    .select_tree(branch, conclusion_selector(concept))
+                    .await
+                    .map_err(|e| {
+                        EvaluationError::Store(format!("rule conclusion lookup: {e:?}"))
+                    })?;
+                let entities = rule_entities(claims);
+                if let Some(head) = head.clone() {
+                    cache.record_discovery(concept.clone(), head, entities.clone());
+                }
+                entities
+            }
+        };
+
+        // Hydration: reuse cached bodies (content-addressed, never stale),
+        // fetch + compile the rest from each rule's `db.rule/source`.
+        let mut rules = Vec::with_capacity(rule_entities.len());
+        for rule_entity in rule_entities {
+            if let Some(body) = cache.body(&rule_entity) {
+                rules.push(body);
+                continue;
+            }
+            let source_claims = self
+                .select_tree(branch, source_selector(&rule_entity))
+                .await
+                .map_err(|e| EvaluationError::Store(format!("rule source lookup: {e:?}")))?;
+            let Some(source) = source_string(source_claims) else {
+                continue;
+            };
+            let body = hydrate(&source)?;
+            cache.record_body(rule_entity, body.clone());
+            rules.push(body);
+        }
+        Ok(rules)
     }
 }
 
@@ -399,15 +442,22 @@ where
         + ConditionalSync
         + 'static,
 {
+    /// Resolve a concept's deductive rules by unioning across layers:
+    /// each branch is a durable layer (committed `db.rule/*`, head-cached),
+    /// the overlay is a transient layer (uncommitted `db.rule/*`, fresh).
+    /// The implicit per-descriptor rule is assembled once on top.
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        // Every concept carries its implicit per-descriptor rule. When a
-        // `RuleSource` is installed, let it extend that with deductive
-        // rules stored as facts (read through `self` as `RuleClaims`).
-        let rules = ConceptRules::new(&input);
-        match &self.rule_source {
-            Some(source) => source.resolve(&input, rules, self).await,
-            None => Ok(rules),
+        let concept = input.this();
+        let mut rules: Vec<DeductiveRule> = Vec::new();
+
+        // Durable layers — one per branch.
+        for branch in &self.branches {
+            rules.extend(self.durable_rules(branch, &concept).await?);
         }
+        // Transient layer — the per-query overlay, read fresh.
+        rules.extend(overlay_rules(&self.changes, &concept));
+
+        Ok(assemble(&input, rules))
     }
 }
 
@@ -431,103 +481,135 @@ impl Branch {
     }
 }
 
+/// Layered deductive-rule resolution — exhaustive coverage of the
+/// caching invariants. Each test isolates one behaviour the durable
+/// (committed, head-cached) and transient (overlay, fresh) layers must
+/// satisfy.
 #[cfg(test)]
-mod tests {
+mod rule_tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::Branch;
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use dialog_artifacts::Entity;
-    use dialog_query::query::Output;
-    use dialog_query::{Concept, Query, Term};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
+    use dialog_query::concept::query::ConceptQuery;
+    use dialog_query::rule::DeductiveRuleDescriptor;
+    use dialog_query::{DeductiveRule, Parameters, Term, the};
 
-    mod people {
-        /// `test/name` attribute used by the rule-source seam tests.
-        #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-        #[domain("test")]
-        pub struct Name(
-            /// The person's name string.
-            pub String,
-        );
+    /// Conclusion concept `employee` (one `name` field). Derived — no
+    /// `employee` fact is ever written; rows come only from rules.
+    fn employee_descriptor() -> ConceptDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "with": { "name": { "the": "org/employee-name", "as": "Text" } }
+        }))
+        .expect("employee descriptor parses")
     }
 
-    /// A simple concept used to exercise the rule-source seam.
-    #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    pub struct Person {
-        /// The person entity.
-        pub this: Entity,
-        /// Their `test/name` attribute.
-        pub name: people::Name,
+    /// A deductive rule: an `employee` is anyone with an
+    /// `org/person-name` fact, projected as `employee-name`.
+    fn employee_from_person() -> DeductiveRule {
+        rule_with_person_attr("org/person-name")
     }
 
-    /// Records whether `resolve` was called and returns `rules`
-    /// unchanged — enough to prove the seam routes through it.
-    struct SpyRuleSource {
-        called: Arc<AtomicBool>,
+    /// Same shape but reading a different person attribute — a *distinct*
+    /// rule body, so a distinct content-addressed identity.
+    fn rule_with_person_attr(attr: &str) -> DeductiveRule {
+        let json = serde_json::json!({
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "when": [{
+                "assert": { "with": { "name": { "the": attr, "as": "Text" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        });
+        let d: DeductiveRuleDescriptor = serde_json::from_value(json).expect("descriptor parses");
+        d.compile().expect("rule compiles")
     }
 
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl RuleSource for SpyRuleSource {
-        async fn resolve(
-            &self,
-            _concept: &ConceptDescriptor,
-            rules: ConceptRules,
-            _claims: &dyn RuleClaims,
-        ) -> Result<ConceptRules, EvaluationError> {
-            self.called.store(true, Ordering::SeqCst);
-            Ok(rules)
-        }
+    /// The `db.rule/*` facts that store `rule`: a `conclusion` index
+    /// pointing at the concept it concludes, and the `source` body.
+    /// Asserting these makes the durable/transient layer resolve it.
+    fn rule_statements(
+        rule: &DeductiveRule,
+    ) -> (impl Statement + 'static, impl Statement + 'static) {
+        let rule_entity = rule.this();
+        let conclusion = rule.conclusion().this();
+        (
+            the!("db.rule/conclusion")
+                .of(rule_entity.clone())
+                .is(conclusion),
+            the!("db.rule/source")
+                .of(rule_entity)
+                .is(rule.canonical_source()),
+        )
     }
+
+    /// Query `employee` and return the derived entities.
+    async fn query_employees<Env>(branch: &Branch, operator: &Env) -> anyhow::Result<Vec<Entity>>
+    where
+        Env: dialog_capability::Provider<Get>
+            + dialog_capability::Provider<Put>
+            + dialog_capability::Provider<Resolve>
+            + dialog_capability::Provider<Identify>
+            + dialog_capability::Provider<Fork<RemoteSite, Get>>
+            + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let query = ConceptQuery {
+            predicate: employee_descriptor(),
+            terms,
+        };
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(query)
+            .perform(operator)
+            .try_vec()
+            .await?;
+        Ok(rows.iter().map(|c| c.entity().clone()).collect())
+    }
+
+    // ----- (1) committed rule resolves via the durable (tree) layer ----
 
     #[dialog_common::test]
-    async fn it_invokes_the_installed_rule_source() -> anyhow::Result<()> {
+    async fn it_resolves_a_committed_rule() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice: Entity = "id:alice".parse()?;
+        let (conc, src) = rule_statements(&employee_from_person());
         branch
             .transaction()
-            .assert(Person {
-                this: alice.clone(),
-                name: people::Name("Alice".into()),
-            })
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(conc)
+            .assert(src)
             .commit()
             .perform(&operator)
             .await?;
+        // refresh handle so the durable layer sees the new head
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let called = Arc::new(AtomicBool::new(false));
-        let source = Arc::new(SpyRuleSource {
-            called: called.clone(),
-        });
-
-        let results: Vec<Person> = branch
-            .query()
-            .with_rules(source)
-            .select(Query::<Person> {
-                this: alice.clone().into(),
-                name: Term::var("name"),
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?;
-
-        assert!(
-            called.load(Ordering::SeqCst),
-            "installed RuleSource must be consulted during the query"
-        );
-        // Resolver returned rules unchanged, so the implicit rule still
-        // resolves the concept normally.
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].this, alice);
+        let employees = query_employees(&branch, &operator).await?;
+        assert!(employees.contains(&alice), "committed rule must resolve");
         Ok(())
     }
 
+    // ----- (7) no rules => implicit-only, empty -----------------------
+
     #[dialog_common::test]
-    async fn it_resolves_without_a_rule_source() -> anyhow::Result<()> {
+    async fn it_returns_empty_when_no_rules() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -535,27 +617,558 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         branch
             .transaction()
-            .assert(Person {
-                this: alice.clone(),
-                name: people::Name("Alice".into()),
-            })
+            .assert(the!("org/person-name").of(alice).is("Alice".to_string()))
             .commit()
             .perform(&operator)
             .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
-        // No `.with_rules(..)` — implicit-only path, unchanged behavior.
-        let results: Vec<Person> = branch
+        // No rule stored, no `employee` fact: nothing matches.
+        assert!(query_employees(&branch, &operator).await?.is_empty());
+        Ok(())
+    }
+
+    // ----- (2) overlay rule resolves via the transient layer ----------
+
+    #[dialog_common::test]
+    async fn it_resolves_an_overlay_rule() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Rule lives only in the overlay (uncommitted) — must still resolve.
+        let (conc, src) = rule_statements(&employee_from_person());
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let rows: Vec<ConceptConclusion> = branch
             .query()
-            .select(Query::<Person> {
-                this: alice.clone().into(),
-                name: Term::var("name"),
+            .with(conc)
+            .with(src)
+            .select(ConceptQuery {
+                predicate: employee_descriptor(),
+                terms,
             })
             .perform(&operator)
             .try_vec()
             .await?;
+        assert!(rows.iter().any(|c| *c.entity() == alice));
+        Ok(())
+    }
 
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].this, alice);
+    // ----- (3) overlay rule resolves AFTER a prior query (head fixed) --
+    // The regression for the bug we hit: a prior query of the concept
+    // populates the discovery cache (empty) at the current head; an
+    // overlay rule must NOT be masked by that cache (head hasn't moved).
+
+    #[dialog_common::test]
+    async fn it_resolves_overlay_rule_after_prior_query() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Prime the durable discovery cache with an empty result.
+        assert!(query_employees(&branch, &operator).await?.is_empty());
+
+        // Now add the rule via the overlay (head unchanged) — must resolve.
+        let (conc, src) = rule_statements(&employee_from_person());
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .with(conc)
+            .with(src)
+            .select(ConceptQuery {
+                predicate: employee_descriptor(),
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(
+            rows.iter().any(|c| *c.entity() == alice),
+            "overlay rule must resolve despite a prior cached query at the same head"
+        );
+        Ok(())
+    }
+
+    // ----- (9) overlay rule does NOT leak into a later plain query ----
+
+    #[dialog_common::test]
+    async fn it_does_not_leak_overlay_rule_into_later_query() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Query WITH the overlay rule — resolves.
+        let (conc, src) = rule_statements(&employee_from_person());
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let with_overlay: Vec<ConceptConclusion> = branch
+            .query()
+            .with(conc)
+            .with(src)
+            .select(ConceptQuery {
+                predicate: employee_descriptor(),
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(with_overlay.iter().any(|c| *c.entity() == alice));
+
+        // A subsequent PLAIN query (no overlay) must NOT see it — the
+        // transient layer is per-query; nothing was committed.
+        assert!(
+            query_employees(&branch, &operator).await?.is_empty(),
+            "overlay rule must not persist into a later plain query"
+        );
+        Ok(())
+    }
+
+    // ----- (5) discovery cache invalidated when the head moves --------
+    // Query once (caches empty at head H0), then commit a rule (head ->
+    // H1); the next query must re-scan and resolve it.
+
+    #[dialog_common::test]
+    async fn it_invalidates_discovery_on_head_move() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Cache empty at the current head.
+        assert!(query_employees(&branch, &operator).await?.is_empty());
+
+        // Commit the rule on the SAME handle → its head advances.
+        let (conc, src) = rule_statements(&employee_from_person());
+        branch
+            .transaction()
+            .assert(conc)
+            .assert(src)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // The same handle (head moved) must now re-scan and resolve.
+        let employees = query_employees(&branch, &operator).await?;
+        assert!(
+            employees.contains(&alice),
+            "a committed rule must resolve after the head advances (discovery re-scan)"
+        );
+        Ok(())
+    }
+
+    // ----- (6) hydration cache: same rule entity reused, distinct rules
+    // distinguished. Two different rule bodies (distinct this()) both
+    // resolve; re-querying reuses the cached compiled bodies.
+
+    #[dialog_common::test]
+    async fn it_resolves_two_distinct_rules_and_reuses_bodies() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let r1 = rule_with_person_attr("org/person-name");
+        let r2 = rule_with_person_attr("org/contractor-name");
+        assert_ne!(
+            r1.this(),
+            r2.this(),
+            "distinct bodies ⇒ distinct identities"
+        );
+
+        let (c1, s1) = rule_statements(&r1);
+        let (c2, s2) = rule_statements(&r2);
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("org/contractor-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .assert(c1)
+            .assert(s1)
+            .assert(c2)
+            .assert(s2)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Both rules conclude `employee`; Alice (person) and Bob
+        // (contractor) both surface.
+        let first = query_employees(&branch, &operator).await?;
+        assert!(first.contains(&alice) && first.contains(&bob));
+
+        // Second query on the same handle reuses cached bodies (no panic,
+        // same result) — exercises the hydration-cache reuse path.
+        let second = query_employees(&branch, &operator).await?;
+        assert_eq!(first.len(), second.len());
+        assert!(second.contains(&alice) && second.contains(&bob));
+        Ok(())
+    }
+
+    // ----- (8) committed + overlay union: both resolve together -------
+
+    #[dialog_common::test]
+    async fn it_unions_committed_and_overlay_rules() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        // Commit rule #1 (person) + a person fact + a contractor fact.
+        let r1 = rule_with_person_attr("org/person-name");
+        let (c1, s1) = rule_statements(&r1);
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("org/contractor-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .assert(c1)
+            .assert(s1)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Rule #2 (contractor) only in the overlay.
+        let r2 = rule_with_person_attr("org/contractor-name");
+        let (c2, s2) = rule_statements(&r2);
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .with(c2)
+            .with(s2)
+            .select(ConceptQuery {
+                predicate: employee_descriptor(),
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let entities: Vec<Entity> = rows.iter().map(|c| c.entity().clone()).collect();
+        assert!(
+            entities.contains(&alice),
+            "committed rule contributes Alice"
+        );
+        assert!(entities.contains(&bob), "overlay rule contributes Bob");
+        Ok(())
+    }
+
+    // ----- (4) discovery cache keys on head: a stale handle (head not
+    // advanced) keeps using its cached discovery and does NOT pick up a
+    // rule committed via another handle until it refreshes. This proves
+    // the cache actually gates on head (not re-scanning every query).
+
+    #[dialog_common::test]
+    async fn it_keeps_discovery_cached_until_head_advances() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let alice: Entity = "id:alice".parse()?;
+        repo.branch("main")
+            .open()
+            .perform(&operator)
+            .await?
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // Handle A: query once → caches empty discovery at head H0.
+        let handle_a = repo.branch("main").open().perform(&operator).await?;
+        assert!(query_employees(&handle_a, &operator).await?.is_empty());
+
+        // Handle B (independent handle) commits the rule → branch head -> H1.
+        let (conc, src) = rule_statements(&employee_from_person());
+        repo.branch("main")
+            .open()
+            .perform(&operator)
+            .await?
+            .transaction()
+            .assert(conc)
+            .assert(src)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // Handle A's head is still H0 (it didn't do the commit), so its
+        // cached empty discovery stands — it does NOT see the new rule.
+        assert!(
+            query_employees(&handle_a, &operator).await?.is_empty(),
+            "a handle at the old head must keep its cached discovery"
+        );
+
+        // A fresh handle (at H1) does see it — confirms the rule really is
+        // committed, and the staleness above is the cache, not missing data.
+        let handle_c = repo.branch("main").open().perform(&operator).await?;
+        assert!(
+            query_employees(&handle_c, &operator)
+                .await?
+                .contains(&alice)
+        );
+        Ok(())
+    }
+
+    // ----- (11) multi-branch: durable rules from each joined branch ----
+
+    #[dialog_common::test]
+    async fn it_unions_rules_across_joined_branches() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // `main` holds a person + the person rule.
+        let alice: Entity = "id:alice".parse()?;
+        let r_person = rule_with_person_attr("org/person-name");
+        let (cp, sp) = rule_statements(&r_person);
+        repo.branch("main")
+            .open()
+            .perform(&operator)
+            .await?
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(cp)
+            .assert(sp)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // A second branch holds a contractor + the contractor rule.
+        let bob: Entity = "id:bob".parse()?;
+        let r_contractor = rule_with_person_attr("org/contractor-name");
+        let (cc, sc) = rule_statements(&r_contractor);
+        repo.branch("other")
+            .open()
+            .perform(&operator)
+            .await?
+            .transaction()
+            .assert(
+                the!("org/contractor-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .assert(cc)
+            .assert(sc)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let other = repo.branch("other").open().perform(&operator).await?;
+
+        // Query across both branches — each is a durable layer, so both
+        // rules (and both their input facts) participate.
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let rows: Vec<ConceptConclusion> = main
+            .query()
+            .join(&other)
+            .select(ConceptQuery {
+                predicate: employee_descriptor(),
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let entities: Vec<Entity> = rows.iter().map(|c| c.entity().clone()).collect();
+        assert!(entities.contains(&alice), "main's rule contributes Alice");
+        assert!(entities.contains(&bob), "other's rule contributes Bob");
+        Ok(())
+    }
+
+    // ===== cache INVALIDATION ========================================
+
+    // A committed rule that is later RETRACTED must stop resolving: the
+    // retract moves the head, so the discovery cache re-scans and finds
+    // the rule's `db.rule/*` facts gone. The inverse of the
+    // head-move-adds case.
+
+    #[dialog_common::test]
+    async fn it_invalidates_discovery_when_a_rule_is_retracted() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        let rule = employee_from_person();
+        let (conc, src) = rule_statements(&rule);
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(conc)
+            .assert(src)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // Resolves while committed (also primes the cache at this head).
+        assert!(query_employees(&branch, &operator).await?.contains(&alice));
+
+        // Retract the rule's facts on the same handle → head advances.
+        let (conc, src) = rule_statements(&rule);
+        branch
+            .transaction()
+            .retract(conc)
+            .retract(src)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // Re-scan at the new head finds no rule → no rows.
+        assert!(
+            query_employees(&branch, &operator).await?.is_empty(),
+            "a retracted rule must stop resolving (discovery re-scan at new head)"
+        );
+        Ok(())
+    }
+
+    // Changing a rule's BODY produces a new content-addressed rule
+    // entity; the hydration cache (keyed by that entity) must not serve
+    // the old compiled body for the new entity. Here two distinct
+    // bodies share the SAME conclusion concept: both must resolve their
+    // own input attribute, proving no cross-contamination.
+
+    #[dialog_common::test]
+    async fn it_does_not_reuse_a_body_across_distinct_rule_entities() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // v1 reads org/person-name; commit it + a matching person fact.
+        let alice: Entity = "id:alice".parse()?;
+        let v1 = rule_with_person_attr("org/person-name");
+        let (c1, s1) = rule_statements(&v1);
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(c1)
+            .assert(s1)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        // Prime the hydration cache for v1.
+        assert!(query_employees(&branch, &operator).await?.contains(&alice));
+
+        // v2 reads org/agent-name (a DIFFERENT body ⇒ different this()).
+        // Commit it + a matching agent fact. v2 must resolve via its OWN
+        // body, not v1's cached one.
+        let carol: Entity = "id:carol".parse()?;
+        let v2 = rule_with_person_attr("org/agent-name");
+        assert_ne!(v1.this(), v2.this());
+        let (c2, s2) = rule_statements(&v2);
+        branch
+            .transaction()
+            .assert(
+                the!("org/agent-name")
+                    .of(carol.clone())
+                    .is("Carol".to_string()),
+            )
+            .assert(c2)
+            .assert(s2)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // Both resolve, each via its own (correctly distinct) compiled body.
+        let employees = query_employees(&branch, &operator).await?;
+        assert!(
+            employees.contains(&alice),
+            "v1 still resolves its person input"
+        );
+        assert!(
+            employees.contains(&carol),
+            "v2 resolves its agent input via its own body, not v1's cached one"
+        );
         Ok(())
     }
 }

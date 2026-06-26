@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use crate::rules::RuleCache;
 use crate::{Branch, BranchReference, ResolveError};
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
@@ -32,6 +35,7 @@ impl OpenBranch {
             revision,
             upstream,
             node_cache: dialog_search_tree::Cache::new(),
+            rule_cache: Arc::new(RuleCache::new()),
         })
     }
 }

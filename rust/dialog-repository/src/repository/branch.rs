@@ -1,4 +1,5 @@
 use super::memory::Cell;
+use crate::rules::SharedRuleCache;
 use crate::{ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
@@ -82,6 +83,11 @@ pub struct Branch {
     /// by one query stay warm for the next instead of being re-fetched from
     /// storage. Content-addressed keys make sharing across revisions safe.
     node_cache: Cache<Blake3Hash, Buffer>,
+    /// Shared deductive-rule cache (discovery by head + hydrated bodies).
+    /// Like `node_cache`, created once per opened branch and carried into
+    /// every query's durable rule resolution, so the `db.rule/*` scan is
+    /// paid once per (concept, head) rather than per query.
+    rule_cache: SharedRuleCache,
 }
 
 impl Branch {
@@ -156,5 +162,10 @@ impl Branch {
     /// A shared handle to this branch's node cache, for seeding a read tree.
     pub(crate) fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
         self.node_cache.clone()
+    }
+
+    /// A shared handle to this branch's deductive-rule cache.
+    pub(crate) fn rule_cache(&self) -> SharedRuleCache {
+        self.rule_cache.clone()
     }
 }
