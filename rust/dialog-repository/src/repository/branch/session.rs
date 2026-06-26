@@ -1,8 +1,10 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey, Statement,
+    Artifact, ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey,
+    Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -14,8 +16,10 @@ use dialog_query::concept::query::ConceptRules;
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::source::SelectRules;
+use futures_util::TryStreamExt as _;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::rules::{RuleClaims, RuleSource};
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
 use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 
@@ -57,6 +61,7 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 pub struct QueryLayer<'a> {
     branches: Vec<&'a Branch>,
     changes: Changes,
+    rule_source: Option<Arc<dyn RuleSource>>,
 }
 
 impl<'a> QueryLayer<'a> {
@@ -75,6 +80,15 @@ impl<'a> QueryLayer<'a> {
         self
     }
 
+    /// Install a [`RuleSource`](crate::RuleSource) so the session
+    /// resolves deductive rules stored as facts, not just the implicit
+    /// per-descriptor rule. Without this, queries see only implicit
+    /// rules (unchanged default behavior). Chainable.
+    pub fn with_rules(mut self, source: Arc<dyn RuleSource>) -> Self {
+        self.rule_source = Some(source);
+        self
+    }
+
     /// Merge another layer in: union the branches, fold the other
     /// layer's changes via its `Statement` impl. Accepts anything
     /// convertible into a `QueryLayer` — a `&Branch` or a `Changes`.
@@ -82,6 +96,7 @@ impl<'a> QueryLayer<'a> {
         let other = other.into();
         self.branches.extend(other.branches);
         other.changes.assert(&mut self.changes);
+        self.rule_source = self.rule_source.or(other.rule_source);
         self
     }
 
@@ -156,6 +171,7 @@ impl<'a> From<&'a Branch> for QueryLayer<'a> {
         Self {
             branches: vec![branch],
             changes: Changes::new(),
+            rule_source: None,
         }
     }
 }
@@ -165,6 +181,7 @@ impl From<Changes> for QueryLayer<'_> {
         Self {
             branches: Vec::new(),
             changes,
+            rule_source: None,
         }
     }
 }
@@ -217,6 +234,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 branches: layer.branches,
                 changes: overlay,
                 tombstones,
+                rule_source: layer.rule_source,
                 env,
             };
             let results = Box::pin(query.perform(&query_env));
@@ -241,6 +259,9 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// stream is filtered against these before the merge so retracts
     /// in the overlay suppress matching facts in the source.
     tombstones: HashSet<SortKey>,
+    /// Optional consumer-supplied resolver for deductive rules stored
+    /// as facts. `None` means only implicit per-descriptor rules.
+    rule_source: Option<Arc<dyn RuleSource>>,
     env: &'a Env,
 }
 
@@ -250,6 +271,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             branches: self.branches.clone(),
             changes: self.changes.clone(),
             tombstones: self.tombstones.clone(),
+            rule_source: self.rule_source.clone(),
             env: self.env,
         }
     }
@@ -322,11 +344,48 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env: ConditionalSync> Provider<SelectRules> for QueryEnv<'_, Env> {
+impl<Env> RuleClaims for QueryEnv<'_, Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn select_claims(
+        &self,
+        selector: ArtifactSelector<Constrained>,
+    ) -> Result<Vec<Artifact>, DialogArtifactsError> {
+        // Read rule facts through the same branch + overlay union as
+        // any other fact, so rules asserted via `.with(..)` are visible.
+        let stream = Provider::<Select<'_>>::execute(self, selector).await?;
+        stream.try_collect().await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env> Provider<SelectRules> for QueryEnv<'_, Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        // Surfaces only the implicit per-descriptor rule each
-        // `ConceptDescriptor` carries — the overlay holds facts only.
-        Ok(ConceptRules::new(&input))
+        // Every concept carries its implicit per-descriptor rule. When a
+        // `RuleSource` is installed, let it extend that with deductive
+        // rules stored as facts (read through `self` as `RuleClaims`).
+        let rules = ConceptRules::new(&input);
+        match &self.rule_source {
+            Some(source) => source.resolve(&input, rules, self).await,
+            None => Ok(rules),
+        }
     }
 }
 
@@ -347,5 +406,134 @@ impl Branch {
     /// overlay in one step. Shorthand for `self.query().with(stmt)`.
     pub fn with<S: Statement>(&self, statement: S) -> QueryLayer<'_> {
         self.query().with(statement)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::helpers::{test_operator_with_profile, test_repo};
+    use dialog_artifacts::Entity;
+    use dialog_query::query::Output;
+    use dialog_query::{Concept, Query, Term};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    mod people {
+        /// `test/name` attribute used by the rule-source seam tests.
+        #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        #[domain("test")]
+        pub struct Name(
+            /// The person's name string.
+            pub String,
+        );
+    }
+
+    /// A simple concept used to exercise the rule-source seam.
+    #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct Person {
+        /// The person entity.
+        pub this: Entity,
+        /// Their `test/name` attribute.
+        pub name: people::Name,
+    }
+
+    /// Records whether `resolve` was called and returns `rules`
+    /// unchanged — enough to prove the seam routes through it.
+    struct SpyRuleSource {
+        called: Arc<AtomicBool>,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl RuleSource for SpyRuleSource {
+        async fn resolve(
+            &self,
+            _concept: &ConceptDescriptor,
+            rules: ConceptRules,
+            _claims: &dyn RuleClaims,
+        ) -> Result<ConceptRules, EvaluationError> {
+            self.called.store(true, Ordering::SeqCst);
+            Ok(rules)
+        }
+    }
+
+    #[dialog_common::test]
+    async fn it_invokes_the_installed_rule_source() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        branch
+            .transaction()
+            .assert(Person {
+                this: alice.clone(),
+                name: people::Name("Alice".into()),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let called = Arc::new(AtomicBool::new(false));
+        let source = Arc::new(SpyRuleSource {
+            called: called.clone(),
+        });
+
+        let results: Vec<Person> = branch
+            .query()
+            .with_rules(source)
+            .select(Query::<Person> {
+                this: alice.clone().into(),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+
+        assert!(
+            called.load(Ordering::SeqCst),
+            "installed RuleSource must be consulted during the query"
+        );
+        // Resolver returned rules unchanged, so the implicit rule still
+        // resolves the concept normally.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].this, alice);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_resolves_without_a_rule_source() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        branch
+            .transaction()
+            .assert(Person {
+                this: alice.clone(),
+                name: people::Name("Alice".into()),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // No `.with_rules(..)` — implicit-only path, unchanged behavior.
+        let results: Vec<Person> = branch
+            .query()
+            .select(Query::<Person> {
+                this: alice.clone().into(),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].this, alice);
+        Ok(())
     }
 }
