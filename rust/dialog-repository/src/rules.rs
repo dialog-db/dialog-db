@@ -12,9 +12,11 @@
 //! A deductive rule is stored as facts:
 //! - `db.rule/conclusion` `of` rule-entity `is` the concept entity it
 //!   concludes — the index a layer looks rules up by.
-//! - `db.rule/source` `of` rule-entity `is` the JSON
-//!   [`DeductiveRuleDescriptor`] — the body, hydrated via
-//!   [`DeductiveRuleDescriptor::compile`].
+//! - `db.rule/source` `of` rule-entity `is` the canonical dag-cbor
+//!   `DeductiveRuleDescriptor` (a `Value::Bytes`) — the body, hydrated
+//!   via `DeductiveRule::decode`. (Bytes, not Record: `Value::Record`
+//!   isn't yet supported end-to-end through the index; the bytes are
+//!   opaque to the query layer either way.)
 //!
 //! These names are a dialog-repository convention (like
 //! `dialog.session/*` / `dialog.meta/*`).
@@ -40,7 +42,6 @@ use dialog_query::DeductiveRule;
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::ConceptRules;
 use dialog_query::error::EvaluationError;
-use dialog_query::rule::DeductiveRuleDescriptor;
 use parking_lot::RwLock;
 
 use crate::Revision;
@@ -68,13 +69,10 @@ pub(crate) fn source_selector(rule: &Entity) -> ArtifactSelector<Constrained> {
 }
 
 /// Hydrate a compiled [`DeductiveRule`] from a `db.rule/source` claim
-/// value (the JSON [`DeductiveRuleDescriptor`]).
-pub(crate) fn hydrate(source: &str) -> Result<DeductiveRule, EvaluationError> {
-    let descriptor: DeductiveRuleDescriptor = serde_json::from_str(source)
-        .map_err(|e| EvaluationError::Store(format!("rule source parse: {e}")))?;
-    descriptor
-        .compile()
-        .map_err(|e| EvaluationError::Store(format!("rule compile: {e}")))
+/// value (the canonical dag-cbor [`DeductiveRuleDescriptor`]).
+pub(crate) fn hydrate(source: &[u8]) -> Result<DeductiveRule, EvaluationError> {
+    DeductiveRule::decode(source)
+        .map_err(|reason| EvaluationError::Store(format!("rule hydrate: {reason}")))
 }
 
 /// Extract the rule entities from a batch of `db.rule/conclusion`
@@ -83,10 +81,10 @@ pub(crate) fn rule_entities(conclusion_claims: Vec<Artifact>) -> Vec<Entity> {
     conclusion_claims.into_iter().map(|a| a.of).collect()
 }
 
-/// Extract the source string from a `db.rule/source` artifact batch.
-pub(crate) fn source_string(source_claims: Vec<Artifact>) -> Option<String> {
+/// Extract the source bytes from a `db.rule/source` artifact batch.
+pub(crate) fn source_bytes(source_claims: Vec<Artifact>) -> Option<Vec<u8>> {
     source_claims.into_iter().find_map(|a| match a.is {
-        Value::String(s) => Some(s),
+        Value::Bytes(bytes) => Some(bytes),
         _ => None,
     })
 }
@@ -192,8 +190,9 @@ pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<Deductiv
         for (entity, attribute, change) in changes.iter() {
             if *entity == rule_entity
                 && *attribute == source_attr
-                && let Change::Assert(Value::String(s)) | Change::Replace(Value::String(s)) = change
-                && let Ok(rule) = hydrate(s)
+                && let Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) =
+                    change
+                && let Ok(rule) = hydrate(bytes)
             {
                 out.push(rule);
                 break;

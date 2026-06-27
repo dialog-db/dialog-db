@@ -114,82 +114,65 @@ impl DeductiveRule {
         }
     }
 
-    /// Canonical JSON form of this rule's descriptor, if it has one —
-    /// a stable byte string independent of map iteration order.
+    /// Canonical encoding of this rule's descriptor, if it has one —
+    /// the dag-cbor bytes, deterministic by construction.
     ///
     /// Returns `None` when the rule body can't be expressed in formal
     /// notation: the implicit per-descriptor rule and any rule built
-    /// directly from raw [`AttributeQuery`] premises serialize to
-    /// nothing, because `Proposition`'s formal-notation `Serialize`
-    /// rejects attribute propositions. Only rules with concept/formula
-    /// bodies (what `rule!:` notation and stored `db.rule/*` rules
-    /// produce) have a canonical source.
+    /// directly from raw [`AttributeQuery`] premises encode to nothing,
+    /// because `Proposition`'s formal-notation `Serialize` rejects
+    /// attribute propositions. Only rules with concept/formula bodies
+    /// (what `rule!:` notation and stored `db.rule/*` rules produce)
+    /// have a canonical encoding.
     ///
-    /// Canonicalization is load-bearing: a premise's `where` terms
-    /// serialize from a [`Parameters`] `HashMap`, whose iteration order
-    /// is non-deterministic, so serializing the descriptor directly
-    /// would vary across compilations of the same rule. Round-tripping
-    /// through a [`serde_json::Value`] with every object's keys sorted
-    /// gives a deterministic form.
-    pub fn try_canonical_source(&self) -> Option<String> {
-        let mut value = serde_json::to_value(self.descriptor()).ok()?;
-        sort_json_keys(&mut value);
-        serde_json::to_string(&value).ok()
+    /// dag-cbor canonicalizes map keys per the spec, so the encoding is
+    /// a pure function of the descriptor even though a premise's terms
+    /// come from a [`Parameters`] `HashMap` — no manual key sorting
+    /// needed. This is the same encoding dialog content-addresses with
+    /// elsewhere.
+    pub fn try_encode(&self) -> Option<Vec<u8>> {
+        serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
     }
 
     /// This rule's content-addressed identity, if it has a canonical
-    /// source: `rule:<base58(blake3(canonical_source))>`.
+    /// encoding: `rule:<base58(blake3(dag-cbor(descriptor)))>`.
     ///
-    /// `None` for rules with no serializable body (implicit /
-    /// attribute-query rules — see
-    /// [`try_canonical_source`](Self::try_canonical_source)). A pure
-    /// function of the rule body, stable across compilations, so it is
-    /// a collision-free key for plan caching and the entity a rule's
-    /// facts are stored under. Hashes canonical JSON rather than
-    /// dag-cbor because the descriptor's premise propositions don't
-    /// dag-cbor encode.
+    /// `None` for rules with no encodable body (implicit / attribute-query
+    /// rules — see [`try_encode`](Self::try_encode)). A pure function of
+    /// the rule body, stable across compilations, so it is a
+    /// collision-free key for plan caching and the entity a rule's facts
+    /// are stored under.
     pub fn try_this(&self) -> Option<Entity> {
         use base58::ToBase58;
-        let hash = blake3::hash(self.try_canonical_source()?.as_bytes());
+        let hash = blake3::hash(&self.try_encode()?);
         let encoded = hash.as_bytes().as_ref().to_base58();
         format!("rule:{encoded}").parse().ok()
     }
 
-    /// Canonical source, panicking if the rule has no serializable body.
-    /// Use on the storage path where the rule is known to be storable
-    /// (concept/formula bodies). Prefer
-    /// [`try_canonical_source`](Self::try_canonical_source) otherwise.
-    pub fn canonical_source(&self) -> String {
-        self.try_canonical_source()
-            .expect("rule body must serialize in formal notation")
+    /// Canonical dag-cbor encoding, panicking if the rule has no
+    /// encodable body. Use on the storage path where the rule is known
+    /// to be storable (concept/formula bodies). Prefer
+    /// [`try_encode`](Self::try_encode) otherwise.
+    pub fn encode(&self) -> Vec<u8> {
+        self.try_encode()
+            .expect("rule body must encode in formal notation")
     }
 
     /// Content-addressed identity, panicking if the rule has no
-    /// serializable body. Use on the storage path; prefer
+    /// encodable body. Use on the storage path; prefer
     /// [`try_this`](Self::try_this) otherwise.
     pub fn this(&self) -> Entity {
         self.try_this()
             .expect("storable rule must have a content-addressed identity")
     }
-}
 
-/// Recursively sort every JSON object's keys so serialization is a pure
-/// function of the value, independent of map iteration order.
-fn sort_json_keys(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            let mut sorted = serde_json::Map::new();
-            let mut keys: Vec<String> = map.keys().cloned().collect();
-            keys.sort();
-            for key in keys {
-                let mut child = map.remove(&key).expect("key present");
-                sort_json_keys(&mut child);
-                sorted.insert(key, child);
-            }
-            *map = sorted;
-        }
-        serde_json::Value::Array(items) => items.iter_mut().for_each(sort_json_keys),
-        _ => {}
+    /// Rebuild a rule from its canonical dag-cbor [`encode`](Self::encode)
+    /// bytes. `Err` carries a human-readable reason — either the cbor
+    /// decode failed or the decoded descriptor didn't compile.
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let descriptor: DeductiveRuleDescriptor = serde_ipld_dagcbor::from_slice(bytes)
+            .map_err(|e| format!("dag-cbor decode failed: {e}"))?;
+        descriptor.compile().map_err(|e| e.to_string())
     }
 }
 
@@ -419,15 +402,18 @@ mod tests {
         let b = build();
         assert_eq!(a.this(), b.this(), "same rule body ⇒ same identity");
         assert_eq!(
-            a.canonical_source(),
-            b.canonical_source(),
-            "canonical source is stable across compilations"
+            a.encode(),
+            b.encode(),
+            "dag-cbor encoding is stable across compilations"
         );
         assert!(
             a.this().to_string().starts_with("rule:"),
             "identity is a rule: URI, got {}",
             a.this()
         );
+        // Round-trips through encode/decode.
+        let decoded = DeductiveRule::decode(&a.encode()).expect("decodes");
+        assert_eq!(decoded.this(), a.this(), "encode/decode preserves identity");
     }
 
     #[dialog_common::test]
