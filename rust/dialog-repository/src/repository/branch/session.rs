@@ -457,7 +457,16 @@ where
         // Transient layer — the per-query overlay, read fresh.
         rules.extend(overlay_rules(&self.changes, &concept));
 
-        Ok(assemble(&input, rules))
+        // Plan cache rides a branch (peers share content-addressed plans;
+        // any branch's cache is correct). The overlay-only query has no
+        // branch, so it falls back to a private cache.
+        let plan_cache = self
+            .branches
+            .first()
+            .map(|branch| branch.plan_cache())
+            .unwrap_or_default();
+
+        Ok(assemble(&input, rules, plan_cache))
     }
 }
 

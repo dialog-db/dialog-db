@@ -4,6 +4,7 @@ use crate::{ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::memory;
+use dialog_query::concept::query::PlanCache;
 
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Capability, Did, Subject};
@@ -88,6 +89,12 @@ pub struct Branch {
     /// every query's durable rule resolution, so the `db.rule/*` scan is
     /// paid once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
+    /// Shared plan cache for the deductive rules resolved on this branch,
+    /// keyed by content-addressed `(rule, adornment)`. Handed to each
+    /// per-query `ConceptRules` assembly so a re-assembled rule set reuses
+    /// plans an earlier query computed. Content-addressed keys make it
+    /// safe across revisions, like `node_cache`.
+    plan_cache: PlanCache,
 }
 
 impl Branch {
@@ -167,5 +174,10 @@ impl Branch {
     /// A shared handle to this branch's deductive-rule cache.
     pub(crate) fn rule_cache(&self) -> SharedRuleCache {
         self.rule_cache.clone()
+    }
+
+    /// A shared handle to this branch's deductive-rule plan cache.
+    pub(crate) fn plan_cache(&self) -> PlanCache {
+        self.plan_cache.clone()
     }
 }
