@@ -20,8 +20,8 @@ use futures_util::TryStreamExt as _;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::rules::{
-    assemble, conclusion_selector, hydrate, overlay_rules, rule_entities, source_selector,
-    source_string,
+    assemble, conclusion_selector, hydrate, overlay_rules, rule_entities, source_bytes,
+    source_selector,
 };
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
 use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
@@ -419,7 +419,7 @@ where
                 .select_tree(branch, source_selector(&rule_entity))
                 .await
                 .map_err(|e| EvaluationError::Store(format!("rule source lookup: {e:?}")))?;
-            let Some(source) = source_string(source_claims) else {
+            let Some(source) = source_bytes(source_claims) else {
                 continue;
             };
             let body = hydrate(&source)?;
@@ -542,9 +542,7 @@ mod rule_tests {
             the!("db.rule/conclusion")
                 .of(rule_entity.clone())
                 .is(conclusion),
-            the!("db.rule/source")
-                .of(rule_entity)
-                .is(rule.canonical_source()),
+            the!("db.rule/source").of(rule_entity).is(rule.encode()),
         )
     }
 

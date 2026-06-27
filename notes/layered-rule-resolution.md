@@ -28,13 +28,17 @@ A deductive rule is stored as two facts (see `rules.rs`):
 
 - `db.rule/conclusion` `of` rule-entity `is` concept-entity — the index;
   "which rules conclude concept X".
-- `db.rule/source` `of` rule-entity `is` JSON `DeductiveRuleDescriptor` —
-  the body, hydrated with `DeductiveRuleDescriptor::compile`.
+- `db.rule/source` `of` rule-entity `is` the rule body as canonical
+  dag-cbor `DeductiveRuleDescriptor` (a `Value::Bytes`), hydrated with
+  `DeductiveRule::decode`.
 
 The rule-entity is content-addressed:
-`rule:<base58(blake3(canonical_source))>` (`DeductiveRule::this`). The
-source is canonical JSON (object keys sorted) because a premise's terms
-serialize from a `HashMap` and would otherwise vary across compilations.
+`rule:<base58(blake3(dag-cbor(descriptor))))>` (`DeductiveRule::this`).
+dag-cbor canonicalizes map keys, so the encoding is a pure function of
+the descriptor even though a premise's terms come from a `HashMap` — no
+manual key sorting. (Stored as `Value::Bytes` rather than
+`Value::Record`: Record isn't yet supported end-to-end through the
+index; the bytes are opaque to the query layer either way.)
 
 These attribute names are a dialog-repository convention, like
 `dialog.session/*` and `dialog.meta/*`.
