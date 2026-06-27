@@ -83,15 +83,23 @@ durable cache only ever holds the committed slice and the overlay is a
 separate layer, an overlay rule cannot be masked by a stale committed
 entry — the failure is structurally excluded.
 
-**Plan** — global, in `concept/query/plan_cache.rs`, keyed by
+**Plan** — `PlanCache` (`concept/query/plan_cache.rs`), keyed by
 `(rule.this(), Adornment)` → `Conjunction`. Planning a rule for a binding
 pattern is a pure function of `(rule body, adornment)`, so a plan is
 reusable across every query and concept that uses the rule, including
-ones that re-assemble `ConceptRules` from layers each query (where a
-per-instance cache would never be reused). Content-addressed ⇒ never
-stale; the cache only bounds memory. The implicit and any
-attribute-bodied rule have no content identity (`try_this` returns
-`None`) and are planned directly, uncached.
+ones that re-assemble `ConceptRules` from layers each query (where the
+per-instance plan map is cold every query). Content-addressed ⇒ never
+stale; the cache only bounds memory (SIEVE eviction, the same
+`sieve-cache` the node cache uses). The implicit and any attribute-bodied
+rule have no content identity (`try_this` returns `None`) and are planned
+directly, uncached.
+
+The cache is **not a process global**: it is owned by the `Branch` (beside
+`node_cache` and `RuleCache`) and handed to each assembled `ConceptRules`,
+so its lifecycle follows the branch. Peer branches in a multi-branch query
+share content-addressed plans, so `execute` rides the first branch's cache
+(a branchless overlay-only query falls back to a private one). A
+standalone `ConceptRules::new` gets a private `PlanCache::default`.
 
 *Soundness:* `Adornment` is a bitmask over alphabetically-sorted
 parameter slots — independent of caller variable names — so

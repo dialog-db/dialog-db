@@ -11,6 +11,7 @@
 use std::iter;
 
 use super::adornment::Adornment;
+use super::plan_cache::PlanCache;
 use crate::DeductiveRule;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::parameters::Parameters;
@@ -29,16 +30,33 @@ pub struct ConceptRules {
     implicit: DeductiveRule,
     installed: Vec<DeductiveRule>,
     plans: Arc<RwLock<HashMap<Adornment, Arc<Disjunction>>>>,
+    /// Cross-query cache of planned per-rule [`Conjunction`]s, keyed by
+    /// content-addressed `(rule, adornment)`. Shared from the owning
+    /// branch so a re-assembled `ConceptRules` (the layered case) reuses
+    /// plans the previous query computed. A standalone instance gets a
+    /// private one via [`PlanCache::default`].
+    plan_cache: PlanCache,
 }
 
 impl ConceptRules {
-    /// Create a new `ConceptRules` from a concept predicate.
-    /// The predicate is used to derive the default rule.
+    /// Create a new `ConceptRules` from a concept predicate, with a
+    /// private (unshared) plan cache. The predicate is used to derive the
+    /// default rule.
     pub fn new(descriptor: &ConceptDescriptor) -> Self {
+        Self::with_plan_cache(descriptor, PlanCache::default())
+    }
+
+    /// Create a new `ConceptRules` sharing `plan_cache` with its owner.
+    ///
+    /// The repository assembles a fresh `ConceptRules` per query from its
+    /// layers; passing the branch's cache here lets each assembly reuse
+    /// plans the previous one computed (see [`PlanCache`]).
+    pub fn with_plan_cache(descriptor: &ConceptDescriptor, plan_cache: PlanCache) -> Self {
         Self {
             implicit: DeductiveRule::from(descriptor),
             installed: Vec::new(),
             plans: Arc::new(RwLock::new(HashMap::new())),
+            plan_cache,
         }
     }
 
@@ -70,8 +88,8 @@ impl ConceptRules {
 
     /// Get or compute a cached plan for the given binding pattern.
     ///
-    /// Each rule is planned through the process-global
-    /// [`plan_cache`](super::plan_cache), keyed by `(rule identity,
+    /// Each rule is planned through the shared, branch-owned
+    /// [`PlanCache`], keyed by `(rule identity,
     /// adornment)`. Planning a rule is a pure function of its body and
     /// the adornment, so this memoizes across *every* query that uses
     /// the rule — including ones that re-assembled this concept's rule
@@ -94,12 +112,12 @@ impl ConceptRules {
         // function of this concept's descriptor and cheap to plan. Only
         // *installed* rules — which have concept/formula bodies and thus
         // a `this()` — are memoized globally by `(rule, adornment)`.
-        let plan: Disjunction =
-            iter::once(self.implicit.plan(&scope))
-                .chain(self.installed.iter().map(|rule| {
-                    super::plan_cache::get_or_plan(rule, adornment, || rule.plan(&scope))
-                }))
-                .collect();
+        let plan: Disjunction = iter::once(self.implicit.plan(&scope))
+            .chain(self.installed.iter().map(|rule| {
+                self.plan_cache
+                    .get_or_plan(rule, adornment, || rule.plan(&scope))
+            }))
+            .collect();
 
         let fork = Arc::new(plan);
         self.plans.write().unwrap().insert(adornment, fork.clone());

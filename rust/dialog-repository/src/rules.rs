@@ -40,7 +40,7 @@ use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{Artifact, ArtifactSelector, Attribute, Changes, Entity, Value};
 use dialog_query::DeductiveRule;
 use dialog_query::concept::descriptor::ConceptDescriptor;
-use dialog_query::concept::query::ConceptRules;
+use dialog_query::concept::query::{ConceptRules, PlanCache};
 use dialog_query::error::EvaluationError;
 use parking_lot::RwLock;
 
@@ -151,11 +151,15 @@ impl RuleCache {
 /// `durable` are the rules read (and cached) from each branch's
 /// committed tree; `transient` are read fresh from the overlay. Both are
 /// already hydrated; this just installs them onto the implicit rule.
+///
+/// `plan_cache` is the owning branch's shared plan cache, so the
+/// per-query re-assembly reuses plans earlier queries computed.
 pub(crate) fn assemble(
     concept: &ConceptDescriptor,
     rules: impl IntoIterator<Item = DeductiveRule>,
+    plan_cache: PlanCache,
 ) -> ConceptRules {
-    let mut concept_rules = ConceptRules::new(concept);
+    let mut concept_rules = ConceptRules::with_plan_cache(concept, plan_cache);
     for rule in rules {
         concept_rules.install(rule);
     }
