@@ -1,13 +1,13 @@
 # Layered Rule Resolution
 
-A concept query resolves both **facts** and **deductive rules** from the
-same stack of sources. Facts are unioned across a branch's tree, any
-joined branches, and the per-query overlay; rules are resolved the same
-way. This note records how that works and why.
+A concept query reads from a stack of **query sources**, each providing
+both **facts** and **deductive rules**. Facts are unioned across a
+branch's tree, any joined branches, and the per-query overlay; rules are
+resolved the same way. This note records how that works and why.
 
-## Layers
+## Query sources (layers)
 
-A query reads from a stack of layers:
+Each source in the stack is a layer:
 
 - **Durable layer** — one per branch in scope. Facts come from the
   branch's committed tree; rules come from `db.rule/*` facts on that
@@ -16,7 +16,7 @@ A query reads from a stack of layers:
   and a transaction's pending writes). Facts and rules both come from
   the in-memory batch.
 
-`QueryEnv` (`repository/branch/session.rs`) is the composition: it holds
+`QueryEnv` (`repository/branch/session.rs`) composes the stack: it holds
 the branches + overlay and implements `Provider<Select>` (facts) and
 `Provider<SelectRules>` (rules). A transaction query is just a
 single-branch `QueryEnv`, so committed and mid-transaction reads share
