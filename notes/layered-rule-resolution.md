@@ -1,13 +1,13 @@
 # Layered Rule Resolution
 
-A concept query reads from a stack of **query sources**, each providing
-both **facts** and **deductive rules**. Facts are unioned across a
-branch's tree, any joined branches, and the per-query overlay; rules are
-resolved the same way. This note records how that works and why.
+A concept query reads from a stack of **layers**, each providing both
+**facts** and **deductive rules**. Facts are unioned across a branch's
+tree, any joined branches, and the per-query overlay; rules are resolved
+the same way. This note records how that works and why.
 
-## Query sources (layers)
+## Layers
 
-Each source in the stack is a layer:
+Each layer in the stack is a query source:
 
 - **Durable layer** — one per branch in scope. Facts come from the
   branch's committed tree; rules come from `db.rule/*` facts on that
