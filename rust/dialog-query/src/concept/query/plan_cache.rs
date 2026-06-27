@@ -79,10 +79,3 @@ where
 
     planned
 }
-
-#[cfg(test)]
-pub(crate) fn clear_for_test() {
-    if let Ok(mut map) = cache().lock() {
-        map.clear();
-    }
-}
