@@ -946,10 +946,13 @@ dependencies = [
 name = "dialog-blobs"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base58",
  "blake3",
  "bytes",
  "dialog-common",
+ "dialog-search-tree",
+ "dialog-storage",
  "dirs",
  "futures-core",
  "futures-util",

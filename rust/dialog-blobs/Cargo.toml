@@ -43,6 +43,14 @@ web-sys = { workspace = true, features = [
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Blob-replication spike (tests/blob_index_spike.rs): exercises the real
+# search-tree differential to show blobs replicate as ordinary tree nodes.
+# Dev-only — does not change the production crate graph.
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+dialog-search-tree = { workspace = true }
+dialog-storage = { workspace = true }
+futures-util = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
