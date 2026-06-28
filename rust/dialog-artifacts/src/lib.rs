@@ -70,6 +70,9 @@ pub use importer::Importer;
 mod state;
 pub use state::*;
 
+mod blob_index;
+pub use blob_index::*;
+
 mod constants;
 pub use constants::*;
 
