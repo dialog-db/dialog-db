@@ -42,30 +42,32 @@ use dialog_query::DeductiveRule;
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, PlanCache};
 use dialog_query::error::EvaluationError;
+use dialog_query::the;
 use parking_lot::RwLock;
 
 use crate::Revision;
 
-/// Build the `db.rule/<name>` attribute used in rule-fact selectors.
-fn rule_attr(name: &str) -> Attribute {
-    format!("db.rule/{name}")
-        .parse()
-        .expect("db.rule/<name> is a valid attribute URI")
+/// The `db.rule/conclusion` index attribute, validated at compile time.
+fn conclusion_attr() -> Attribute {
+    the!("db.rule/conclusion").into()
+}
+
+/// The `db.rule/source` body attribute, validated at compile time.
+fn source_attr() -> Attribute {
+    the!("db.rule/source").into()
 }
 
 /// Selector for `db.rule/conclusion is = <concept>` — finds the rule
 /// entities concluding a concept.
 pub(crate) fn conclusion_selector(concept: &Entity) -> ArtifactSelector<Constrained> {
     ArtifactSelector::new()
-        .the(rule_attr("conclusion"))
+        .the(conclusion_attr())
         .is(Value::Entity(concept.clone()))
 }
 
 /// Selector for `db.rule/source of = <rule>` — fetches a rule's body.
 pub(crate) fn source_selector(rule: &Entity) -> ArtifactSelector<Constrained> {
-    ArtifactSelector::new()
-        .the(rule_attr("source"))
-        .of(rule.clone())
+    ArtifactSelector::new().the(source_attr()).of(rule.clone())
 }
 
 /// Hydrate a compiled [`DeductiveRule`] from a `db.rule/source` claim
@@ -174,13 +176,13 @@ pub(crate) fn assemble(
 pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<DeductiveRule> {
     use dialog_artifacts::Change;
 
-    let conclusion_attr = rule_attr("conclusion");
-    let source_attr = rule_attr("source");
+    let conclusion = conclusion_attr();
+    let source = source_attr();
 
     // rule entities whose conclusion is `concept`, asserted in the overlay.
     let mut rule_entities: Vec<Entity> = Vec::new();
     for (entity, attribute, change) in changes.iter() {
-        if *attribute == conclusion_attr
+        if *attribute == conclusion
             && let Change::Assert(Value::Entity(c)) | Change::Replace(Value::Entity(c)) = change
             && c == concept
         {
@@ -193,7 +195,7 @@ pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<Deductiv
     for rule_entity in rule_entities {
         for (entity, attribute, change) in changes.iter() {
             if *entity == rule_entity
-                && *attribute == source_attr
+                && *attribute == source
                 && let Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) =
                     change
                 && let Ok(rule) = hydrate(bytes)
