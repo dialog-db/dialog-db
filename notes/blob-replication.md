@@ -1,195 +1,203 @@
-# Blob Storage & Replication — Design + Spike
+# Blobs: storage, replication, and access
 
-Status: spike / design record
-Author: spike on branch `claude/blob-storage-replication-spike`
+Status: design record
 
-## Problem
+## Goal
 
-We want to store binary blobs in the database and have them **replicate** to a
-remote the same way the rest of the data does. Two of these requirements are in
-tension and worth stating precisely:
+Store binary blobs in the database, keep them whole and hash-addressable, and
+have them replicate to a remote through the same mechanism that already
+replicates the rest of the data — without inlining blob bytes into the index and
+without a bespoke side protocol for "which blobs need uploading."
 
-1. Blobs can be large, so they should not be inlined into the triple
-   (`the/of/is`) index — a multi-megabyte value in a single prolly-tree leaf
-   wrecks the node-size distribution and forces a reader to pull the whole blob
-   just to traverse that leaf.
-2. Replication must be able to answer **"which blobs does the remote not yet
-   have?"** without keeping a side-channel manifest in sync. Today the only
-   thing that crosses the wire on `push` is the set of *novel tree nodes*
-   computed by the differential; anything that is not a tree node is invisible
-   to it.
+Blobs must also be usable as self-contained resources: a blob should be loadable
+behind an `<img>`/`<video>` source or a CSS `url(...)`, which means it must be
+retrievable as a single contiguous byte range, range-readable, with no assembly
+step on the read path.
 
-The crate `dialog-blobs` already gives us local content-addressed blob storage
-(Blake3, sharded directories, streaming `put`/`get`), but it is an island: no
-capability surface, no participation in the differential, no replication. So a
-peer that pulls the index gets triples that *reference* blob hashes it cannot
-resolve.
+## Identity
 
-## The core idea (refined)
+A blob is identified by the BLAKE3 root hash of its complete byte content. This
+hash is a BAO root (BLAKE3's verified-streaming Merkle root), so verified
+streaming and verified range reads are intrinsic properties of the identity and
+become available without changing it.
 
-The user's proposal — add a **blob index** keyed by `blob_tag / blob_hash →
-bytes` so the *existing differential identifies the new segments and uploads
-them with the other blocks* — is the right shape. The whole appeal is that
-replication needs **zero new machinery**: a blob becomes ordinary tree content,
-and `TreeDifference::novel_nodes` already computes "exactly the blocks the
-holder of the source tree is missing" (see
-`dialog-search-tree/src/differential.rs:915`). Push already streams those novel
-nodes to the remote archive (`dialog-repository/src/repository/branch/push.rs:135`).
-Put a blob's bytes *inside* the tree and it rides that path for free.
+A blob is referenced everywhere by this hash:
 
-Two refinements make it actually work in practice.
+- as an entity (`blob:<hash>`), so ordinary facts can attach extrinsic metadata
+  (content type, file name, captions, …) to it through the regular triple store;
+- as a key in the blob index (below), which carries intrinsic, content-derived
+  metadata and drives replication.
 
-### Refinement 1 — chunk the blob, and content-address the chunks
+These two are complementary: extrinsic, user-asserted metadata lives in facts;
+intrinsic, content-derived metadata lives in the blob index.
 
-`blob_hash → bytes` as a *single* entry reintroduces problem (1) one layer down:
-the entry's value is the whole blob, so the leaf holding it is enormous and any
-diff that touches it ships the entire blob even for a one-byte change. So split
-the blob into bounded chunks.
+## The blob index
 
-But **how the chunks are keyed decides whether dedup works**, and this is the
-non-obvious part the spike surfaced. The tempting layout —
+The triple store maintains three index orderings over one prolly tree,
+distinguished by a leading key tag: EAV (`0`), AEV (`1`), VAE (`2`). Two further
+tags are allocated after them:
 
-```
-key = BLOB_TAG ‖ blob_hash ‖ chunk_index   ✗ no cross-blob dedup
-```
+- `HISTORY = 3` — reserved for a future history index; unused for now.
+- `BLOB = 4` — the **blob index** (the fifth index).
 
-— embeds the *blob* hash in every chunk key, so two blobs that share byte-for-byte
-chunks still land in disjoint key ranges and **never share a tree leaf**.
-Content-addressed dedup silently does not happen. (The spike's first iteration
-used exactly this layout and its dedup assertion failed: a chunk-sharing blob
-uploaded just as many novel nodes as a fully disjoint one.)
+The blob index keys on the blob hash under the `BLOB` tag and fits the existing
+fixed key layout (tag byte, blob hash in the value-reference field, remainder
+zeroed). Its value is a **versioned, extensible record**. Today it holds the
+blob size; the version prefix leaves room to add fields (e.g. an outboard
+reference, a kind discriminant) without migration.
 
-The correct layout content-addresses the **chunk**, with a separate manifest
-mapping a blob to its ordered chunk list:
+Because the blob index is an ordinary part of the tree, the set of referenced
+blobs is a contiguous, deduplicated key range — one entry per distinct blob —
+and any change to it is visible to the tree differential. The blob index value
+being the size lets a size query be answered from the index alone, with no blob
+fetch.
 
-```
-chunk    key = CHUNK_TAG ‖ chunk_hash (32)  →  chunk bytes (≤ CHUNK_SIZE)
-manifest key = BLOB_TAG  ‖ blob_hash  (32)  →  length ‖ [chunk_hash; n]
-```
+The blob bytes themselves never enter the tree. Only the hash (as a key) and the
+small intrinsic record (as a value) do, so index nodes stay small regardless of
+blob size.
 
-Now identical chunks across blobs (and blob versions) are the *same entry* in the
-same leaf, so the differential ships each distinct chunk exactly once. Reads
-follow the manifest's chunk-hash list (no range scan needed). Both namespaces
-share one fixed-width 33-byte key, distinguished by the tag byte.
+## Layered architecture
 
-`CHUNK_SIZE` is a tuning knob. Fixed-size chunking is enough for the spike;
-content-defined chunking (rolling hash) is the upgrade that makes dedup survive
-*insertions* (not just appends/replacements), since a CDC boundary set re-aligns
-chunks after a shift instead of rewriting every following chunk.
+The design separates a logical layer (replicated, identical across peers) from a
+physical layer (per-peer storage representation).
 
-### Refinement 2 — keep blobs in their own tree (own catalog), hydrated lazily
-
-There are two viable placements:
-
-| | Same tree as triples (tag-namespaced key) | Separate blob tree (own root/catalog) |
+| Layer | Concern | Contents |
 |---|---|---|
-| Replication change | none — literally the user's plan | reuse `TreeDifference` on a 2nd root |
-| Revision shape | unchanged | gains a 2nd root reference |
-| Key layout | must fit the fixed 162-byte artifact key | free to use a compact 37-byte key |
-| Lazy pull | no — pulling the index pulls blob bytes | **yes** — blob nodes fetched on demand |
-| Blast radius | blob churn rewrites triple-index spine | isolated to the blob tree |
+| 1. Identity & references | logical, replicated | blob hash; `blob:<hash>` entity; blob-index entry `hash → {version, size, …}` |
+| 2. Physical storage | per-peer | one contiguous content-addressed object per blob; transfer state (outboard, coverage bitmap, partial/complete) |
+| 3. Transfer | protocol | ingest (hash-discovered); replication write (hash-known, verified); read (hash-addressed, ranged, lazy) |
+| 4. Access & serving | presentation | query predicates; resource URLs resolved from a hash to bytes |
 
-The same-tree variant is the smallest possible change and matches the proposal
-literally. But it couples the two concerns the problem statement separates:
-because the artifact key is a fixed 162-byte `(tag, entity, attribute,
-value-type, value-ref)` layout (`dialog-artifacts/src/key.rs:75`), blob chunks
-would have to be shoehorned into it, and — more importantly — pulling the index
-would drag every blob byte along with it, defeating requirement (1) at sync
-time.
+The logical layer is what the differential sees and what a revision points at.
+The physical layer can differ between peers (one peer has a blob complete,
+another not yet) without changing any logical state.
 
-**Recommendation: a dedicated blob tree** (`PersistentTree<[u8;37], Vec<u8>>`)
-persisted under a new archive catalog `"blobs"`, with its root carried in the
-`Revision` next to the existing triple-tree root. It keeps the exact
-differential-replication property the proposal is built on, while also giving:
+## Blob lifecycle and transfer
 
-- **Lazy hydration for free.** `NetworkedIndex`
-  (`dialog-repository/src/repository/archive/networked.rs`) already falls back to
-  the remote on a local cache miss and caches what it fetches. Point a
-  `NetworkedIndex` at the `"blobs"` catalog and a peer downloads blob chunks only
-  when it actually reads a blob — the triple index stays small and pullable on
-  its own.
-- A compact key and node-size tuning independent of the triple index.
-- Isolation: blob writes don't churn the triple-index spine.
+### Ingest — `BlobImport`
 
-The cost is one extra root reference in `Revision` and one extra
-`TreeDifference` pass in `push`/`pull` — both mechanical, since the index tree
-already does exactly this.
+Content enters the system through ingest, where the hash is **discovered**, not
+supplied. The caller provides a byte source (a forward read stream); the
+implementation persists it while hashing in a single pass and returns the blob
+hash `H`. The content is written to a temporary location during the pass and
+then placed at its `H` address, so a forward stream is sufficient and no full
+copy is held in memory.
 
-## How it maps onto capabilities
+Ingest is a local operation: the blob lands in the local blob catalog and a
+blob-index entry is added. Because the hash is not known ahead of time, ingest is
+not a hash-addressed wire operation; its authorization is "may write into this
+catalog," not "may write content `H`."
 
-No new capability *kind* is needed; blobs are just another archive catalog. The
-existing hierarchy (`dialog-effects/src/archive.rs`) already supports it:
+### Replication write — random-access verified fill
 
-```
-Subject (repository DID)
-  └── Archive                       // /archive
-        └── Catalog { catalog: "blobs" }
-              ├── Get   { digest }            → Option<Bytes>
-              ├── Put   { block }             → ()
-              └── Import { blocks }           → ()
-```
+By the time a blob propagates to a remote, its hash `H` is already known from
+ingest and recorded in the blob index. The remote write is therefore
+**hash-ahead**: a capability invocation commits to the fixed `H`, and content is
+moved as **order-independent, range-addressed writes** into a blob preallocated
+by `H`:
 
-A blob chunk is a content-addressed block exactly like a tree node, so `Put`,
-`Import`, and `Get` carry it without change, and the `Attenuate` projections
-(digest + sha256 checksum in the signed invocation) already cover integrity
-across the wire. Read-only delegation = delegate `Catalog{"blobs"}` with `Get`;
-write = with `Put`/`Import`. The blob *tree's* nodes live in this catalog; the
-blob *content addresses* referenced from triples are the manifest hashes.
+1. allocate the blob by `H` (and its size / outboard);
+2. write any range `[offset, offset+len)` in any order, in parallel, idempotently,
+   each verified against `H` via a BAO proof;
+3. a coverage bitmap tracks presence; the blob flips from partial to complete
+   when fully covered.
 
-So a triple keeps referencing a blob by a single 32-byte hash (today
-`Value::Bytes`/`Value::Record` inline the bytes — `value.rs:25`; the blob-aware
-path would store the **blob hash** as the reference and move the bytes into the
-blob tree). The blob tree resolves that hash to chunks.
+This is resumable, parallelizable, and retryable, and integrity derives from the
+content address rather than from trusting the destination to assemble parts.
+There is no ordering dependency between ranges; the write is random-access, not
+an append.
 
-## Garbage collection
+Backends realize this natively: a local file store uses sparse writes plus the
+coverage bitmap; an S3-style store uses parallel multipart parts plus completion,
+with the client-computed `H` and per-range proofs providing integrity.
 
-Content-addressed blobs accumulate; nothing today reclaims them
-(`dialog-blobs` has no GC). Because blob chunks are now *tree entries*,
-reachability becomes a tree question: a blob is live iff some triple references
-its manifest hash. A mark-and-sweep can walk the triple index, collect
-referenced blob hashes, and drop blob-tree entries (and their backing chunks)
-outside that set. Out of scope for the spike but unblocked by putting blobs in
-the tree — the index *is* the reachability root set.
+Partial/complete state is confined to the physical layer. Combined with the
+invariant that a revision is published only after the blobs it references are
+complete, partial blobs are never observable through a published revision.
 
-## What the spike proves
+### Read
 
-`rust/dialog-blobs/tests/blob_index_spike.rs` is a self-contained, runnable
-demonstration (dev-dependencies only — no change to the production crate graph).
-It implements the dedicated-blob-tree design against the *real*
-`dialog-search-tree` differential and asserts the property the whole plan rests
-on:
+Reads are hash-addressed and lazy: a blob is fetched by `H` on demand, and a
+peer that has the index but not a blob's bytes retrieves them from the remote
+when needed. Stored blobs are contiguous and seekable, so range reads (for media
+seeking, for slicing, for verified ranges) are served directly without assembly.
 
-1. **Content-addressed chunk index.** `put_blob` splits bytes into `CHUNK_SIZE`
-   chunks, stores each under `CHUNK_TAG ‖ chunk_hash → bytes`, and writes a
-   `BLOB_TAG ‖ blob_hash → length ‖ [chunk_hash…]` manifest. `read_blob`
-   reconstructs the bytes by following the manifest's chunk list.
-2. **Replication rides the differential.** Inserting a blob and diffing the tree
-   against its previous version yields novel nodes; streaming those novel nodes
-   to a fresh "remote" store and rebuilding the tree from its root lets the
-   remote `read_blob` the identical bytes — i.e. the differential *did* identify
-   exactly the blocks needed to replicate the blob.
-3. **Chunk-level dedup (and the keying pitfall).** A blob that shares most of its
-   chunks with an already-replicated blob uploads strictly fewer novel nodes than
-   a fully-disjoint blob of the same size. This test only passes because chunks
-   are keyed by chunk hash; it is the guard that caught the `blob_hash ‖ index`
-   mis-keying described above.
+## Replication
 
-Run it:
+Push diffs the tree once. The node-level view of the difference replicates the
+tree blocks, as it does for the other indexes. The entry-level view of the same
+difference, restricted to the `BLOB` tag, names exactly the blobs newly
+referenced relative to the synchronization checkpoint — i.e. the blobs the remote
+does not yet have under fast-forward. Push uploads those blobs (by the transfer
+protocol above) before publishing the revision that references them.
 
-```
-cargo test -p dialog-blobs --test blob_index_spike
-```
+The archive is append-only. Blobs are never deleted from a remote; reclaiming
+unreferenced blobs is a local concern and is out of scope here. Consequently the
+blob index, from the archive's perspective, only grows, and there is no
+cross-peer deletion to converge.
 
-## Suggested path to production (post-spike)
+## Capability surface
 
-1. Promote the blob-index key/chunk helpers into `dialog-blobs` as a real module
-   (`BlobIndex`), generic over a `dialog-search-tree` storage, backed by the
-   existing `dialog-blobs` VFS for the raw chunk bytes if we want large chunks
-   off-heap.
-2. Add a `"blobs"` catalog wiring in `dialog-repository` (a `NetworkedIndex`
-   over the blobs catalog) and a second root in `Revision`.
-3. Extend `commit`/`push`/`pull` to diff and import the blob tree alongside the
-   index tree (the loops already exist; they get a sibling).
-4. Switch large `Value` variants to store a blob-manifest hash instead of inline
-   bytes, with a size threshold deciding inline-vs-blob.
-5. Content-defined chunking + mark-and-sweep GC.
+Blobs use the archive capability hierarchy under a dedicated `blobs` catalog,
+parallel to the catalog used for index blocks:
+
+- **Read**: a hash-addressed `Get` (whole or ranged) on the `blobs` catalog.
+- **Replication write**: hash-addressed, range-addressed verified writes on the
+  `blobs` catalog (the fill protocol above), authorized over the known `H`.
+- **Ingest**: a hash-discovered local effect (`BlobImport`) that returns `H`;
+  because no hash is known ahead of time, it is not delegated as a content-bound
+  wire operation.
+
+The exact effect shapes (particularly the ingest effect and the ranged
+verified-write effect) are firmed up in the write PR.
+
+## Query surface
+
+- `blob/size(hash) → size` — answered from the blob-index value; no blob fetch.
+- `blob/slice(hash, start, end) → blob` — returns an opaque blob handle (a view
+  over a range of the parent), mirroring `Blob.slice`. Reading bytes from a
+  handle is a streaming/serving concern, not a query binding.
+
+Reading blob bytes directly within a query (binding bytes into a result row) is
+not a current need and is deliberately left open; the query surface binds only
+small values (a hash, a size, a handle).
+
+## Serving blobs as resources
+
+A blob is addressed by hash, so turning `…/<hash>` into bytes for a browser is a
+presentation layer on top of the storage model. A service worker can resolve such
+a request from local storage and lazily hydrate missing bytes (verified) from the
+archive, giving self-contained resource URLs without a dedicated server. The
+storage model is agnostic to which mechanism serves the bytes; this layer is out
+of scope for the initial work.
+
+## Load-bearing decisions
+
+Two decisions must be made correctly at the outset because later capabilities
+depend on them; both are cheap to honor immediately.
+
+1. **A blob's identity is the standard BLAKE3/BAO root of its complete bytes.**
+   No bespoke digest. This is what makes verified streaming, verified ranges, and
+   verified fill available later without changing identities or references.
+2. **The blob-index value is a versioned, extensible record** (holding the size
+   initially). New intrinsic fields can be added without migration.
+
+Given these, the remaining choices (whole-object versus verified-chunk transfer,
+serving mechanism, slice handle semantics) can change later without disturbing
+the logical model or stored identities.
+
+## Delivery plan
+
+1. **Tree support.** Allocate the `HISTORY` and `BLOB` tags; add the blob index
+   (`hash → {version, size}`) with local read/write and membership. No network or
+   capability surface.
+2. **Replication.** Push ships newly-referenced blobs to the `blobs` catalog,
+   driven by the entry-level difference over the `BLOB` tag; lazy read-back on the
+   remote. Whole-object hash-addressed transfer is sufficient here and is
+   forward-compatible with verified fill (identity is the same `H` either way).
+3. **Query engine.** `blob/size` and `blob/slice`, plus the read/ingest surface.
+
+Deferred, and explicitly not blocked by the above: BAO verified-chunk transfer
+(random-access fill, verified streaming, verified ranges); blob composition and
+verified sub-blob addressing; reading blob bytes within queries; service-worker
+resource serving.
