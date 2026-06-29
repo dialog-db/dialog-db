@@ -662,6 +662,18 @@ impl FileWriter {
     pub async fn finish(self) -> Result<(), FileSystemError> {
         write_atomic(&self.handle, &self.buffer).await
     }
+
+    /// Commit the buffered content to `dest` instead of the handle it was
+    /// opened on. Lets a content-addressed writer pick the final path (the
+    /// hash) only after the content has been streamed and hashed.
+    pub async fn finish_to(self, dest: &FileSystemHandle) -> Result<(), FileSystemError> {
+        write_atomic(dest, &self.buffer).await
+    }
+
+    /// Discard the buffered content without committing it.
+    pub async fn discard(self) -> Result<(), FileSystemError> {
+        Ok(())
+    }
 }
 
 pub(super) async fn write(
