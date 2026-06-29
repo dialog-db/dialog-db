@@ -15,12 +15,12 @@
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Buffer, ContentAddressedStorage, Delta};
+use dialog_search_tree::{Buffer, Change, ContentAddressedStorage, Delta, TreeDifference};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    BlobKey, Datum, DialogArtifactsError, Key, KeyBytes, State,
+    BLOB_KEY_TAG, BlobKey, Datum, DialogArtifactsError, Key, KeyBytes, State,
     tree::{ArtifactTree, TreeStorageBridge},
 };
 
@@ -96,6 +96,68 @@ impl BlobRecord {
             None => Err(DialogArtifactsError::MalformedIndex(
                 "empty blob record".to_string(),
             )),
+        }
+    }
+}
+
+/// A change to the blob index between two tree versions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobChange {
+    /// A blob newly referenced in the target tree — a candidate to upload.
+    Added(Blake3Hash),
+    /// A blob reference removed in the target tree.
+    Removed(Blake3Hash),
+}
+
+impl BlobChange {
+    /// The blob hash this change concerns.
+    pub fn hash(&self) -> &Blake3Hash {
+        match self {
+            BlobChange::Added(hash) | BlobChange::Removed(hash) => hash,
+        }
+    }
+}
+
+/// Stream the blob-index differences between two tree versions, in hash order.
+///
+/// Runs the search-tree differential and keeps only entries in the `BLOB` tag
+/// range, so the result names exactly the blobs added or removed between
+/// `checkpoint` and `current` — the set push must ship (additions) without
+/// re-reading subtrees that did not change. Both trees must be readable from
+/// `store`.
+pub fn blob_changes<S>(
+    checkpoint: ArtifactTree,
+    current: ArtifactTree,
+    store: S,
+) -> impl Stream<Item = Result<BlobChange, DialogArtifactsError>> + ConditionalSend
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + Clone
+        + ConditionalSync
+        + 'static,
+{
+    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    try_stream! {
+        let difference = TreeDifference::compute(&checkpoint, &current, &storage, &storage).await?;
+        let changes = difference.changes();
+        tokio::pin!(changes);
+        for await change in changes {
+            let (entry, removed) = match change? {
+                Change::Add(entry) => (entry, false),
+                Change::Remove(entry) => (entry, true),
+            };
+            let key = Key::from(entry.key);
+            if key.tag() != BLOB_KEY_TAG {
+                continue;
+            }
+            let hash = BlobKey(key).blob_hash();
+            // Decoding rejects a malformed record; a `None` decode is a
+            // retraction tombstone, which is a reference only when removed.
+            match (removed, BlobRecord::from_state(&entry.value)?) {
+                (false, Some(_)) => yield BlobChange::Added(hash),
+                (true, _) => yield BlobChange::Removed(hash),
+                (false, None) => {}
+            }
         }
     }
 }
@@ -292,6 +354,48 @@ mod tests {
                 (hash(3), BlobRecord::new(3)),
             ]
         );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_detects_newly_referenced_blobs_from_the_differential()
+    -> Result<(), DialogArtifactsError> {
+        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
+        let mut delta = Delta::zero();
+
+        let persist = |store: &mut MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+                       delta: &mut Delta<NodeHash, Buffer>| {
+            let buffers: Vec<_> = delta.flush().collect();
+            let store = store.clone();
+            async move {
+                let mut store = store;
+                for (_, buffer) in buffers {
+                    store
+                        .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                        .await?;
+                }
+                Ok::<_, DialogArtifactsError>(())
+            }
+        };
+
+        // Checkpoint references blob A.
+        let mut checkpoint = ArtifactTree::empty();
+        checkpoint
+            .put_blob(&mut store, &mut delta, &hash(1), BlobRecord::new(10))
+            .await?;
+        persist(&mut store, &mut delta).await?;
+
+        // Current adds blob B and keeps A.
+        let mut current = checkpoint.clone();
+        current
+            .put_blob(&mut store, &mut delta, &hash(2), BlobRecord::new(20))
+            .await?;
+        persist(&mut store, &mut delta).await?;
+
+        let changes: Vec<_> = blob_changes(checkpoint, current, store)
+            .try_collect()
+            .await?;
+        assert_eq!(changes, vec![BlobChange::Added(hash(2))]);
         Ok(())
     }
 }
