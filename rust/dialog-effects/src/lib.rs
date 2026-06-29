@@ -39,6 +39,7 @@
 pub mod access;
 pub mod archive;
 pub mod authority;
+pub mod blob;
 pub mod credential;
 pub mod memory;
 pub mod space;
@@ -51,6 +52,7 @@ pub mod storage;
 /// ```
 pub mod prelude {
     pub use crate::archive::prelude::*;
+    pub use crate::blob::prelude::*;
     pub use crate::credential::prelude::*;
     pub use crate::memory::prelude::*;
 }
