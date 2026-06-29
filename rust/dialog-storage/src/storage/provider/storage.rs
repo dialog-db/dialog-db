@@ -638,8 +638,8 @@ mod tests {
             use wasm_bindgen_futures::JsFuture;
 
             let global = js_sys::global();
-            let factory = Reflect::get(&global, &JsValue::from_str("indexedDB"))
-                .expect("global indexedDB");
+            let factory =
+                Reflect::get(&global, &JsValue::from_str("indexedDB")).expect("global indexedDB");
             let databases: Function = Reflect::get(&factory, &JsValue::from_str("databases"))
                 .expect("indexedDB.databases")
                 .unchecked_into();
