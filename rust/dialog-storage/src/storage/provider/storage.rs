@@ -362,6 +362,35 @@ mod tests {
             assert_eq!(result.unwrap(), Some(content));
         }
 
+        // `load` is "open an existing space, fail if absent" — it must
+        // never bring a space into being. A `load` of a name that was
+        // never created has to error AND leave nothing behind on disk
+        // (the bug it guards: a missing-name `load` materializing an
+        // empty backing store, e.g. a stray IndexedDB database).
+        #[dialog_common::test]
+        async fn it_does_not_create_on_load_of_missing_space() {
+            use std::path::PathBuf;
+
+            let env = Storage::temp();
+            let name = unique_name("fs-load-missing");
+
+            // Where `TempFileSystem` roots a `Directory::Profile` space.
+            let root: PathBuf = std::env::temp_dir()
+                .join("dialog")
+                .join("profile")
+                .join(&name);
+            assert!(!root.exists(), "precondition: space must not exist yet");
+
+            let result = StorageFx::profile(&name).load().perform(&env).await;
+
+            assert!(result.is_err(), "load of a missing space must fail");
+            assert!(
+                !root.exists(),
+                "load must not create the space directory: {}",
+                root.display(),
+            );
+        }
+
         #[dialog_common::test]
         async fn it_rejects_duplicate_create_on_filesystem() {
             let env = Storage::temp();
@@ -380,6 +409,73 @@ mod tests {
                 .perform(&env)
                 .await;
             assert!(result.is_err(), "duplicate create should fail");
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    mod web_tests {
+        use super::*;
+        use crate::helpers::unique_name;
+
+        // `load` is "open an existing space, fail if absent" — it must never
+        // bring a space into being. On IndexedDB a space is one database, so a
+        // `load` of a never-created profile has to error AND leave no database
+        // behind (the bug it guards: a missing-name load materializing a stray
+        // IndexedDB database, e.g. the literal `{subject}` DB an unbound
+        // template once produced).
+        #[dialog_common::test]
+        async fn it_does_not_create_on_load_of_missing_space() {
+            use crate::provider::storage::WebSpace;
+
+            let env: Storage<WebSpace> = Storage::default();
+            let name = unique_name("idb-load-missing");
+            // `Directory::Profile` names the database `"{name}.profile"`.
+            let db_name = format!("{name}.profile");
+
+            assert!(
+                !idb_database_exists(&db_name).await,
+                "precondition: database must not exist yet",
+            );
+
+            let result = StorageFx::profile(&name).load().perform(&env).await;
+
+            assert!(result.is_err(), "load of a missing space must fail");
+            assert!(
+                !idb_database_exists(&db_name).await,
+                "load must not create the IndexedDB database `{db_name}`",
+            );
+        }
+
+        /// True if an IndexedDB database with this name currently exists.
+        ///
+        /// Calls `indexedDB.databases()` (which lists without opening, so it
+        /// never creates one) off the worker/window global — the test runs in
+        /// a dedicated worker where `window` is absent, so the factory is read
+        /// from `self`, not `window`.
+        async fn idb_database_exists(name: &str) -> bool {
+            use js_sys::{Array, Function, Promise, Reflect};
+            use wasm_bindgen::{JsCast, JsValue};
+            use wasm_bindgen_futures::JsFuture;
+
+            let global = js_sys::global();
+            let factory =
+                Reflect::get(&global, &JsValue::from_str("indexedDB")).expect("global indexedDB");
+            let databases: Function = Reflect::get(&factory, &JsValue::from_str("databases"))
+                .expect("indexedDB.databases")
+                .unchecked_into();
+            let promise: Promise = databases
+                .call0(&factory)
+                .expect("databases() call")
+                .unchecked_into();
+            let list = JsFuture::from(promise).await.expect("databases() resolves");
+
+            Array::from(&list).iter().any(|info| {
+                Reflect::get(&info, &JsValue::from_str("name"))
+                    .ok()
+                    .and_then(|n| n.as_string())
+                    .as_deref()
+                    == Some(name)
+            })
         }
     }
 }
