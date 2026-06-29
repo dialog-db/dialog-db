@@ -376,9 +376,7 @@ pub(super) async fn open_reader(
 /// into place on [`FileWriter::finish`] — the same atomic temp+rename
 /// `write_atomic` uses, but fed incrementally so multi-gigabyte content never
 /// lands in a single buffer.
-pub(super) async fn open_writer(
-    handle: &FileSystemHandle,
-) -> Result<FileWriter, FileSystemError> {
+pub(super) async fn open_writer(handle: &FileSystemHandle) -> Result<FileWriter, FileSystemError> {
     let target: PathBuf = handle.try_into()?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
@@ -411,7 +409,25 @@ impl FileWriter {
     }
 
     /// Flush and atomically move the staged file into place.
-    pub async fn finish(mut self) -> Result<(), FileSystemError> {
+    pub async fn finish(self) -> Result<(), FileSystemError> {
+        let target = self.target.clone();
+        self.finish_to_path(&target).await
+    }
+
+    /// Flush and atomically move the staged file to `dest` instead of the
+    /// handle it was opened on. Lets a content-addressed writer pick the final
+    /// path (the hash) only once the content has been streamed and hashed.
+    pub async fn finish_to(self, dest: &FileSystemHandle) -> Result<(), FileSystemError> {
+        let dest_path: PathBuf = dest.try_into()?;
+        self.finish_to_path(&dest_path).await
+    }
+
+    async fn finish_to_path(mut self, dest: &PathBuf) -> Result<(), FileSystemError> {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| FileSystemError::Io(e.to_string()))?;
+        }
         self.file
             .flush()
             .await
@@ -420,13 +436,19 @@ impl FileWriter {
             .sync_all()
             .await
             .map_err(|e| FileSystemError::Io(e.to_string()))?;
-        match fs::rename(&self.tmp, &self.target).await {
+        match fs::rename(&self.tmp, dest).await {
             Ok(()) => Ok(()),
             Err(e) => {
                 let _ = fs::remove_file(&self.tmp).await;
                 Err(FileSystemError::Io(e.to_string()))
             }
         }
+    }
+
+    /// Discard the staged content without committing it.
+    pub async fn discard(self) -> Result<(), FileSystemError> {
+        let _ = fs::remove_file(&self.tmp).await;
+        Ok(())
     }
 }
 

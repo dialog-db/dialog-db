@@ -26,6 +26,7 @@
 //! [weblocks]: https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API
 
 mod archive;
+mod blob;
 mod error;
 mod memory;
 
