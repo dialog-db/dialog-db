@@ -3,7 +3,6 @@
 //! Layout: `{space_root}/archive/{catalog}/{base58(digest)}`
 
 use super::{FileSystem, FileSystemError, FileSystemHandle};
-use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
@@ -25,7 +24,8 @@ impl From<FileSystemError> for ArchiveError {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Get> for FileSystem {
     async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
         let catalog = effect.catalog();
@@ -40,7 +40,8 @@ impl Provider<Get> for FileSystem {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Put> for FileSystem {
     async fn execute(&self, effect: Capability<Put>) -> Result<(), ArchiveError> {
         let catalog = effect.catalog();
@@ -48,25 +49,21 @@ impl Provider<Put> for FileSystem {
         let content = effect.content();
 
         let key = digest.as_bytes().to_base58();
-        let destination = self.archive()?.resolve(catalog)?;
-        let handle = destination.resolve(&key)?;
+        let handle = self.archive()?.resolve(catalog)?.resolve(&key)?;
 
-        // Content-addressed storage is idempotent - if file exists with same
-        // content hash, no need to rewrite
+        // Content-addressed storage is idempotent: if the blob already exists
+        // its bytes are identical, so there is nothing to rewrite.
         if handle.exists().await {
             return Ok(());
         }
 
-        // Write atomically via temp file + rename
-        let tmp_handle = destination.resolve(&format!("{}.tmp", key))?;
-        tmp_handle.write(content).await?;
-        tmp_handle.rename(&handle).await?;
-
+        handle.write_atomic(content).await?;
         Ok(())
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Import> for FileSystem {
     async fn execute(&self, effect: Capability<Import>) -> Result<(), ArchiveError> {
         let catalog = effect.catalog();
@@ -86,16 +83,13 @@ impl Provider<Import> for FileSystem {
                 let key = buffer.blake3_hash().as_bytes().to_base58();
                 let handle = destination.resolve(&key)?;
 
-                // Content-addressed storage is idempotent - if file exists
-                // with same content hash, no need to rewrite
+                // Content-addressed storage is idempotent: an existing blob has
+                // identical bytes, so there is nothing to rewrite.
                 if handle.exists().await {
                     return Ok(());
                 }
 
-                // Write atomically via temp file + rename
-                let tmp_handle = destination.resolve(&format!("{}.tmp", key))?;
-                tmp_handle.write(buffer.as_ref()).await?;
-                tmp_handle.rename(&handle).await?;
+                handle.write_atomic(buffer.as_ref()).await?;
                 Ok(()) as Result<(), ArchiveError>
             }
         }))
@@ -105,7 +99,7 @@ impl Provider<Import> for FileSystem {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::helpers::{unique_did, unique_name};

@@ -47,6 +47,7 @@ mod tests {
 
     use super::*;
     use dialog_capability::{Site, SiteAddress};
+    use dialog_effects::storage::Location;
     use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address as S3Address;
     use dialog_remote_ucan_s3::UcanAddress;
@@ -64,7 +65,7 @@ mod tests {
     }
 
     fn fs_address() -> FsAddress {
-        FsAddress::new("did:key:zTestVault")
+        FsAddress::new(Location::temp("test-vault"))
     }
 
     /// `NetworkAddress` is a public enum with one variant per field. Variant

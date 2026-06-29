@@ -22,10 +22,9 @@
 //! [`IndexedDb`]: indexeddb::IndexedDb
 //! [`Volatile`]: volatile::Volatile
 
-#[cfg(not(target_arch = "wasm32"))]
+// The filesystem provider is isomorphic: native is backed by `tokio::fs`,
+// the browser by the File System Access API. It compiles on every target.
 pub mod fs;
-
-#[cfg(not(target_arch = "wasm32"))]
 pub use fs::*;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
