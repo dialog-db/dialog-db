@@ -16,7 +16,7 @@
 //!
 //! [fsapi]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API
 
-use super::{FileSystem, FileSystemError, FileSystemHandle};
+use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle};
 use js_sys::Uint8Array;
 use std::rc::Rc;
 use url::Url;
@@ -604,6 +604,64 @@ pub(super) async fn write_atomic(
     contents: &[u8],
 ) -> Result<(), FileSystemError> {
     write(handle, contents).await
+}
+
+/// Streaming reader. The File System Access API has no incremental read
+/// primitive that works off the main thread on every browser, so this buffers
+/// the whole file and yields it (sliced to the requested range) as a single
+/// chunk — correct and API-uniform with native; a chunked OPFS read is a
+/// follow-up. Nothing here is hot on the web (large blobs are the OPFS-Space
+/// case), so buffering is acceptable for now.
+pub(super) async fn open_reader(
+    handle: &FileSystemHandle,
+    offset: u64,
+    len: Option<u64>,
+) -> Result<FileReader, FileSystemError> {
+    let bytes = read(handle).await?;
+    let start = (offset as usize).min(bytes.len());
+    let end = match len {
+        Some(len) => start.saturating_add(len as usize).min(bytes.len()),
+        None => bytes.len(),
+    };
+    let chunk = bytes[start..end].to_vec();
+    let stream = async_stream::try_stream! {
+        if !chunk.is_empty() {
+            yield chunk;
+        }
+    };
+    Ok(Box::pin(stream))
+}
+
+/// Streaming writer. Buffers chunks and commits them with the atomic
+/// `createWritable().close()` on [`FileWriter::finish`]. Like the reader, this
+/// buffers rather than streaming to OPFS incrementally — a follow-up.
+pub(super) async fn open_writer(
+    handle: &FileSystemHandle,
+) -> Result<FileWriter, FileSystemError> {
+    Ok(FileWriter {
+        handle: handle.clone(),
+        buffer: Vec::new(),
+    })
+}
+
+/// A streaming, atomically-committed file writer (web). Buffers until
+/// [`finish`](Self::finish), which writes atomically.
+pub struct FileWriter {
+    handle: FileSystemHandle,
+    buffer: Vec<u8>,
+}
+
+impl FileWriter {
+    /// Append a chunk to the buffer.
+    pub async fn write_all(&mut self, bytes: &[u8]) -> Result<(), FileSystemError> {
+        self.buffer.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// Commit the buffered content atomically.
+    pub async fn finish(self) -> Result<(), FileSystemError> {
+        write_atomic(&self.handle, &self.buffer).await
+    }
 }
 
 pub(super) async fn write(

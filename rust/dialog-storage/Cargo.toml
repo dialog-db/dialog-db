@@ -55,7 +55,7 @@ tokio = { workspace = true, features = ["sync"] }
 url = { workspace = true }
 pidlock = { workspace = true }
 tempfile = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net"] }
+tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net", "io-util"] }
 http-body-util = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 tokio-test = { workspace = true, optional = true }

@@ -4,14 +4,20 @@
 //! Path layout and containment live in the shared [`super`] module; this file
 //! only performs I/O.
 
-use super::{FileSystem, FileSystemError, FileSystemHandle};
+use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle};
 use crate::resource::Resource;
+use async_stream::try_stream;
 use dialog_effects::storage::{Directory, Location};
 use std::env;
 use std::io;
+use std::io::SeekFrom;
 use std::path::PathBuf;
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use url::Url;
+
+/// Chunk size for streaming file reads.
+const STREAM_CHUNK_SIZE: usize = 64 * 1024;
 
 /// Subdirectory name used to namespace dialog storage inside the
 /// platform's data and temp directories.
@@ -234,6 +240,107 @@ pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
         return false;
     };
     path.exists()
+}
+
+/// Open a streaming reader over the file, starting at `offset` and yielding at
+/// most `len` bytes (all of it when `len` is `None`). Chunks are owned `Vec`s
+/// so nothing buffers the whole file.
+pub(super) async fn open_reader(
+    handle: &FileSystemHandle,
+    offset: u64,
+    len: Option<u64>,
+) -> Result<FileReader, FileSystemError> {
+    let path: PathBuf = handle.try_into()?;
+    let mut file = fs::File::open(&path)
+        .await
+        .map_err(|e| FileSystemError::Io(e.to_string()))?;
+    if offset > 0 {
+        file.seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))?;
+    }
+    let stream = try_stream! {
+        let mut file = file;
+        let mut remaining = len;
+        let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+        loop {
+            let cap = match remaining {
+                Some(0) => break,
+                Some(r) => (r as usize).min(STREAM_CHUNK_SIZE),
+                None => STREAM_CHUNK_SIZE,
+            };
+            let read = file
+                .read(&mut buf[..cap])
+                .await
+                .map_err(|e| FileSystemError::Io(e.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            if let Some(r) = remaining.as_mut() {
+                *r -= read as u64;
+            }
+            yield buf[..read].to_vec();
+        }
+    };
+    Ok(Box::pin(stream))
+}
+
+/// Open a streaming writer that stages into a sibling temp file and renames it
+/// into place on [`FileWriter::finish`] — the same atomic temp+rename
+/// `write_atomic` uses, but fed incrementally so multi-gigabyte content never
+/// lands in a single buffer.
+pub(super) async fn open_writer(
+    handle: &FileSystemHandle,
+) -> Result<FileWriter, FileSystemError> {
+    let target: PathBuf = handle.try_into()?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))?;
+    }
+    let tmp = target.with_extension(format!("{}.tmp", unique_suffix()));
+    let file = fs::File::create(&tmp)
+        .await
+        .map_err(|e| FileSystemError::Io(e.to_string()))?;
+    Ok(FileWriter { file, tmp, target })
+}
+
+/// A streaming, atomically-committed file writer. Bytes go to a temp file;
+/// [`finish`](Self::finish) flushes and renames it into place. Dropping without
+/// `finish` leaves the temp file (cleaned up best-effort).
+pub struct FileWriter {
+    file: fs::File,
+    tmp: PathBuf,
+    target: PathBuf,
+}
+
+impl FileWriter {
+    /// Append a chunk to the staged file.
+    pub async fn write_all(&mut self, bytes: &[u8]) -> Result<(), FileSystemError> {
+        self.file
+            .write_all(bytes)
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))
+    }
+
+    /// Flush and atomically move the staged file into place.
+    pub async fn finish(mut self) -> Result<(), FileSystemError> {
+        self.file
+            .flush()
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))?;
+        self.file
+            .sync_all()
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string()))?;
+        match fs::rename(&self.tmp, &self.target).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = fs::remove_file(&self.tmp).await;
+                Err(FileSystemError::Io(e.to_string()))
+            }
+        }
+    }
 }
 
 /// Acquire a cross-process PID lock for the given handle's CAS critical
