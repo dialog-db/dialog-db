@@ -74,9 +74,12 @@ where
                 .map_err(|e| StorageError::NotFound(e.to_string()));
         }
 
-        let store = S::open(location)
+        // `load`, not `open`: a `storage::Load` of a space that was never
+        // created must fail without materializing its backing store (an
+        // `open` here would, on IndexedDB, create the database into being).
+        let store = S::load(location)
             .await
-            .map_err(|e| StorageError::Storage(e.to_string()))?;
+            .map_err(|e| StorageError::NotFound(e.to_string()))?;
 
         let cred: Credential = did!("local:storage")
             .credential()
