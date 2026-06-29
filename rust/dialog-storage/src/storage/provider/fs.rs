@@ -53,7 +53,7 @@ mod native;
 mod web;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub use web::WebRoot;
+pub use web::FileSystemDirectoryHandleExt;
 
 pub use error::FileSystemError;
 
@@ -91,51 +91,27 @@ impl From<FileSystemHandle> for FileSystem {
     }
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-impl FileSystem {
-    /// Open the provider for a directory persisted in IndexedDB under `name`.
-    ///
-    /// `name` is the FS-remote address: an IndexedDB database holding the
-    /// directory's `FileSystemDirectoryHandle`. The handle must have been saved
-    /// once with [`register_web_directory`]. This is the web analogue of opening
-    /// a native directory from its `file:` URL.
-    pub async fn open_web(name: &str) -> Result<Self, FileSystemError> {
-        Ok(WebRoot::open(name).await?.provider())
-    }
-}
-
-/// Persist a host-granted directory handle under the IndexedDB database `name`,
-/// so a [`FileSystem`] for it can later be opened with
-/// [`FileSystem::open_web`]. Typically called once, right after the user picks
-/// the directory through `showDirectoryPicker()`.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub async fn register_web_directory(
-    name: &str,
-    handle: web_sys::FileSystemDirectoryHandle,
-) -> Result<(), FileSystemError> {
-    WebRoot::register(name, handle).await
-}
-
 /// A location in the filesystem, represented as a `file:` URL.
 ///
 /// The URL is the single source of truth for path layout and containment on
 /// every target; child paths resolved through [`resolve`](Self::resolve) are
 /// validated against the root so segments can never escape it. On the web a
-/// [`WebRoot`] is carried alongside so the same URL path can be walked through
-/// the File System Access API.
+/// `MountedDirectory` is carried alongside so the same URL path can be walked
+/// through the File System Access API.
 #[derive(Clone, Debug)]
 pub struct FileSystemHandle {
     /// The `file:` URL describing this handle's position in the layout.
     url: Url,
-    /// The web root this handle navigates from. The URL path relative to the
-    /// root's URL gives the segment list to walk through the FS Access API.
+    /// The mounted directory this handle navigates within. The URL path
+    /// relative to that directory's base URL gives the segment list to walk
+    /// through the FS Access API.
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    root: web::WebRoot,
+    root: web::MountedDirectory,
 }
 
 /// Constructing a handle from a bare `file:` URL is native-only; on the web a
-/// handle must be created through [`WebRoot::handle`] so it carries the JS
-/// directory handle it navigates from.
+/// handle must be created through `MountedDirectory` so it carries the JS directory
+/// handle it navigates from.
 #[cfg(not(target_arch = "wasm32"))]
 impl TryFrom<Url> for FileSystemHandle {
     type Error = FileSystemError;
@@ -268,6 +244,19 @@ impl FileSystemHandle {
     /// Write contents to the file at this location, creating parent dirs.
     pub async fn write(&self, contents: &[u8]) -> Result<(), FileSystemError> {
         backend::write(self, contents).await
+    }
+
+    /// Write contents to this location atomically: a concurrent reader sees
+    /// either the old file or the complete new one, never a partial write.
+    ///
+    /// Each backend does the cheapest thing that gives that guarantee — on the
+    /// web `createWritable().close()` already swaps the file atomically, so this
+    /// is a direct write; on native it stages a temp file and `rename`s it into
+    /// place (one atomic syscall). Callers that need atomicity should prefer
+    /// this over a manual temp+rename, which on the web degrades to a full
+    /// read+rewrite+delete.
+    pub async fn write_atomic(&self, contents: &[u8]) -> Result<(), FileSystemError> {
+        backend::write_atomic(self, contents).await
     }
 
     /// Atomically rename this location to another.

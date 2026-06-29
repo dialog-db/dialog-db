@@ -49,20 +49,15 @@ impl Provider<Put> for FileSystem {
         let content = effect.content();
 
         let key = digest.as_bytes().to_base58();
-        let destination = self.archive()?.resolve(catalog)?;
-        let handle = destination.resolve(&key)?;
+        let handle = self.archive()?.resolve(catalog)?.resolve(&key)?;
 
-        // Content-addressed storage is idempotent - if file exists with same
-        // content hash, no need to rewrite
+        // Content-addressed storage is idempotent: if the blob already exists
+        // its bytes are identical, so there is nothing to rewrite.
         if handle.exists().await {
             return Ok(());
         }
 
-        // Write atomically via temp file + rename
-        let tmp_handle = destination.resolve(&format!("{}.tmp", key))?;
-        tmp_handle.write(content).await?;
-        tmp_handle.rename(&handle).await?;
-
+        handle.write_atomic(content).await?;
         Ok(())
     }
 }
@@ -88,16 +83,13 @@ impl Provider<Import> for FileSystem {
                 let key = buffer.blake3_hash().as_bytes().to_base58();
                 let handle = destination.resolve(&key)?;
 
-                // Content-addressed storage is idempotent - if file exists
-                // with same content hash, no need to rewrite
+                // Content-addressed storage is idempotent: an existing blob has
+                // identical bytes, so there is nothing to rewrite.
                 if handle.exists().await {
                     return Ok(());
                 }
 
-                // Write atomically via temp file + rename
-                let tmp_handle = destination.resolve(&format!("{}.tmp", key))?;
-                tmp_handle.write(buffer.as_ref()).await?;
-                tmp_handle.rename(&handle).await?;
+                handle.write_atomic(buffer.as_ref()).await?;
                 Ok(()) as Result<(), ArchiveError>
             }
         }))
