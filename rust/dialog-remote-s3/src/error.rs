@@ -46,6 +46,12 @@ impl From<S3Error> for MemoryError {
     }
 }
 
+impl From<S3Error> for dialog_effects::blob::BlobError {
+    fn from(error: S3Error) -> Self {
+        dialog_effects::blob::BlobError::Storage(error.to_string())
+    }
+}
+
 /// Error encoding or decoding [`S3Authorization`](crate::S3Authorization)
 /// to/from a [`Secret`](dialog_effects::credential::Secret).
 #[derive(Debug, Error)]
