@@ -13,7 +13,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use dialog_remote_s3::{Address, S3Credential, S3Authorization};
+//! use dialog_remote_s3::{Address, S3Credential, S3Request};
 //! use dialog_effects::archive::{Archive, Catalog, Get};
 //! use dialog_capability::{Subject, did};
 //!
@@ -25,18 +25,19 @@
 //!
 //! let subject = did!("key:zSubject");
 //!
-//! let auth = S3Authorization::from(S3Credential::new(
+//! let credential = S3Credential::new(
 //!     "AKIAIOSFODNN7EXAMPLE",
 //!     "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-//! ));
+//! );
 //!
 //! let capability = Subject::from(subject)
 //!     .attenuate(Archive)
 //!     .attenuate(Catalog::new("blobs"))
 //!     .invoke(Get::new([0u8; 32]));
 //!
-//! let request = auth.redeem(&capability, &address).await?;
-//! println!("Presigned URL: {}", request.url);
+//! let auth = S3Request::from(&capability).attest(credential);
+//! let permit = auth.redeem(&address).await?;
+//! println!("Presigned URL: {}", permit.url);
 //! # Ok(())
 //! # }
 //! ```

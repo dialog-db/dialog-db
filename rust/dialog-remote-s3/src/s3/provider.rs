@@ -5,4 +5,5 @@
 //! - `Provider<ForkInvocation<S3, Fx>>` — authorization via S3Authorization, then delegation
 
 pub mod archive;
+pub mod blob;
 pub mod memory;
