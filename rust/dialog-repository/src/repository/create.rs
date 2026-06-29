@@ -33,10 +33,11 @@ impl CreateRepository {
     /// repository with that same signer.
     ///
     /// ```no_run
-    /// # async fn example(
+    /// # async fn example<Env>(
     /// #     profile: &dialog_operator::Profile,
-    /// #     operator: &impl dialog_capability::Provider<dialog_effects::space::Create>,
-    /// # ) -> Result<(), Box<dyn std::error::Error>> {
+    /// #     operator: &Env,
+    /// # ) -> Result<(), Box<dyn std::error::Error>>
+    /// # where Env: dialog_capability::Provider<dialog_effects::space::Create> + dialog_common::ConditionalSync {
     /// use dialog_credentials::Ed25519Signer;
     /// use dialog_repository::RepositoryExt;
     /// use dialog_varsig::Principal;

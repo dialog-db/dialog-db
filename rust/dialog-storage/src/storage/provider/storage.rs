@@ -26,7 +26,7 @@ use crate::resource::Pool;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::NativeSpace;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub use web::WebSpace;
+pub use web::{WebOpfsSpace, WebSpace};
 
 /// Storage: the runtime context for capability dispatch.
 #[derive(Provider)]
@@ -380,6 +380,192 @@ mod tests {
                 .perform(&env)
                 .await;
             assert!(result.is_err(), "duplicate create should fail");
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    mod web_tests {
+        use super::*;
+        use crate::helpers::unique_name;
+
+        // `Storage::opfs()` mounts a Space that keeps archive and memory in OPFS
+        // and credential/certificate on IndexedDB. These exercise the full
+        // mixed-backend round-trip: create (credential -> IndexedDB), archive a
+        // blob and publish a cell (-> OPFS), read them back, then reload the
+        // profile (credential read back from IndexedDB).
+        #[dialog_common::test]
+        async fn it_round_trips_archive_and_memory_on_opfs() {
+            let env = Storage::opfs();
+            let name = unique_name("opfs-roundtrip");
+
+            let did = StorageFx::profile(&name)
+                .create(test_credential().await)
+                .perform(&env)
+                .await
+                .unwrap()
+                .did();
+
+            // Archive (-> OPFS).
+            let content = b"opfs archive blob".to_vec();
+            let digest = Blake3Hash::hash(&content);
+            did.clone()
+                .archive()
+                .catalog("index")
+                .put(Buffer::from(content.clone()))
+                .perform(&env)
+                .await
+                .unwrap();
+            let got = did
+                .clone()
+                .archive()
+                .catalog("index")
+                .get(digest)
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(got, Some(content));
+
+            // Memory (-> OPFS).
+            let cell = b"opfs cell value".to_vec();
+            did.clone()
+                .memory()
+                .space("data")
+                .cell("head")
+                .publish(cell.clone(), None)
+                .perform(&env)
+                .await
+                .unwrap();
+            let resolved = did
+                .memory()
+                .space("data")
+                .cell("head")
+                .resolve()
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(resolved.unwrap().content, cell);
+        }
+
+        #[dialog_common::test]
+        async fn it_loads_the_credential_from_indexeddb() {
+            let env = Storage::opfs();
+            let name = unique_name("opfs-credential");
+            let credential = test_credential().await;
+            let expected_did = credential.did();
+
+            StorageFx::profile(&name)
+                .create(credential)
+                .perform(&env)
+                .await
+                .unwrap();
+
+            // The credential lives on IndexedDB; loading the profile reads it
+            // back, proving the credential slot is wired to IndexedDB while
+            // archive/memory above used OPFS.
+            let loaded = StorageFx::profile(&name)
+                .load()
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(loaded.did(), expected_did);
+        }
+
+        #[dialog_common::test]
+        async fn it_enforces_cas_on_opfs_memory() {
+            use dialog_effects::memory::MemoryError;
+
+            let env = Storage::opfs();
+            let did = StorageFx::profile(&unique_name("opfs-cas"))
+                .create(test_credential().await)
+                .perform(&env)
+                .await
+                .unwrap()
+                .did();
+
+            did.clone()
+                .memory()
+                .space("data")
+                .cell("head")
+                .publish(b"first".to_vec(), None)
+                .perform(&env)
+                .await
+                .unwrap();
+
+            // A second IfNoneMatch publish must fail: the cell already exists.
+            let result = did
+                .memory()
+                .space("data")
+                .cell("head")
+                .publish(b"second".to_vec(), None)
+                .perform(&env)
+                .await;
+            assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
+        }
+
+        #[dialog_common::test]
+        async fn it_isolates_spaces_on_opfs() {
+            let env = Storage::opfs();
+            let alice = StorageFx::profile(&unique_name("opfs-alice"))
+                .create(test_credential().await)
+                .perform(&env)
+                .await
+                .unwrap()
+                .did();
+            let bob = StorageFx::profile(&unique_name("opfs-bob"))
+                .create(test_credential().await)
+                .perform(&env)
+                .await
+                .unwrap()
+                .did();
+
+            let content = b"alice only".to_vec();
+            let digest = Blake3Hash::hash(&content);
+            alice
+                .archive()
+                .catalog("index")
+                .put(Buffer::from(content))
+                .perform(&env)
+                .await
+                .unwrap();
+
+            let seen = bob
+                .archive()
+                .catalog("index")
+                .get(digest)
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(seen, None, "bob's OPFS space must not see alice's blob");
+        }
+
+        #[dialog_common::test]
+        async fn it_round_trips_a_large_blob_on_opfs() {
+            // A megabyte blob — the large-payload case OPFS is meant to serve.
+            let env = Storage::opfs();
+            let did = StorageFx::profile(&unique_name("opfs-large"))
+                .create(test_credential().await)
+                .perform(&env)
+                .await
+                .unwrap()
+                .did();
+
+            let content: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
+            let digest = Blake3Hash::hash(&content);
+            did.clone()
+                .archive()
+                .catalog("index")
+                .put(Buffer::from(content.clone()))
+                .perform(&env)
+                .await
+                .unwrap();
+            let got = did
+                .archive()
+                .catalog("index")
+                .get(digest)
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(got, Some(content));
         }
     }
 }

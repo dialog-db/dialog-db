@@ -85,6 +85,68 @@ impl Credential {
             CredentialExport::Verifier(v) => Ok(Self::Verifier(VerifierCredential::import(v)?)),
         }
     }
+
+    /// Recover a verifier-only credential (public key, hence DID) from the
+    /// byte-compatible on-disk storage form, on any target.
+    ///
+    /// The stored form is multicodec-tagged bytes — `{PUBLIC_TAG|pubkey}` for a
+    /// verifier, `{PRIVATE_TAG|seed|PUBLIC_TAG|pubkey}` for a signer. Only the
+    /// public key is read, so this works in the browser too (no WebCrypto
+    /// import of a non-extractable signing key). The result can verify and
+    /// yields the credential's [`Did`](dialog_varsig::Did), which is all that
+    /// subject checks need; it cannot sign.
+    pub fn identity(bytes: &[u8]) -> Result<Self, CredentialExportError> {
+        use constants::{
+            KEY_SIZE, PRIVATE_TAG, PUBLIC_KEY_OFFSET, PUBLIC_TAG, PUBLIC_TAG_SIZE,
+            SIGNER_EXPORT_SIZE, VERIFIER_EXPORT_SIZE,
+        };
+
+        let pubkey: &[u8] = if bytes.len() == VERIFIER_EXPORT_SIZE && bytes.starts_with(PUBLIC_TAG)
+        {
+            &bytes[PUBLIC_TAG_SIZE..]
+        } else if bytes.len() == SIGNER_EXPORT_SIZE
+            && bytes.starts_with(PRIVATE_TAG)
+            && bytes[PUBLIC_KEY_OFFSET..].starts_with(PUBLIC_TAG)
+        {
+            &bytes[PUBLIC_KEY_OFFSET + PUBLIC_TAG_SIZE..]
+        } else {
+            return Err(CredentialExportError::InvalidFormat(format!(
+                "unrecognized credential format: length={}",
+                bytes.len()
+            )));
+        };
+
+        let key: [u8; KEY_SIZE] = pubkey
+            .try_into()
+            .map_err(|_| CredentialExportError::InvalidFormat("invalid public key".into()))?;
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&key)
+            .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
+        Ok(Self::Verifier(VerifierCredential::from(
+            crate::Ed25519Verifier(crate::ed25519::Ed25519VerifyingKey::Native(vk)),
+        )))
+    }
+
+    /// The identity (public-key) bytes for this credential, in the
+    /// byte-compatible verifier storage form `{PUBLIC_TAG|pubkey}`, on any
+    /// target.
+    ///
+    /// This is the inverse of [`identity`](Self::identity): writing these bytes
+    /// to a directory's `credential/key/self` is what makes that directory the
+    /// space for this credential's [`Did`](dialog_varsig::Did). Only the public
+    /// key is emitted, so it works in the browser too.
+    pub fn to_identity_bytes(&self) -> Vec<u8> {
+        use constants::{KEY_SIZE, PUBLIC_TAG, PUBLIC_TAG_SIZE, VERIFIER_EXPORT_SIZE};
+
+        let pubkey: [u8; KEY_SIZE] = match self {
+            Self::Signer(s) => s.0.ed25519_did().0.to_bytes(),
+            Self::Verifier(v) => v.0.0.to_bytes(),
+        };
+        let mut buffer = Vec::with_capacity(VERIFIER_EXPORT_SIZE);
+        buffer.extend_from_slice(PUBLIC_TAG);
+        buffer.extend_from_slice(&pubkey);
+        debug_assert_eq!(buffer.len(), PUBLIC_TAG_SIZE + KEY_SIZE);
+        buffer
+    }
 }
 
 impl Serialize for Credential {
