@@ -45,6 +45,7 @@ pub const SERVICE: &str = "s3";
 pub const DEFAULT_PATH: &str = "/";
 
 pub mod archive;
+pub mod blob;
 pub mod memory;
 
 /// Precondition for conditional S3 operations (CAS semantics).
