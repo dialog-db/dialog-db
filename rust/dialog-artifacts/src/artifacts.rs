@@ -670,13 +670,11 @@ mod tests {
             )
         };
 
-        // The old prolly tree pinned its eagerly loaded root node in
-        // memory, so query read counts excluded the root. The search tree
-        // holds only the root hash and reads the root block on first use;
-        // the shared node cache absorbs that read on every subsequent
-        // query against the same tree (see it_uses_indexes_to_optimize_reads
-        // where the second select costs one read fewer than it used to).
-        assert_eq!(net_reads, 3);
+        // The threshold-based geometric distribution gives an exact 1/m
+        // split at every level, so the tree is flatter than the bit-batch
+        // distribution (whose upper levels averaged only 2-4 children) and a
+        // point query walks one fewer block to reach its leaf.
+        assert_eq!(net_reads, 2);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -734,13 +732,11 @@ mod tests {
             )
         };
 
-        // The old prolly tree pinned its eagerly loaded root node in
-        // memory, so query read counts excluded the root. The search tree
-        // holds only the root hash and reads the root block on first use;
-        // the shared node cache absorbs that read on every subsequent
-        // query against the same tree (see it_uses_indexes_to_optimize_reads
-        // where the second select costs one read fewer than it used to).
-        assert_eq!(net_reads, 3);
+        // The threshold-based geometric distribution gives an exact 1/m
+        // split at every level, so the tree is flatter than the bit-batch
+        // distribution (whose upper levels averaged only 2-4 children) and a
+        // point query walks one fewer block to reach its leaf.
+        assert_eq!(net_reads, 2);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -776,13 +772,11 @@ mod tests {
             )
         };
 
-        // The old prolly tree pinned its eagerly loaded root node in
-        // memory, so query read counts excluded the root. The search tree
-        // holds only the root hash and reads the root block on first use;
-        // the shared node cache absorbs that read on every subsequent
-        // query against the same tree (see it_uses_indexes_to_optimize_reads
-        // where the second select costs one read fewer than it used to).
-        assert_eq!(net_reads, 5);
+        // The threshold-based geometric distribution gives an exact 1/m
+        // split at every level, so the tree is flatter than the bit-batch
+        // distribution (whose upper levels averaged only 2-4 children) and
+        // reaching a leaf costs fewer block reads.
+        assert_eq!(net_reads, 2);
         assert_eq!(net_writes, 0);
 
         let fact_stream =
@@ -800,10 +794,11 @@ mod tests {
             )
         };
 
-        // One read fewer than the old tree: the root block was cached
-        // by the select above, while the old tree re-walked from its
-        // resident root through uncached children.
-        assert_eq!(net_reads, 10);
+        // The broad attribute scan walks far fewer blocks under the
+        // threshold-based geometric distribution: its exact 1/m split at
+        // every level keeps the tree flat, where the bit-batch distribution
+        // built taller upper levels that cost more reads to traverse.
+        assert_eq!(net_reads, 4);
         assert_eq!(net_writes, 0);
 
         Ok(())
