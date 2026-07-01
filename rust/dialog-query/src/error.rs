@@ -1,5 +1,6 @@
 //! Error types for the query engine
 
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::error;
 use std::fmt;
@@ -13,7 +14,7 @@ use crate::term::Term;
 use crate::types::Any;
 pub use thiserror::Error;
 
-/// Errors that occur before query execution — during rule compilation, schema
+/// Errors that occur before query execution: during rule compilation, schema
 /// validation, planning, and syntax parsing.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum TypeError {
@@ -46,6 +47,15 @@ pub enum TypeError {
     #[error("Unconstrained fact selector")]
     UnconstrainedSelector,
 
+    /// A concept declares no required (`with`) attributes. Such a
+    /// concept constrains nothing about an entity, so every entity
+    /// trivially matches it: the same degenerate shape as a concept
+    /// with no attributes at all. Optional (`maybe`) attributes do
+    /// not count: they widen results rather than constrain them. A
+    /// concept must have at least one required attribute.
+    #[error("Concept declares no required attributes; at least one `with` attribute is required")]
+    EmptyConcept,
+
     /// A rule declares a parameter that none of its premises use.
     #[error("Rule {rule} does not use parameter \"{parameter}\"")]
     UnusedParameter {
@@ -62,6 +72,59 @@ pub enum TypeError {
         rule: Box<Rule>,
         /// Name of the unbound variable.
         variable: String,
+    },
+
+    /// A rule's conclusion references a required variable that is
+    /// bound only by Optional (set-widened) premises: the rule
+    /// could produce a row with the conclusion variable in Absent
+    /// state, which a required head cannot accept. Fix by adding
+    /// a required-binding premise for the variable, or by coalescing
+    /// the optional source with a fallback before reaching the head.
+    #[error(
+        "Rule {rule}: field \"{variable}\" is optional but the conclusion requires a value. \
+         Use coalesce(...) to provide a fallback, or bind \"{variable}\" from a required premise."
+    )]
+    RequiredHeadFromOptional {
+        /// The offending rule.
+        rule: Box<Rule>,
+        /// Name of the optionally-bound head variable.
+        variable: String,
+    },
+
+    /// A `Coalesce` constraint in this rule violates its type
+    /// contract: its source must be set-widened (`Optional<α>`)
+    /// and its `fallback` and `is` must each unify with `α`.
+    #[error("Rule {rule} has an invalid Coalesce constraint: {reason}")]
+    CoalesceTypeMismatch {
+        /// The offending rule.
+        rule: Box<Rule>,
+        /// Human-readable reason for the mismatch.
+        reason: String,
+    },
+
+    /// A set-widening (`maybe`) premise appears under `unless`. A
+    /// left-join always yields a row for a bound entity (Present or
+    /// the Absent fallback), so negating it filters every row and
+    /// the rule is vacuously false. Negate the scalar lookup ("the
+    /// entity has no such fact") or the concept instead.
+    #[error(
+        "Rule {rule} negates an optional (maybe) premise, which is always false. \
+         Negate the scalar attribute lookup or the concept instead."
+    )]
+    NegatedOptional {
+        /// The offending rule.
+        rule: Box<Rule>,
+    },
+
+    /// Type inference over a rule's premises produced a
+    /// contradiction (a variable appears in slots with conflicting
+    /// kinds). The planner cannot proceed because the rule has no
+    /// valid interpretation.
+    #[error("Type inference failed: {reason}")]
+    TypeInference {
+        /// Human-readable description of the conflict, including
+        /// the offending variable.
+        reason: String,
     },
 
     /// A rule application omits a required parameter.
@@ -237,6 +300,23 @@ pub enum EvaluationError {
     #[error("Unbound variable {variable_name:?}")]
     UnboundVariable {
         /// Name of the unbound variable.
+        variable_name: String,
+    },
+
+    /// A binding for the variable exists, but it is
+    /// [`Binding::Absent`](crate::Binding::Absent), i.e., an
+    /// optional resolver looked up the entity's attribute and
+    /// found no fact. Distinct from
+    /// [`Self::UnboundVariable`] (no binding at all): `Absent`
+    /// means "we looked, and the answer is no value." Consumers
+    /// that require a `Value` can call
+    /// [`Binding::content`](crate::Binding::content) to convert
+    /// this case into an error; consumers that handle optionality
+    /// (Coalesce, the macro's `realize`) pattern-match on
+    /// [`Binding`](crate::Binding) directly.
+    #[error("Variable {variable_name:?} is bound to Absent")]
+    Absent {
+        /// Name of the variable bound to Absent.
         variable_name: String,
     },
 
@@ -469,4 +549,67 @@ pub enum TransactionError {
     /// An error from the underlying storage layer.
     #[error("Storage error: {0}")]
     Storage(#[from] DialogArtifactsError),
+}
+
+/// Why a premise cannot run yet under the current bindings: the
+/// `Err` case of the SIPS binding function
+/// [`Premise::feasible`](crate::Premise::feasible). Names which
+/// variables the premise is still waiting on, so the planner (and
+/// later demand reification) knows what would unblock it.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum Infeasible {
+    /// All of these still-unbound variables must be bound before the
+    /// premise can run. A choice group already satisfied (by a
+    /// constant or a bound variable) contributes nothing here.
+    #[error("premise needs these variables bound first: {0:?}")]
+    NeedsAll(BTreeSet<String>),
+}
+
+/// Errors raised by type inference over a rule's premises
+/// ([`TypeEnv::infer`](crate::rule::types::TypeEnv::infer)).
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum InferenceError {
+    /// A variable appears in slots whose declared kinds have no
+    /// common type: unification produced a contradiction.
+    #[error("variable {variable} has conflicting kinds across premises: {reason}")]
+    Conflict {
+        /// Name of the offending variable.
+        variable: String,
+        /// Underlying unifier error message.
+        reason: String,
+    },
+}
+
+/// Errors raised by rule analysis
+/// ([`analyze`](crate::rule::analyzer::analyze)). Each variant
+/// describes a structural or type problem that prevents a rule from
+/// being plannable.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum AnalysisError {
+    /// Type inference produced a contradiction; see
+    /// [`InferenceError`].
+    #[error("type inference failed: {reason}")]
+    Inference {
+        /// Description of the conflict.
+        reason: String,
+    },
+    /// A conclusion variable's inferred type admits `Nothing`:
+    /// the rule could produce `Absent` in a required slot.
+    #[error("conclusion variable {variable} is optional")]
+    RequiredHeadFromOptional {
+        /// Name of the offending head variable.
+        variable: String,
+    },
+    /// A `Coalesce` constraint's type contract is violated.
+    #[error("Coalesce type mismatch: {reason}")]
+    CoalesceTypeMismatch {
+        /// Human-readable reason from the unifier.
+        reason: String,
+    },
+    /// A set-widening (`maybe`) premise appears under `unless`. A
+    /// left-join always yields a row for a bound entity (Present or
+    /// Absent), so negating it filters every row; the rule would
+    /// be vacuously false.
+    #[error("negation over an optional (maybe) premise is always false")]
+    NegatedOptional,
 }

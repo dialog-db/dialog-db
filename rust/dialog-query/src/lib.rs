@@ -42,6 +42,8 @@ pub mod error;
 pub mod formula;
 /// Negation support for excluding matching results.
 pub mod negation;
+/// Left-join projection realizing optional (`maybe`) concept fields.
+pub mod optional;
 /// Named parameter bindings for rule and formula applications.
 pub mod parameters;
 /// Query planner that compiles premises into execution plans.
@@ -68,6 +70,9 @@ pub mod statement;
 pub mod stream;
 /// Term types for pattern matching with variables and constants.
 pub mod term;
+/// Unified schema-layer type system (`Type`, `Primitive`,
+/// `Composite`, set-operations).
+pub mod type_system;
 /// Type system utilities bridging Rust types to dialog-artifacts types.
 pub mod types;
 
@@ -75,15 +80,16 @@ pub use artifact::*;
 pub use attribute::query::{AttributeQuery, DynamicAttributeQuery};
 pub use attribute::*;
 pub use claim::Claim;
-pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor};
+pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor, ConceptFieldDescriptor};
 pub use concept::query::{ConceptQuery, ConceptRules};
-pub use concept::{Concept, Conclusion};
+pub use concept::{Concept, ConceptField, Conclusion};
 pub use constraint::Constraint;
 pub use descriptor::Descriptor;
 pub use environment::*;
 pub use error::*;
 pub use formula::*;
 pub use negation::*;
+pub use optional::OptionalAttributeQuery;
 pub use parameters::*;
 pub use planner::*;
 pub use predicate::*;

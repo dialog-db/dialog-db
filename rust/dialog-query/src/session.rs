@@ -15,20 +15,46 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
+    use crate::Attribute;
     use crate::Match;
     use crate::artifact::{Entity, Value};
     use crate::attribute::query::AttributeQuery;
+    use crate::formula::Like;
     use crate::query::Output;
+    use crate::rule::When;
     use crate::session::RuleRegistry;
+    use crate::source::SelectRules;
     use crate::source::test::TestEnv;
     use crate::the;
 
     use crate::concept::descriptor::ConceptDescriptor;
     use crate::concept::query::ConceptRules;
+    use crate::concept::query::adornment::Adornment;
     use crate::error::EvaluationError;
+    use crate::planner::{Conjunction, Planner};
+    use crate::proposition::Proposition;
     use crate::rule::deductive::DeductiveRule;
-    use crate::{AttributeDescriptor, Cardinality, Concept, Parameters, Query, Term, Type};
+    use crate::{
+        AttributeDescriptor, Cardinality, Concept, Environment, Parameters, Premise, Query, Term,
+        Type,
+    };
+    use dialog_capability::Provider;
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use implicit_attr_test::{Name, Role};
+
+    /// Lower a single proposition to its compiled `Plan` for the
+    /// given binding scope. Tests that exercise a concept/attribute
+    /// proposition in isolation run it through the planner so they
+    /// evaluate via the same operator IR as production.
+    fn plan_proposition(proposition: Proposition, scope_vars: &[&str]) -> Conjunction {
+        let mut scope = Environment::new();
+        for var in scope_vars {
+            scope.add(*var);
+        }
+        Planner::from(vec![Premise::Assert(proposition)])
+            .plan(&scope)
+            .expect("proposition should plan")
+    }
 
     #[dialog_common::test]
     async fn it_queries_asserted_facts() -> anyhow::Result<()> {
@@ -61,7 +87,7 @@ mod tests {
         }
         let session = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
-        let person = ConceptDescriptor::from([
+        let person = ConceptDescriptor::try_from([
             (
                 "name",
                 AttributeDescriptor::new(
@@ -80,7 +106,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let name_param = Term::var("name");
         let age_param = Term::var("age");
@@ -89,10 +116,10 @@ mod tests {
         params.insert("age".into(), Term::var("age"));
 
         // Use new query API directly on application
-        let application = person.apply(params)?;
+        let plan = plan_proposition(person.apply(params)?, &[]);
 
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(Match::new().seed(), &session),
+            plan.evaluate(Match::new().seed(), &session),
         )
         .await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
@@ -102,8 +129,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.lookup(&name_param)?;
-            let person_age = match_result.lookup(&age_param)?;
+            let person_name = match_result.lookup(&name_param)?.content()?;
+            let person_age = match_result.lookup(&age_param)?.content()?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -147,7 +174,7 @@ mod tests {
             ),
         );
 
-        let person = ConceptDescriptor::from(attributes);
+        let person = ConceptDescriptor::try_from(attributes).unwrap();
 
         // Mixed case - valid parameters with some matching attributes (should succeed)
         let mut mixed_params = Parameters::new();
@@ -165,7 +192,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let person = ConceptDescriptor::from([
+        let person = ConceptDescriptor::try_from([
             (
                 "name",
                 AttributeDescriptor::new(
@@ -184,7 +211,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let alice = person
             .create()
@@ -214,10 +242,10 @@ mod tests {
         params.insert("age".into(), Term::var("age"));
 
         // Let's test with empty parameters first to see the exact error
-        let application = person.apply(params)?;
+        let plan = plan_proposition(person.apply(params)?, &[]);
 
         let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(Match::new().seed(), &session),
+            plan.evaluate(Match::new().seed(), &session),
         )
         .await?;
         assert_eq!(selection.len(), 2); // Should find just Alice and Bob
@@ -227,8 +255,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let person_name = match_result.lookup(&name_param)?;
-            let person_age = match_result.lookup(&age_param)?;
+            let person_name = match_result.lookup(&name_param)?.content()?;
+            let person_age = match_result.lookup(&age_param)?.content()?;
 
             match person_name {
                 Value::String(name_str) if name_str == "Alice" => {
@@ -291,7 +319,7 @@ mod tests {
         }
 
         // employee can be derived from the stuff concept
-        let employee_predicate: ConceptDescriptor = Query::<Employee>::default().into();
+        let employee_predicate: ConceptDescriptor = Employee::descriptor().clone();
         let employee_from_stuff = DeductiveRule::new(
             employee_predicate,
             vec![
@@ -320,7 +348,7 @@ mod tests {
         let mut rules = RuleRegistry::new();
         rules.register(employee_from_stuff)?;
 
-        let stuff_predicate: ConceptDescriptor = Query::<Stuff>::default().into();
+        let stuff_predicate: ConceptDescriptor = Stuff::descriptor().clone();
         let alice = stuff_predicate
             .create()
             .with("name", "Alice".to_string())
@@ -376,8 +404,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_installs_rule_via_api() -> anyhow::Result<()> {
-        use crate::rule::When;
-
         mod employee {
             use crate::Attribute;
 
@@ -443,7 +469,7 @@ mod tests {
 
         // Replicate Session::install logic for RuleRegistry
         let query = Query::<Employee>::default();
-        let concept: ConceptDescriptor = query.clone().into();
+        let concept: ConceptDescriptor = Employee::descriptor().clone();
         let when = employee_from_stuff(query).into_premises();
         let premises = when.into_vec();
         let install_rule =
@@ -454,7 +480,7 @@ mod tests {
         rules.register(install_rule)?;
 
         // Create test data as Stuff
-        let stuff_predicate: ConceptDescriptor = Query::<Stuff>::default().into();
+        let stuff_predicate: ConceptDescriptor = Stuff::descriptor().clone();
         let alice = stuff_predicate
             .create()
             .with("name", "Alice".to_string())
@@ -507,7 +533,6 @@ mod tests {
         let mut found_bob = false;
 
         for employee in employees {
-            use crate::Attribute as _;
             match employee.name.value().as_str() {
                 "Alice" => {
                     assert_eq!(employee.job.value(), "manager");
@@ -533,7 +558,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let _branch = repo.branch("main").open().perform(&operator).await?;
 
-        let adult_conclusion = ConceptDescriptor::from(vec![
+        let adult_conclusion = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -552,7 +577,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let rule = DeductiveRule::from(&adult_conclusion);
 
@@ -577,7 +603,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let concept = ConceptDescriptor::from([(
+        let concept = ConceptDescriptor::try_from([(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -585,15 +611,14 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
         let rule = DeductiveRule::from(&concept);
 
         // Test with RuleRegistry + TestEnv
         let mut registry = RuleRegistry::new();
         registry.register(rule.clone())?;
         let env = TestEnv::new(&branch, &operator, registry);
-        use crate::source::SelectRules;
-        use dialog_capability::Provider;
         let _rules = Provider::<SelectRules>::execute(&env, concept.clone()).await?;
 
         Ok(())
@@ -605,7 +630,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let _branch = repo.branch("main").open().perform(&operator).await?;
 
-        let adult_concept = ConceptDescriptor::from([(
+        let adult_concept = ConceptDescriptor::try_from([(
             "name".to_string(),
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -613,7 +638,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         let adult_rule = DeductiveRule::from(&adult_concept);
 
@@ -638,10 +664,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_filters_with_like_formula_in_rule() -> anyhow::Result<()> {
-        use crate::Attribute;
-        use crate::formula::Like;
-        use crate::rule::When;
-
         mod note_like_test {
             use crate::Attribute;
 
@@ -684,7 +706,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let query_m = Query::<MatchingNote>::default();
-        let concept_m: ConceptDescriptor = query_m.clone().into();
+        let concept_m: ConceptDescriptor = MatchingNote::descriptor().clone();
         let when_m = matching_notes(query_m).into_premises();
         let rule_m = DeductiveRule::new(concept_m, when_m.into_vec()).map_err(|e| {
             EvaluationError::Planning {
@@ -732,10 +754,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_negates_like_formula_in_rule() -> anyhow::Result<()> {
-        use crate::Attribute;
-        use crate::formula::Like;
-        use crate::rule::When;
-
         mod note_not_like_test {
             use crate::Attribute;
 
@@ -783,7 +801,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         let query_n = Query::<NonDraftNote>::default();
-        let concept_n: ConceptDescriptor = query_n.clone().into();
+        let concept_n: ConceptDescriptor = NonDraftNote::descriptor().clone();
         let when_n = non_draft_notes(query_n).into_premises();
         let rule_n = DeductiveRule::new(concept_n, when_n.into_vec()).map_err(|e| {
             EvaluationError::Planning {
@@ -835,10 +853,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_infers_implicit_attributes() -> anyhow::Result<()> {
-        use crate::Attribute as _;
-        use crate::rule::When;
-        use implicit_attr_test::{Name, Role};
-
         #[derive(Clone, Debug, PartialEq, Concept)]
         pub struct Employee {
             /// Employee
@@ -889,7 +903,7 @@ mod tests {
         // Install the rule using the clean API - no turbofish needed!
         // The type inference works: Employee is inferred from the function parameter
         let query_e = Query::<Employee>::default();
-        let concept_e: ConceptDescriptor = query_e.clone().into();
+        let concept_e: ConceptDescriptor = Employee::descriptor().clone();
         let when_e = employee_with_implicit_title(query_e).into_premises();
         let rule_e = DeductiveRule::new(concept_e, when_e.into_vec()).map_err(|e| {
             EvaluationError::Planning {
@@ -956,7 +970,7 @@ mod tests {
 
     /// Helper: build a person concept predicate with name and age attributes.
     fn person_concept() -> ConceptDescriptor {
-        ConceptDescriptor::from([
+        ConceptDescriptor::try_from([
             (
                 "name",
                 AttributeDescriptor::new(
@@ -976,6 +990,7 @@ mod tests {
                 ),
             ),
         ])
+        .unwrap()
     }
 
     #[dialog_common::test]
@@ -1041,7 +1056,7 @@ mod tests {
         let rule = DeductiveRule::from(&person);
         rules.install(rule);
 
-        // Cache should be invalidated — new plan must be computed
+        // Cache should be invalidated: new plan must be computed
         let plan_after = rules.plan(&terms, &candidate);
 
         assert!(
@@ -1066,10 +1081,11 @@ mod tests {
         let plan_before = person_rules.plan(&terms, &candidate);
 
         // Install a rule for a DIFFERENT concept entity
-        let unrelated = ConceptDescriptor::from([(
+        let unrelated = ConceptDescriptor::try_from([(
             "title",
             AttributeDescriptor::new(the!("book/title"), "", Cardinality::One, Some(Type::String)),
-        )]);
+        )])
+        .unwrap();
         let rule = DeductiveRule::from(&unrelated);
         registry.register(rule).unwrap();
 
@@ -1101,7 +1117,7 @@ mod tests {
         // Re-install the exact same rule (duplicate)
         rules.install(rule);
 
-        // Cache should NOT be invalidated — the rule was already present
+        // Cache should NOT be invalidated: the rule was already present
         let plan_after = rules.plan(&terms, &candidate);
 
         assert!(
@@ -1124,7 +1140,7 @@ mod tests {
         let candidate = Match::new();
         let plan_original = rules.plan(&terms, &candidate);
 
-        // Clone the ConceptRules — the cache is shared via Arc
+        // Clone the ConceptRules: the cache is shared via Arc
         let cloned = rules.clone();
         let plan_cloned = cloned.plan(&terms, &candidate);
 
@@ -1136,8 +1152,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_cheaper_plan_with_bound_entity() {
-        use crate::concept::query::adornment::Adornment;
-
         let person = person_concept();
         let rules = ConceptRules::new(&person);
 
@@ -1209,19 +1223,18 @@ mod tests {
         params.insert("name".into(), Term::var("name"));
         params.insert("age".into(), Term::var("age"));
 
-        let application = person.apply(params)?;
+        let plan = plan_proposition(person.apply(params)?, &[]);
 
         // First query -- plan is computed and cached
         let results1: Vec<_> = futures_util::TryStreamExt::try_collect(
-            application.clone().evaluate(Match::new().seed(), &session),
+            plan.clone().evaluate(Match::new().seed(), &session),
         )
         .await?;
 
         // Second query -- plan is reused from cache
-        let results2: Vec<_> = futures_util::TryStreamExt::try_collect(
-            application.evaluate(Match::new().seed(), &session),
-        )
-        .await?;
+        let results2: Vec<_> =
+            futures_util::TryStreamExt::try_collect(plan.evaluate(Match::new().seed(), &session))
+                .await?;
 
         assert_eq!(results1.len(), 2, "First query should find 2 people");
         assert_eq!(results2.len(), 2, "Cached query should find 2 people");
@@ -1282,24 +1295,21 @@ mod tests {
         params.insert("name".into(), Term::var("name"));
         params.insert("age".into(), Term::var("age"));
 
-        let application = person.apply(params)?;
+        let plan = plan_proposition(person.apply(params)?, &["this"]);
 
         let mut candidate = Match::new();
         candidate.bind(&entity_param, Value::from(alice.clone()))?;
 
-        let results = application
-            .evaluate(candidate.seed(), &session)
-            .try_vec()
-            .await?;
+        let results = plan.evaluate(candidate.seed(), &session).try_vec().await?;
 
         assert_eq!(results.len(), 1, "Should find exactly one person (Alice)");
         assert_eq!(
-            results[0].lookup(&name_param)?,
+            results[0].lookup(&name_param)?.content()?,
             Value::String("Alice".into()),
             "Should resolve to Alice"
         );
         assert_eq!(
-            results[0].lookup(&age_param)?,
+            results[0].lookup(&age_param)?.content()?,
             Value::UnsignedInt(30),
             "Should have Alice's age"
         );

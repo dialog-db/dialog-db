@@ -130,9 +130,14 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::formula::conversions::{ParseUnsignedInteger, ToString};
     use crate::formula::math::*;
     use crate::formula::query::FormulaQuery;
+    use crate::query::Application;
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
     use crate::*;
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
@@ -167,6 +172,7 @@ mod tests {
             output
                 .lookup(&Term::var("x"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
         );
@@ -174,6 +180,7 @@ mod tests {
             output
                 .lookup(&Term::var("y"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(3)
         );
@@ -183,6 +190,7 @@ mod tests {
             output
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(8)
         );
@@ -234,6 +242,7 @@ mod tests {
             result1
                 .lookup(&Term::var("a"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(2)
         );
@@ -241,6 +250,7 @@ mod tests {
             result1
                 .lookup(&Term::var("b"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(3)
         );
@@ -248,6 +258,7 @@ mod tests {
             result1
                 .lookup(&Term::var("sum"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
         );
@@ -264,6 +275,7 @@ mod tests {
             result2
                 .lookup(&Term::var("a"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(10)
         );
@@ -271,6 +283,7 @@ mod tests {
             result2
                 .lookup(&Term::var("b"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(15)
         );
@@ -278,6 +291,7 @@ mod tests {
             result2
                 .lookup(&Term::var("sum"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(25)
         );
@@ -304,6 +318,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(7)
         );
@@ -333,6 +348,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(0)
         );
@@ -359,6 +375,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(42)
         );
@@ -385,6 +402,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(5)
         );
@@ -432,6 +450,7 @@ mod tests {
             result
                 .lookup(&Term::var("result"))
                 .ok()
+                .and_then(|b| b.content().ok())
                 .and_then(|v| u32::try_from(v).ok()),
             Some(2)
         );
@@ -461,8 +480,6 @@ mod tests {
 
     #[dialog_common::test]
     fn it_chains_formula_results() -> anyhow::Result<()> {
-        use crate::formula::conversions::{ParseUnsignedInteger, ToString};
-
         // First: Parse a number from string
         let mut parse_terms = Parameters::new();
         parse_terms.insert("text".to_string(), Term::var("str_input"));
@@ -493,7 +510,14 @@ mod tests {
         let final_results = sum_formula.compute(sum_input)?;
         assert_eq!(final_results.len(), 1);
         assert_eq!(
-            u32::try_from(final_results[0].lookup(&Term::var("final_sum")).unwrap()).ok(),
+            u32::try_from(
+                final_results[0]
+                    .lookup(&Term::var("final_sum"))
+                    .unwrap()
+                    .content()
+                    .unwrap()
+            )
+            .ok(),
             Some(15)
         );
 
@@ -511,6 +535,8 @@ mod tests {
                 string_results[0]
                     .lookup(&Term::var("final_string"))
                     .unwrap()
+                    .content()
+                    .unwrap()
             )
             .ok(),
             Some("15".to_string())
@@ -521,11 +547,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_performs_formula_with_all_variables() -> anyhow::Result<()> {
-        use crate::query::Application;
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         // Create a SumQuery with all variables
         let query = Query::<Sum> {
             of: Term::var("x"),
@@ -553,7 +574,7 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
 
-        // Now test realize — should reconstruct the Sum proof struct
+        // Now test realize: should reconstruct the Sum proof struct
         let proof = query_copy.realize(matches[0].clone())?;
         assert_eq!(proof.of, 5);
         assert_eq!(proof.with, 3);
@@ -564,11 +585,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_performs_formula_with_constant_inputs() -> anyhow::Result<()> {
-        use crate::query::Application;
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         // Input fields are constants, output field is a variable
         let query = Query::<Sum> {
             of: Term::from(5u32),
@@ -581,7 +597,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
-        // Constants are already bound — empty starting Match should work
+        // Constants are already bound: empty starting Match should work
         let input = Match::new();
 
         let query_copy = query.clone();
@@ -598,11 +614,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_performs_formula_with_constant_output() -> anyhow::Result<()> {
-        use crate::query::Application;
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         // Output field is a constant matching the expected result
         let query = Query::<Sum> {
             of: Term::var("x"),
@@ -622,7 +633,7 @@ mod tests {
         let query_copy = query.clone();
         let matches: Vec<Match> = query.evaluate(input.seed(), &source).try_collect().await?;
 
-        // Should succeed — the formula computes 8, and the constant 8 is consistent
+        // Should succeed: the formula computes 8, and the constant 8 is consistent
         assert_eq!(matches.len(), 1);
         let proof = query_copy.realize(matches[0].clone())?;
         assert_eq!(proof.of, 5);
@@ -634,11 +645,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_rejects_inconsistent_constant_in_formula() -> anyhow::Result<()> {
-        use crate::query::Application;
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         // Output field is a constant that does NOT match (5 + 3 ≠ 99)
         let query = Query::<Sum> {
             of: Term::var("x"),
@@ -657,7 +663,7 @@ mod tests {
 
         let selection: Vec<Match> = query.evaluate(input.seed(), &source).try_collect().await?;
 
-        // The formula computes 8 but "is" is constant 99 — inconsistency
+        // The formula computes 8 but "is" is constant 99: inconsistency
         // should filter this out (0 results)
         assert_eq!(
             selection.len(),
@@ -670,11 +676,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_performs_formula_with_mixed_terms() -> anyhow::Result<()> {
-        use crate::query::Application;
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         // Mix: one input is constant, one is variable, output is variable
         let query = Query::<Sum> {
             of: Term::from(10u32),
@@ -704,11 +705,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_performs_formula_with_shared_variable() -> anyhow::Result<()> {
-        use crate::query::Application;
-        use crate::session::RuleRegistry;
-        use crate::source::test::TestEnv;
-        use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-
         // Both inputs use the same variable (x + x)
         let query = Query::<Sum> {
             of: Term::var("x"),

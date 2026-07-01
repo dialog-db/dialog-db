@@ -169,6 +169,29 @@ where
         self.cache.update(edition);
     }
 
+    /// Capture this cell's current version as a [`Checkpoint`] to publish
+    /// against later.
+    ///
+    /// The read-modify-write guard. A caller that reads the cell, computes a
+    /// new value over some `await`s, then writes it back, should `checkpoint()`
+    /// up front and publish through the checkpoint. The checkpoint remembers
+    /// the version current *now*; [`Checkpoint::publish`] CAS's against it, so
+    /// if a concurrent write advanced the cell in the meantime the publish
+    /// fails with
+    /// [`VersionMismatch`](dialog_effects::memory::MemoryError::VersionMismatch)
+    /// rather than reading the now-advanced version live and silently
+    /// clobbering that write.
+    ///
+    /// Unlike a detached copy, a checkpoint shares this cell's cache: a
+    /// successful publish through it advances this cell (and every clone), so
+    /// there is nothing to copy back. See `Branch::pull`.
+    pub fn checkpoint(&self) -> Checkpoint<T, Codec> {
+        Checkpoint {
+            cell: self.clone(),
+            expected: self.cache.version(),
+        }
+    }
+
     /// Returns the subject DID from the capability chain.
     pub fn subject(&self) -> &Did {
         self.capability.subject()
@@ -199,6 +222,12 @@ where
 {
     /// Create a command to publish a new value to this cell.
     ///
+    /// The CAS precondition is the cache's *current* version at perform time:
+    /// "overwrite whatever the cell holds now". For a write computed from a
+    /// value read earlier, [`checkpoint`](Self::checkpoint) the cell first and
+    /// publish through the checkpoint, so a concurrent write makes the CAS fail
+    /// rather than silently win.
+    ///
     /// Call `.perform(&env)` for local, or `.fork(&address).perform(&env)`
     /// for remote.
     pub fn publish(&self, content: T) -> Publish<T, Codec> {
@@ -207,6 +236,45 @@ where
             cache: self.cache.clone(),
             content,
         }
+    }
+}
+
+/// A cell paired with the version it held when the checkpoint was taken.
+///
+/// Created by [`Cell::checkpoint`]. Publishing through it CAS's against the
+/// checkpointed version rather than the cell's live version, so a write
+/// computed from a value read at checkpoint time fails (rather than silently
+/// clobbers) if a concurrent write advanced the cell in the meantime.
+pub struct Checkpoint<T, Codec: Clone = CborEncoder> {
+    cell: Cell<T, Codec>,
+    expected: Option<Version>,
+}
+
+impl<T, Codec> Checkpoint<T, Codec>
+where
+    T: Serialize + Clone + ConditionalSync + Debug,
+    Codec: Encoder<Bytes = Vec<u8>> + Clone,
+{
+    /// Publish `content`, CAS'd against the checkpointed version.
+    ///
+    /// Fails with
+    /// [`VersionMismatch`](dialog_effects::memory::MemoryError::VersionMismatch)
+    /// if the cell advanced past the checkpoint. On success the cell's shared
+    /// cache is updated, so the originating [`Cell`] and its clones observe the
+    /// new edition — there is nothing to copy back.
+    pub async fn publish<Env>(self, content: T, env: &Env) -> Result<(), PublishError>
+    where
+        Env: dialog_capability::Provider<memory::Publish>,
+    {
+        let bytes = self.cell.cache.encode(&content).await?;
+        let version = self
+            .cell
+            .capability
+            .publish(bytes, self.expected)
+            .perform(env)
+            .await?;
+        self.cell.cache.update(Edition { content, version });
+        Ok(())
     }
 }
 
