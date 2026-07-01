@@ -92,6 +92,24 @@ impl AttributeQueryAll {
         Self { is, ..self }
     }
 
+    /// Return a copy with the `the`/`of` variable terms carrying
+    /// the given kinds. The planner stamps what rule-level
+    /// inference proved about the attribute and entity variables —
+    /// in particular prefix refinements, which the selector
+    /// conversion turns into index-range bounds. Constants and
+    /// `None` kinds are left unchanged.
+    pub(crate) fn with_subject_kinds(self, the: Option<Kind>, of: Option<Kind>) -> Self {
+        let the = match the {
+            Some(kind) => self.the.with_kind(kind),
+            None => self.the,
+        };
+        let of = match of {
+            Some(kind) => self.of.with_kind(kind),
+            None => self.of,
+        };
+        Self { the, of, ..self }
+    }
+
     /// Get the 'cause' term.
     pub fn cause(&self) -> &Term<Cause> {
         &self.cause
@@ -329,14 +347,27 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
     fn try_from(from: &AttributeQueryAll) -> Result<Self, Self::Error> {
         let mut selector: Option<ArtifactSelector<Constrained>> = None;
 
-        if let Term::Constant(the) = &from.the {
-            let relation = ArtifactsAttribute::try_from(the.clone()).map_err(|_| {
-                EvaluationError::Store("Could not convert value to Attribute".to_string())
-            })?;
-            selector = Some(match selector {
-                None => ArtifactSelector::new().the(relation),
-                Some(s) => s.the(relation),
-            });
+        match &from.the {
+            Term::Constant(the) => {
+                let relation = ArtifactsAttribute::try_from(the.clone()).map_err(|_| {
+                    EvaluationError::Store("Could not convert value to Attribute".to_string())
+                })?;
+                selector = Some(match selector {
+                    None => ArtifactSelector::new().the(relation),
+                    Some(s) => s.the(relation),
+                });
+            }
+            Term::Variable { .. } => {
+                // A prefix refinement the planner stamped onto the
+                // attribute variable becomes an AEV range bound.
+                if let Some(refinement) = from.the.kind().as_ref().and_then(Kind::refinement) {
+                    let prefix = refinement.prefix.clone();
+                    selector = Some(match selector {
+                        None => ArtifactSelector::new().the_starting_with(prefix),
+                        Some(s) => s.the_starting_with(prefix),
+                    });
+                }
+            }
         }
 
         match &from.of {
@@ -349,7 +380,17 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     Some(s) => s.of(entity),
                 });
             }
-            Term::Variable { .. } => {}
+            Term::Variable { .. } => {
+                // A prefix refinement on the entity variable becomes
+                // an EAV range bound over the URI's raw head.
+                if let Some(refinement) = from.of.kind().as_ref().and_then(Kind::refinement) {
+                    let prefix = refinement.prefix.clone();
+                    selector = Some(match selector {
+                        None => ArtifactSelector::new().of_starting_with(prefix),
+                        Some(s) => s.of_starting_with(prefix),
+                    });
+                }
+            }
         }
 
         match &from.is {
@@ -390,6 +431,48 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::the;
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+
+    /// A prefix refinement stamped onto a variable term becomes a
+    /// range bound on the selector — the end of the
+    /// predicate → inference → planner → scan pipeline.
+    #[dialog_common::test]
+    fn it_pushes_prefix_refinements_into_the_selector() -> anyhow::Result<()> {
+        let entity_kind = Kind::from(Type::Entity)
+            .with_prefix("did:key:")
+            .expect("entity is textual");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("e").with_kind(entity_kind),
+            Term::var("v"),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert_eq!(selector.entity_prefix(), Some("did:key:"));
+
+        let attribute_kind = Kind::from(Type::Symbol)
+            .with_prefix("person/")
+            .expect("symbol is textual");
+        let query = AttributeQueryAll::new(
+            Term::<The>::var("a").with_kind(attribute_kind),
+            Term::<Entity>::var("e"),
+            Term::var("v"),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert_eq!(selector.attribute_prefix(), Some("person/"));
+
+        // An unrefined variable contributes nothing, as before.
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("e"),
+            Term::var("v"),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert_eq!(selector.entity_prefix(), None);
+        assert_eq!(selector.attribute_prefix(), None);
+        Ok(())
+    }
 
     #[dialog_common::test]
     async fn it_scans_with_all_variables() -> anyhow::Result<()> {
