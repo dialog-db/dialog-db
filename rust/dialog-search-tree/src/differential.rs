@@ -33,7 +33,7 @@ use rkyv::{
 
 use crate::{
     ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Entry,
-    Key, Link, Node, SymmetryWith, Tree, Value, into_owned,
+    Key, Link, PersistentNode, PersistentTree, SymmetryWith, Value, into_owned,
 };
 
 /// Represents a change in the key-value store.
@@ -72,7 +72,7 @@ where
     /// A fully loaded node together with its owned upper bound key.
     Loaded {
         /// The loaded node.
-        node: Node<Key, Value>,
+        node: PersistentNode<Key, Value>,
         /// The node's upper bound key (owned copy).
         upper_bound: Key,
     },
@@ -126,7 +126,7 @@ where
 {
     storage: &'a ContentAddressedStorage<Backend>,
     nodes: Vec<SparseTreeNode<Key, Value>>,
-    expanded: Vec<Node<Key, Value>>,
+    expanded: Vec<PersistentNode<Key, Value>>,
 }
 
 impl<'a, Key, Value, Backend> SparseTree<'a, Key, Value, Backend>
@@ -151,11 +151,11 @@ where
     async fn load(
         storage: &ContentAddressedStorage<Backend>,
         hash: &Blake3Hash,
-    ) -> Result<Node<Key, Value>, DialogSearchTreeError> {
+    ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         let bytes = storage.retrieve(hash).await?.ok_or_else(|| {
             DialogSearchTreeError::Node(format!("Blob not found in storage: {hash}"))
         })?;
-        Ok(Node::new(Buffer::from(bytes)))
+        Ok(PersistentNode::new(Buffer::from(bytes)))
     }
 
     /// Initializes a sparse tree from a root hash. The root is not loaded;
@@ -167,7 +167,7 @@ where
         let nodes = if root == NULL_BLAKE3_HASH {
             vec![]
         } else {
-            let node: Node<Key, Value> = Self::load(storage, root).await?;
+            let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
             let upper_bound = node.body()?.upper_bound().and_then(into_owned)?;
             vec![SparseTreeNode::Loaded { node, upper_bound }]
         };
@@ -389,8 +389,8 @@ where
     /// the trees: in particular, two identical trees are recognized by their
     /// root hashes alone, with zero reads.
     pub async fn compute<D>(
-        source_tree: &Tree<Key, Value, D>,
-        target_tree: &Tree<Key, Value, D>,
+        source_tree: &PersistentTree<Key, Value, D>,
+        target_tree: &PersistentTree<Key, Value, D>,
         source_storage: &'a ContentAddressedStorage<Backend>,
         target_storage: &'a ContentAddressedStorage<Backend>,
     ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
@@ -568,7 +568,7 @@ where
     /// tree.
     pub fn novel_nodes(
         &'a self,
-    ) -> impl Stream<Item = Result<Node<Key, Value>, DialogSearchTreeError>> + 'a {
+    ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a {
         try_stream! {
             for node in &self.target.expanded {
                 yield node.clone();
@@ -611,7 +611,7 @@ mod tests {
 
     use super::{Change, TreeDifference};
     use crate::helpers::{TestStorage, Traversable as _, TraversalOrder, TreeNodes as _};
-    use crate::{ContentAddressedStorage, Entry, Tree, tree_spec};
+    use crate::{Buffer, ContentAddressedStorage, Delta, Entry, PersistentTree, tree_spec};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -658,20 +658,26 @@ mod tests {
         }
     }
 
-    type TestTree = Tree<[u8; 4], Vec<u8>>;
+    type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
 
     async fn build(
         keys: impl IntoIterator<Item = (u32, Vec<u8>)>,
         storage: &mut ContentAddressedStorage<CountingBackend>,
     ) -> Result<TestTree> {
         let mut tree = TestTree::empty();
+        let mut delta = Delta::zero();
         for (key, value) in keys {
-            tree = tree.insert(key.to_le_bytes(), value, storage).await?;
-        }
-        for buffer in tree.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            tree = tree
+                .edit()
+                .insert(key.to_le_bytes(), value, storage)
+                .await?
+                .persist(&mut delta)?;
+            // Flush after each persist so the next edit can load the nodes this persist created.
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
         }
         Ok(tree)
     }
@@ -767,9 +773,14 @@ mod tests {
         // Applying the same differential to the source tree must produce a
         // tree with the target's root.
         let mut merged = source.clone();
+        let mut delta = Delta::zero();
         let changes = source.differentiate(&target, &storage, &storage);
-        merged.integrate(changes, &storage).await?;
-        for buffer in merged.flush() {
+        merged = merged
+            .edit()
+            .integrate(changes, &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
                 .await?;
@@ -795,10 +806,13 @@ mod tests {
         // One modified entry produces trees that differ along one root-to-
         // leaf path on each side.
         let mut modified = base.clone();
+        let mut delta = Delta::zero();
         modified = modified
+            .edit()
             .insert(1000u32.to_le_bytes(), vec![0xFF], &storage)
-            .await?;
-        for buffer in modified.flush() {
+            .await?
+            .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
                 .await?;
@@ -833,18 +847,26 @@ mod tests {
         let base = build(base_entries.clone(), &mut storage).await?;
 
         let mut ours = base.clone();
-        ours = ours.insert(99u32.to_le_bytes(), vec![1], &storage).await?;
-        for buffer in ours.flush() {
+        let mut delta_ours = Delta::zero();
+        ours = ours
+            .edit()
+            .insert(99u32.to_le_bytes(), vec![1], &storage)
+            .await?
+            .persist(&mut delta_ours)?;
+        for (_, buffer) in delta_ours.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
                 .await?;
         }
 
         let mut theirs = base.clone();
+        let mut delta_theirs = Delta::zero();
         theirs = theirs
+            .edit()
             .insert(99u32.to_le_bytes(), vec![2], &storage)
-            .await?;
-        for buffer in theirs.flush() {
+            .await?
+            .persist(&mut delta_theirs)?;
+        for (_, buffer) in delta_theirs.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
                 .await?;
@@ -853,19 +875,29 @@ mod tests {
         // Integrate their changes into ours, and our changes into theirs;
         // both replicas must converge on the same value.
         let mut merged_ours = ours.clone();
+        let mut delta_merged_ours = Delta::zero();
         let their_changes = base.differentiate(&theirs, &storage, &storage);
-        merged_ours.integrate(their_changes, &storage).await?;
+        merged_ours = merged_ours
+            .edit()
+            .integrate(their_changes, &storage)
+            .await?
+            .persist(&mut delta_merged_ours)?;
 
         let mut merged_theirs = theirs.clone();
+        let mut delta_merged_theirs = Delta::zero();
         let our_changes = base.differentiate(&ours, &storage, &storage);
-        merged_theirs.integrate(our_changes, &storage).await?;
+        merged_theirs = merged_theirs
+            .edit()
+            .integrate(our_changes, &storage)
+            .await?
+            .persist(&mut delta_merged_theirs)?;
 
-        for buffer in merged_ours.flush() {
+        for (_, buffer) in delta_merged_ours.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
                 .await?;
         }
-        for buffer in merged_theirs.flush() {
+        for (_, buffer) in delta_merged_theirs.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
                 .await?;
@@ -890,15 +922,19 @@ mod tests {
 
         let base = build(entries.clone(), &mut storage).await?;
         let mut extended = base.clone();
+        let mut delta = Delta::zero();
         for i in 1000..1020u32 {
             extended = extended
+                .edit()
                 .insert(i.to_le_bytes(), vec![i as u8], &storage)
-                .await?;
-        }
-        for buffer in extended.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+                .await?
+                .persist(&mut delta)?;
+            // Flush after each persist so the next edit can load the nodes this persist created.
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
         }
 
         // A "remote" that already has the base tree.
@@ -1748,10 +1784,10 @@ mod tests {
     }
 
     async fn flush(
-        tree: &mut TestTree,
+        delta: &mut Delta<Blake3Hash, Buffer>,
         storage: &mut ContentAddressedStorage<CountingBackend>,
     ) -> Result<()> {
-        for buffer in tree.flush() {
+        for (_, buffer) in delta.flush() {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
                 .await?;
@@ -2028,8 +2064,15 @@ mod tests {
             value: vec![20],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        let mut delta = Delta::zero();
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist(&mut delta)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta, &mut storage).await?;
 
         assert_eq!(tree.get(&key(1), &storage).await?, Some(vec![10]));
         assert_eq!(tree.get(&key(2), &storage).await?, Some(vec![20]));
@@ -2049,8 +2092,15 @@ mod tests {
             value: vec![10],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        let mut delta = Delta::zero();
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist(&mut delta)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta, &mut storage).await?;
 
         assert_eq!(tree.get(&key(1), &storage).await?, Some(vec![10]));
         assert_eq!(
@@ -2076,8 +2126,15 @@ mod tests {
             value: new_value.clone(),
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        let mut delta = Delta::zero();
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist(&mut delta)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta, &mut storage).await?;
 
         // Check which value won based on identity hash comparison
         let winner = if value_identity(&new_value) > value_identity(&existing_value) {
@@ -2100,8 +2157,15 @@ mod tests {
             value: vec![10],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        let mut delta = Delta::zero();
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist(&mut delta)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta, &mut storage).await?;
 
         assert_eq!(tree.get(&key(1), &storage).await?, None);
         assert_eq!(tree.get(&key(2), &storage).await?, Some(vec![20]));
@@ -2120,8 +2184,15 @@ mod tests {
             value: vec![20],
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        let mut delta = Delta::zero();
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist(&mut delta)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta, &mut storage).await?;
 
         assert_eq!(tree.get(&key(1), &storage).await?, Some(vec![10]));
         assert_eq!(tree.get(&key(2), &storage).await?, None);
@@ -2140,8 +2211,15 @@ mod tests {
             value: vec![20], // Wrong value
         })];
 
-        tree.integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+        let mut delta = Delta::zero();
+        tree = tree
+            .edit()
+            .integrate(iter(changes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist(&mut delta)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta, &mut storage).await?;
 
         // Entry should still exist with original value
         assert_eq!(tree.get(&key(1), &storage).await?, Some(vec![10]));
@@ -2156,12 +2234,22 @@ mod tests {
         // Initial state - both replicas start with same value, then each
         // updates the same key to a different value.
         let mut tree_a = build([(1, vec![10])], &mut storage).await?;
-        tree_a = tree_a.insert(key(1), vec![20], &storage).await?;
-        flush(&mut tree_a, &mut storage).await?;
+        let mut delta_a = Delta::zero();
+        tree_a = tree_a
+            .edit()
+            .insert(key(1), vec![20], &storage)
+            .await?
+            .persist(&mut delta_a)?;
+        flush(&mut delta_a, &mut storage).await?;
 
         let mut tree_b = build([(1, vec![10])], &mut storage).await?;
-        tree_b = tree_b.insert(key(1), vec![30], &storage).await?;
-        flush(&mut tree_b, &mut storage).await?;
+        let mut delta_b = Delta::zero();
+        tree_b = tree_b
+            .edit()
+            .insert(key(1), vec![30], &storage)
+            .await?
+            .persist(&mut delta_b)?;
+        flush(&mut delta_b, &mut storage).await?;
 
         // Both replicas exchange their changes (relative to an empty tree,
         // so each side ships its full state as adds).
@@ -2170,12 +2258,20 @@ mod tests {
         let changes_b = collect_changes(&empty_tree, &tree_b, &storage).await?;
 
         // Integrate changes
-        tree_a
+        tree_a = tree_a
+            .edit()
             .integrate(iter(changes_b.into_iter().map(Ok)), &storage)
-            .await?;
-        tree_b
+            .await?
+            .persist(&mut delta_a)?;
+        tree_b = tree_b
+            .edit()
             .integrate(iter(changes_a.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist(&mut delta_b)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta_a, &mut storage).await?;
+        flush(&mut delta_b, &mut storage).await?;
 
         // Both should converge to the same value (deterministic by hash)
         let final_a = tree_a.get(&key(1), &storage).await?;
@@ -2203,9 +2299,15 @@ mod tests {
         let mut start = TestTree::empty();
 
         let changes = collect_changes(&start, &target, &storage).await?;
-        start
+        let mut delta = Delta::zero();
+        start = start
+            .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist(&mut delta)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta, &mut storage).await?;
 
         // Verify start now matches target
         assert_eq!(start.get(&key(1), &storage).await?, Some(vec![10]));
@@ -2222,9 +2324,15 @@ mod tests {
         let mut start = build([(1, vec![10]), (2, vec![20]), (3, vec![30])], &mut storage).await?;
 
         let changes = collect_changes(&start, &target, &storage).await?;
-        start
+        let mut delta = Delta::zero();
+        start = start
+            .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist(&mut delta)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta, &mut storage).await?;
 
         // Verify start is now empty
         assert_eq!(start.get(&key(1), &storage).await?, None);
@@ -2244,9 +2352,15 @@ mod tests {
         let target = build([(2, vec![22]), (3, vec![30]), (4, vec![40])], &mut storage).await?;
 
         let changes = collect_changes(&start, &target, &storage).await?;
-        start
+        let mut delta = Delta::zero();
+        start = start
+            .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist(&mut delta)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta, &mut storage).await?;
 
         // Verify start now matches target
         assert_eq!(start.get(&key(1), &storage).await?, None);
@@ -2269,9 +2383,15 @@ mod tests {
         .await?;
 
         let changes = collect_changes(&start, &target, &storage).await?;
-        start
+        let mut delta = Delta::zero();
+        start = start
+            .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist(&mut delta)?;
+
+        // Flush so the reads below can load the integrated nodes from storage.
+        flush(&mut delta, &mut storage).await?;
 
         // Verify start now matches target
         for i in 0..50u32 {
@@ -2297,9 +2417,12 @@ mod tests {
         let mut start = build((10..30u32).map(|i| (i, vec![(i * 5) as u8])), &mut storage).await?;
 
         let changes = collect_changes(&start, &target, &storage).await?;
-        start
+        let mut delta = Delta::zero();
+        start = start
+            .edit()
             .integrate(iter(changes.into_iter().map(Ok)), &storage)
-            .await?;
+            .await?
+            .persist(&mut delta)?;
 
         // Root hash should match after integration (canonical form)
         assert_eq!(start.root(), &target_root);

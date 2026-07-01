@@ -11,6 +11,7 @@ use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_search_tree::Delta;
 use futures_util::Stream;
 
 /// Command that commits a stream of changes (assert/retract) to a branch.
@@ -85,7 +86,9 @@ where
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
         // cardinality-one supersession, and retraction live in the
         // shared `ArtifactTreeExt::apply` so the key layout stays uniform.
-        tree.apply(&mut store, changes).await?;
+        // The batch's new nodes accumulate in `delta`, which we flush below.
+        let mut delta = Delta::zero();
+        tree.apply(&mut store, &mut delta, changes).await?;
 
         // Persist the tree's pending nodes before referencing the root in
         // a revision; a revision must only point at durable blocks. The
@@ -97,7 +100,7 @@ where
         branch
             .archive()
             .index()
-            .import(tree.flush())
+            .import(delta.flush().map(|(_, buffer)| buffer))
             .perform(env)
             .await
             .map_err(DialogArtifactsError::from)?;

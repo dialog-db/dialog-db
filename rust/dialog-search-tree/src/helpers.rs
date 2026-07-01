@@ -51,8 +51,8 @@ use rkyv::{
 };
 
 use crate::{
-    ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Key,
-    Link, Node, Rank, SymmetryWith, Tree, Value, into_owned,
+    ArchivedNodeBody, Buffer, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution,
+    Key, Link, PersistentNode, PersistentTree, Rank, SymmetryWith, Value, into_owned,
 };
 
 /// Traversal order for tree iteration.
@@ -145,13 +145,13 @@ where
         &'a self,
         order: TraversalOrder,
         storage: &'a ContentAddressedStorage<Backend>,
-    ) -> impl Stream<Item = Result<Node<Key, Value>, DialogSearchTreeError>> + 'a
+    ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSend;
 }
 
-impl<Key, Value, D> Traversable<Key, Value> for Tree<Key, Value, D>
+impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
 where
     Key: self::Key + ConditionalSync + 'static,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -180,7 +180,7 @@ where
         &'a self,
         order: TraversalOrder,
         storage: &'a ContentAddressedStorage<Backend>,
-    ) -> impl Stream<Item = Result<Node<Key, Value>, DialogSearchTreeError>> + 'a
+    ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSend,
@@ -215,7 +215,7 @@ where
 async fn load_node<Key, Value, Backend>(
     storage: &ContentAddressedStorage<Backend>,
     hash: &Blake3Hash,
-) -> Result<Node<Key, Value>, DialogSearchTreeError>
+) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -237,7 +237,7 @@ where
         .retrieve(hash)
         .await?
         .ok_or_else(|| DialogSearchTreeError::Node(format!("Blob not found in storage: {hash}")))?;
-    Ok(Node::new(Buffer::from(bytes)))
+    Ok(PersistentNode::new(Buffer::from(bytes)))
 }
 
 /// A stream of tree nodes.
@@ -245,7 +245,7 @@ where
 /// This trait is implemented for any stream that yields `Result<Node<...>, Error>`.
 /// Import this trait to use extension methods like [`into_hash_set`](TreeNodes::into_hash_set).
 pub trait TreeNodes<Key, Value>:
-    Stream<Item = Result<Node<Key, Value>, DialogSearchTreeError>>
+    Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>>
 where
     Key: self::Key,
     Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -273,7 +273,7 @@ where
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
-    S: Stream<Item = Result<Node<Key, Value>, DialogSearchTreeError>>,
+    S: Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>>,
 {
     fn into_hash_set(self) -> impl std::future::Future<Output = HashSet<Blake3Hash>> {
         self.filter_map(|result| async { result.ok().map(|node| node.hash().clone()) })
@@ -298,7 +298,7 @@ pub type JournaledBackend = JournaledStorage<MemoryStorageBackend<Blake3Hash, Ve
 pub type TestStorage = ContentAddressedStorage<JournaledBackend>;
 
 /// Type alias for the tree type used in tree specs.
-pub type TestTree = Tree<SpecKey, Vec<u8>, DistributionSimulator>;
+pub type TestTree = PersistentTree<SpecKey, Vec<u8>, DistributionSimulator>;
 
 /// Creates an empty journaled [`TestStorage`].
 pub fn test_storage() -> TestStorage {
@@ -560,19 +560,23 @@ impl TreeDescriptor {
         // the key bytes, where DistributionSimulator reads it back out.
         // Values carry the decoded base key.
         let mut tree = TestTree::empty();
+        let mut delta = Delta::zero();
         for key in &collection {
             let rank = ranks.get(key).copied().unwrap_or(1);
             tree = tree
+                .edit()
                 .insert(encode_key(key, rank), key.clone(), &storage)
-                .await?;
-        }
+                .await?
+                .persist(&mut delta)?;
 
-        // Persist all pending nodes so differentials read them through the
-        // journaled backend.
-        for buffer in tree.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            // Flush after each persist so the next edit (and the differentials
+            // that read afterwards) can load the nodes this persist created: a
+            // persist writes new nodes only into the delta, never into storage.
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
         }
 
         let root = tree.root().clone();

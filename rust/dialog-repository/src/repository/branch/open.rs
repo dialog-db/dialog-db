@@ -31,6 +31,7 @@ impl OpenBranch {
             reference: self.branch,
             revision,
             upstream,
+            node_cache: dialog_search_tree::Cache::new(),
         })
     }
 }
