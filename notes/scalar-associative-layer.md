@@ -127,4 +127,4 @@ is settled:
 - The remaining row-multiplicity guards (`saw_fact`, `entity_known`)
   were deleted with `Resolution`; their semantics live in
   `OptionalAttributeQuery::evaluate`'s four-case contract. User-facing semantics
-  are documented in `rust/dialog-query/guide.md`.
+  are documented in `notes/guide.md`.

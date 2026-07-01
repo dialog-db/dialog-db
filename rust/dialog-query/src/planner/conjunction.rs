@@ -348,6 +348,130 @@ mod tests {
         Ok(())
     }
 
+    /// Formulas are polymorphic over the numeric types: one
+    /// math/sum premise computes over signed-integer facts (its
+    /// scheme instantiates per row), and a row whose inputs cannot
+    /// share a single type is a non-match — no promotion, no error.
+    #[dialog_common::test]
+    async fn it_sums_signed_integers_and_filters_mixed_rows() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("game/score").of(alice.clone()).is(-5i64))
+            .assert(the!("game/bonus").of(alice.clone()).is(-3i64))
+            .assert(the!("game/score").of(bob.clone()).is(2i64))
+            // Bob's bonus is a float: his row cannot instantiate the
+            // scheme to one type.
+            .assert(the!("game/bonus").of(bob.clone()).is(0.5f64))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let score_scan = AttributeQuery::new(
+            Term::from(the!("game/score")),
+            Term::<Entity>::var("player"),
+            Term::var("score"),
+            Term::var("c1"),
+            Some(Cardinality::One),
+        );
+        let bonus_scan = AttributeQuery::new(
+            Term::from(the!("game/bonus")),
+            Term::<Entity>::var("player"),
+            Term::var("bonus"),
+            Term::var("c2"),
+            Some(Cardinality::One),
+        );
+        let mut sum_terms = Parameters::new();
+        sum_terms.insert("of".to_string(), Term::var("score"));
+        sum_terms.insert("with".to_string(), Term::var("bonus"));
+        sum_terms.insert("is".to_string(), Term::var("total"));
+        let sum = Premise::Assert(Proposition::Formula(Sum::apply(sum_terms)?.into()));
+
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(score_scan))),
+            Premise::Assert(Proposition::Attribute(Box::new(bonus_scan))),
+            sum,
+        ])
+        .plan(&Environment::new())?;
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Alice computes within one type; Bob's mixed row is a non-match"
+        );
+        assert_eq!(
+            results[0].lookup(&Term::var("total"))?.content()?,
+            Value::SignedInt(-8),
+            "signed arithmetic, previously inexpressible, just works"
+        );
+        Ok(())
+    }
+
+    /// Polymorphic literals: an integer literal adapts losslessly to
+    /// each row's instantiation, so one premise with a literal works
+    /// over signed data — the literal follows the data, never the
+    /// other way around.
+    #[dialog_common::test]
+    async fn it_adapts_integer_literals_to_the_rows_type() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("game/score").of(alice.clone()).is(-5i64))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let score_scan = AttributeQuery::new(
+            Term::from(the!("game/score")),
+            Term::<Entity>::var("player"),
+            Term::var("score"),
+            Term::var("c1"),
+            Some(Cardinality::One),
+        );
+        let mut sum_terms = Parameters::new();
+        sum_terms.insert("of".to_string(), Term::var("score"));
+        // An unsigned literal over signed data: adapts to -5 + 1.
+        sum_terms.insert(
+            "with".to_string(),
+            Term::<Any>::Constant(Value::UnsignedInt(1)),
+        );
+        sum_terms.insert("is".to_string(), Term::var("total"));
+        let sum = Premise::Assert(Proposition::Formula(Sum::apply(sum_terms)?.into()));
+
+        let plan = Planner::from(vec![
+            Premise::Assert(Proposition::Attribute(Box::new(score_scan))),
+            sum,
+        ])
+        .plan(&Environment::new())?;
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].lookup(&Term::var("total"))?.content()?,
+            Value::SignedInt(-4),
+            "the literal instantiated to the row's signed type"
+        );
+        Ok(())
+    }
+
     /// Characterization of the agreed filter semantics, passing
     /// today: a formula slot demanding a present value narrows a
     /// set-widened attribute variable rule-wide (occurrence typing),
