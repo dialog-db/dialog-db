@@ -35,7 +35,9 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_common::Blake3Hash;
 use dialog_common::helpers::BenchData;
 use dialog_search_tree::helpers::{Traversable as _, TraversalOrder};
-use dialog_search_tree::{ContentAddressedStorage, Distribution, Node, Rank, Tree};
+use dialog_search_tree::{
+    ContentAddressedStorage, Delta, Distribution, PersistentNode, PersistentTree, Rank,
+};
 use dialog_storage::MemoryStorageBackend;
 use futures_util::StreamExt;
 
@@ -122,7 +124,9 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 /// Builds and persists a tree of `size` random entries under distribution `D`.
-async fn build_tree<D>(size: usize) -> (Tree<[u8; 16], Vec<u8>, D>, Storage, Vec<[u8; 16]>)
+async fn build_tree<D>(
+    size: usize,
+) -> (PersistentTree<[u8; 16], Vec<u8>, D>, Storage, Vec<[u8; 16]>)
 where
     D: Distribution,
 {
@@ -131,16 +135,24 @@ where
     let values = data.random_buffers::<32>(size);
 
     let mut storage = ContentAddressedStorage::new(Backend::default());
-    let mut tree = Tree::<[u8; 16], Vec<u8>, D>::empty();
+    let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
+    let mut delta = Delta::zero();
 
     for (key, value) in keys.iter().zip(values.iter()) {
-        tree = tree.insert(*key, value.to_vec(), &storage).await.unwrap();
-    }
-    for buffer in tree.flush() {
-        storage
-            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+        tree = tree
+            .edit()
+            .insert(*key, value.to_vec(), &storage)
             .await
+            .unwrap()
+            .persist(&mut delta)
             .unwrap();
+        // Flush after each persist so the next edit can load the nodes this persist created.
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await
+                .unwrap();
+        }
     }
 
     (tree, storage, keys)
@@ -152,10 +164,24 @@ async fn insert_all<D>(keys: &[[u8; 16]], values: &[Vec<u8>])
 where
     D: Distribution,
 {
-    let storage = ContentAddressedStorage::new(Backend::default());
-    let mut tree = Tree::<[u8; 16], Vec<u8>, D>::empty();
+    let mut storage = ContentAddressedStorage::new(Backend::default());
+    let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
+    let mut delta = Delta::zero();
     for (key, value) in keys.iter().zip(values.iter()) {
-        tree = tree.insert(*key, value.clone(), &storage).await.unwrap();
+        tree = tree
+            .edit()
+            .insert(*key, value.clone(), &storage)
+            .await
+            .unwrap()
+            .persist(&mut delta)
+            .unwrap();
+        // Flush after each persist so the next edit can load the nodes this persist created.
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await
+                .unwrap();
+        }
     }
 }
 
@@ -284,7 +310,7 @@ struct Shape {
 
 /// Walks the persisted tree to recover its height, node counts, per-level
 /// fan-out and total persisted byte size.
-async fn shape_of<D>(tree: &Tree<[u8; 16], Vec<u8>, D>, storage: &Storage) -> Shape
+async fn shape_of<D>(tree: &PersistentTree<[u8; 16], Vec<u8>, D>, storage: &Storage) -> Shape
 where
     D: Distribution,
 {
@@ -322,7 +348,7 @@ where
 
             for hash in &frontier {
                 let bytes = storage.retrieve(hash).await.unwrap().unwrap();
-                let node = Node::<[u8; 16], Vec<u8>>::new(bytes.into());
+                let node = PersistentNode::<[u8; 16], Vec<u8>>::new(bytes.into());
                 node_count += 1;
                 match node.as_index() {
                     Ok(index) => {
