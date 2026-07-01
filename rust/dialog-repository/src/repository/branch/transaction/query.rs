@@ -37,36 +37,30 @@
 //!
 //! # Non-composable
 //!
-//! [`TransactionQuery`] intentionally has no `.with(...)` chain — a
-//! transaction's view is the branch plus its own pending changes,
-//! not a session you can layer more sources onto. To compose more
-//! sources, commit the transaction first and use
-//! [`Branch::query`](crate::Branch::query) (which gives full
-//! `.with(...)` / `.join(...)` composition on the session).
+//! [`TransactionQuery`] intentionally has no `.with(...)` / `.join(...)`
+//! chain — a transaction's view is the branch plus its own pending
+//! changes, not a session you can layer more *fact sources* onto. To
+//! compose more sources, commit the transaction first and use
+//! [`Branch::query`](crate::Branch::query).
+//!
+//! Deductive-rule resolution is built into the shared [`QueryEnv`] this
+//! routes through (a durable layer per branch + the overlay as a
+//! transient layer), so rules resolve identically whether a concept is
+//! queried mid-transaction or after commit — it's part of evaluating a
+//! query, not an optional composition.
 
-use std::collections::HashSet;
-
-use async_trait::async_trait;
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey,
-};
+use dialog_artifacts::{Changes, DialogArtifactsError};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
-use dialog_query::concept::descriptor::ConceptDescriptor;
-use dialog_query::concept::query::ConceptRules;
-use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
-use dialog_query::source::SelectRules;
 
-use crate::Branch;
-use crate::RemoteSite;
-use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
-use crate::repository::branch::select_from_branch;
+use crate::repository::branch::session::QueryEnv;
+use crate::{Branch, RemoteSite};
 
 /// A non-composable query handle returned by
 /// [`Transaction::query`](crate::repository::branch::Transaction::query).
@@ -153,70 +147,17 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
                 .overlay(&operator);
             let tombstones = tombstones_from(&overlay);
 
-            let trans_env = TransactionEnv {
-                branch,
-                changes: overlay,
-                tombstones,
-                env,
-            };
-            let results = Box::pin(query.perform(&trans_env));
+            // A transaction query is just a single-branch `QueryEnv`.
+            // Constructing the *same* env type the branch-session path
+            // uses is what guarantees identical behavior — fact reads,
+            // tombstones, schema metadata, and deductive-rule
+            // resolution all share one implementation.
+            let query_env = QueryEnv::new(vec![branch], overlay, tombstones, env);
+            let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
             }
         }
-    }
-}
-
-/// The runtime env serving a [`TransactionSelectQuery`].
-///
-/// Unions the (tombstone-filtered) branch stream with the pending
-/// [`Changes`] overlay via `Provider<Select> for Changes`. Built per
-/// `.perform(env)` so the env reference is never captured on the
-/// outer [`TransactionQuery`].
-pub(crate) struct TransactionEnv<'a, Env> {
-    branch: &'a Branch,
-    changes: Changes,
-    tombstones: HashSet<SortKey>,
-    env: &'a Env,
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<'a, Env> Provider<Select<'a>> for TransactionEnv<'a, Env>
-where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
-    async fn execute(
-        &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        // Branch stream — filtered by tombstones from the pending
-        // retracts. Tombstones touch only the branch source; the
-        // overlay's facts (below) pass through unfiltered so a
-        // `retract(x).assert(x)` pattern surfaces `x` correctly.
-        let raw = select_from_branch(self.branch, self.env, input.clone()).await?;
-        let filtered_branch = filter_tombstones(raw, self.tombstones.clone());
-
-        // Pending changes overlay — Changes itself is a Provider<Select>.
-        let overlay = Provider::<Select<'a>>::execute(&self.changes, input).await?;
-
-        Ok(merge_grouped(vec![filtered_branch, overlay]))
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Env: ConditionalSync> Provider<SelectRules> for TransactionEnv<'_, Env> {
-    async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        // Surfaces only the implicit per-descriptor rule each
-        // `ConceptDescriptor` carries.
-        Ok(ConceptRules::new(&input))
     }
 }
 

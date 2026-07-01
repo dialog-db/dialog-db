@@ -1,8 +1,11 @@
 /// Adornment types for parameter binding pattern caching.
 pub mod adornment;
+/// Shared, branch-owned plan cache keyed by (rule identity, adornment).
+mod plan_cache;
 /// Per-concept rule management with adornment-keyed plan caching.
 pub mod rules;
 
+pub use plan_cache::PlanCache;
 pub use rules::ConceptRules;
 
 use std::fmt;

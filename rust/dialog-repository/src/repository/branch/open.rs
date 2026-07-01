@@ -1,6 +1,10 @@
+use std::sync::Arc;
+
+use crate::rules::RuleCache;
 use crate::{Branch, BranchReference, ResolveError};
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
+use dialog_query::concept::query::PlanCache;
 
 /// Command to open a branch. Resolves the branch's revision and upstream
 /// cells without ever erroring on a missing revision — a freshly-opened
@@ -32,6 +36,8 @@ impl OpenBranch {
             revision,
             upstream,
             node_cache: dialog_search_tree::Cache::new(),
+            rule_cache: Arc::new(RuleCache::new()),
+            plan_cache: PlanCache::default(),
         })
     }
 }

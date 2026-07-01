@@ -113,6 +113,67 @@ impl DeductiveRule {
             unless,
         }
     }
+
+    /// Canonical encoding of this rule's descriptor, if it has one —
+    /// the dag-cbor bytes, deterministic by construction.
+    ///
+    /// Returns `None` when the rule body can't be expressed in formal
+    /// notation: the implicit per-descriptor rule and any rule built
+    /// directly from raw [`AttributeQuery`] premises encode to nothing,
+    /// because `Proposition`'s formal-notation `Serialize` rejects
+    /// attribute propositions. Only rules with concept/formula bodies
+    /// (what `rule!:` notation and stored `db.rule/*` rules produce)
+    /// have a canonical encoding.
+    ///
+    /// dag-cbor canonicalizes map keys per the spec, so the encoding is
+    /// a pure function of the descriptor even though a premise's terms
+    /// come from a [`Parameters`] `HashMap` — no manual key sorting
+    /// needed. This is the same encoding dialog content-addresses with
+    /// elsewhere.
+    pub fn try_encode(&self) -> Option<Vec<u8>> {
+        serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
+    }
+
+    /// This rule's content-addressed identity, if it has a canonical
+    /// encoding: `rule:<base58(blake3(dag-cbor(descriptor)))>`.
+    ///
+    /// `None` for rules with no encodable body (implicit / attribute-query
+    /// rules — see [`try_encode`](Self::try_encode)). A pure function of
+    /// the rule body, stable across compilations, so it is a
+    /// collision-free key for plan caching and the entity a rule's facts
+    /// are stored under.
+    pub fn try_this(&self) -> Option<Entity> {
+        use base58::ToBase58;
+        let hash = blake3::hash(&self.try_encode()?);
+        let encoded = hash.as_bytes().as_ref().to_base58();
+        format!("rule:{encoded}").parse().ok()
+    }
+
+    /// Canonical dag-cbor encoding, panicking if the rule has no
+    /// encodable body. Use on the storage path where the rule is known
+    /// to be storable (concept/formula bodies). Prefer
+    /// [`try_encode`](Self::try_encode) otherwise.
+    pub fn encode(&self) -> Vec<u8> {
+        self.try_encode()
+            .expect("rule body must encode in formal notation")
+    }
+
+    /// Content-addressed identity, panicking if the rule has no
+    /// encodable body. Use on the storage path; prefer
+    /// [`try_this`](Self::try_this) otherwise.
+    pub fn this(&self) -> Entity {
+        self.try_this()
+            .expect("storable rule must have a content-addressed identity")
+    }
+
+    /// Rebuild a rule from its canonical dag-cbor [`encode`](Self::encode)
+    /// bytes. `Err` carries a human-readable reason — either the cbor
+    /// decode failed or the decoded descriptor didn't compile.
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let descriptor: DeductiveRuleDescriptor = serde_ipld_dagcbor::from_slice(bytes)
+            .map_err(|e| format!("dag-cbor decode failed: {e}"))?;
+        descriptor.compile().map_err(|e| e.to_string())
+    }
 }
 
 impl Serialize for DeductiveRule {
@@ -311,6 +372,48 @@ mod tests {
             DependencyGraph::from_premises(&analysis.premises),
             "retained graph must match the premises' dependency graph"
         );
+    }
+
+    /// A concept-bodied rule (the storable kind) has a deterministic,
+    /// content-addressed `this()` — same body ⇒ same `rule:` entity
+    /// across independent compilations, regardless of premise-term map
+    /// iteration order. This is the plan-cache / storage key.
+    #[dialog_common::test]
+    fn it_has_a_deterministic_content_addressed_identity() {
+        use serde_json::json;
+        let json = json!({
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "when": [
+                {
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                }
+            ]
+        });
+        let build = || {
+            let d: DeductiveRuleDescriptor =
+                serde_json::from_value(json.clone()).expect("descriptor parses");
+            d.compile().expect("rule compiles")
+        };
+        let a = build();
+        let b = build();
+        assert_eq!(a.this(), b.this(), "same rule body ⇒ same identity");
+        assert_eq!(
+            a.encode(),
+            b.encode(),
+            "dag-cbor encoding is stable across compilations"
+        );
+        assert!(
+            a.this().to_string().starts_with("rule:"),
+            "identity is a rule: URI, got {}",
+            a.this()
+        );
+        // Round-trips through encode/decode.
+        let decoded = DeductiveRule::decode(&a.encode()).expect("decodes");
+        assert_eq!(decoded.this(), a.this(), "encode/decode preserves identity");
     }
 
     #[dialog_common::test]

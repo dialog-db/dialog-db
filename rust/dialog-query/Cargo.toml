@@ -16,6 +16,9 @@ serde_ipld_dagcbor = { workspace = true }
 blake3 = { workspace = true }
 base58 = { workspace = true }
 
+# Caching
+sieve-cache = { workspace = true }
+
 # Error handling
 thiserror = { workspace = true }
 
