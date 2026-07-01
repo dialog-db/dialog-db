@@ -3,9 +3,11 @@ use crate::Revision;
 
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Capability, Did, Subject};
+use dialog_common::Blake3Hash;
 use dialog_effects::archive::Archive;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_query::query::Application;
+use dialog_search_tree::{Buffer, Cache};
 
 mod claims;
 pub use claims::*;
@@ -73,6 +75,11 @@ pub struct Branch {
     reference: BranchReference,
     revision: Cell<Revision>,
     upstream: Cell<Upstream>,
+    /// Shared node cache for tree reads. Created once per opened branch and
+    /// carried (as a shared handle) into every `Select`'s tree, so blocks read
+    /// by one query stay warm for the next instead of being re-fetched from
+    /// storage. Content-addressed keys make sharing across revisions safe.
+    node_cache: Cache<Blake3Hash, Buffer>,
 }
 
 impl Branch {
@@ -122,5 +129,10 @@ impl Branch {
     /// Query with an application. Shortcut for `branch.query().select(query)`.
     pub fn select<Q: Application>(&self, query: Q) -> SelectQuery<'_, Q> {
         SelectQuery::new(self, query)
+    }
+
+    /// A shared handle to this branch's node cache, for seeding a read tree.
+    pub(crate) fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
+        self.node_cache.clone()
     }
 }

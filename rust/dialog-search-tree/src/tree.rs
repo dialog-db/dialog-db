@@ -152,6 +152,18 @@ where
         }
     }
 
+    /// Creates a [`PersistentTree`] from a known root hash, reusing an existing
+    /// node cache instead of allocating a fresh empty one.
+    ///
+    /// Nodes are content-addressed: a [`Blake3Hash`] always maps to the same
+    /// bytes, so a cache may be shared freely across tree versions and revisions
+    /// without ever serving a stale entry. Use this to keep a cache warm across
+    /// successive reconstructions of a tree from a moving root (e.g. a branch
+    /// that reuses one cache across every read).
+    pub fn from_hash_with_cache(root: Blake3Hash, node_cache: Cache<Blake3Hash, Buffer>) -> Self {
+        Self::seal(root, node_cache)
+    }
+
     /// Retrieves the value associated with `key` from the tree.
     ///
     /// This method performs a binary search through the tree hierarchy to
