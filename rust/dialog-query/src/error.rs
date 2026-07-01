@@ -390,6 +390,23 @@ pub enum EvaluationError {
         reason: String,
     },
 
+    /// A value's type fell outside a variable's rule-inferred kind
+    /// at bind time. Scans filter mismatched facts before binding,
+    /// so reaching this is a planner-contract violation (an untyped
+    /// construction path fed a value the rule's types exclude), not
+    /// a data-dependent non-match.
+    #[error("Variable ?{variable} of kind {kind} cannot bind {value} ({value_type})")]
+    KindMismatch {
+        /// Name of the variable whose kind rejected the value.
+        variable: String,
+        /// The variable's rule-inferred kind (display form).
+        kind: String,
+        /// The rejected value (debug form).
+        value: String,
+        /// The rejected value's type (debug form).
+        value_type: String,
+    },
+
     /// A constraint was violated during evaluation.
     #[error("Constraint violation: {constraint}")]
     ConstraintViolation {
