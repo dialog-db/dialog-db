@@ -52,6 +52,7 @@ dialog-artifacts = { workspace = true }
 dialog-operator = { workspace = true }
 dialog-repository = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
+dialog-network = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }
 futures-util = { workspace = true }
@@ -59,6 +60,40 @@ wasm-bindgen-test = { workspace = true }
 
 [features]
 default = []
+# Marker feature so benchmarks (which depend on `BenchEnv` in
+# `src/helpers.rs`) are only built when explicitly requested. The helper
+# itself lives behind `#[cfg(any(test, feature = "helpers"))]` and is
+# pulled in by the benches via `#[path]`; it relies exclusively on
+# dev-dependencies (dialog-repository depends on dialog-query, so those
+# crates can only appear as a dev-dependency cycle, never a normal dep).
+helpers = []
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[example]]
+name = "profile_join"
+required-features = ["helpers"]
+
+[[bench]]
+name = "query_reads"
+harness = false
+required-features = ["helpers"]
+
+[[bench]]
+name = "query_join"
+harness = false
+required-features = ["helpers"]
+
+[[bench]]
+name = "query_memory"
+harness = false
+required-features = ["helpers"]
+
+[[bench]]
+name = "query_disk"
+harness = false
+required-features = ["helpers"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("web-integration-tests"))'] }
