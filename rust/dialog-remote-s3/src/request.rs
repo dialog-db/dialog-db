@@ -14,7 +14,7 @@
 //! use dialog_capability::{Subject, did};
 //! use dialog_effects::archive::{Archive, Catalog, Get, Put};
 //! use dialog_common::Blake3Hash;
-//! use dialog_remote_s3::capability::S3Request;
+//! use dialog_remote_s3::S3Request;
 //!
 //! let subject = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
 //!
