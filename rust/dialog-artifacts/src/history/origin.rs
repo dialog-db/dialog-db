@@ -49,21 +49,27 @@ impl Origin {
         ))
     }
 
-    /// Derive the [`Origin`] for an issuer and subject identified by DIDs.
+    /// Derive the [`Origin`] for a lineage identified by a sequence of
+    /// string identifiers — typically the issuer DID, the repository DID,
+    /// and the branch name.
     ///
-    /// Unlike [`Origin::derive`], where the fixed-width issuer key makes the
-    /// concatenation unambiguous, DIDs are variable-width, so the issuer is
-    /// length-prefixed to keep the derivation injective.
-    pub fn derive_from_dids(issuer: &str, subject: &str) -> Self {
-        let issuer = issuer.as_bytes();
-        Self(make_reference(
-            [
-                &(issuer.len() as u64).to_be_bytes()[..],
-                issuer,
-                subject.as_bytes(),
-            ]
-            .concat(),
-        ))
+    /// Unlike [`Origin::derive`], where the fixed-width issuer key makes
+    /// concatenation unambiguous, these identifiers are variable-width, so
+    /// every component is length-prefixed to keep the derivation injective.
+    ///
+    /// The components must together identify a single sequential actor: a
+    /// branch head advances independently of every other branch, so within
+    /// a multi-branch repository the branch belongs in the scope — deriving
+    /// from the issuer and repository alone would let two branches advanced
+    /// by the same issuer mint colliding versions.
+    pub fn derive_from_identifiers<'a>(identifiers: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut bytes = Vec::new();
+        for identifier in identifiers {
+            let identifier = identifier.as_bytes();
+            bytes.extend_from_slice(&(identifier.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(identifier);
+        }
+        Self(make_reference(bytes))
     }
 
     /// The byte representation of this [`Origin`], suitable for use as a key

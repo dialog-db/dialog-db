@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync, NULL_BLAKE3_HASH};
-use dialog_search_tree::{ContentAddressedStorage as NodeStorage, Delta, PersistentTree};
+use dialog_search_tree::{Change, ContentAddressedStorage as NodeStorage, Delta, PersistentTree};
 use dialog_storage::{Blake3Hash, CborEncoder, DialogStorageError, Encoder, StorageBackend};
 use futures_util::TryStreamExt;
 
@@ -9,8 +9,7 @@ use crate::tree::TreeStorageBridge;
 use crate::{Attribute, DialogArtifactsError, Entity, Value};
 
 use super::{
-    Cause, Claim, HISTORY_KEY_LENGTH, History, HistoryKey, REVISION_ATTRIBUTE, Record, Revision,
-    Version,
+    Claim, HISTORY_KEY_LENGTH, History, HistoryKey, REVISION_ATTRIBUTE, Record, Revision, Version,
 };
 
 /// The search tree used to persist the history index. Keys are the raw
@@ -95,6 +94,49 @@ where
             self.storage.store(buffer.into_vec(), &digest).await?;
         }
         Ok(self.hash())
+    }
+
+    /// Adopt every record present in the history index rooted at `other`
+    /// that this index lacks.
+    ///
+    /// Records are immutable and uniquely keyed, so adoption is a union:
+    /// entries only this index has are kept, never removed. Only blocks on
+    /// paths where the two indexes differ are read, so shared history (from
+    /// common ancestry) costs nothing. This is the replication step of a
+    /// merge: after adopting the remote side's history, conflict detection
+    /// keeps working across the sync boundary.
+    pub async fn adopt(&mut self, other: &Blake3Hash) -> Result<(), DialogArtifactsError> {
+        let other = HistoryIndex::from_hash(NodeHash::from(*other));
+
+        let additions = {
+            let changes = self
+                .index
+                .differentiate(&other, &self.storage, &self.storage);
+            tokio::pin!(changes);
+
+            let mut additions = Vec::new();
+            while let Some(change) = changes.try_next().await? {
+                if let Change::Add(entry) = change {
+                    additions.push(entry);
+                }
+            }
+            additions
+        };
+
+        if additions.is_empty() {
+            return Ok(());
+        }
+
+        let mut transient = self.index.edit();
+        for entry in additions {
+            transient = transient
+                .insert(entry.key, entry.value, &self.storage)
+                .await?;
+        }
+        self.index = transient.persist(&mut self.delta)?;
+        self.persist().await?;
+
+        Ok(())
     }
 
     /// Whether the given claim, produced by the revision identified by
@@ -285,7 +327,7 @@ pub fn revision_record(revision: &Revision) -> Result<(Version, Record), DialogA
 pub fn revision_record_for(
     subject: &str,
     version: &Version,
-    parent: Option<Version>,
+    parents: impl IntoIterator<Item = Version>,
 ) -> Result<(Version, Record), DialogArtifactsError> {
     Ok((
         *version,
@@ -293,7 +335,7 @@ pub fn revision_record_for(
             the: Attribute::from_str(REVISION_ATTRIBUTE)?,
             of: Entity::from_str(subject)?,
             is: Value::Bytes(version.key_bytes().to_vec()),
-            cause: parent.map(Cause::from).unwrap_or_default(),
+            cause: parents.into_iter().collect(),
         }),
     ))
 }

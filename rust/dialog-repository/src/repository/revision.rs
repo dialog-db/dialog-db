@@ -25,6 +25,13 @@ pub struct Revision {
     /// DID of the profile (long-lived key) that authorized this revision.
     pub authority: Did,
 
+    /// Name of the branch this revision was minted on. Part of the
+    /// revision's [`Origin`] scope: a branch head is an independent
+    /// sequential actor, so two branches advanced by the same issuer must
+    /// not share an origin — otherwise they could mint colliding versions.
+    #[serde(default)]
+    pub branch: String,
+
     /// Root of the search tree at this revision.
     pub tree: TreeReference,
 
@@ -50,11 +57,18 @@ pub struct Revision {
 impl Revision {
     /// Build the first revision of a branch, with no causal ancestor and
     /// the genesis edition.
-    pub fn new(tree: TreeReference, subject: Did, issuer: Did, authority: Did) -> Self {
+    pub fn new(
+        tree: TreeReference,
+        subject: Did,
+        branch: impl Into<String>,
+        issuer: Did,
+        authority: Did,
+    ) -> Self {
         Self {
             subject,
             issuer,
             authority,
+            branch: branch.into(),
             tree,
             cause: HashSet::new(),
             edition: Edition::GENESIS,
@@ -67,11 +81,18 @@ impl Revision {
     /// Whoever advances a revision has, by construction, seen it, so the new
     /// edition is `self + 1` no matter which issuer commits. The previous
     /// revision's tree root is recorded in `cause`.
-    pub fn advance(&self, tree: TreeReference, issuer: Did, authority: Did) -> Self {
+    pub fn advance(
+        &self,
+        tree: TreeReference,
+        branch: impl Into<String>,
+        issuer: Did,
+        authority: Did,
+    ) -> Self {
         Self {
             subject: self.subject.clone(),
             issuer,
             authority,
+            branch: branch.into(),
             tree,
             cause: HashSet::from([self.tree.clone()]),
             edition: self.edition.successor(),
@@ -89,6 +110,7 @@ impl Revision {
         &self,
         upstream: &Revision,
         tree: TreeReference,
+        branch: impl Into<String>,
         issuer: Did,
         authority: Did,
     ) -> Self {
@@ -96,6 +118,7 @@ impl Revision {
             subject: self.subject.clone(),
             issuer,
             authority,
+            branch: branch.into(),
             tree,
             cause: HashSet::from([upstream.tree.clone()]),
             edition: self.edition.max(upstream.edition).successor(),
@@ -103,11 +126,16 @@ impl Revision {
         }
     }
 
-    /// The [`Origin`] of this revision: the repository-scoped identity of
-    /// its issuer, derived from the issuer and subject DIDs. Two origins are
-    /// equal exactly when the same issuer committed to the same repository.
+    /// The [`Origin`] of this revision: the lineage-scoped identity of its
+    /// issuer, derived from the issuer DID, the subject DID, and the branch
+    /// the revision was minted on. Two origins are equal exactly when the
+    /// same issuer committed to the same branch of the same repository.
     pub fn origin(&self) -> Origin {
-        Origin::derive_from_dids(self.issuer.as_str(), self.subject.as_str())
+        Origin::derive_from_identifiers([
+            self.issuer.as_str(),
+            self.subject.as_str(),
+            self.branch.as_str(),
+        ])
     }
 
     /// The [`Version`] identifying this revision: its origin paired with its
@@ -132,6 +160,7 @@ mod tests {
         Revision::new(
             TreeReference::from(EMPTY_TREE_HASH),
             did!("test:repository"),
+            "main",
             did!("test:alice"),
             did!("test:profile"),
         )
@@ -144,18 +173,19 @@ mod tests {
 
         // Advancing increments the edition no matter which issuer commits:
         // whoever advances a revision has seen it
-        let second = base.advance(tree(1), did!("test:alice"), did!("test:profile"));
+        let second = base.advance(tree(1), "main", did!("test:alice"), did!("test:profile"));
         assert_eq!(second.edition, Edition::new(1));
         assert!(second.cause.contains(&base.tree));
 
-        let third = second.advance(tree(2), did!("test:bob"), did!("test:profile"));
+        let third = second.advance(tree(2), "main", did!("test:bob"), did!("test:profile"));
         assert_eq!(third.edition, Edition::new(2));
 
         // A merge advances past both lineages
-        let concurrent = second.advance(tree(3), did!("test:carol"), did!("test:profile"));
+        let concurrent = second.advance(tree(3), "main", did!("test:carol"), did!("test:profile"));
         let merged = third.merge(
             &concurrent,
             tree(4),
+            "main",
             did!("test:alice"),
             did!("test:profile"),
         );
@@ -168,8 +198,8 @@ mod tests {
 
         // Two issuers advance from the same base without seeing each other:
         // same edition, different origins — concurrent by inspection
-        let left = base.advance(tree(1), did!("test:alice"), did!("test:profile"));
-        let right = base.advance(tree(2), did!("test:bob"), did!("test:profile"));
+        let left = base.advance(tree(1), "main", did!("test:alice"), did!("test:profile"));
+        let right = base.advance(tree(2), "main", did!("test:bob"), did!("test:profile"));
         assert_eq!(left.edition, right.edition);
         assert_ne!(left.origin(), right.origin());
         assert_ne!(left.version(), right.version());
@@ -179,9 +209,16 @@ mod tests {
         let elsewhere = Revision::new(
             TreeReference::from(EMPTY_TREE_HASH),
             did!("test:other-repository"),
+            "main",
             did!("test:alice"),
             did!("test:profile"),
         );
         assert_ne!(left.origin(), elsewhere.origin());
+
+        // ... and on two different branches of the same repository: each
+        // branch head is an independent sequential actor
+        let branched = base.advance(tree(3), "feature", did!("test:alice"), did!("test:profile"));
+        assert_ne!(left.origin(), branched.origin());
+        assert_ne!(left.version(), branched.version());
     }
 }
