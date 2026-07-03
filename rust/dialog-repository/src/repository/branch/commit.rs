@@ -1,10 +1,9 @@
+use crate::schema;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
-use dialog_artifacts::history::{
-    Edition, HistoryStore, Origin, Record, Version, revision_record_for,
-};
+use dialog_artifacts::history::{Edition, HistoryStore, Record, Version};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{DialogArtifactsError, Instruction};
 use dialog_capability::{Fork, Provider};
@@ -96,8 +95,12 @@ where
             .as_ref()
             .map(|base| base.edition.successor())
             .unwrap_or(Edition::GENESIS);
-        let origin =
-            Origin::derive_from_identifiers([issuer.as_str(), branch.of().as_str(), branch.name()]);
+        let lineage = schema::Branch::new(
+            &schema::Origin::new(profile.clone(), branch.of().clone()),
+            branch.name(),
+        )
+        .this;
+        let origin = Revision::origin_of(&lineage, &issuer);
         let version = Version::new(origin, edition);
 
         // Walk forward from the current revision's tree root, or from
@@ -126,12 +129,6 @@ where
                 .await?;
             records.push((version, Record::derive(instruction, &current)));
         }
-        records.push(revision_record_for(
-            branch.of().as_str(),
-            &version,
-            base_revision.as_ref().map(Revision::version),
-        )?);
-
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
         // cardinality-one supersession, and retraction live in the
         // shared `ArtifactTreeExt::apply_versioned` so the key layout stays
@@ -164,25 +161,27 @@ where
 
         let tree = TreeReference::from(*tree.root().as_bytes());
 
-        // Record the commit's claim lineage (plus the revision's own
-        // lineage claim) into the history index, continuing from the most
-        // recent recorded history root. This is what powers claim-level
-        // conflict detection: see `dialog_artifacts::history::causality`.
-        let mut history = match base_revision
-            .as_ref()
-            .and_then(|base| base.history.as_ref())
-        {
-            Some(root) => HistoryStore::from_hash(root.hash(), store.clone()),
-            None => HistoryStore::new(store.clone()),
-        };
-        history.record_all(records).await?;
+        let parent = base_revision.as_ref().map(Revision::version);
+        let base_history = base_revision.as_ref().and_then(|base| base.history.clone());
 
         let mut revision = match base_revision {
             Some(base) => base.advance(tree, branch.name(), issuer, profile),
             None => Revision::new(tree, branch.of().clone(), branch.name(), issuer, profile),
         };
-        revision.history = history.hash().map(TreeReference::from);
         debug_assert_eq!(revision.version(), version);
+
+        // Record the commit's claim lineage, the revision's DAG edge on the
+        // branch lineage entity, and the revision's own attribute claims
+        // into the history index, continuing from the most recent recorded
+        // root. This is what powers claim-level conflict detection: see
+        // `dialog_artifacts::history::causality`.
+        records.extend(revision.records(parent)?);
+        let mut history = match &base_history {
+            Some(root) => HistoryStore::from_hash(root.hash(), store.clone()),
+            None => HistoryStore::new(store.clone()),
+        };
+        history.record_all(records).await?;
+        revision.history = history.hash().map(TreeReference::from);
 
         head.publish(revision.clone(), env).await?;
 
@@ -400,10 +399,28 @@ mod history_tests {
         );
 
         // The revision DAG edges are recorded too: each revision's lineage
-        // claim is present, and the common ancestor of the head with itself
-        // is itself.
+        // claim is present, attached to the branch lineage entity and
+        // pointing at the content-derived revision entity...
+        let edge = history.revision_at(&second.version()).await?;
         assert_eq!(history.revision_at(&first.version()).await?.len(), 1);
-        assert_eq!(history.revision_at(&second.version()).await?.len(), 1);
+        assert_eq!(edge.len(), 1);
+        assert_eq!(edge[0].of, second.lineage());
+        assert_eq!(edge[0].is, Value::Entity(second.entity()));
+
+        // ... and the revision entity is describable like any other entity:
+        // its attribute claims are recorded on it
+        let described = history
+            .claims_at(
+                &second.version(),
+                &second.entity(),
+                &"dialog.revision/edition".parse()?,
+            )
+            .await?;
+        assert_eq!(described.len(), 1);
+        assert_eq!(
+            described[0].is,
+            Value::UnsignedInt(u128::from(second.edition.value()))
+        );
         assert_eq!(
             common_ancestor(&second.version(), &first.version(), &history).await?,
             Some(first.version())

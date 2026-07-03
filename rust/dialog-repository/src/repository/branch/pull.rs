@@ -1,5 +1,5 @@
 use dialog_artifacts::DialogArtifactsError;
-use dialog_artifacts::history::{HistoryStore, revision_record_for};
+use dialog_artifacts::history::HistoryStore;
 use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -213,11 +213,7 @@ impl<'a> Pull<'a> {
                     history.adopt(root.hash()).await?;
                 }
                 history
-                    .record_all([revision_record_for(
-                        branch.of().as_str(),
-                        &revision.version(),
-                        [local.version(), upstream_revision.version()],
-                    )?])
+                    .record_all(revision.records([local.version(), upstream_revision.version()])?)
                     .await?;
                 revision.history = history.hash().map(TreeReference::from);
 
