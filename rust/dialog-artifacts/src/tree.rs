@@ -33,6 +33,7 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
 use std::ops::RangeInclusive;
 
+use crate::history::Version;
 use crate::{
     ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum,
     DialogArtifactsError, ENTITY_LENGTH, ENTITY_RAW_HEAD, EntityKey, EntityKeyPart, FromKey,
@@ -159,6 +160,24 @@ pub trait ArtifactTreeExt {
             + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend;
 
+    /// Like [`ArtifactTreeExt::apply`], but tags every [`Datum`] written by
+    /// the batch with the [`Version`](crate::history::Version) of the
+    /// revision that produced it. This is the write path used by the
+    /// version-controlled [`Repository`](crate::history::Repository);
+    /// [`ArtifactTreeExt::apply`] leaves the version unset.
+    async fn apply_versioned<S, I>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        version: Option<Version>,
+        instructions: I,
+    ) -> Result<(), DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+        I: Stream<Item = Instruction> + ConditionalSend;
+
     /// Scan the tree for [`Artifact`]s matching the given constrained
     /// selector.
     ///
@@ -198,6 +217,22 @@ impl ArtifactTreeExt for ArtifactTree {
             + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
+        self.apply_versioned(store, delta, None, instructions).await
+    }
+
+    async fn apply_versioned<S, I>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        version: Option<Version>,
+        instructions: I,
+    ) -> Result<(), DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+        I: Stream<Item = Instruction> + ConditionalSend,
+    {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
 
         // Snapshot the committed tree before editing. A retract consults it to
@@ -221,7 +256,8 @@ impl ArtifactTreeExt for ArtifactTree {
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
 
-                    let datum = Datum::from(artifact);
+                    let mut datum = Datum::from(artifact);
+                    datum.version = version;
                     let added = State::Added(datum);
                     transient = transient
                         .insert(entity_key.into_key().into(), added.clone(), &storage)
@@ -295,7 +331,8 @@ impl ArtifactTreeExt for ArtifactTree {
                     let entity_key = EntityKey::from(&artifact);
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
-                    let datum = Datum::from(artifact);
+                    let mut datum = Datum::from(artifact);
+                    datum.version = version;
                     let added = State::Added(datum);
                     transient = transient
                         .insert(entity_key.into_key().into(), added.clone(), &storage)

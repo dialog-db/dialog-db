@@ -10,7 +10,20 @@ use serde::{Deserialize, Serialize};
 /// useful property: a higher edition has seen at least as much causal history
 /// as any lower one, regardless of which repository it came from.
 #[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
 )]
 #[repr(transparent)]
 pub struct Edition(u64);

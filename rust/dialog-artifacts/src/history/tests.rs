@@ -3,13 +3,14 @@
 use std::str::FromStr;
 
 use anyhow::Result;
+use dialog_storage::MemoryStorageBackend;
 use ed25519_dalek::SigningKey;
 
-use crate::{Attribute, DialogArtifactsError, Entity, Value};
+use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value};
 
 use super::{
-    Authority, Causality, Cause, Claim, Edition, History, MemoryHistory, Origin, Revision, Version,
-    causality, common_ancestor,
+    Authority, Causality, Cause, Claim, Edition, History, MemoryHistory, Origin, Repository,
+    Revision, Version, causality, common_ancestor,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -208,11 +209,7 @@ async fn it_detects_concurrent_claims_and_supersession() -> Result<()> {
     // Bob pulls Alice's work and deliberately supersedes both concurrent
     // claims; his cause lists both, so tier 1 resolves in O(1)
     let b3 = revise(&repo, &bob, &[&a2, &b1], 4);
-    let bob_resolution = name_claim(
-        &entity,
-        "Bob",
-        Cause::new(vec![a2.version(), b1.version()]),
-    );
+    let bob_resolution = name_claim(&entity, "Bob", Cause::new(vec![a2.version(), b1.version()]));
     history.record(&b3.version(), bob_resolution.clone());
 
     assert_eq!(
@@ -533,6 +530,331 @@ async fn it_records_multiple_values_per_attribute() -> Result<()> {
         .claims_at(&a1.version(), &entity, &name_attribute())
         .await?;
     assert_eq!(claims.len(), 2);
+
+    Ok(())
+}
+
+fn title_attribute() -> Attribute {
+    Attribute::from_str("post/title").unwrap()
+}
+
+fn assert_title(of: &Entity, value: &str) -> Instruction {
+    Instruction::Assert(Artifact {
+        the: title_attribute(),
+        of: of.clone(),
+        is: Value::String(value.into()),
+        cause: None,
+    })
+}
+
+/// The claims recorded for the given attribute, paired with their versions,
+/// in causal (key) order
+async fn claims_for<Backend>(
+    repository: &Repository<Backend>,
+    the: &Attribute,
+) -> Result<Vec<(Version, Claim)>>
+where
+    Backend: dialog_storage::StorageBackend<
+            Key = dialog_storage::Blake3Hash,
+            Value = Vec<u8>,
+            Error = dialog_storage::DialogStorageError,
+        > + dialog_common::ConditionalSync
+        + 'static,
+{
+    Ok(repository
+        .history()
+        .records()
+        .await?
+        .into_iter()
+        .filter(|(_, record)| &record.claim().the == the)
+        .map(|(version, record)| (version, record.claim().clone()))
+        .collect())
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_commits_signed_revisions_and_reopens() -> Result<()> {
+    let backend = MemoryStorageBackend::default();
+    let subject = Entity::new()?;
+    let key = signing_key(1);
+    let authority = authority_of(&key);
+    let post = Entity::new()?;
+
+    let mut repository =
+        Repository::open(subject.clone(), key.clone(), authority, backend.clone()).await?;
+
+    assert!(repository.head().is_none());
+
+    // The first commit is the genesis revision
+    let genesis = repository.commit([assert_title(&post, "Hello")]).await?;
+    assert_eq!(genesis.edition(), Edition::GENESIS);
+    assert!(genesis.cause().is_genesis());
+    genesis.verify()?;
+
+    // The next commit builds on the head
+    let second = repository
+        .commit([assert_title(&post, "Hello, world")])
+        .await?;
+    assert_eq!(second.edition(), Edition::new(1));
+    assert!(second.cause().contains(&genesis.version()));
+
+    // Asserted data is tagged with the version that produced it
+    let data = repository
+        .artifacts()
+        .select_data(&post, &title_attribute())
+        .await?;
+    assert!(
+        data.iter()
+            .any(|datum| datum.version == Some(second.version()))
+    );
+
+    // Reopening from the same storage restores the verified head, the
+    // history index and the revision lineage
+    let reopened = Repository::open(subject.clone(), key, authority, backend).await?;
+    assert_eq!(reopened.head(), Some(&second));
+    let lineage = reopened.history().revisions(&subject).await?;
+    assert_eq!(
+        lineage
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        vec![genesis.version(), second.version()]
+    );
+    assert_eq!(lineage[1].1.cause, Cause::from(genesis.version()));
+
+    Ok(())
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_records_supersession_lineage_on_update() -> Result<()> {
+    let backend = MemoryStorageBackend::default();
+    let subject = Entity::new()?;
+    let key = signing_key(1);
+    let post = Entity::new()?;
+
+    let mut repository =
+        Repository::open(subject.clone(), key.clone(), authority_of(&key), backend).await?;
+
+    let first = repository.commit([assert_title(&post, "Hej")]).await?;
+
+    // Update the title through the cardinality-one supersession mechanism
+    let second = repository
+        .commit([Instruction::Replace(Artifact {
+            the: title_attribute(),
+            of: post.clone(),
+            is: Value::String("Hi".into()),
+            cause: None,
+        })])
+        .await?;
+
+    // The recorded claim lineage mirrors the supersession: the second
+    // claim's cause is the first claim's version
+    let claims = claims_for(&repository, &title_attribute()).await?;
+    assert_eq!(claims.len(), 2);
+    let (first_version, first_claim) = &claims[0];
+    let (second_version, second_claim) = &claims[1];
+    assert_eq!(*first_version, first.version());
+    assert_eq!(*second_version, second.version());
+    assert!(first_claim.cause.is_genesis());
+    assert_eq!(second_claim.cause, Cause::from(first.version()));
+
+    // Tier 1 conflict detection over the durable history index
+    assert_eq!(
+        repository
+            .causality((second_claim, second_version), (first_claim, first_version))
+            .await?,
+        Causality::Supersedes
+    );
+
+    // Retraction participates in the same lineage
+    let current = Artifact::try_from(
+        repository
+            .artifacts()
+            .select_data(&post, &title_attribute())
+            .await?
+            .remove(0),
+    )?;
+    let third = repository.commit([Instruction::Retract(current)]).await?;
+    let claims = claims_for(&repository, &title_attribute()).await?;
+    assert_eq!(claims.len(), 3);
+    let (retraction_version, retraction_claim) = &claims[2];
+    assert_eq!(*retraction_version, third.version());
+    assert_eq!(retraction_claim.cause, Cause::from(second.version()));
+    assert!(
+        repository
+            .artifacts()
+            .select_data(&post, &title_attribute())
+            .await?
+            .is_empty()
+    );
+
+    Ok(())
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_replicates_and_supersedes_across_replicas() -> Result<()> {
+    let subject = Entity::new()?;
+    let post = Entity::new()?;
+    let bob_key = signing_key(1);
+    let alice_key = signing_key(2);
+
+    // Bob and Alice are collaborators on the same repository, each on their
+    // own replica (separate storage), each acting under their own key
+    let mut bob = Repository::open(
+        subject.clone(),
+        bob_key.clone(),
+        authority_of(&bob_key),
+        MemoryStorageBackend::default(),
+    )
+    .await?;
+    let mut alice = Repository::open(
+        subject.clone(),
+        alice_key.clone(),
+        authority_of(&bob_key),
+        MemoryStorageBackend::default(),
+    )
+    .await?;
+
+    // Bob commits, and Alice pulls his history
+    let bob_head = bob.commit([assert_title(&post, "Hej")]).await?;
+    for (version, record) in bob.history().records().await? {
+        alice.integrate(&version, record).await?;
+    }
+
+    // Alice's replica now reflects Bob's claim, tagged with his version
+    let replicated = alice
+        .artifacts()
+        .select_data(&post, &title_attribute())
+        .await?;
+    assert_eq!(replicated.len(), 1);
+    assert_eq!(replicated[0].version, Some(bob_head.version()));
+
+    // Alice updates the title, merging Bob's head
+    let alice_head = alice
+        .merge(
+            &bob_head,
+            [Instruction::Replace(Artifact {
+                the: title_attribute(),
+                of: post.clone(),
+                is: Value::String("Hi".into()),
+                cause: None,
+            })],
+        )
+        .await?;
+    assert_eq!(alice_head.edition(), Edition::new(1));
+    assert!(alice_head.cause().contains(&bob_head.version()));
+
+    // Her claim's cause records that it supersedes Bob's claim
+    let claims = claims_for(&alice, &title_attribute()).await?;
+    assert_eq!(claims.len(), 2);
+    let (bob_version, bob_claim) = &claims[0];
+    let (alice_version, alice_claim) = &claims[1];
+    assert_eq!(alice_claim.cause, Cause::from(bob_head.version()));
+    assert_eq!(
+        alice
+            .causality((alice_claim, alice_version), (bob_claim, bob_version))
+            .await?,
+        Causality::Supersedes
+    );
+
+    // Bob pulls Alice's history back; integration is idempotent for the
+    // records he already has, and his replica converges on her value
+    for (version, record) in alice.history().records().await? {
+        bob.integrate(&version, record).await?;
+    }
+    let converged = bob
+        .artifacts()
+        .select_data(&post, &title_attribute())
+        .await?;
+    assert_eq!(converged.len(), 1);
+    assert_eq!(converged[0].value, Value::String("Hi".into()).to_bytes());
+    assert_eq!(converged[0].version, Some(alice_head.version()));
+
+    Ok(())
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_surfaces_concurrent_values_across_replicas() -> Result<()> {
+    let subject = Entity::new()?;
+    let post = Entity::new()?;
+    let bob_key = signing_key(1);
+    let carol_key = signing_key(2);
+
+    let mut bob = Repository::open(
+        subject.clone(),
+        bob_key.clone(),
+        authority_of(&bob_key),
+        MemoryStorageBackend::default(),
+    )
+    .await?;
+    let mut carol = Repository::open(
+        subject.clone(),
+        carol_key.clone(),
+        authority_of(&bob_key),
+        MemoryStorageBackend::default(),
+    )
+    .await?;
+
+    // Bob and Carol write concurrently, neither having seen the other
+    let bob_head = bob.commit([assert_title(&post, "Hej")]).await?;
+    let carol_head = carol.commit([assert_title(&post, "Yo")]).await?;
+    assert_eq!(bob_head.edition(), carol_head.edition());
+
+    // Carol pulls Bob's history: both values coexist until deliberately
+    // resolved, and conflict detection reports them concurrent (tier 0)
+    for (version, record) in bob.history().records().await? {
+        carol.integrate(&version, record).await?;
+    }
+    let values = carol
+        .artifacts()
+        .select_data(&post, &title_attribute())
+        .await?;
+    assert_eq!(values.len(), 2);
+
+    let claims = claims_for(&carol, &title_attribute()).await?;
+    assert_eq!(claims.len(), 2);
+    assert_eq!(
+        carol
+            .causality((&claims[0].1, &claims[0].0), (&claims[1].1, &claims[1].0))
+            .await?,
+        Causality::Concurrent
+    );
+
+    // Carol resolves the conflict: her replacement supersedes both
+    // concurrent claims, and its record's cause lists both of them
+    let resolution = carol
+        .merge(
+            &bob_head,
+            [Instruction::Replace(Artifact {
+                the: title_attribute(),
+                of: post.clone(),
+                is: Value::String("Yo, hej!".into()),
+                cause: None,
+            })],
+        )
+        .await?;
+    assert_eq!(resolution.edition(), Edition::new(1));
+    assert!(resolution.cause().contains(&bob_head.version()));
+    assert!(resolution.cause().contains(&carol_head.version()));
+
+    let claims = claims_for(&carol, &title_attribute()).await?;
+    assert_eq!(claims.len(), 3);
+    let (_, resolution_claim) = &claims[2];
+    assert_eq!(
+        resolution_claim.cause,
+        Cause::new(vec![bob_head.version(), carol_head.version()])
+    );
+
+    // Only the resolved value remains asserted
+    let values = carol
+        .artifacts()
+        .select_data(&post, &title_attribute())
+        .await?;
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0].value, Value::String("Yo, hej!".into()).to_bytes());
 
     Ok(())
 }
