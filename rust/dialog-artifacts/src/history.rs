@@ -49,6 +49,15 @@ pub use causality::*;
 mod memory;
 pub use memory::*;
 
+mod record;
+pub use record::*;
+
+mod store;
+pub use store::*;
+
+mod repository;
+pub use repository::*;
+
 /// The attribute under which a repository's revision lineage claims are
 /// recorded. The claim's entity is the repository DID and its value is the
 /// content-addressed entity of the [`Revision`].

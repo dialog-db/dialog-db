@@ -108,3 +108,9 @@ impl fmt::Debug for HistoryKey {
         write!(f, "HistoryKey({})", self.version())
     }
 }
+
+impl From<[u8; HISTORY_KEY_LENGTH]> for HistoryKey {
+    fn from(bytes: [u8; HISTORY_KEY_LENGTH]) -> Self {
+        Self(bytes)
+    }
+}
