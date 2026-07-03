@@ -49,6 +49,23 @@ impl Origin {
         ))
     }
 
+    /// Derive the [`Origin`] for an issuer and subject identified by DIDs.
+    ///
+    /// Unlike [`Origin::derive`], where the fixed-width issuer key makes the
+    /// concatenation unambiguous, DIDs are variable-width, so the issuer is
+    /// length-prefixed to keep the derivation injective.
+    pub fn derive_from_dids(issuer: &str, subject: &str) -> Self {
+        let issuer = issuer.as_bytes();
+        Self(make_reference(
+            [
+                &(issuer.len() as u64).to_be_bytes()[..],
+                issuer,
+                subject.as_bytes(),
+            ]
+            .concat(),
+        ))
+    }
+
     /// The byte representation of this [`Origin`], suitable for use as a key
     /// component
     pub fn key_bytes(&self) -> &Blake3Hash {

@@ -136,21 +136,14 @@ pub mod branch {
         pub String,
     );
 
-    /// `dialog.branch/period` — logical-clock period of the current
-    /// revision.
+    /// `dialog.branch/edition` — causal depth of the current revision.
+    ///
+    /// A Lamport timestamp derived from the revision DAG:
+    /// `max(cause editions) + 1`, or zero for the first revision.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
-    pub struct Period(
-        /// Period component of the revision's logical clock.
-        pub u128,
-    );
-
-    /// `dialog.branch/moment` — logical-clock moment of the current
-    /// revision.
-    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    #[domain("dialog.branch")]
-    pub struct Moment(
-        /// Moment component of the revision's logical clock.
+    pub struct Edition(
+        /// Edition of the revision's logical clock.
         pub u128,
     );
 }
@@ -363,10 +356,8 @@ pub struct BranchRevision {
     pub this: Entity,
     /// Tree hash of the current revision, base58-encoded.
     pub tree: branch::Tree,
-    /// Logical-clock period component.
-    pub period: branch::Period,
-    /// Logical-clock moment component.
-    pub moment: branch::Moment,
+    /// Causal depth of the revision (Lamport timestamp).
+    pub edition: branch::Edition,
 }
 
 /// What this query session is reading from.
@@ -533,8 +524,7 @@ mod tests {
         let rev = BranchRevision {
             this: b.this.clone(),
             tree: branch::Tree("zSomeHash".into()),
-            period: branch::Period(1),
-            moment: branch::Moment(42),
+            edition: branch::Edition(42),
         };
         assert_eq!(rev.this, b.this);
     }

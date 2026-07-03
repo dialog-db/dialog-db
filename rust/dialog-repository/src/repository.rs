@@ -1309,8 +1309,7 @@ mod tests {
                 .select(Query::<schema::BranchRevision> {
                     this: branch_concept.this.clone().into(),
                     tree: Term::var("tree"),
-                    period: Term::var("period"),
-                    moment: Term::var("moment"),
+                    edition: Term::var("edition"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1342,8 +1341,7 @@ mod tests {
                 .select(Query::<schema::BranchRevision> {
                     this: branch_concept.this.into(),
                     tree: Term::var("tree"),
-                    period: Term::var("period"),
-                    moment: Term::var("moment"),
+                    edition: Term::var("edition"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1388,8 +1386,7 @@ mod tests {
                 .select(Query::<schema::BranchRevision> {
                     this: branch_concept.this.clone().into(),
                     tree: Term::var("tree"),
-                    period: Term::var("period"),
-                    moment: Term::var("moment"),
+                    edition: Term::var("edition"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1414,8 +1411,7 @@ mod tests {
                 .select(Query::<schema::BranchRevision> {
                     this: branch_concept.this.into(),
                     tree: Term::var("tree"),
-                    period: Term::var("period"),
-                    moment: Term::var("moment"),
+                    edition: Term::var("edition"),
                 })
                 .perform(&operator)
                 .try_vec()
