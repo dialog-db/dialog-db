@@ -34,6 +34,17 @@ pub struct Revision {
     /// Causal depth of this revision: `max(cause editions) + 1`, or zero for
     /// the first revision. Isomorphic to a Lamport timestamp.
     pub edition: Edition,
+
+    /// Root of the history index at the most recent revision that recorded
+    /// claim lineage (see `dialog_artifacts::history`), or `None` when no
+    /// lineage has been recorded yet. Commits made through
+    /// [`Branch::commit`](crate::Branch::commit) record every claim's causal
+    /// lineage into the history index and update this root; operations that
+    /// do not (yet) record lineage carry the previous root forward, so
+    /// conflict detection degrades to `IncompleteHistory` for the claims
+    /// they produced rather than losing the recorded history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<TreeReference>,
 }
 
 impl Revision {
@@ -47,6 +58,7 @@ impl Revision {
             tree,
             cause: HashSet::new(),
             edition: Edition::GENESIS,
+            history: None,
         }
     }
 
@@ -63,6 +75,7 @@ impl Revision {
             tree,
             cause: HashSet::from([self.tree.clone()]),
             edition: self.edition.successor(),
+            history: self.history.clone(),
         }
     }
 
@@ -86,6 +99,7 @@ impl Revision {
             tree,
             cause: HashSet::from([upstream.tree.clone()]),
             edition: self.edition.max(upstream.edition).successor(),
+            history: self.history.clone(),
         }
     }
 

@@ -321,66 +321,22 @@ where
         }
     }
 
-    /// Derive the history [`Record`] for an instruction: the record's cause
-    /// lists the versions of the currently asserted claims the instruction
-    /// supersedes. Data that carries no version (committed outside of version
-    /// control) contributes nothing to the cause.
+    /// Derive the history [`Record`] for an instruction against the current
+    /// EAV state — see [`Record::derive`].
     async fn derive_record(
         &self,
         instruction: &Instruction,
     ) -> Result<Record, DialogArtifactsError> {
-        match instruction {
-            // An assertion is purely additive: it supersedes nothing
-            Instruction::Assert(artifact) => Ok(Record::Assert(Claim {
-                the: artifact.the.clone(),
-                of: artifact.of.clone(),
-                is: artifact.is.clone(),
-                cause: Cause::genesis(),
-            })),
-            // A replacement supersedes every currently asserted claim with a
-            // different value on the same `(entity, attribute)` — exactly the
-            // data the cardinality-one supersession removes from the indexes
-            Instruction::Replace(artifact) => {
-                let value = artifact.is.to_bytes();
-                let mut versions = Vec::new();
-                for datum in self
-                    .artifacts
-                    .select_data(&artifact.of, &artifact.the)
-                    .await?
-                {
-                    if datum.value != value {
-                        versions.extend(datum.version);
-                    }
-                }
-
-                Ok(Record::Assert(Claim {
-                    the: artifact.the.clone(),
-                    of: artifact.of.clone(),
-                    is: artifact.is.clone(),
-                    cause: Cause::new(versions),
-                }))
-            }
-            Instruction::Retract(artifact) => {
-                let value = artifact.is.to_bytes();
-                let mut versions = Vec::new();
-                for datum in self
-                    .artifacts
-                    .select_data(&artifact.of, &artifact.the)
-                    .await?
-                {
-                    if datum.value == value {
-                        versions.extend(datum.version);
-                    }
-                }
-
-                Ok(Record::Retract(Claim {
-                    the: artifact.the.clone(),
-                    of: artifact.of.clone(),
-                    is: artifact.is.clone(),
-                    cause: Cause::new(versions),
-                }))
-            }
-        }
+        let artifact = match instruction {
+            Instruction::Assert(artifact)
+            | Instruction::Replace(artifact)
+            | Instruction::Retract(artifact) => artifact,
+        };
+        let current = self
+            .artifacts
+            .select_data(&artifact.of, &artifact.the)
+            .await?;
+        Ok(Record::derive(instruction, &current))
     }
 
     async fn persist_head(&mut self) -> Result<(), DialogArtifactsError> {

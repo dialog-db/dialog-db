@@ -2,6 +2,9 @@ use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
+use dialog_artifacts::history::{
+    Edition, HistoryStore, Origin, Record, Version, revision_record_for,
+};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{DialogArtifactsError, Instruction};
 use dialog_capability::{Fork, Provider};
@@ -12,7 +15,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::Delta;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt, stream};
 
 /// Command that commits a stream of changes (assert/retract) to a branch.
 ///
@@ -80,6 +83,22 @@ where
         };
         let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
+        // Discover who we are up front: the revision is attributed to the
+        // profile / operator, and the commit's `Version` — the identifier
+        // every datum and history record it writes is tagged with — derives
+        // from the issuer and the subject. The subject comes from the
+        // branch itself, not the identity chain.
+        let authority = Identify.perform(env).await?;
+        let issuer = authority.did();
+        let profile = authority.profile().clone();
+
+        let edition = base_revision
+            .as_ref()
+            .map(|base| base.edition.successor())
+            .unwrap_or(Edition::GENESIS);
+        let origin = Origin::derive_from_dids(issuer.as_str(), branch.of().as_str());
+        let version = Version::new(origin, edition);
+
         // Walk forward from the current revision's tree root, or from
         // the empty tree if the branch has no commits yet.
         let base_tree_hash = base_revision
@@ -89,12 +108,43 @@ where
 
         let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
 
+        // Derive each instruction's history record against the pre-commit
+        // tree, so the record's cause lists the versions of the claims the
+        // instruction supersedes. This needs the instructions twice (once to
+        // derive, once to apply), hence the collect.
+        let instructions: Vec<Instruction> = changes.collect().await;
+        let mut records: Vec<(Version, Record)> = Vec::with_capacity(instructions.len() + 1);
+        for instruction in &instructions {
+            let artifact = match instruction {
+                Instruction::Assert(artifact)
+                | Instruction::Replace(artifact)
+                | Instruction::Retract(artifact) => artifact,
+            };
+            let current = tree
+                .select_data(store.clone(), &artifact.of, &artifact.the)
+                .await?;
+            records.push((version, Record::derive(instruction, &current)));
+        }
+        records.push(revision_record_for(
+            branch.of().as_str(),
+            &version,
+            base_revision.as_ref().map(Revision::version),
+        )?);
+
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
         // cardinality-one supersession, and retraction live in the
-        // shared `ArtifactTreeExt::apply` so the key layout stays uniform.
-        // The batch's new nodes accumulate in `delta`, which we flush below.
+        // shared `ArtifactTreeExt::apply_versioned` so the key layout stays
+        // uniform; every asserted datum is tagged with this commit's
+        // version. The batch's new nodes accumulate in `delta`, which we
+        // flush below.
         let mut delta = Delta::zero();
-        tree.apply(&mut store, &mut delta, changes).await?;
+        tree.apply_versioned(
+            &mut store,
+            &mut delta,
+            Some(version),
+            stream::iter(instructions),
+        )
+        .await?;
 
         // Persist the tree's pending nodes before referencing the root in
         // a revision; a revision must only point at durable blocks. The
@@ -113,17 +163,25 @@ where
 
         let tree = TreeReference::from(*tree.root().as_bytes());
 
-        // Discover who we are so the revision can be attributed to the
-        // correct profile / operator. The subject comes from the branch
-        // itself, not the identity chain.
-        let authority = Identify.perform(env).await?;
-        let issuer = authority.did();
-        let profile = authority.profile().clone();
+        // Record the commit's claim lineage (plus the revision's own
+        // lineage claim) into the history index, continuing from the most
+        // recent recorded history root. This is what powers claim-level
+        // conflict detection: see `dialog_artifacts::history::causality`.
+        let mut history = match base_revision
+            .as_ref()
+            .and_then(|base| base.history.as_ref())
+        {
+            Some(root) => HistoryStore::from_hash(root.hash(), store.clone()),
+            None => HistoryStore::new(store.clone()),
+        };
+        history.record_all(records).await?;
 
-        let revision = match base_revision {
+        let mut revision = match base_revision {
             Some(base) => base.advance(tree, issuer, profile),
             None => Revision::new(tree, branch.of().clone(), issuer, profile),
         };
+        revision.history = history.hash().map(TreeReference::from);
+        debug_assert_eq!(revision.version(), version);
 
         head.publish(revision.clone(), env).await?;
 
@@ -259,6 +317,127 @@ mod tests {
             2,
             "both racing commits must survive recovery"
         );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use crate::helpers::{test_operator_with_profile, test_repo};
+    use anyhow::Result;
+
+    use dialog_artifacts::history::{Causality, History as _, causality, common_ancestor};
+    use dialog_artifacts::{Artifact, Instruction, Value};
+    use futures_util::stream;
+
+    fn title(of: &str, value: &str) -> Artifact {
+        Artifact {
+            the: "post/title".parse().unwrap(),
+            of: of.parse().unwrap(),
+            is: Value::String(value.to_string()),
+            cause: None,
+        }
+    }
+
+    /// Commits record claim lineage into the history index: a replacement's
+    /// record supersedes the claim it replaced, detectable via the tiered
+    /// conflict detection, and every revision's DAG edge is recorded.
+    #[dialog_common::test]
+    async fn it_records_claim_lineage_across_commits() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let first = branch
+            .commit(stream::iter(vec![Instruction::Assert(title(
+                "post:1", "Hej",
+            ))]))
+            .perform(&operator)
+            .await?;
+        assert!(first.history.is_some(), "commit must record history");
+
+        // Refresh so the next commit builds on the published head.
+        branch.refresh(&operator).await?;
+        let second = branch
+            .commit(stream::iter(vec![Instruction::Replace(title(
+                "post:1", "Hi",
+            ))]))
+            .perform(&operator)
+            .await?;
+
+        branch.refresh(&operator).await?;
+        let history = branch.history(&operator);
+
+        // Both claims are recorded, and the replacement's cause lists the
+        // version of the claim it superseded.
+        let records = history.records().await?;
+        let claims: Vec<_> = records
+            .iter()
+            .filter(|(_, record)| record.claim().the.to_string() == "post/title")
+            .collect();
+        assert_eq!(claims.len(), 2);
+        let (first_version, first_record) = claims[0];
+        let (second_version, second_record) = claims[1];
+        assert_eq!(*first_version, first.version());
+        assert_eq!(*second_version, second.version());
+        assert!(first_record.claim().cause.is_genesis());
+        assert!(second_record.claim().cause.contains(&first.version()));
+
+        // Tier 1 conflict detection over the branch's durable history.
+        assert_eq!(
+            causality(
+                (second_record.claim(), second_version),
+                (first_record.claim(), first_version),
+                &history
+            )
+            .await?,
+            Causality::Supersedes
+        );
+
+        // The revision DAG edges are recorded too: each revision's lineage
+        // claim is present, and the common ancestor of the head with itself
+        // is itself.
+        assert_eq!(history.revision_at(&first.version()).await?.len(), 1);
+        assert_eq!(history.revision_at(&second.version()).await?.len(), 1);
+        assert_eq!(
+            common_ancestor(&second.version(), &first.version(), &history).await?,
+            Some(first.version())
+        );
+
+        Ok(())
+    }
+
+    /// Data committed through a branch is tagged with the revision's
+    /// version, so later commits can derive what they supersede.
+    #[dialog_common::test]
+    async fn it_tags_committed_data_with_the_revision_version() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let revision = branch
+            .commit(stream::iter(vec![Instruction::Assert(title(
+                "post:1", "Hej",
+            ))]))
+            .perform(&operator)
+            .await?;
+
+        // Read the datum back through the artifact tree and check the tag.
+        use crate::{Index, NetworkedIndex, RepositoryArchiveExt as _};
+        use dialog_artifacts::tree::ArtifactTreeExt as _;
+        use dialog_common::Blake3Hash as NodeHash;
+
+        let store = NetworkedIndex::new(&operator, branch.archive().index(), None);
+        let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+        let data = tree
+            .select_data(store, &"post:1".parse()?, &"post/title".parse()?)
+            .await?;
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].version, Some(revision.version()));
 
         Ok(())
     }
