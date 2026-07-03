@@ -1014,10 +1014,7 @@ where
     };
 
     // Strip a non-canonical chain of single-child index nodes over indices.
-    loop {
-        let TransientNode::Index(index) = &mut root else {
-            break;
-        };
+    while let TransientNode::Index(index) = &mut root {
         if index.children.len() != 1 {
             break;
         }
@@ -1943,7 +1940,7 @@ mod tests {
         // byte order is also a boundary, so no interior entry sits between them.
         let mut byte_boundaries: Vec<(u32, [u8; 4])> =
             boundaries.iter().map(|&k| (k, k.to_le_bytes())).collect();
-        byte_boundaries.sort_by(|a, b| a.1.cmp(&b.1));
+        byte_boundaries.sort_by_key(|boundary| boundary.1);
 
         let mut solo_boundary = None;
         for pair in byte_boundaries.windows(2) {
