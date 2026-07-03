@@ -350,33 +350,8 @@ where
         of: &Entity,
         the: &Attribute,
     ) -> Result<Vec<Datum>, DialogArtifactsError> {
-        use crate::{AttributeKeyPart, EntityKey, EntityKeyPart, KeyViewConstruct, KeyViewMut};
-
         let index = self.index.read().await;
-        let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
-            .set_entity(EntityKeyPart::from(of))
-            .set_attribute(AttributeKeyPart::from(the))
-            .into_key();
-        let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
-            .set_entity(EntityKeyPart::from(of))
-            .set_attribute(AttributeKeyPart::from(the))
-            .into_key();
-
-        let tree_storage = TreeStorage::new(TreeStorageBridge(self.storage.clone()));
-        let stream = index.stream_range(
-            crate::KeyBytes::from(search_start)..=crate::KeyBytes::from(search_end),
-            &tree_storage,
-        );
-        tokio::pin!(stream);
-
-        let mut data = Vec::new();
-        while let Some(entry) = stream.try_next().await? {
-            if let State::Added(datum) = entry.value {
-                data.push(datum);
-            }
-        }
-
-        Ok(data)
+        index.select_data(self.storage.clone(), of, the).await
     }
 
     /// Commit the given instructions, tagging every asserted [`Datum`] with

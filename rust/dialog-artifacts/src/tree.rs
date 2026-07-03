@@ -178,6 +178,20 @@ pub trait ArtifactTreeExt {
             + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend;
 
+    /// The currently asserted [`Datum`]s recorded for the given entity and
+    /// attribute, scanned from the EAV index. Multiple data are possible for
+    /// attributes with more than one asserted value.
+    async fn select_data<S>(
+        &self,
+        store: S,
+        of: &crate::Entity,
+        the: &crate::Attribute,
+    ) -> Result<Vec<Datum>, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync;
+
     /// Scan the tree for [`Artifact`]s matching the given constrained
     /// selector.
     ///
@@ -397,6 +411,44 @@ impl ArtifactTreeExt for ArtifactTree {
         // caller's delta.
         *self = transient.persist(delta)?;
         Ok(())
+    }
+
+    async fn select_data<S>(
+        &self,
+        store: S,
+        of: &crate::Entity,
+        the: &crate::Attribute,
+    ) -> Result<Vec<Datum>, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+
+        let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
+            .set_entity(EntityKeyPart::from(of))
+            .set_attribute(AttributeKeyPart::from(the))
+            .into_key();
+        let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
+            .set_entity(EntityKeyPart::from(of))
+            .set_attribute(AttributeKeyPart::from(the))
+            .into_key();
+
+        let stream = self.stream_range(
+            KeyBytes::from(search_start)..=KeyBytes::from(search_end),
+            &storage,
+        );
+        tokio::pin!(stream);
+
+        let mut data = Vec::new();
+        while let Some(entry) = stream.next().await {
+            if let State::Added(datum) = entry?.value {
+                data.push(datum);
+            }
+        }
+
+        Ok(data)
     }
 
     fn scan<'s, S>(

@@ -9,7 +9,8 @@ use crate::tree::TreeStorageBridge;
 use crate::{Attribute, DialogArtifactsError, Entity, Value};
 
 use super::{
-    Claim, HISTORY_KEY_LENGTH, History, HistoryKey, REVISION_ATTRIBUTE, Record, Revision, Version,
+    Cause, Claim, HISTORY_KEY_LENGTH, History, HistoryKey, REVISION_ATTRIBUTE, Record, Revision,
+    Version,
 };
 
 /// The search tree used to persist the history index. Keys are the raw
@@ -30,8 +31,7 @@ pub type HistoryIndex = PersistentTree<[u8; HISTORY_KEY_LENGTH], Vec<u8>>;
 pub struct HistoryStore<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync
-        + 'static,
+        + ConditionalSync,
 {
     index: HistoryIndex,
     storage: NodeStorage<TreeStorageBridge<Backend>>,
@@ -42,8 +42,7 @@ where
 impl<Backend> HistoryStore<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync
-        + 'static,
+        + ConditionalSync,
 {
     /// Initialize a new, empty [`HistoryStore`] over the given storage
     /// backend
@@ -217,8 +216,7 @@ where
 impl<Backend> History for HistoryStore<Backend>
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync
-        + 'static,
+        + ConditionalSync,
 {
     async fn claims_at(
         &self,
@@ -274,6 +272,28 @@ pub fn revision_record(revision: &Revision) -> Result<(Version, Record), DialogA
             of: revision.subject().clone(),
             is: Value::Entity(revision.entity()?),
             cause: revision.cause().clone(),
+        }),
+    ))
+}
+
+/// The lineage record for a revision identified by its subject DID and
+/// [`Version`], for revision representations that live outside this module
+/// (e.g. `dialog-repository`'s branch revisions). The claim's entity is the
+/// repository DID, its value is the version's key encoding, and its cause is
+/// the parent revision's version — the edge of the revision DAG that
+/// [`common_ancestor`](super::common_ancestor) traverses.
+pub fn revision_record_for(
+    subject: &str,
+    version: &Version,
+    parent: Option<Version>,
+) -> Result<(Version, Record), DialogArtifactsError> {
+    Ok((
+        *version,
+        Record::Assert(Claim {
+            the: Attribute::from_str(REVISION_ATTRIBUTE)?,
+            of: Entity::from_str(subject)?,
+            is: Value::Bytes(version.key_bytes().to_vec()),
+            cause: parent.map(Cause::from).unwrap_or_default(),
         }),
     ))
 }
