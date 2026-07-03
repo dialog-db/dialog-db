@@ -63,6 +63,7 @@ mod tests {
             subject: subject.did().clone(),
             issuer: subject.did().clone(),
             authority: subject.did().clone(),
+            branch: "main".into(),
             tree: TreeReference::from(EMPTY_TREE_HASH),
             cause: HashSet::new(),
             edition: Edition::GENESIS,

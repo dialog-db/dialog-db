@@ -96,7 +96,8 @@ where
             .as_ref()
             .map(|base| base.edition.successor())
             .unwrap_or(Edition::GENESIS);
-        let origin = Origin::derive_from_dids(issuer.as_str(), branch.of().as_str());
+        let origin =
+            Origin::derive_from_identifiers([issuer.as_str(), branch.of().as_str(), branch.name()]);
         let version = Version::new(origin, edition);
 
         // Walk forward from the current revision's tree root, or from
@@ -177,8 +178,8 @@ where
         history.record_all(records).await?;
 
         let mut revision = match base_revision {
-            Some(base) => base.advance(tree, issuer, profile),
-            None => Revision::new(tree, branch.of().clone(), issuer, profile),
+            Some(base) => base.advance(tree, branch.name(), issuer, profile),
+            None => Revision::new(tree, branch.of().clone(), branch.name(), issuer, profile),
         };
         revision.history = history.hash().map(TreeReference::from);
         debug_assert_eq!(revision.version(), version);

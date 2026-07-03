@@ -1,4 +1,5 @@
 use dialog_artifacts::DialogArtifactsError;
+use dialog_artifacts::history::{HistoryStore, revision_record_for};
 use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -190,12 +191,37 @@ impl<'a> Pull<'a> {
             // current authority combining both sides.
             Some(local) => {
                 let authority = Identify.perform(env).await?;
-                local.merge(
+                let mut revision = local.merge(
                     &upstream_revision,
                     merged_tree,
+                    branch.name(),
                     authority.did(),
                     authority.profile().clone(),
-                )
+                );
+
+                // Union the two sides' recorded claim lineage and record the
+                // merge's own DAG edge (cause: both parents), so conflict
+                // detection keeps working across the sync boundary instead of
+                // degrading to `IncompleteHistory` for the pulled claims.
+                // Upstream history nodes replicate on demand through the
+                // networked store, exactly like tree blocks.
+                let mut history = match &local.history {
+                    Some(root) => HistoryStore::from_hash(root.hash(), store.clone()),
+                    None => HistoryStore::new(store.clone()),
+                };
+                if let Some(root) = &upstream_revision.history {
+                    history.adopt(root.hash()).await?;
+                }
+                history
+                    .record_all([revision_record_for(
+                        branch.of().as_str(),
+                        &revision.version(),
+                        [local.version(), upstream_revision.version()],
+                    )?])
+                    .await?;
+                revision.history = history.hash().map(TreeReference::from);
+
+                revision
             }
         };
 
@@ -586,6 +612,142 @@ mod tests {
             .commit(&operator)
             .await?;
         assert!(pulled.is_none(), "a no-op pull commits to None");
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use crate::helpers::{test_operator_with_profile, test_repo};
+    use anyhow::Result;
+
+    use dialog_artifacts::history::{Causality, History as _, causality, common_ancestor};
+    use dialog_artifacts::{Artifact, Instruction, Value};
+    use futures_util::stream;
+
+    fn assert_one(the: &str, of: &str, value: &str) -> Instruction {
+        Instruction::Assert(Artifact {
+            the: the.parse().unwrap(),
+            of: of.parse().unwrap(),
+            is: Value::String(value.to_string()),
+            cause: None,
+        })
+    }
+
+    /// Pulling merges recorded claim lineage across the sync boundary: the
+    /// upstream's history records are adopted, the merge's DAG edge lists
+    /// both parents, and supersession established on one branch against
+    /// claims committed on the other is detectable afterwards.
+    #[dialog_common::test]
+    async fn it_merges_history_across_a_pull() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // Main commits a title; feature adopts it via fast-forward pull —
+        // the recorded history root travels with the adopted revision.
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&operator)
+        .await?;
+        let first = main.revision().expect("main has a revision");
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+        assert_eq!(
+            feature.revision().and_then(|r| r.history),
+            first.history,
+            "fast-forward adoption carries the upstream history root"
+        );
+
+        // Feature replaces the title: its record's cause lists the version
+        // of main's claim, because the pulled data is version-tagged.
+        feature
+            .commit(stream::iter(vec![Instruction::Replace(Artifact {
+                the: "post/title".parse()?,
+                of: "post:1".parse()?,
+                is: Value::String("Hi".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        let replacement = feature.revision().expect("feature has a revision");
+
+        // Meanwhile main commits something else, so the next pull is a real
+        // three-way merge rather than a fast-forward.
+        main.commit(stream::iter(vec![assert_one(
+            "user/name",
+            "user:1",
+            "Alice",
+        )]))
+        .perform(&operator)
+        .await?;
+        let concurrent = main.revision().expect("main has a revision");
+
+        let merged = feature
+            .pull()
+            .perform(&operator)
+            .await?
+            .expect("pull merges");
+        assert!(merged.history.is_some(), "merge records history");
+
+        let history = feature.history(&operator);
+
+        // Main's concurrent claim was adopted into feature's history.
+        assert_eq!(
+            history
+                .claims_at(
+                    &concurrent.version(),
+                    &"user:1".parse()?,
+                    &"user/name".parse()?
+                )
+                .await?
+                .len(),
+            1,
+            "the upstream's records are adopted across the pull"
+        );
+
+        // The supersession feature established over main's claim is
+        // detectable from the merged history.
+        let title_claims: Vec<_> = history
+            .records()
+            .await?
+            .into_iter()
+            .filter(|(_, record)| record.claim().the.to_string() == "post/title")
+            .collect();
+        assert_eq!(title_claims.len(), 2);
+        let (hej_version, hej) = &title_claims[0];
+        let (hi_version, hi) = &title_claims[1];
+        assert_eq!(*hej_version, first.version());
+        assert_eq!(*hi_version, replacement.version());
+        assert_eq!(
+            causality(
+                (hi.claim(), hi_version),
+                (hej.claim(), hej_version),
+                &history
+            )
+            .await?,
+            Causality::Supersedes
+        );
+
+        // The merge's DAG edge lists both parents, and the two lineages
+        // meet at main's first revision.
+        let edge = history.revision_at(&merged.version()).await?;
+        assert_eq!(edge.len(), 1);
+        assert!(edge[0].cause.contains(&replacement.version()));
+        assert!(edge[0].cause.contains(&concurrent.version()));
+        assert_eq!(
+            common_ancestor(&replacement.version(), &concurrent.version(), &history).await?,
+            Some(first.version())
+        );
 
         Ok(())
     }
