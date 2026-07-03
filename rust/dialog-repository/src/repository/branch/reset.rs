@@ -44,6 +44,7 @@ mod tests {
     use anyhow::Result;
     use std::collections::HashSet;
 
+    use dialog_artifacts::history::Edition;
     use dialog_capability::Subject;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
@@ -64,8 +65,7 @@ mod tests {
             authority: subject.did().clone(),
             tree: TreeReference::from(EMPTY_TREE_HASH),
             cause: HashSet::new(),
-            period: 0,
-            moment: 0,
+            edition: Edition::GENESIS,
         };
         branch.reset(revision.clone()).perform(&provider).await?;
 
