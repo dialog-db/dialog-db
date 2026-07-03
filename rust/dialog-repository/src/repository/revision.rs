@@ -1,8 +1,23 @@
 use crate::TreeReference;
-use dialog_artifacts::history::{Edition, Origin, Version};
+use crate::schema::{self, EntityExt as _};
+use dialog_artifacts::history::{
+    Cause, Claim, Edition, Origin, REVISION_ATTRIBUTE, Record, Version,
+};
+use dialog_artifacts::{Attribute, DialogArtifactsError, Entity, Value};
 use dialog_capability::Did;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::str::FromStr;
+
+/// Canonical dag-cbor input for deriving a revision's entity from its
+/// [`Version`] (see [`EntityExt`](crate::schema::EntityExt)). The version is
+/// globally unique, so two replicas that know a revision's version converge
+/// on the same entity — and can attach (or query) metadata for it without
+/// holding the revision itself.
+#[derive(Serialize)]
+enum RevisionHash<'a> {
+    Revision { origin: &'a [u8], edition: u64 },
+}
 
 /// A revision represents a concrete state of the repository at a point in time.
 ///
@@ -126,16 +141,32 @@ impl Revision {
         }
     }
 
+    /// The branch-on-replica entity this revision was minted on: the schema
+    /// [`Branch`](crate::schema::Branch) entity, content-derived from the
+    /// `(profile, subject)` origin and the branch name — the same entity the
+    /// query layer injects overlay facts for on every branch.
+    pub fn lineage(&self) -> Entity {
+        let origin = schema::Origin::new(self.authority.clone(), self.subject.clone());
+        schema::Branch::new(&origin, self.branch.as_str()).this
+    }
+
     /// The [`Origin`] of this revision: the lineage-scoped identity of its
-    /// issuer, derived from the issuer DID, the subject DID, and the branch
-    /// the revision was minted on. Two origins are equal exactly when the
-    /// same issuer committed to the same branch of the same repository.
+    /// issuer, derived from the schema branch entity (which already folds in
+    /// the profile, the subject, and the branch name) and the issuer.
+    ///
+    /// The branch entity converges across sessions of the same replica, but
+    /// a lineage must identify a single sequential actor, so the issuer —
+    /// the per-session operator key — disambiguates operators advancing the
+    /// same branch.
     pub fn origin(&self) -> Origin {
-        Origin::derive_from_identifiers([
-            self.issuer.as_str(),
-            self.subject.as_str(),
-            self.branch.as_str(),
-        ])
+        Self::origin_of(&self.lineage(), &self.issuer)
+    }
+
+    /// The version-control [`Origin`] for the given lineage (branch) entity
+    /// advanced by `issuer`. Both identifiers are length-prefixed in the
+    /// derivation, keeping it injective.
+    pub fn origin_of(lineage: &Entity, issuer: &Did) -> Origin {
+        Origin::derive_from_identifiers([lineage.as_str(), issuer.as_str()])
     }
 
     /// The [`Version`] identifying this revision: its origin paired with its
@@ -143,6 +174,90 @@ impl Revision {
     /// same edition but different origins identify concurrent revisions.
     pub fn version(&self) -> Version {
         Version::new(self.origin(), self.edition)
+    }
+
+    /// The content-derived entity identifying this revision — the entity
+    /// onto which commit metadata can be associated, like on any other
+    /// entity.
+    pub fn entity(&self) -> Entity {
+        Self::entity_of(&self.version())
+    }
+
+    /// The entity for the revision identified by `version`. Any replica that
+    /// knows a revision's version derives the same entity.
+    pub fn entity_of(version: &Version) -> Entity {
+        Entity::of(&RevisionHash::Revision {
+            origin: version.origin.key_bytes().as_slice(),
+            edition: version.edition.value(),
+        })
+    }
+
+    /// The history records describing this revision:
+    ///
+    /// - its DAG edge — a `dialog.db/revision` claim on the branch lineage
+    ///   entity whose value is the revision entity and whose cause lists the
+    ///   parent revision versions (what
+    ///   [`common_ancestor`](dialog_artifacts::history::common_ancestor)
+    ///   traverses), and
+    /// - its attribute claims on the revision entity (tree, edition, branch,
+    ///   issuer, authority, and one `cause` per parent revision entity), so
+    ///   the revision is describable and joinable like any other entity.
+    pub fn records(
+        &self,
+        parents: impl IntoIterator<Item = Version>,
+    ) -> Result<Vec<(Version, Record)>, DialogArtifactsError> {
+        let version = self.version();
+        let this = self.entity();
+        let parents: Vec<Version> = parents.into_iter().collect();
+
+        let mut records = vec![(
+            version,
+            Record::Assert(Claim {
+                the: Attribute::from_str(REVISION_ATTRIBUTE)?,
+                of: self.lineage(),
+                is: Value::Entity(this.clone()),
+                cause: parents.iter().copied().collect(),
+            }),
+        )];
+
+        let mut attribute = |the: &str, is: Value| -> Result<(), DialogArtifactsError> {
+            records.push((
+                version,
+                Record::Assert(Claim {
+                    the: Attribute::from_str(the)?,
+                    of: this.clone(),
+                    is,
+                    cause: Cause::genesis(),
+                }),
+            ));
+            Ok(())
+        };
+
+        attribute(
+            "dialog.revision/tree",
+            Value::Bytes(self.tree.hash().to_vec()),
+        )?;
+        attribute(
+            "dialog.revision/edition",
+            Value::UnsignedInt(u128::from(self.edition.value())),
+        )?;
+        attribute("dialog.revision/branch", Value::Entity(self.lineage()))?;
+        attribute(
+            "dialog.revision/issuer",
+            Value::Entity(Entity::from_str(self.issuer.as_str())?),
+        )?;
+        attribute(
+            "dialog.revision/authority",
+            Value::Entity(Entity::from_str(self.authority.as_str())?),
+        )?;
+        for parent in &parents {
+            attribute(
+                "dialog.revision/cause",
+                Value::Entity(Self::entity_of(parent)),
+            )?;
+        }
+
+        Ok(records)
     }
 }
 

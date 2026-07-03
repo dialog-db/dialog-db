@@ -317,25 +317,3 @@ pub fn revision_record(revision: &Revision) -> Result<(Version, Record), DialogA
         }),
     ))
 }
-
-/// The lineage record for a revision identified by its subject DID and
-/// [`Version`], for revision representations that live outside this module
-/// (e.g. `dialog-repository`'s branch revisions). The claim's entity is the
-/// repository DID, its value is the version's key encoding, and its cause is
-/// the parent revision's version — the edge of the revision DAG that
-/// [`common_ancestor`](super::common_ancestor) traverses.
-pub fn revision_record_for(
-    subject: &str,
-    version: &Version,
-    parents: impl IntoIterator<Item = Version>,
-) -> Result<(Version, Record), DialogArtifactsError> {
-    Ok((
-        *version,
-        Record::Assert(Claim {
-            the: Attribute::from_str(REVISION_ATTRIBUTE)?,
-            of: Entity::from_str(subject)?,
-            is: Value::Bytes(version.key_bytes().to_vec()),
-            cause: parents.into_iter().collect(),
-        }),
-    ))
-}
