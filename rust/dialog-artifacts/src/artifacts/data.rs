@@ -8,7 +8,7 @@ use dialog_storage::Blake3Hash;
 use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 
-use crate::{Artifact, Cause, make_reference};
+use crate::{Artifact, Cause, history::Version, make_reference};
 
 #[cfg(doc)]
 use crate::{Artifacts, Attribute, Entity};
@@ -28,6 +28,12 @@ pub struct Datum {
     pub value: Vec<u8>,
     /// Get the [`Cause`] of this [`ValueDatum`], if any
     pub cause: Option<Cause>,
+    /// The [`Version`] of the revision that produced this [`Datum`], when it
+    /// was committed through a version-controlled
+    /// [`Repository`](crate::history::Repository). Data committed directly
+    /// through [`Artifacts`] carries no version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<Version>,
 }
 
 impl Datum {
@@ -51,6 +57,7 @@ impl From<Artifact> for Datum {
             value_type: artifact.is.data_type().into(),
             value: artifact.is.to_bytes(),
             cause: artifact.cause,
+            version: None,
         }
     }
 }

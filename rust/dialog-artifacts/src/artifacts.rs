@@ -61,6 +61,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "csv")]
 use crate::{EntityKey, KeyBytes, KeyViewConstruct};
 
+use crate::history::Version;
 use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge};
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
@@ -340,48 +341,52 @@ where
 
         Ok(())
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> ArtifactStore for Artifacts<Backend>
-where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync
-        + 'static,
-{
-    fn select(
+    /// Get the currently asserted [`Datum`]s recorded for the given entity
+    /// and attribute. Multiple data are possible for attributes with more
+    /// than one asserted value.
+    pub async fn select_data(
         &self,
-        selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
-    {
-        let index = self.index.clone();
-        let storage = self.storage.clone();
+        of: &Entity,
+        the: &Attribute,
+    ) -> Result<Vec<Datum>, DialogArtifactsError> {
+        use crate::{AttributeKeyPart, EntityKey, EntityKeyPart, KeyViewConstruct, KeyViewMut};
 
-        try_stream! {
-            // Clone the tree under the read lock to "pin" it at a
-            // version for the stream's lifetime, then hand off to the
-            // shared `ArtifactTreeExt::scan` for EAV/AEV/VAE dispatch.
-            let tree = index.read().await.clone();
-            let scanned = tree.scan(storage, selector);
-            tokio::pin!(scanned);
-            for await artifact in scanned {
-                yield artifact?;
+        let index = self.index.read().await;
+        let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
+            .set_entity(EntityKeyPart::from(of))
+            .set_attribute(AttributeKeyPart::from(the))
+            .into_key();
+        let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
+            .set_entity(EntityKeyPart::from(of))
+            .set_attribute(AttributeKeyPart::from(the))
+            .into_key();
+
+        let tree_storage = TreeStorage::new(TreeStorageBridge(self.storage.clone()));
+        let stream = index.stream_range(
+            crate::KeyBytes::from(search_start)..=crate::KeyBytes::from(search_end),
+            &tree_storage,
+        );
+        tokio::pin!(stream);
+
+        let mut data = Vec::new();
+        while let Some(entry) = stream.try_next().await? {
+            if let State::Added(datum) = entry.value {
+                data.push(datum);
             }
         }
-    }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> ArtifactStoreMut for Artifacts<Backend>
-where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync
-        + 'static,
-{
-    async fn commit<Instructions>(
+        Ok(data)
+    }
+
+    /// Commit the given instructions, tagging every asserted [`Datum`] with
+    /// the [`Version`](crate::history::Version) of the revision that produced
+    /// it. This is the write path used by the version-controlled
+    /// [`Repository`](crate::history::Repository); committing through
+    /// [`ArtifactStoreMut::commit`] leaves the version unset.
+    pub(crate) async fn commit_with_version<Instructions>(
         &mut self,
+        version: Option<Version>,
         instructions: Instructions,
     ) -> Result<Blake3Hash, DialogArtifactsError>
     where
@@ -394,13 +399,13 @@ where
 
             // The per-instruction EAV/AEV/VAE key writes (and
             // cardinality-one supersession) are the shared
-            // `ArtifactTreeExt::apply`. `commit` adds only the
-            // surrounding transaction bookkeeping — base-revision
+            // `ArtifactTreeExt::apply_versioned`. This method adds only
+            // the surrounding transaction bookkeeping — base-revision
             // capture, revision persistence, pointer advance, and the
             // rollback below.
             let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
             index
-                .apply(&mut self.storage, &mut delta, instructions)
+                .apply_versioned(&mut self.storage, &mut delta, version, instructions)
                 .await?;
 
             // Persist the tree's pending nodes before minting a revision;
@@ -450,6 +455,55 @@ where
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> ArtifactStore for Artifacts<Backend>
+where
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync
+        + 'static,
+{
+    fn select(
+        &self,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        let index = self.index.clone();
+        let storage = self.storage.clone();
+
+        try_stream! {
+            // Clone the tree under the read lock to "pin" it at a
+            // version for the stream's lifetime, then hand off to the
+            // shared `ArtifactTreeExt::scan` for EAV/AEV/VAE dispatch.
+            let tree = index.read().await.clone();
+            let scanned = tree.scan(storage, selector);
+            tokio::pin!(scanned);
+            for await artifact in scanned {
+                yield artifact?;
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> ArtifactStoreMut for Artifacts<Backend>
+where
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync
+        + 'static,
+{
+    async fn commit<Instructions>(
+        &mut self,
+        instructions: Instructions,
+    ) -> Result<Blake3Hash, DialogArtifactsError>
+    where
+        Instructions: Stream<Item = Instruction> + ConditionalSend,
+    {
+        self.commit_with_version(None, instructions).await
     }
 }
 

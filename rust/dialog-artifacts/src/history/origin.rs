@@ -20,7 +20,20 @@ use super::Issuer;
 /// used concurrently from multiple replicas of the same repository can mint
 /// colliding [`Version`](super::Version)s. Each replica should act under its
 /// own issuer key.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 #[repr(transparent)]
 pub struct Origin(pub Blake3Hash);
 

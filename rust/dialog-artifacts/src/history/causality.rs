@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 
 use crate::{Attribute, DialogArtifactsError, Entity};
@@ -34,9 +33,13 @@ impl Causality {
 }
 
 /// Read access to the history index, sufficient to traverse claim lineages
-/// and the revision DAG
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+/// and the revision DAG.
+///
+/// Uses native `async fn` (rather than `async_trait`'s boxed futures) so that
+/// implementations over [`dialog_search_tree`]'s borrowing streams do not
+/// have to promise `Send` futures; executors that require `Send` can demand
+/// it at the call site.
+#[allow(async_fn_in_trait)]
 pub trait History: ConditionalSync {
     /// The claims written to `(of, the)` by the revision identified by
     /// `version`. Multiple claims are possible for cardinality-many

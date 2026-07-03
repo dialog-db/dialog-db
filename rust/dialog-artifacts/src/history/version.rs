@@ -16,7 +16,19 @@ pub const VERSION_LENGTH: usize = EDITION_LENGTH + ORIGIN_LENGTH;
 /// ordering is total and deterministic). Two versions with the same edition
 /// but different origins are concurrent: neither can have seen the other,
 /// since seeing it would have forced a higher edition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct Version {
     /// The repository-scoped identity of the actor that produced the revision
     pub origin: Origin,
