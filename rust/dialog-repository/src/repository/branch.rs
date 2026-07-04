@@ -91,7 +91,7 @@ pub type Index = dialog_artifacts::Index;
 pub struct Branch {
     reference: BranchReference,
     revision: Cell<Revision>,
-    upstream: Cell<Upstream>,
+    upstream: Cell<Upstreams>,
     /// Shared node cache for tree reads. Created once per opened branch and
     /// carried (as a shared handle) into every `Select`'s tree, so blocks read
     /// by one query stay warm for the next instead of being re-fetched from
@@ -127,9 +127,18 @@ impl Branch {
         self.revision.content()
     }
 
-    /// Returns the upstream state, or `None` if no upstream is configured.
+    /// Returns the default upstream — the target of a bare pull/push/fetch —
+    /// or `None` if no upstream is configured.
     pub fn upstream(&self) -> Option<Upstream> {
-        self.upstream.content()
+        self.upstreams().default_upstream().cloned()
+    }
+
+    /// Returns every configured upstream tracking entry, default first. A
+    /// branch can track several upstreams and pull from / push to any of
+    /// them — see [`Pull::from`](crate::Pull::from) and
+    /// [`Push::to`](crate::Push::to).
+    pub fn upstreams(&self) -> Upstreams {
+        self.upstream.content().unwrap_or_default()
     }
 
     /// Re-resolve this handle's head and upstream from storage, updating its

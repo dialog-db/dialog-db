@@ -1,7 +1,7 @@
 use crate::schema;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
+    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
 use dialog_artifacts::history::{Edition, Version};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
@@ -74,11 +74,16 @@ where
         // to read remote-only blocks on demand (pull only merges the
         // tree metadata, not every block). `NetworkedIndex` falls back
         // to the remote when a block is missing locally.
-        let remote = match branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => {
-                branch.subject().remote(name).load().perform(env).await.ok()
-            }
-            _ => None,
+        let upstreams = branch.upstreams();
+        let remote = match upstreams.remote_name() {
+            Some(name) => branch
+                .subject()
+                .remote(name.to_string())
+                .load()
+                .perform(env)
+                .await
+                .ok(),
+            None => None,
         };
         let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 

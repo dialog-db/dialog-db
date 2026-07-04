@@ -318,6 +318,13 @@ pub enum PullError {
         branch: String,
     },
 
+    /// Pull targeted the branch itself.
+    #[error("Branch {branch} cannot pull from itself")]
+    UpstreamIsItself {
+        /// The branch name.
+        branch: String,
+    },
+
     /// Loading the local upstream branch failed.
     #[error("Failed to load upstream branch: {0}")]
     LoadBranch(#[from] LoadBranchError),
@@ -337,6 +344,10 @@ pub enum PullError {
     /// A cell publish during pull failed.
     #[error("Failed to publish merged revision: {0}")]
     Publish(#[from] PublishError),
+
+    /// A cell resolve during pull failed.
+    #[error("Failed to resolve during pull: {0}")]
+    Resolve(#[from] ResolveError),
 
     /// Identifying the current authority for the merge revision failed.
     #[error("Failed to identify authority for merge: {0}")]
@@ -362,6 +373,13 @@ pub enum PushError {
     #[error("Branch {branch} has no upstream")]
     BranchHasNoUpstream {
         /// The local branch with no configured upstream.
+        branch: String,
+    },
+
+    /// Push targeted the branch itself.
+    #[error("Branch {branch} cannot push to itself")]
+    UpstreamIsItself {
+        /// The branch name.
         branch: String,
     },
 
