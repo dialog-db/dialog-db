@@ -158,7 +158,7 @@ Revisions and claims share a unified history index:
 /edition/origin/entity/attribute/value_hash -> Claim
 ```
 
-The index is not a separate tree: history records live in the same search tree as the EAV/AEV/VAE indexes, under their own key tag, with the entity and attribute components hashed down to fit the fixed key width (history lookups are exact-match on components taken from a claim in hand, so hashing loses nothing until range queries over entities are needed). One root therefore covers both data and its history:
+The index is not a separate tree: history records live in the same search tree as the EAV/AEV/VAE indexes, under their own key tag. The logical key exceeds the tree's fixed key width, so it is stored head-plus-hash — an order-preserving raw prefix (edition, origin, the entity key form's raw head, and up to 57 raw attribute bytes) with the final 32 bytes a Blake3 hash of the entire untruncated key. The hash covers the trimmed tails, so distinct logical keys always store distinctly, while the raw prefix keeps the region range-scannable by `(edition, origin, entity, attribute)`; readers re-check truncated components against the stored record. This is the same rule the entity key form already applies internally, promoted to the whole key — and the raw prefix is exactly what a variable-length key redesign would carry, so range logic survives that migration. One root therefore covers both data and its history:
 
 - A revision's tree reference is the atomic unit of sync — history can never be replicated separately from the data it describes, or vice versa.
 - Pulling merges history automatically: records ride the same tree differential as data, and since every record's key is unique to its version, the union is conflict-free.
