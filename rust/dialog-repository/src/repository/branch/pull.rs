@@ -1,5 +1,5 @@
 use dialog_artifacts::DialogArtifactsError;
-use dialog_artifacts::history::HistoryStore;
+use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -144,7 +144,7 @@ impl<'a> Pull<'a> {
         // when the upstream is remote, falls back to the remote
         // archive for blocks that haven't been replicated. With
         // `remote: None` it degrades to a plain local index.
-        let store = NetworkedIndex::new(env, branch.archive().index(), remote);
+        let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
         // The three trees: last-sync base, local current, and the
         // upstream revision we're merging in. Hydration is lazy; blocks
@@ -163,6 +163,47 @@ impl<'a> Pull<'a> {
             .await?
             .persist(&mut delta)?;
 
+        let merged_tree = TreeReference::from(*merged.root().as_bytes());
+
+        let new_revision = match local_revision {
+            // Merging produced the upstream tree verbatim (fast-forward):
+            // adopt the upstream revision — there's nothing novel to
+            // attribute. History lives in the same tree, so trees being
+            // identical means histories are identical too: any novel local
+            // record would have made the roots differ.
+            _ if merged_tree == upstream_revision.tree => upstream_revision.clone(),
+            // Branch has no prior revision; adopt the upstream
+            // revision directly (its identity still applies).
+            None => upstream_revision.clone(),
+            // Real three-way merge: mint a revision attributed to the
+            // current authority combining both sides. The merged tree
+            // already unions the two sides' recorded history (the local
+            // side's records rode the differential like any other entries);
+            // the merge's own DAG edge and attribute claims — cause listing
+            // both parents — are recorded on top, so conflict detection
+            // keeps working across the sync boundary. The placeholder tree
+            // root is replaced once those records are in the tree.
+            Some(local) => {
+                let authority = Identify.perform(env).await?;
+                let mut revision = local.merge(
+                    &upstream_revision,
+                    TreeReference::default(),
+                    branch.name(),
+                    authority.did(),
+                    authority.profile().clone(),
+                );
+                let entries = revision
+                    .records([local.version(), upstream_revision.version()])?
+                    .into_iter()
+                    .map(|(version, record)| record.into_entry(&version))
+                    .collect();
+                merged.record(&mut store, &mut delta, entries).await?;
+                revision.tree = TreeReference::from(*merged.root().as_bytes());
+
+                revision
+            }
+        };
+
         // Persist the merged tree's pending nodes to the local archive
         // before referencing its root in a revision. The whole flush
         // travels as one `Import` invocation: block buffers are
@@ -176,50 +217,6 @@ impl<'a> Pull<'a> {
             .perform(env)
             .await
             .map_err(DialogArtifactsError::from)?;
-
-        let merged_tree = TreeReference::from(*merged.root().as_bytes());
-
-        let new_revision = match local_revision {
-            // Merging produced the upstream tree verbatim
-            // (fast-forward): adopt the upstream revision — there's
-            // nothing novel to attribute.
-            _ if merged_tree == upstream_revision.tree => upstream_revision.clone(),
-            // Branch has no prior revision; adopt the upstream
-            // revision directly (its identity still applies).
-            None => upstream_revision.clone(),
-            // Real three-way merge: mint a revision attributed to the
-            // current authority combining both sides.
-            Some(local) => {
-                let authority = Identify.perform(env).await?;
-                let mut revision = local.merge(
-                    &upstream_revision,
-                    merged_tree,
-                    branch.name(),
-                    authority.did(),
-                    authority.profile().clone(),
-                );
-
-                // Union the two sides' recorded claim lineage and record the
-                // merge's own DAG edge (cause: both parents), so conflict
-                // detection keeps working across the sync boundary instead of
-                // degrading to `IncompleteHistory` for the pulled claims.
-                // Upstream history nodes replicate on demand through the
-                // networked store, exactly like tree blocks.
-                let mut history = match &local.history {
-                    Some(root) => HistoryStore::from_hash(root.hash(), store.clone()),
-                    None => HistoryStore::new(store.clone()),
-                };
-                if let Some(root) = &upstream_revision.history {
-                    history.adopt(root.hash()).await?;
-                }
-                history
-                    .record_all(revision.records([local.version(), upstream_revision.version()])?)
-                    .await?;
-                revision.history = history.hash().map(TreeReference::from);
-
-                revision
-            }
-        };
 
         Ok(PreparedPull::Merged(Box::new(Merged {
             branch,
@@ -659,9 +656,9 @@ mod history_tests {
         feature.set_upstream(&main).perform(&operator).await?;
         feature.pull().perform(&operator).await?;
         assert_eq!(
-            feature.revision().and_then(|r| r.history),
-            first.history,
-            "fast-forward adoption carries the upstream history root"
+            feature.revision().map(|r| r.tree),
+            Some(first.tree.clone()),
+            "fast-forward adoption carries the upstream tree, history included"
         );
 
         // Feature replaces the title: its record's cause lists the version
@@ -693,7 +690,6 @@ mod history_tests {
             .perform(&operator)
             .await?
             .expect("pull merges");
-        assert!(merged.history.is_some(), "merge records history");
 
         let history = feature.history(&operator);
 

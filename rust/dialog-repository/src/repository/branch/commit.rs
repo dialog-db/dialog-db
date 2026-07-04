@@ -3,7 +3,7 @@ use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
 };
-use dialog_artifacts::history::{Edition, HistoryStore, Record, Version};
+use dialog_artifacts::history::{Edition, Version};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{DialogArtifactsError, Instruction};
 use dialog_capability::{Fork, Provider};
@@ -14,7 +14,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::Delta;
-use futures_util::{Stream, StreamExt, stream};
+use futures_util::Stream;
 
 /// Command that commits a stream of changes (assert/retract) to a branch.
 ///
@@ -96,7 +96,7 @@ where
             .map(|base| base.edition.successor())
             .unwrap_or(Edition::GENESIS);
         let lineage = schema::Branch::new(
-            &schema::Origin::new(profile.clone(), branch.of().clone()),
+            schema::Origin::new(profile.clone(), branch.of().clone()),
             branch.name(),
         )
         .this;
@@ -112,41 +112,54 @@ where
 
         let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
 
-        // Derive each instruction's history record against the pre-commit
-        // tree, so the record's cause lists the versions of the claims the
-        // instruction supersedes. This needs the instructions twice (once to
-        // derive, once to apply), hence the collect.
-        let instructions: Vec<Instruction> = changes.collect().await;
-        let mut records: Vec<(Version, Record)> = Vec::with_capacity(instructions.len() + 1);
-        for instruction in &instructions {
-            let artifact = match instruction {
-                Instruction::Assert(artifact)
-                | Instruction::Replace(artifact)
-                | Instruction::Retract(artifact) => artifact,
-            };
-            let current = tree
-                .select_data(store.clone(), &artifact.of, &artifact.the)
-                .await?;
-            records.push((version, Record::derive(instruction, &current)));
-        }
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
-        // cardinality-one supersession, and retraction live in the
-        // shared `ArtifactTreeExt::apply_versioned` so the key layout stays
-        // uniform; every asserted datum is tagged with this commit's
-        // version. The batch's new nodes accumulate in `delta`, which we
-        // flush below.
+        // cardinality-one supersession, retraction — and, because the
+        // writes are version-tagged, each instruction's history record,
+        // whose cause lists the versions of the exact claims the write
+        // superseded — all live in the shared
+        // `ArtifactTreeExt::apply_versioned` so the key layout stays
+        // uniform. Data and history land in the same tree: one root covers
+        // both. The batch's new nodes accumulate in `delta`.
         let mut delta = Delta::zero();
-        tree.apply_versioned(
-            &mut store,
-            &mut delta,
-            Some(version),
-            stream::iter(instructions),
-        )
-        .await?;
+        let changed = tree
+            .apply_versioned(&mut store, &mut delta, Some(version), changes)
+            .await?;
+
+        // A batch that left the indexes untouched (e.g. a transaction
+        // re-asserting metadata that is already in place) is a no-op:
+        // keep the current revision rather than minting one that differs
+        // only by edition. Only a branch with no revision at all still
+        // publishes, to establish its genesis.
+        if !changed && let Some(base) = base_revision {
+            return Ok(base);
+        }
+
+        // Mint the revision (the placeholder tree root is replaced below,
+        // after its own records are in the tree) and record its DAG edge on
+        // the branch lineage entity plus its attribute claims on the
+        // revision entity, in the same batch delta. None of those records
+        // depend on the final root — a root cannot appear inside itself.
+        let parent = base_revision.as_ref().map(Revision::version);
+        let mut revision = match base_revision {
+            Some(base) => base.advance(TreeReference::default(), branch.name(), issuer, profile),
+            None => Revision::new(
+                TreeReference::default(),
+                branch.of().clone(),
+                branch.name(),
+                issuer,
+                profile,
+            ),
+        };
+        debug_assert_eq!(revision.version(), version);
+        let entries = revision
+            .records(parent)?
+            .into_iter()
+            .map(|(version, record)| record.into_entry(&version))
+            .collect();
+        tree.record(&mut store, &mut delta, entries).await?;
 
         // Persist the tree's pending nodes before referencing the root in
         // a revision; a revision must only point at durable blocks. The
-        // empty tree's root is the canonical empty-tree hash already. The
         // whole flush travels as one `Import` invocation; block buffers are
         // reference-counted, so nothing is copied on the way in, and
         // providers with native batching persist it in a single round trip
@@ -159,29 +172,7 @@ where
             .await
             .map_err(DialogArtifactsError::from)?;
 
-        let tree = TreeReference::from(*tree.root().as_bytes());
-
-        let parent = base_revision.as_ref().map(Revision::version);
-        let base_history = base_revision.as_ref().and_then(|base| base.history.clone());
-
-        let mut revision = match base_revision {
-            Some(base) => base.advance(tree, branch.name(), issuer, profile),
-            None => Revision::new(tree, branch.of().clone(), branch.name(), issuer, profile),
-        };
-        debug_assert_eq!(revision.version(), version);
-
-        // Record the commit's claim lineage, the revision's DAG edge on the
-        // branch lineage entity, and the revision's own attribute claims
-        // into the history index, continuing from the most recent recorded
-        // root. This is what powers claim-level conflict detection: see
-        // `dialog_artifacts::history::causality`.
-        records.extend(revision.records(parent)?);
-        let mut history = match &base_history {
-            Some(root) => HistoryStore::from_hash(root.hash(), store.clone()),
-            None => HistoryStore::new(store.clone()),
-        };
-        history.record_all(records).await?;
-        revision.history = history.hash().map(TreeReference::from);
+        revision.tree = TreeReference::from(*tree.root().as_bytes());
 
         head.publish(revision.clone(), env).await?;
 
@@ -358,7 +349,6 @@ mod history_tests {
             ))]))
             .perform(&operator)
             .await?;
-        assert!(first.history.is_some(), "commit must record history");
 
         // Refresh so the next commit builds on the published head.
         branch.refresh(&operator).await?;

@@ -7,7 +7,7 @@ use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
 use crate::{NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
-use dialog_artifacts::history::HistoryStore;
+use dialog_artifacts::history::TreeHistory;
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::Fork;
 use dialog_capability::{Capability, Did, Subject};
@@ -167,16 +167,15 @@ impl Branch {
         self.subject().archive()
     }
 
-    /// The history index at this branch's current revision: the durable
-    /// record of claim lineage maintained by [`Branch::commit`], which
+    /// The recorded claim lineage at this branch's current revision, which
     /// powers claim-level conflict detection (see
     /// [`dialog_artifacts::history::causality`]).
     ///
-    /// Hydrated from the current revision's recorded history root; empty
-    /// when the branch has no recorded lineage yet. Reads that miss locally
-    /// are not fetched from a remote — traversal over unreplicated history
-    /// surfaces as `IncompleteHistory`.
-    pub fn history<'a, Env>(&self, env: &'a Env) -> HistoryStore<NetworkedIndex<'a, Env>>
+    /// History records live in the same tree as the data, so this reads the
+    /// history region of the current revision's tree. Reads that miss
+    /// locally are not fetched from a remote — traversal over unreplicated
+    /// history surfaces as `IncompleteHistory`.
+    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
     where
         Env: Provider<ArchiveGet>
             + Provider<ArchivePut>
@@ -185,10 +184,11 @@ impl Branch {
             + 'static,
     {
         let store = NetworkedIndex::new(env, self.archive().index(), None);
-        match self.revision().and_then(|revision| revision.history) {
-            Some(root) => HistoryStore::from_hash(root.hash(), store),
-            None => HistoryStore::new(store),
-        }
+        let root = self
+            .revision()
+            .map(|revision| *revision.tree.hash())
+            .unwrap_or(crate::EMPTY_TREE_HASH);
+        TreeHistory::from_root(&root, store)
     }
 
     /// Export all artifacts from this branch to the given exporter.

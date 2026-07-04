@@ -38,13 +38,15 @@ pub use value::*;
 mod blob;
 pub use blob::*;
 
+mod history;
+pub use history::*;
+
 mod part;
 pub use part::*;
 
-/// Tag byte reserved for the history index (the fourth index ordering).
-///
-/// Allocated so the blob index lands at tag `4`; the history index itself is
-/// not yet implemented, so no key view is built on this tag.
+/// Tag byte of the history index (the fourth index ordering): the region of
+/// the artifact tree holding per-instruction claim-lineage records (see
+/// [`history`]). Allocated below the blob index's tag `4`.
 pub const HISTORY_KEY_TAG: u8 = 3;
 
 /// Helper macro for creating mutable slices from byte arrays at compile time.

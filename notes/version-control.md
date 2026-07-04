@@ -158,6 +158,12 @@ Revisions and claims share a unified history index:
 /edition/origin/entity/attribute/value_hash -> Claim
 ```
 
+The index is not a separate tree: history records live in the same search tree as the EAV/AEV/VAE indexes, under their own key tag, with the entity and attribute components hashed down to fit the fixed key width (history lookups are exact-match on components taken from a claim in hand, so hashing loses nothing until range queries over entities are needed). One root therefore covers both data and its history:
+
+- A revision's tree reference is the atomic unit of sync — history can never be replicated separately from the data it describes, or vice versa.
+- Pulling merges history automatically: records ride the same tree differential as data, and since every record's key is unique to its version, the union is conflict-free.
+- Two identical trees necessarily carry identical histories, so fast-forward detection is a root comparison.
+
 This key structure serves two purposes.
 
 **Revision DAG traversal:** revision claims are stored under `entity = repository_did`. Because edition leads the key, scanning the index and filtering on `entity = repository_did` yields revision history in a total order consistent with causality (concurrent revisions interleave, but no revision ever appears before one of its ancestors). Finding a common ancestor between two revision lineages is done by following `cause` pointers backward from each head.
