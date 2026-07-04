@@ -10,10 +10,15 @@ pub struct SetUpstream<'a> {
 }
 
 impl Branch {
-    /// Create a command to set the upstream for this branch.
+    /// Create a command to set the default upstream for this branch.
     ///
     /// Accepts either a `&Branch` or a `&RemoteBranch` (converted via
     /// `From` impls on [`UpstreamBranch`]).
+    ///
+    /// A branch can track several upstreams: setting a second, different
+    /// target keeps the first as a tracked entry and makes the new one the
+    /// default. Setting an already-tracked target promotes it to default,
+    /// preserving its recorded sync base.
     pub fn set_upstream(&self, source: impl Into<UpstreamBranch>) -> SetUpstream<'_> {
         SetUpstream {
             branch: self,
@@ -37,11 +42,9 @@ impl SetUpstream<'_> {
             });
         }
 
-        self.branch
-            .upstream
-            .publish(self.upstream)
-            .perform(env)
-            .await?;
+        let mut upstreams = self.branch.upstreams();
+        upstreams.upsert_default(self.upstream);
+        self.branch.upstream.publish(upstreams).perform(env).await?;
 
         Ok(())
     }
@@ -138,6 +141,39 @@ mod tests {
             upstream,
             Some(Upstream::Remote { ref remote, ref branch, .. })
                 if remote == "origin" && branch == "main"
+        ));
+
+        Ok(())
+    }
+
+    /// A branch can track several upstreams: setting a second target keeps
+    /// the first as a tracked entry and makes the new one the default;
+    /// re-setting an existing target just promotes it back.
+    #[dialog_common::test]
+    async fn it_tracks_multiple_upstreams_with_the_latest_set_as_default() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let dev = repo.branch("dev").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.set_upstream(&dev).perform(&operator).await?;
+
+        let upstreams = feature.upstreams();
+        assert_eq!(upstreams.iter().count(), 2);
+        assert!(matches!(
+            upstreams.default_upstream(),
+            Some(Upstream::Local { branch, .. }) if branch == "dev"
+        ));
+
+        feature.set_upstream(&main).perform(&operator).await?;
+        let upstreams = feature.upstreams();
+        assert_eq!(upstreams.iter().count(), 2);
+        assert!(matches!(
+            upstreams.default_upstream(),
+            Some(Upstream::Local { branch, .. }) if branch == "main"
         ));
 
         Ok(())

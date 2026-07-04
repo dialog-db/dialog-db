@@ -13,21 +13,39 @@ use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
 use crate::{
     Branch, Checkpoint, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, PullError,
     RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
+    UpstreamBranch,
 };
 
 /// Command struct for pulling from upstream (auto-dispatches local/remote).
 pub struct Pull<'a> {
     branch: &'a Branch,
+    from: Option<Upstream>,
 }
 
 impl<'a> Pull<'a> {
     fn new(branch: &'a Branch) -> Self {
-        Self { branch }
+        Self { branch, from: None }
+    }
+
+    /// Pull from the given branch instead of the default upstream.
+    ///
+    /// Accepts either a `&Branch` or a `&RemoteBranch` — the same inputs as
+    /// [`Branch::set_upstream`]. If the target is already tracked, its
+    /// recorded sync base drives the merge; otherwise the merge runs from
+    /// the empty base (correct, just unable to skip anything) and a
+    /// successful pull starts tracking the target — without changing the
+    /// default upstream — so the next pull from it is incremental.
+    pub fn from(mut self, source: impl Into<UpstreamBranch>) -> Self {
+        self.from = Some(Upstream::from(source.into()));
+        self
     }
 }
 
 impl Branch {
     /// Pull from the configured upstream.
+    ///
+    /// Targets the default upstream; chain [`Pull::from`] to pull from
+    /// another tracked (or brand-new) upstream instead.
     pub fn pull(&self) -> Pull<'_> {
         Pull::new(self)
     }
@@ -84,18 +102,41 @@ impl<'a> Pull<'a> {
             + 'static,
     {
         let branch = self.branch;
-        let upstream = branch
-            .upstream()
-            .ok_or_else(|| PullError::BranchHasNoUpstream {
-                branch: branch.name().to_string(),
-            })?;
+
+        // Select the upstream entry to pull from: the default when no
+        // explicit source was given, otherwise the tracked entry for that
+        // target — or, for a target not tracked yet, a fresh entry whose
+        // empty sync base makes the merge run from scratch.
+        let upstreams = branch.upstreams();
+        let upstream = match self.from {
+            None => upstreams.default_upstream().cloned().ok_or_else(|| {
+                PullError::BranchHasNoUpstream {
+                    branch: branch.name().to_string(),
+                }
+            })?,
+            Some(target) => {
+                if let Upstream::Local { branch: name, .. } = &target
+                    && name == branch.name()
+                {
+                    return Err(PullError::UpstreamIsItself {
+                        branch: branch.name().to_string(),
+                    });
+                }
+                upstreams.find(&target).cloned().unwrap_or(target)
+            }
+        };
 
         // Resolve the upstream's current revision and, when the
         // upstream is remote, keep a handle so the merge can fall back
         // to the remote archive for blocks that aren't local.
-        let (upstream_revision, remote) = match upstream {
+        let (upstream_revision, remote) = match &upstream {
             Upstream::Local { branch: id, .. } => {
-                let upstream_branch = branch.subject().branch(id).load().perform(env).await?;
+                let upstream_branch = branch
+                    .subject()
+                    .branch(id.clone())
+                    .load()
+                    .perform(env)
+                    .await?;
                 (upstream_branch.revision(), None)
             }
             Upstream::Remote {
@@ -103,8 +144,17 @@ impl<'a> Pull<'a> {
                 branch: branch_name,
                 ..
             } => {
-                let remote = branch.subject().remote(name).load().perform(env).await?;
-                let upstream = remote.branch(branch_name).open().perform(env).await?;
+                let remote = branch
+                    .subject()
+                    .remote(name.clone())
+                    .load()
+                    .perform(env)
+                    .await?;
+                let upstream = remote
+                    .branch(branch_name.clone())
+                    .open()
+                    .perform(env)
+                    .await?;
                 (upstream.fetch().perform(env).await?, Some(remote))
             }
         };
@@ -115,13 +165,11 @@ impl<'a> Pull<'a> {
             return Ok(PreparedPull::NoOp);
         };
 
-        // `base` is the upstream tree at our last sync point (the
-        // divergence marker). If it equals the upstream's current
-        // tree, the upstream hasn't moved and there's nothing to pull.
-        let base = branch
-            .upstream()
-            .map(|u| u.tree().clone())
-            .unwrap_or_default();
+        // `base` is the upstream tree at our last sync point with this
+        // particular upstream (the divergence marker). If it equals the
+        // upstream's current tree, the upstream hasn't moved and there's
+        // nothing to pull.
+        let base = upstream.tree().clone();
 
         if base == upstream_revision.tree {
             return Ok(PreparedPull::NoOp);
@@ -149,7 +197,7 @@ impl<'a> Pull<'a> {
         // The three trees: last-sync base, local current, and the
         // upstream revision we're merging in. Hydration is lazy; blocks
         // load on demand as the differential walks them.
-        let base = Index::from_hash(NodeHash::from(*base.hash()));
+        let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
         let local = Index::from_hash(NodeHash::from(local_tree_hash));
         let mut merged = Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
 
@@ -157,7 +205,7 @@ impl<'a> Pull<'a> {
         // tree to produce the merged tree. The differential only reads
         // blocks on paths where base and local actually differ.
         let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-        let local_changes = base.differentiate(&local, &tree_store, &tree_store);
+        let local_changes = base_tree.differentiate(&local, &tree_store, &tree_store);
         let mut delta = Delta::zero();
         merged = Box::pin(merged.edit().integrate(local_changes, &tree_store))
             .await?
@@ -222,7 +270,8 @@ impl<'a> Pull<'a> {
             branch,
             head,
             new_revision,
-            upstream_tree: upstream_revision.tree,
+            sync: upstream.with_tree(upstream_revision.tree),
+            base,
         })))
     }
 }
@@ -253,8 +302,13 @@ pub struct Merged<'a> {
     head: Checkpoint<Revision>,
     /// The merged revision to publish as the new head.
     new_revision: Revision,
-    /// The upstream tree just merged in — the new sync-base marker.
-    upstream_tree: TreeReference,
+    /// The upstream entry just pulled from, its sync base already advanced
+    /// to the tree merged in — the tracking state to upsert.
+    sync: Upstream,
+    /// The sync base the merge actually ran from — what the pulled entry's
+    /// tree looked like at prepare time. Lets the commit phase detect
+    /// whether a concurrent write advanced this same entry in the meantime.
+    base: TreeReference,
 }
 
 impl PreparedPull<'_> {
@@ -273,7 +327,8 @@ impl PreparedPull<'_> {
             branch,
             head,
             new_revision,
-            upstream_tree,
+            sync,
+            base,
         } = match self {
             PreparedPull::NoOp => return Ok(None),
             PreparedPull::Merged(merged) => *merged,
@@ -289,34 +344,46 @@ impl PreparedPull<'_> {
         // reconcile a mismatch.
         head.publish(new_revision.clone(), env).await?;
 
-        // Advance the recorded sync base to the upstream tree we just merged
-        // in, so the next pull/push uses it as the divergence marker.
-        // Checkpointed just before the write, so its CAS is against the marker
-        // as it stands now.
+        // Advance the pulled upstream's recorded sync base to the tree we
+        // just merged in, so the next pull/push against it uses that as the
+        // divergence marker. An upstream pulled explicitly for the first
+        // time gets tracked here (appended, not made the default).
+        // Checkpointed just before the write, so its CAS is against the
+        // marker as it stands now.
         //
-        // The head publish above and this write are not one atomic step: a
-        // concurrent pull could land its own (head + sync-base) pair in
-        // between. If it did, the marker moved and our write would clobber a
-        // consistent pair back to a stale base — so on a mismatch we DON'T
-        // propagate the error. The other pull already established a valid
-        // (head, base); we yield to it and return the head as it now stands,
-        // rather than the revision we published (which has been superseded).
-        if let Some(upstream) = branch.upstream() {
-            let marker = branch.upstream.checkpoint();
-            let publish = marker.publish(upstream.with_tree(upstream_tree), env).await;
+        // The head publish above and this write are not one atomic step,
+        // and other syncs write this cell too — a concurrent pull, a push
+        // to another upstream, a set_upstream. On a version mismatch we
+        // re-read the cell: if our entry is untouched (the concurrent
+        // write was about a different entry), fold our advance into the
+        // current state and publish once more; if our own entry moved, a
+        // concurrent sync of this same upstream already established a
+        // consistent (head, base) pair — clobbering it back would regress
+        // the base — so we yield and return the head as it now stands.
+        let marker = branch.upstream.checkpoint();
+        let mut upstreams = branch.upstreams();
+        upstreams.upsert(sync.clone());
+        let publish = marker.publish(upstreams, env).await;
 
-            if let Err(PublishError::VersionMismatch { .. }) = publish {
-                // Re-read the head a concurrent pull left in place and return
-                // it. It must differ from what we published — if it matched,
-                // the marker moved without the head, which would be an
-                // inconsistent state we don't expect.
-                let current = branch.revision();
-                debug_assert!(
-                    current.as_ref() != Some(&new_revision),
-                    "upstream marker moved but head did not — inconsistent sync state"
-                );
-                return Ok(current);
+        if let Err(PublishError::VersionMismatch { .. }) = publish {
+            branch.upstream.resolve().perform(env).await?;
+            let marker = branch.upstream.checkpoint();
+            let mut upstreams = branch.upstreams();
+            let ours_untouched = match upstreams.find(&sync) {
+                None => true,
+                Some(entry) => *entry.tree() == base,
+            };
+            if !ours_untouched {
+                return Ok(branch.revision());
             }
+            upstreams.upsert(sync);
+            match marker.publish(upstreams, env).await {
+                // The cell is contended; give up on the marker advance —
+                // the merge itself landed, the next pull is just heavier.
+                Err(PublishError::VersionMismatch { .. }) => return Ok(branch.revision()),
+                other => other?,
+            }
+        } else {
             publish?;
         }
 
@@ -383,6 +450,81 @@ mod tests {
             .revision()
             .expect("feature should have a revision after pull");
         assert_eq!(feature_rev.tree, main_revision.tree);
+        Ok(())
+    }
+
+    /// A branch can pull from an upstream other than its default: the
+    /// merge lands, the target starts being tracked with its own sync base
+    /// (so re-pulling it is a no-op), and the default stays put.
+    #[dialog_common::test]
+    async fn it_pulls_from_a_non_default_upstream_and_tracks_it() -> Result<()> {
+        use crate::Upstream;
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:main".parse()?,
+            is: Value::String("Main data".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+        let dev = repo.branch("dev").open().perform(&operator).await?;
+        dev.commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/email".parse()?,
+            of: "user:dev".parse()?,
+            is: Value::String("dev@test.com".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+
+        // Explicit pull from a branch that is not the default upstream.
+        let merged = feature.pull().from(&dev).perform(&operator).await?;
+        assert!(merged.is_some(), "pull from a second upstream merges");
+
+        // Both data sets are visible on the feature branch.
+        let emails = feature
+            .claims()
+            .select(ArtifactSelector::new().the("user/email".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(emails.len(), 1, "dev's data arrived via the explicit pull");
+
+        // Dev is now tracked (with its own sync base), main stays default.
+        let upstreams = feature.upstreams();
+        assert_eq!(upstreams.iter().count(), 2);
+        assert!(matches!(
+            upstreams.default_upstream(),
+            Some(Upstream::Local { branch, .. }) if branch == "main"
+        ));
+
+        // Dev hasn't moved since, so re-pulling it is a no-op.
+        let again = feature.pull().from(&dev).perform(&operator).await?;
+        assert!(
+            again.is_none(),
+            "tracked sync base makes the re-pull a no-op"
+        );
+
+        // Pulling from the branch itself is refused.
+        let selfish = feature.pull().from(&feature).perform(&operator).await;
+        assert!(matches!(
+            selfish,
+            Err(crate::PullError::UpstreamIsItself { .. })
+        ));
+
         Ok(())
     }
 
