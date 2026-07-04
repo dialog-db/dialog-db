@@ -33,7 +33,7 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
 use std::ops::RangeInclusive;
 
-use crate::history::Version;
+use crate::history::{Cause as HistoryCause, Claim, Record, Version};
 use crate::{
     ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum,
     DialogArtifactsError, ENTITY_LENGTH, ENTITY_RAW_HEAD, EntityKey, EntityKeyPart, FromKey,
@@ -73,6 +73,49 @@ where
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.0.get(key.as_bytes()).await
+    }
+}
+
+/// Layers a [`Delta`]'s buffered nodes over a backing store for reads, so
+/// that a tree persisted into the delta but not yet flushed remains
+/// traversable. This lets a caller keep editing a tree across multiple
+/// persist points (e.g. [`ArtifactTreeExt::apply_versioned`] followed by
+/// [`ArtifactTreeExt::record`]) while the whole batch still travels to
+/// storage as a single flush. Writes pass through to the backing store.
+struct DeltaReadThrough<'a, S> {
+    delta: &'a Delta<NodeHash, Buffer>,
+    store: S,
+}
+
+impl<S: Clone> Clone for DeltaReadThrough<'_, S> {
+    fn clone(&self) -> Self {
+        Self {
+            delta: self.delta,
+            store: self.store.clone(),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> StorageBackend for DeltaReadThrough<'_, S>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+{
+    type Key = NodeHash;
+    type Value = Vec<u8>;
+    type Error = DialogStorageError;
+
+    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        self.store.set(*key.as_bytes(), value).await
+    }
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        if let Some(buffer) = self.delta.get(key) {
+            return Ok(Some(buffer.as_ref().to_vec()));
+        }
+        self.store.get(key.as_bytes()).await
     }
 }
 
@@ -162,16 +205,22 @@ pub trait ArtifactTreeExt {
 
     /// Like [`ArtifactTreeExt::apply`], but tags every [`Datum`] written by
     /// the batch with the [`Version`](crate::history::Version) of the
-    /// revision that produced it. This is the write path used by the
-    /// version-controlled [`Repository`](crate::history::Repository);
-    /// [`ArtifactTreeExt::apply`] leaves the version unset.
+    /// revision that produced it, and records each instruction's history
+    /// claim into the tree's history region. This is the write path used
+    /// by version-controlled branch commits; [`ArtifactTreeExt::apply`]
+    /// leaves the version unset.
+    ///
+    /// Returns whether the batch changed the indexes at all. A batch made
+    /// entirely of cardinality-one no-ops (re-asserting values already in
+    /// place) leaves the tree untouched and records no history — there is
+    /// nothing a revision could attribute, and callers should not mint one.
     async fn apply_versioned<S, I>(
         &mut self,
         store: &mut S,
         delta: &mut Delta<NodeHash, Buffer>,
         version: Option<Version>,
         instructions: I,
-    ) -> Result<(), DialogArtifactsError>
+    ) -> Result<bool, DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
@@ -187,6 +236,20 @@ pub trait ArtifactTreeExt {
         of: &crate::Entity,
         the: &crate::Attribute,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync;
+
+    /// Write pre-built entries (e.g. revision lineage records — see
+    /// [`Record::into_entry`](crate::history::Record::into_entry)) into the
+    /// tree as one edit batch, accumulating new nodes in `delta`
+    async fn record<S>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        entries: Vec<(Key, State<Datum>)>,
+    ) -> Result<(), DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
@@ -231,7 +294,9 @@ impl ArtifactTreeExt for ArtifactTree {
             + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
-        self.apply_versioned(store, delta, None, instructions).await
+        self.apply_versioned(store, delta, None, instructions)
+            .await
+            .map(|_| ())
     }
 
     async fn apply_versioned<S, I>(
@@ -240,7 +305,7 @@ impl ArtifactTreeExt for ArtifactTree {
         delta: &mut Delta<NodeHash, Buffer>,
         version: Option<Version>,
         instructions: I,
-    ) -> Result<(), DialogArtifactsError>
+    ) -> Result<bool, DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
@@ -262,13 +327,32 @@ impl ArtifactTreeExt for ArtifactTree {
         // costs a single persist instead of one full tree rebuild per key.
         let mut transient = self.edit();
 
+        // History records are buffered and only written if the batch changed
+        // the indexes: a batch of pure no-ops must leave the tree untouched,
+        // history region included.
+        let mut history_entries: Vec<(Key, State<Datum>)> = Vec::new();
+        let mut changed = false;
+
         tokio::pin!(instructions);
         while let Some(instruction) = instructions.next().await {
             match instruction {
                 Instruction::Assert(artifact) => {
+                    changed = true;
                     let entity_key = EntityKey::from(&artifact);
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
+
+                    // A version-tagged assertion records its history: an
+                    // assertion is purely additive, so it supersedes nothing.
+                    if let Some(version) = &version {
+                        let record = Record::Assert(Claim {
+                            the: artifact.the.clone(),
+                            of: artifact.of.clone(),
+                            is: artifact.is.clone(),
+                            cause: HistoryCause::genesis(),
+                        });
+                        history_entries.push(record.into_entry(version));
+                    }
 
                     let mut datum = Datum::from(artifact);
                     datum.version = version;
@@ -294,6 +378,7 @@ impl ArtifactTreeExt for ArtifactTree {
                     // immutably, so collect into owned vectors in a scope that
                     // ends before the subsequent mutating reassignments.
                     let mut superseded_keys: Vec<Key> = Vec::new();
+                    let mut superseded_versions: Vec<Version> = Vec::new();
                     let mut found_same_value = false;
                     {
                         let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
@@ -312,15 +397,28 @@ impl ArtifactTreeExt for ArtifactTree {
                         while let Some(candidate) = search_stream.next().await {
                             let candidate = candidate?;
                             if let State::Added(current_element) = candidate.value {
+                                let prior_version = current_element.version;
                                 let current = Artifact::try_from(current_element)?;
                                 if current.is == artifact.is {
                                     found_same_value = true;
                                 } else {
                                     superseded_keys.push(Key::from(candidate.key));
+                                    superseded_versions.extend(prior_version);
                                 }
                             }
                         }
                     }
+
+                    // Cardinality-one no-op: the identical claim already
+                    // stands, at its original version, and there is nothing
+                    // to supersede. Nothing changes in the indexes and no
+                    // history is recorded — a fresh record would fork the
+                    // claim's lineage away from the version the standing
+                    // datum carries.
+                    if found_same_value && superseded_keys.is_empty() {
+                        continue;
+                    }
+                    changed = true;
 
                     for key in superseded_keys {
                         let entity_key = EntityKey(key);
@@ -336,6 +434,23 @@ impl ArtifactTreeExt for ArtifactTree {
                         transient = transient
                             .delete(&attribute_key.into_key().into(), &storage)
                             .await?;
+                    }
+
+                    // A version-tagged replacement records its history: its
+                    // cause lists the versions of the claims it superseded —
+                    // exactly the data removed from the indexes above. The
+                    // record is written even when the insert below is skipped
+                    // because a same-valued prior survives; the supersession
+                    // of the different-valued claims still happened and must
+                    // be attributable.
+                    if let Some(version) = &version {
+                        let record = Record::Assert(Claim {
+                            the: artifact.the.clone(),
+                            of: artifact.of.clone(),
+                            is: artifact.is.clone(),
+                            cause: HistoryCause::new(superseded_versions),
+                        });
+                        history_entries.push(record.into_entry(version));
                     }
 
                     if found_same_value {
@@ -359,9 +474,35 @@ impl ArtifactTreeExt for ArtifactTree {
                         .await?;
                 }
                 Instruction::Retract(artifact) => {
+                    changed = true;
                     let entity_key = EntityKey::from(&artifact);
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
+
+                    // A version-tagged retraction records its history: its
+                    // cause is the version of the assertion it withdraws.
+                    // An assertion made earlier in this same batch carries
+                    // this batch's own version; a record must not claim
+                    // itself as its cause, so that degenerates to a genesis
+                    // retraction.
+                    if let Some(version) = &version {
+                        let withdrawn = match transient
+                            .get(&entity_key.clone().into_key().into(), &storage)
+                            .await?
+                        {
+                            Some(State::Added(datum)) => {
+                                datum.version.filter(|withdrawn| withdrawn != version)
+                            }
+                            _ => None,
+                        };
+                        let record = Record::Retract(Claim {
+                            the: artifact.the.clone(),
+                            of: artifact.of.clone(),
+                            is: artifact.is.clone(),
+                            cause: withdrawn.into_iter().collect(),
+                        });
+                        history_entries.push(record.into_entry(version));
+                    }
 
                     // Was this exact fact committed *before* this batch? Read the
                     // value key (the fact identity) from the base snapshot, not
@@ -407,10 +548,14 @@ impl ArtifactTreeExt for ArtifactTree {
             }
         }
 
+        for (key, entry) in history_entries {
+            transient = transient.insert(key.into(), entry, &storage).await?;
+        }
+
         // Seal the whole batch with a single bottom-up persist into the
         // caller's delta.
         *self = transient.persist(delta)?;
-        Ok(())
+        Ok(changed)
     }
 
     async fn select_data<S>(
@@ -449,6 +594,33 @@ impl ArtifactTreeExt for ArtifactTree {
         }
 
         Ok(data)
+    }
+
+    async fn record<S>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        entries: Vec<(Key, State<Datum>)>,
+    ) -> Result<(), DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let mut transient = self.edit();
+        {
+            // Read through the delta: this tree's latest nodes may only
+            // exist there (persisted by an earlier batch, not yet flushed).
+            let storage = ContentAddressedStorage::new(DeltaReadThrough {
+                delta: &*delta,
+                store: store.clone(),
+            });
+            for (key, entry) in entries {
+                transient = transient.insert(key.into(), entry, &storage).await?;
+            }
+        }
+        *self = transient.persist(delta)?;
+        Ok(())
     }
 
     fn scan<'s, S>(

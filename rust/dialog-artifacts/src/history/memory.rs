@@ -9,8 +9,8 @@ use super::{Claim, History, HistoryKey, REVISION_ATTRIBUTE, Revision, Version};
 /// `/edition/origin/entity/attribute/value_hash` keys to [`Claim`]s.
 ///
 /// This is a reference implementation used to exercise the version control
-/// machinery; [`HistoryStore`](super::HistoryStore) is the durable
-/// implementation backed by [`dialog_search_tree`].
+/// machinery in unit tests; [`TreeHistory`](super::TreeHistory) is the
+/// durable implementation, reading the history region of the artifact tree.
 #[derive(Clone, Debug, Default)]
 pub struct MemoryHistory {
     claims: BTreeMap<HistoryKey, Claim>,

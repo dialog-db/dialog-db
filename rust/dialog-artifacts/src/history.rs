@@ -40,23 +40,27 @@ pub use revision::*;
 mod claim;
 pub use claim::*;
 
+#[cfg(test)]
 mod key;
+#[cfg(test)]
 pub use key::*;
 
 mod causality;
 pub use causality::*;
 
+// An in-memory `History` used by the unit tests in this module. The durable
+// implementation is [`TreeHistory`], which reads the history region of the
+// artifact tree itself (see [`crate::history_key`] for the key layout).
+#[cfg(test)]
 mod memory;
+#[cfg(test)]
 pub use memory::*;
 
 mod record;
 pub use record::*;
 
-mod store;
-pub use store::*;
-
-mod repository;
-pub use repository::*;
+mod query;
+pub use query::*;
 
 /// The attribute under which a repository's revision lineage claims are
 /// recorded. The claim's entity is the repository DID and its value is the

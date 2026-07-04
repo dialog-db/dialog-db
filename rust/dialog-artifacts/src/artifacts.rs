@@ -61,7 +61,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "csv")]
 use crate::{EntityKey, KeyBytes, KeyViewConstruct};
 
-use crate::history::Version;
 use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge};
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
@@ -354,14 +353,13 @@ where
         index.select_data(self.storage.clone(), of, the).await
     }
 
-    /// Commit the given instructions, tagging every asserted [`Datum`] with
-    /// the [`Version`](crate::history::Version) of the revision that produced
-    /// it. This is the write path used by the version-controlled
-    /// [`Repository`](crate::history::Repository); committing through
-    /// [`ArtifactStoreMut::commit`] leaves the version unset.
-    pub(crate) async fn commit_with_version<Instructions>(
+    /// Commit the given instructions to the store's indexes.
+    ///
+    /// Data committed this way carries no [`Version`](crate::history::Version)
+    /// tag and records no history — version-controlled writes go through the
+    /// branch commit path in `dialog-repository` instead.
+    async fn commit_instructions<Instructions>(
         &mut self,
-        version: Option<Version>,
         instructions: Instructions,
     ) -> Result<Blake3Hash, DialogArtifactsError>
     where
@@ -374,13 +372,13 @@ where
 
             // The per-instruction EAV/AEV/VAE key writes (and
             // cardinality-one supersession) are the shared
-            // `ArtifactTreeExt::apply_versioned`. This method adds only
+            // `ArtifactTreeExt::apply`. This method adds only
             // the surrounding transaction bookkeeping — base-revision
             // capture, revision persistence, pointer advance, and the
             // rollback below.
             let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
             index
-                .apply_versioned(&mut self.storage, &mut delta, version, instructions)
+                .apply(&mut self.storage, &mut delta, instructions)
                 .await?;
 
             // Persist the tree's pending nodes before minting a revision;
@@ -478,7 +476,7 @@ where
     where
         Instructions: Stream<Item = Instruction> + ConditionalSend,
     {
-        self.commit_with_version(None, instructions).await
+        self.commit_instructions(instructions).await
     }
 }
 

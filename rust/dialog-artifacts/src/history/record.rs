@@ -1,8 +1,12 @@
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
-use crate::{Datum, Instruction};
+use crate::{
+    Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value, ValueDataType, history_key,
+};
 
-use super::{Cause, Claim};
+use super::{Cause, Claim, Version};
 
 /// A [`Claim`] paired with its polarity, as stored in the history index.
 ///
@@ -32,55 +36,41 @@ impl Record {
         matches!(self, Record::Assert(_))
     }
 
-    /// Derive the history record for an instruction, given the [`Datum`]s
-    /// currently asserted at the instruction's `(entity, attribute)`: the
-    /// record's cause lists the versions of the claims the instruction
-    /// supersedes. Data that carries no version (committed outside of
-    /// version control) contributes nothing to the cause.
-    ///
-    /// - An assertion is purely additive: it supersedes nothing.
-    /// - A replacement supersedes every currently asserted claim with a
-    ///   different value — exactly the data the cardinality-one supersession
-    ///   removes from the indexes.
-    /// - A retraction withdraws the assertions of its exact value.
-    pub fn derive(instruction: &Instruction, current: &[Datum]) -> Record {
-        match instruction {
-            Instruction::Assert(artifact) => Record::Assert(Claim {
-                the: artifact.the.clone(),
-                of: artifact.of.clone(),
-                is: artifact.is.clone(),
-                cause: Cause::genesis(),
-            }),
-            Instruction::Replace(artifact) => {
-                let value = artifact.is.to_bytes();
-                let versions = current
-                    .iter()
-                    .filter(|datum| datum.value != value)
-                    .filter_map(|datum| datum.version)
-                    .collect();
+    /// The tree entry storing this record in the history region of the
+    /// artifact tree: the [`history_key`] for the claim at `version`, and
+    /// the claim in [`Datum`] form with the supersedes/retraction fields
+    /// carrying what [`Claim::cause`] and the record polarity express.
+    pub fn into_entry(self, version: &Version) -> (Key, State<Datum>) {
+        let retraction = !self.is_assertion();
+        let claim = match self {
+            Record::Assert(claim) | Record::Retract(claim) => claim,
+        };
+        let key = history_key(version, &claim.of, &claim.the, &claim.is.to_reference());
+        let datum = Datum {
+            entity: claim.of.to_string(),
+            attribute: claim.the.to_string(),
+            value_type: claim.is.data_type().into(),
+            value: claim.is.to_bytes(),
+            cause: None,
+            version: Some(*version),
+            supersedes: claim.cause.versions().to_vec(),
+            retraction,
+        };
+        (key, State::Added(datum))
+    }
 
-                Record::Assert(Claim {
-                    the: artifact.the.clone(),
-                    of: artifact.of.clone(),
-                    is: artifact.is.clone(),
-                    cause: Cause::new(versions),
-                })
-            }
-            Instruction::Retract(artifact) => {
-                let value = artifact.is.to_bytes();
-                let versions = current
-                    .iter()
-                    .filter(|datum| datum.value == value)
-                    .filter_map(|datum| datum.version)
-                    .collect();
-
-                Record::Retract(Claim {
-                    the: artifact.the.clone(),
-                    of: artifact.of.clone(),
-                    is: artifact.is.clone(),
-                    cause: Cause::new(versions),
-                })
-            }
-        }
+    /// Reconstruct a record from its stored [`Datum`] form
+    pub fn try_from_datum(datum: Datum) -> Result<Record, DialogArtifactsError> {
+        let claim = Claim {
+            the: Attribute::from_str(&datum.attribute)?,
+            of: Entity::from_str(&datum.entity)?,
+            is: Value::try_from((ValueDataType::from(datum.value_type), datum.value))?,
+            cause: Cause::new(datum.supersedes),
+        };
+        Ok(if datum.retraction {
+            Record::Retract(claim)
+        } else {
+            Record::Assert(claim)
+        })
     }
 }
