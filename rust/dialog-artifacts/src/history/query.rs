@@ -7,8 +7,8 @@ use futures_util::TryStreamExt;
 
 use crate::tree::{ArtifactTree, TreeStorageBridge};
 use crate::{
-    Attribute, DialogArtifactsError, Entity, State, history_attribute_hash, history_claim_range,
-    history_key_attribute_hash, history_key_version, history_region_range, history_version_range,
+    Attribute, DialogArtifactsError, Entity, State, history_attribute_head, history_claim_range,
+    history_key_attribute_head, history_key_version, history_region_range, history_version_range,
 };
 
 use super::{Claim, History, REVISION_ATTRIBUTE, Record, Version};
@@ -89,9 +89,16 @@ where
         );
         tokio::pin!(stream);
 
+        // The range spans the keys' raw entity/attribute heads, which may
+        // be shared beyond their truncation point; re-check the stored
+        // record before decoding it (see `history_claim_range`).
+        let the = the.to_string();
         let mut claims = Vec::new();
         while let Some(entry) = stream.try_next().await? {
             if let State::Added(datum) = entry.value {
+                if datum.entity != of.as_str() || datum.attribute != the {
+                    continue;
+                }
                 claims.push(Record::try_from_datum(datum)?.claim().clone());
             }
         }
@@ -99,7 +106,10 @@ where
     }
 
     async fn revision_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
-        let attribute = history_attribute_hash(&Attribute::from_str(REVISION_ATTRIBUTE)?);
+        // The revision attribute fits the raw attribute head, so the in-key
+        // comparison is exact — non-matching records skip without decoding.
+        let attribute = Attribute::from_str(REVISION_ATTRIBUTE)?;
+        let head = history_attribute_head(&attribute);
         let (min, max) = history_version_range(version);
         let stream = self.tree.stream_range(
             crate::KeyBytes::from(min)..=crate::KeyBytes::from(max),
@@ -109,7 +119,7 @@ where
 
         let mut claims = Vec::new();
         while let Some(entry) = stream.try_next().await? {
-            if history_key_attribute_hash(&entry.key) != attribute.as_slice() {
+            if history_key_attribute_head(&entry.key) != head {
                 continue;
             }
             if let State::Added(datum) = entry.value {

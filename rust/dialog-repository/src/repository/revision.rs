@@ -197,19 +197,23 @@ impl Revision {
         &self,
         parents: impl IntoIterator<Item = Version>,
     ) -> Result<Vec<(Version, Record)>, DialogArtifactsError> {
-        let version = self.version();
-        let this = self.entity();
+        // Derive the schema entities once: `version()` and `entity()` each
+        // recompute the lineage (two content-derived entities) on their own.
+        let lineage = self.lineage();
+        let version = Version::new(Self::origin_of(&lineage, &self.issuer), self.edition);
+        let this = Self::entity_of(&version);
         let parents: Vec<Version> = parents.into_iter().collect();
 
-        let mut records = vec![(
+        let mut records = Vec::with_capacity(5 + parents.len());
+        records.push((
             version,
             Record::Assert(Claim {
                 the: Attribute::from_str(REVISION_ATTRIBUTE)?,
-                of: self.lineage(),
+                of: lineage.clone(),
                 is: Value::Entity(this.clone()),
                 cause: parents.iter().copied().collect(),
             }),
-        )];
+        ));
 
         let mut attribute = |the: &str, is: Value| -> Result<(), DialogArtifactsError> {
             records.push((
@@ -228,7 +232,7 @@ impl Revision {
             "dialog.revision/edition",
             Value::UnsignedInt(u128::from(self.edition.value())),
         )?;
-        attribute("dialog.revision/branch", Value::Entity(self.lineage()))?;
+        attribute("dialog.revision/branch", Value::Entity(lineage))?;
         attribute(
             "dialog.revision/issuer",
             Value::Entity(Entity::from_str(self.issuer.as_str())?),

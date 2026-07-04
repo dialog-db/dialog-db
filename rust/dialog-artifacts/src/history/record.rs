@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value, ValueDataType, history_key,
+    make_reference,
 };
 
 use super::{Cause, Claim, Version};
@@ -45,12 +46,20 @@ impl Record {
         let claim = match self {
             Record::Assert(claim) | Record::Retract(claim) => claim,
         };
-        let key = history_key(version, &claim.of, &claim.the, &claim.is.to_reference());
+        let value_type = claim.is.data_type();
+        let value = claim.is.to_bytes();
+        let key = history_key(
+            version,
+            &claim.of,
+            &claim.the,
+            value_type,
+            &make_reference(&value),
+        );
         let datum = Datum {
             entity: claim.of.to_string(),
             attribute: claim.the.to_string(),
-            value_type: claim.is.data_type().into(),
-            value: claim.is.to_bytes(),
+            value_type: value_type.into(),
+            value,
             cause: None,
             version: Some(*version),
             supersedes: claim.cause.versions().to_vec(),

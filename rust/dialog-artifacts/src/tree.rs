@@ -374,9 +374,14 @@ impl ArtifactTreeExt for ArtifactTree {
                     // in-flight transient tree, so writes from earlier
                     // instructions in this batch are visible. Same-valued priors
                     // already represent the desired state; only different-valued
-                    // ones need superseding. The scan borrows `transient`
-                    // immutably, so collect into owned vectors in a scope that
-                    // ends before the subsequent mutating reassignments.
+                    // ones need superseding. Sameness is compared on the raw
+                    // stored form — (value_type, bytes) — sparing a full
+                    // `Artifact` parse per candidate. The scan borrows
+                    // `transient` immutably, so collect into owned vectors in a
+                    // scope that ends before the subsequent mutating
+                    // reassignments.
+                    let replace_type = u8::from(artifact.is.data_type());
+                    let replace_value = artifact.is.to_bytes();
                     let mut superseded_keys: Vec<Key> = Vec::new();
                     let mut superseded_versions: Vec<Version> = Vec::new();
                     let mut found_same_value = false;
@@ -397,13 +402,13 @@ impl ArtifactTreeExt for ArtifactTree {
                         while let Some(candidate) = search_stream.next().await {
                             let candidate = candidate?;
                             if let State::Added(current_element) = candidate.value {
-                                let prior_version = current_element.version;
-                                let current = Artifact::try_from(current_element)?;
-                                if current.is == artifact.is {
+                                if current_element.value_type == replace_type
+                                    && current_element.value == replace_value
+                                {
                                     found_same_value = true;
                                 } else {
                                     superseded_keys.push(Key::from(candidate.key));
-                                    superseded_versions.extend(prior_version);
+                                    superseded_versions.extend(current_element.version);
                                 }
                             }
                         }
