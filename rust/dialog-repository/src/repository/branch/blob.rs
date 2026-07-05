@@ -1,5 +1,5 @@
 use crate::{
-    Branch, CommitError, Index, LocalIndex, RemoteSite, RepositoryArchiveExt as _,
+    Branch, CommitError, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
     RepositoryMemoryExt as _, Upstream,
 };
 use dialog_artifacts::{BlobIndexExt as _, BlobRecord};
@@ -44,7 +44,8 @@ impl Branch {
     /// Look up a blob's size from the index, or `None` if the branch's current
     /// tree does not reference it.
     ///
-    /// Answered from the blob index alone — no blob bytes are fetched.
+    /// Answered from the blob index alone — no blob bytes are fetched. Index
+    /// nodes missing locally hydrate from the remote upstream, if any.
     pub fn blob_size(&self, hash: &Blake3Hash) -> BlobSize<'_> {
         BlobSize {
             branch: self,
@@ -55,7 +56,8 @@ impl Branch {
     /// List every blob referenced by the branch's current tree, paired with its
     /// [`BlobRecord`](dialog_artifacts::BlobRecord).
     ///
-    /// Answered from the blob index alone — no blob bytes are fetched.
+    /// Answered from the blob index alone — no blob bytes are fetched. Index
+    /// nodes missing locally hydrate from the remote upstream, if any.
     pub fn list_blobs(&self) -> ListBlobs<'_> {
         ListBlobs { branch: self }
     }
@@ -74,16 +76,41 @@ impl Branch {
     }
 }
 
+/// Build the tree store for the branch's blob-index reads.
+///
+/// A branch tracking a remote upstream may need remote-only tree nodes to read
+/// its blob index — after a fast-forward pull only the revision pointer is
+/// local, and the index nodes hydrate lazily. Fall back to the remote archive
+/// on a local miss (caching what lands), exactly as `commit` and `write_blob`
+/// do. With no remote upstream this degrades to a plain local index.
+async fn index_store<'e, Env>(branch: &Branch, env: &'e Env) -> NetworkedIndex<'e, Env>
+where
+    Env: Provider<Resolve> + ConditionalSync + 'static,
+{
+    let remote = match branch.upstream() {
+        Some(Upstream::Remote { remote: name, .. }) => {
+            branch.subject().remote(name).load().perform(env).await.ok()
+        }
+        _ => None,
+    };
+    NetworkedIndex::new(env, branch.archive().index(), remote)
+}
+
 impl BlobSize<'_> {
     /// Execute the lookup, returning the blob's size or `None` if unreferenced.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<u64>, CommitError>
     where
-        Env: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + ConditionalSync
+            + 'static,
     {
         let Some(revision) = self.branch.revision() else {
             return Ok(None);
         };
-        let store = LocalIndex::new(env, self.branch.archive().index());
+        let store = index_store(self.branch, env).await;
         let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
         let index_hash: dialog_storage::Blake3Hash = *self.hash.as_bytes();
         Ok(tree.get_blob(&store, &index_hash).await?.map(|r| r.size))
@@ -98,12 +125,17 @@ impl ListBlobs<'_> {
         env: &Env,
     ) -> Result<Vec<(dialog_storage::Blake3Hash, BlobRecord)>, CommitError>
     where
-        Env: Provider<Get> + Provider<Put> + ConditionalSync + 'static,
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + ConditionalSync
+            + 'static,
     {
         let Some(revision) = self.branch.revision() else {
             return Ok(Vec::new());
         };
-        let store = LocalIndex::new(env, self.branch.archive().index());
+        let store = index_store(self.branch, env).await;
         let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
         let listed = tree.list_blobs(store).try_collect().await?;
         Ok(listed)
@@ -125,6 +157,7 @@ impl ReadBlob<'_> {
             + Provider<BlobRead>
             + Provider<BlobImport>
             + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
             + 'static,
