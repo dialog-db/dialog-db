@@ -34,6 +34,7 @@
 //! ```
 
 mod archive;
+mod blob;
 mod certificate;
 mod credential;
 mod memory;
@@ -58,6 +59,10 @@ type CertificateKey = String;
 struct Session {
     /// Content-addressed blob storage keyed by (catalog, digest).
     archive: HashMap<ArchiveKey, Vec<u8>>,
+    /// Whole hash-addressable binary objects keyed by base58 digest,
+    /// parallel to the block archive (mirrors the filesystem layout
+    /// `{space_root}/blob/{base58(digest)}`).
+    blobs: HashMap<String, Vec<u8>>,
     /// Transactional memory storage keyed by (space, cell).
     memory: HashMap<MemoryKey, Vec<u8>>,
     /// Credential storage keyed by address.
