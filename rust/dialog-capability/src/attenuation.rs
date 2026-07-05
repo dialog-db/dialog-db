@@ -1,5 +1,6 @@
 use crate::settings::Caveat;
 use crate::{Constraint, Effect, Policy};
+use std::any::type_name;
 
 /// Trait for constraints that narrow the ability path.
 ///
@@ -41,8 +42,17 @@ pub trait Attenuation: Sized + Caveat {
     /// By default, derives the segment from the struct name (lowercased).
     /// Override this method to use a custom segment.
     fn attenuation() -> &'static str {
-        let full = std::any::type_name::<Self>();
-        full.rsplit("::").next().unwrap_or(full)
+        let full = type_name::<Self>();
+        // Strip generic parameters first, then take the last path segment.
+        // e.g., "crate::credential::Retrieve<alloc::string::String>" → "Retrieve"
+        let without_generics = match full.find('<') {
+            Some(pos) => &full[..pos],
+            None => full,
+        };
+        without_generics
+            .rsplit("::")
+            .next()
+            .unwrap_or(without_generics)
     }
 }
 

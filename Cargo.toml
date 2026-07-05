@@ -25,12 +25,17 @@ members = [
     "rust/dialog-diagnose",
     "rust/dialog-dbsp",
     "rust/dialog-encoding",
-    "rust/dialog-prolly-tree",
+    "rust/dialog-csv",
     "rust/dialog-query",
     "rust/dialog-search-tree",
     "rust/dialog-storage",
-    "rust/dialog-s3-credentials",
+    "rust/dialog-ucan-core",
     "rust/dialog-ucan",
+    "rust/dialog-remote-s3",
+    "rust/dialog-remote-ucan-s3",
+    "rust/dialog-network",
+    "rust/dialog-operator",
+    "rust/dialog-repository",
     "rust/dialog-varsig",
     "rust/dialog-blobs",
 ]
@@ -49,6 +54,7 @@ arrayref = "0.3"
 async-signature = "0.5"
 async-stream = "0.3"
 async-trait = "0.1"
+auto_enums = { version = "0.8", features = ["futures03"] }
 base58 = "0.2"
 base64 = "0.22"
 blake3 = "1"
@@ -140,7 +146,9 @@ tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
+dialog-ucan-core = { path = "./rust/dialog-ucan-core" }
 dialog-ucan = { path = "./rust/dialog-ucan" }
+dialog-network = { path = "./rust/dialog-network" }
 dialog-varsig = { path = "./rust/dialog-varsig" }
 ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "ucan" }
 varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "varsig" }
@@ -170,8 +178,11 @@ path = "./rust/dialog-credentials"
 [workspace.dependencies.dialog-encoding]
 path = "./rust/dialog-encoding"
 
-[workspace.dependencies.dialog-prolly-tree]
-path = "./rust/dialog-prolly-tree"
+[workspace.dependencies.dialog-csv]
+path = "./rust/dialog-csv"
+
+[workspace.dependencies.dialog-search-tree]
+path = "./rust/dialog-search-tree"
 
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
@@ -185,12 +196,21 @@ path = "./rust/dialog-macros"
 [workspace.dependencies.dialog-query]
 path = "./rust/dialog-query"
 
-[workspace.dependencies.dialog-s3-credentials]
-path = "./rust/dialog-s3-credentials"
-
 [workspace.dependencies.dialog-blobs]
 path = "./rust/dialog-blobs"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27
 # csv-async = { git = "https://github.com/cdata/csv-async.git" }
+
+[workspace.dependencies.dialog-remote-s3]
+path = "./rust/dialog-remote-s3"
+
+[workspace.dependencies.dialog-remote-ucan-s3]
+path = "./rust/dialog-remote-ucan-s3"
+
+[workspace.dependencies.dialog-operator]
+path = "./rust/dialog-operator"
+
+[workspace.dependencies.dialog-repository]
+path = "./rust/dialog-repository"

@@ -2,13 +2,11 @@ mod r#match;
 
 pub use r#match::*;
 
-use async_stream::try_stream;
 use dialog_common::ConditionalSend;
 
 use crate::error::EvaluationError;
 
-pub use futures_util::future::Either;
-pub use futures_util::stream::{Stream, TryStream, once};
+pub use futures_util::stream::{Stream, TryStream};
 pub use std::future::Future;
 
 /// A fallible, asynchronous stream of [`Match`] values.
@@ -22,10 +20,8 @@ pub use std::future::Future;
 /// Combinators like [`try_flat_map`](Selection::try_flat_map),
 /// [`expand`](Selection::expand), and [`try_expand`](Selection::try_expand)
 /// make it easy to transform selection streams within premise implementations.
-pub trait Selection:
-    Stream<Item = Result<Match, EvaluationError>> + 'static + ConditionalSend
-{
-    /// Collect all matches into a Vec, propagating any errors
+pub trait Selection: Stream<Item = Result<Match, EvaluationError>> + ConditionalSend {
+    /// Collect all matches into a Vec, propagating any errors.
     #[allow(async_fn_in_trait)]
     fn try_vec(self) -> impl Future<Output = Result<Vec<Match>, EvaluationError>> + ConditionalSend
     where
@@ -33,83 +29,9 @@ pub trait Selection:
     {
         async move { futures_util::TryStreamExt::try_collect(self).await }
     }
-
-    /// Flat-map each match into a stream of matches, propagating errors.
-    ///
-    /// Like `StreamExt::flat_map` but for fallible streams: errors from
-    /// the outer stream are forwarded directly, `Ok` values are passed
-    /// to `f` which returns a new selection stream that gets flattened in.
-    fn try_flat_map<S, F>(self, mut f: F) -> impl Selection
-    where
-        Self: Sized,
-        S: Selection,
-        F: FnMut(Match) -> S + ConditionalSend + 'static,
-    {
-        futures_util::StreamExt::flat_map(self, move |result| match result {
-            Ok(matched) => Either::Left(f(matched)),
-            Err(e) => Either::Right(once(async move { Err(e) })),
-        })
-    }
-
-    /// Expand each match into zero or more matches using an infallible expander.
-    fn expand<M: SelectionExpand>(self, expander: M) -> impl Selection
-    where
-        Self: Sized,
-    {
-        try_stream! {
-            for await each in self {
-                for expanded in expander.expand(each?) {
-                    yield expanded;
-                }
-            }
-        }
-    }
-
-    /// Expand each match into zero or more matches using a fallible expander.
-    fn try_expand<M: SelectionTryExpand>(self, expander: M) -> impl Selection
-    where
-        Self: Sized,
-    {
-        try_stream! {
-            for await each in self {
-                for expanded in expander.try_expand(each?)? {
-                    yield expanded;
-                }
-            }
-        }
-    }
 }
 
-impl<S> Selection for S where
-    S: Stream<Item = Result<Match, EvaluationError>> + 'static + ConditionalSend
-{
-}
-
-/// Expands a match into multiple matches, potentially returning an error.
-pub trait SelectionTryExpand: ConditionalSend + 'static {
-    /// Attempt to expand a single match into zero or more matches.
-    fn try_expand(&self, item: Match) -> Result<Vec<Match>, EvaluationError>;
-}
-
-/// Expands a match into multiple matches infallibly.
-pub trait SelectionExpand: ConditionalSend + 'static {
-    /// Expand a single match into zero or more matches.
-    fn expand(&self, item: Match) -> Vec<Match>;
-}
-
-impl<F: Fn(Match) -> Result<Vec<Match>, EvaluationError> + ConditionalSend + 'static>
-    SelectionTryExpand for F
-{
-    fn try_expand(&self, matched: Match) -> Result<Vec<Match>, EvaluationError> {
-        self(matched)
-    }
-}
-
-impl<F: Fn(Match) -> Vec<Match> + ConditionalSend + 'static> SelectionExpand for F {
-    fn expand(&self, matched: Match) -> Vec<Match> {
-        self(matched)
-    }
-}
+impl<S> Selection for S where S: Stream<Item = Result<Match, EvaluationError>> + ConditionalSend {}
 
 #[cfg(test)]
 mod tests {
@@ -117,10 +39,10 @@ mod tests {
     use crate::Term;
     use crate::artifact::{Entity, Value};
     use crate::error::EvaluationError;
+    use futures_util::TryStreamExt;
 
     #[dialog_common::test]
     async fn it_seeds_one_empty_match() {
-        use futures_util::TryStreamExt;
         let results: Vec<Match> = Match::new().seed().try_collect().await.unwrap();
         assert_eq!(results.len(), 1);
     }
@@ -170,6 +92,7 @@ mod tests {
 
         let result = candidate
             .lookup(&name_param)
+            .and_then(|b| b.content())
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Alice");
@@ -184,6 +107,7 @@ mod tests {
 
         let result = candidate
             .lookup(&age_param)
+            .and_then(|b| b.content())
             .and_then(|v| u32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 25);
@@ -198,6 +122,7 @@ mod tests {
 
         let result = candidate
             .lookup(&score_param)
+            .and_then(|b| b.content())
             .and_then(|v| i32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), -10);
@@ -212,6 +137,7 @@ mod tests {
 
         let result = candidate
             .lookup(&active_param)
+            .and_then(|b| b.content())
             .and_then(|v| bool::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert!(result.unwrap());
@@ -229,6 +155,7 @@ mod tests {
 
         let result = candidate
             .lookup(&entity_param)
+            .and_then(|b| b.content())
             .and_then(|v| Entity::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), entity_value);
@@ -241,6 +168,7 @@ mod tests {
 
         let result = candidate
             .lookup(&constant_param)
+            .and_then(|b| b.content())
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "constant_value");
@@ -253,6 +181,7 @@ mod tests {
 
         let result = candidate
             .lookup(&name_param)
+            .and_then(|b| b.content())
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -270,6 +199,7 @@ mod tests {
 
         let result = candidate
             .lookup(&blank_param)
+            .and_then(|b| b.content())
             .and_then(|v| String::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -289,6 +219,7 @@ mod tests {
 
         let result = candidate
             .lookup(&name_param)
+            .and_then(|b| b.content())
             .and_then(|v| u32::try_from(v).map_err(EvaluationError::from));
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -307,7 +238,10 @@ mod tests {
         candidate.bind(&name_term, value.clone()).unwrap();
         candidate.bind(&name_term, value.clone()).unwrap();
 
-        assert_eq!(candidate.lookup(&name_term).unwrap(), value);
+        assert_eq!(
+            candidate.lookup(&name_term).unwrap().content().unwrap(),
+            value
+        );
     }
 
     #[dialog_common::test]
@@ -336,10 +270,30 @@ mod tests {
             .bind(&Term::var("active"), Value::Boolean(true))
             .unwrap();
 
-        let name_result = String::try_from(candidate.lookup(&Term::var("name")).unwrap()).unwrap();
-        let age_result = u32::try_from(candidate.lookup(&Term::var("age")).unwrap()).unwrap();
-        let active_result =
-            bool::try_from(candidate.lookup(&Term::var("active")).unwrap()).unwrap();
+        let name_result = String::try_from(
+            candidate
+                .lookup(&Term::var("name"))
+                .unwrap()
+                .content()
+                .unwrap(),
+        )
+        .unwrap();
+        let age_result = u32::try_from(
+            candidate
+                .lookup(&Term::var("age"))
+                .unwrap()
+                .content()
+                .unwrap(),
+        )
+        .unwrap();
+        let active_result = bool::try_from(
+            candidate
+                .lookup(&Term::var("active"))
+                .unwrap()
+                .content()
+                .unwrap(),
+        )
+        .unwrap();
 
         assert_eq!(name_result, "Bob");
         assert_eq!(age_result, 30);

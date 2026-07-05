@@ -6,7 +6,23 @@
 
 use std::ops::{Deref, DerefMut};
 
-use dialog_prolly_tree::KeyType;
+use dialog_common::ConditionalSync;
+use serde::de::DeserializeOwned;
+use std::fmt::Debug;
+
+/// A key used to reference values in a search tree index.
+///
+/// Hosted here since the search tree itself keys on raw byte arrays; this
+/// trait is the artifact-level abstraction over the typed key views.
+pub trait KeyType:
+    Debug + TryFrom<Vec<u8>> + ConditionalSync + Clone + PartialEq + Ord + Serialize + DeserializeOwned
+{
+    /// Get the raw bytes of this [`KeyType`]
+    fn bytes(&self) -> &[u8];
+}
+
+/// A value that may be stored against a key in an artifact index.
+pub trait ValueType: Debug + ConditionalSync + Clone + Serialize + DeserializeOwned {}
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
@@ -42,6 +58,12 @@ use crate::{ArtifactSelector, DialogArtifactsError, ValueDataType, selector::Con
 pub(crate) const TAG_LENGTH: usize = 1;
 /// Length of the entity field in key bytes
 pub(crate) const ENTITY_LENGTH: usize = 64;
+/// Number of leading entity-URI bytes stored *raw* (and therefore
+/// order-preserving) in the entity field; the remainder of the
+/// field is a hash of the URI's tail (see [`Uri::key_bytes`](crate::Uri::key_bytes)).
+/// Prefix scans can range over at most this many bytes of the URI;
+/// longer prefixes re-check against the stored datum.
+pub(crate) const ENTITY_RAW_HEAD: usize = 32;
 /// Length of the attribute field in key bytes
 pub(crate) const ATTRIBUTE_LENGTH: usize = 64;
 /// Length of the value data type field in key bytes

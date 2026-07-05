@@ -6,7 +6,8 @@ use crate::descriptor::Descriptor;
 use crate::negation::Negation;
 use crate::statement::Statement;
 use crate::types::Scalar;
-use crate::{Cardinality, Entity, Premise, Proposition, Term, Transaction};
+use crate::{Cardinality, Entity, Premise, Proposition, Term};
+use dialog_artifacts::Update;
 use std::iter;
 use std::marker::PhantomData;
 use std::ops::Not;
@@ -59,7 +60,7 @@ where
 
     /// Set the value for this attribute expression.
     ///
-    /// Accepts **both** concrete values and query terms — the `Is` type
+    /// Accepts **both** concrete values and query terms; the `Is` type
     /// parameter is preserved unevaluated in the resulting
     /// [`StaticAttributeExpression`]. Downstream trait impls then impose
     /// additional constraints based on how the expression is used:
@@ -70,8 +71,8 @@ where
     ///   so both concrete values and [`Term`] variables work.
     ///
     /// The `Into<Term<A::Type>>` bound here provides *construction-time*
-    /// type safety — e.g. passing an `i32` for a `String` attribute is a
-    /// compile error — without eagerly converting the value, which would
+    /// type safety (e.g. passing an `i32` for a `String` attribute is a
+    /// compile error) without eagerly converting the value, which would
     /// erase the distinction between concrete and term values.
     pub fn is<Is: Into<Term<A::Type>>>(self, value: Is) -> StaticAttributeExpression<A, Of, Is> {
         StaticAttributeExpression {
@@ -83,7 +84,7 @@ where
     }
 }
 
-/// A fully concrete attribute expression — entity and value are both known.
+/// A fully concrete attribute expression: entity and value are both known.
 ///
 /// This is the form that implements [`Statement`] for assert/retract operations.
 pub type StaticAttributeStatement<A> = StaticAttributeExpression<A, Entity, A>;
@@ -94,16 +95,16 @@ pub type StaticAttributeStatement<A> = StaticAttributeExpression<A, Entity, A>;
 /// passed to [`.is()`](StaticAttributeBuilder::is) is stored as-is. This lets
 /// downstream trait impls impose their own constraints:
 ///
-/// - [`Statement`] requires `Is: Into<A>` — only concrete values.
-/// - [`From<...> for Premise`] requires `Is: Into<Term<A::Type>>` — concrete
+/// - [`Statement`] requires `Is: Into<A>`: only concrete values.
+/// - [`From<...> for Premise`] requires `Is: Into<Term<A::Type>>`: concrete
 ///   values or [`Term`] variables.
 ///
 /// # Type Parameters
 ///
-/// - `A` — the attribute type
-/// - `Of` — entity position (`Entity` or `Term<Entity>`)
-/// - `Is` — value position (deferred; e.g. `&str`, `A`, `Term<A::Type>`)
-/// - `Because` — cause position (`Option<Cause>` or `Term<Cause>`)
+/// - `A`: the attribute type
+/// - `Of`: entity position (`Entity` or `Term<Entity>`)
+/// - `Is`: value position (deferred; e.g. `&str`, `A`, `Term<A::Type>`)
+/// - `Because`: cause position (`Option<Cause>` or `Term<Cause>`)
 pub struct StaticAttributeExpression<A: Attribute, Of, Is, Because: ExpressionCause = Option<Cause>>
 {
     /// The entity (or entity term) this attribute belongs to.
@@ -155,24 +156,24 @@ where
     A: Attribute + Descriptor<AttributeDescriptor> + Clone,
     Is: Into<A>,
 {
-    fn assert(self, transaction: &mut Transaction) {
+    fn assert(self, update: &mut impl Update) {
         let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let the = desc.the().clone();
         let attr: A = is.into();
         let value = attr.value().clone().into();
         if desc.cardinality() == Cardinality::One {
-            transaction.associate_unique(the, of, value);
+            update.associate_unique(the.into(), of, value);
         } else {
-            transaction.associate(the, of, value);
+            update.associate(the.into(), of, value);
         }
     }
 
-    fn retract(self, transaction: &mut Transaction) {
+    fn retract(self, update: &mut impl Update) {
         let (of, is, _) = self.into_parts();
         let desc = <A as Descriptor<AttributeDescriptor>>::descriptor();
         let attr: A = is.into();
-        transaction.dissociate(desc.the().clone(), of, attr.value().clone().into());
+        update.dissociate(desc.the().clone().into(), of, attr.value().clone().into());
     }
 }
 
@@ -265,12 +266,21 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
+    use crate::Changes;
     use crate::Match;
     use crate::artifact::Value;
     use crate::premise::Premise;
     use crate::proposition::Proposition;
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
     use crate::statement::Statement;
+    use crate::{Environment, Planner};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use futures_util::TryStreamExt;
 
     mod person {
         use crate::Attribute;
@@ -285,9 +295,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = person::Name::of(alice).is("Alice");
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -295,9 +305,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = person::Name::of(alice).is(person::Name("Alice".into()));
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -305,9 +315,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = person::Name::of(alice).is("Alice");
 
-        let mut transaction = Transaction::new();
-        statement.retract(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.retract(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -446,9 +456,9 @@ mod tests {
         let alice = Entity::new().unwrap();
 
         let expr = person::Name::of(alice.clone()).is("Alice");
-        let mut transaction = Transaction::new();
-        expr.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        expr.assert(&mut changes);
+        assert!(!changes.is_empty());
 
         let expression = person::Name::of(alice).is("Alice");
         let premise: Premise = expression.into();
@@ -467,41 +477,34 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
-        use crate::artifact::Artifacts;
-        use crate::{Session, Term};
-        use dialog_storage::MemoryStorageBackend;
-        use futures_util::TryStreamExt;
-
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(store.clone());
-        session
-            .transact(person::Name::of(alice.clone()).is("Alice"))
+        branch
+            .transaction()
+            .assert(person::Name::of(alice.clone()).is("Alice"))
+            .commit()
+            .perform(&operator)
             .await?;
 
         let premise: Premise = person::Name::of(alice.clone())
             .is(Term::<String>::var("name"))
             .into();
 
-        let prop = match premise {
-            Premise::Assert(prop) => prop,
-            _ => panic!("Expected Assert"),
-        };
+        let plan = Planner::from(vec![premise])
+            .plan(&Environment::new())
+            .expect("premise should plan");
 
-        let results = prop
-            .evaluate(Match::new().seed(), &Session::open(store.clone()))
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = plan
+            .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;
 
         assert_eq!(results.len(), 1);
-
-        let mut session = Session::open(store.clone());
-        session
-            .transact(person::Name::of(alice.clone()).is("Alice"))
-            .await?;
 
         Ok(())
     }

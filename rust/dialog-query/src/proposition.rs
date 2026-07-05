@@ -1,33 +1,29 @@
 use std::fmt;
 
 use crate::attribute::query::AttributeQuery;
-use crate::concept::descriptor::ConceptDescriptor;
 pub use crate::concept::query::ConceptQuery;
 use crate::constraint::Constraint;
 pub use crate::error::AnalyzerError;
 pub use crate::error::QueryResult;
 pub use crate::formula::query::FormulaQuery;
+use crate::optional::OptionalAttributeQuery;
 pub use crate::premise::{Negation, Premise};
-use crate::query::Application;
-use crate::selection::Selection;
-pub use crate::{Environment, Parameters, Schema, Source};
-use futures_util::future::Either;
+pub use crate::{Environment, Parameters, Schema};
 use serde::de;
 use serde::ser;
-use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use std::fmt::Display;
 
 /// A knowledge-base query embedded inside a [`Premise::When`](crate::Premise::When).
 ///
 /// Each variant binds a different kind of application:
-/// - `Attribute` — EAV triple lookup against the fact store, with
+/// - `Attribute`: EAV triple lookup against the fact store, with
 ///   cardinality-aware winner selection.
-/// - `Concept` — entity-level query using a concept predicate and its
+/// - `Concept`: entity-level query using a concept predicate and its
 ///   associated deductive rules.
-/// - `Formula` — pure computation that derives new bindings from existing
+/// - `Formula`: pure computation that derives new bindings from existing
 ///   ones without touching the fact store.
-/// - `Constraint` — pure variable constraint (equality, comparison) that
+/// - `Constraint`: pure variable constraint (equality, comparison) that
 ///   filters or infers bindings without querying stored data.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Proposition {
@@ -35,9 +31,13 @@ pub enum Proposition {
     Concept(ConceptQuery),
     /// Application of a formula for computation
     Formula(FormulaQuery),
-    /// Attribute query — cardinality-aware EAV lookup.
+    /// Attribute query: cardinality-aware EAV lookup.
     /// Boxed to reduce enum size.
     Attribute(Box<AttributeQuery>),
+    /// Left-join over a scalar attribute lookup: the semantic-layer
+    /// realization of an optional (`maybe`) concept field. Boxed to
+    /// reduce enum size.
+    OptionalAttribute(Box<OptionalAttributeQuery>),
     /// Constraint between variables (equality, comparison, etc.)
     Constraint(Constraint),
 }
@@ -49,25 +49,10 @@ impl Proposition {
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
         match self {
             Proposition::Attribute(query) => query.estimate(env),
+            Proposition::OptionalAttribute(query) => query.estimate(env),
             Proposition::Concept(application) => application.estimate(env),
             Proposition::Formula(application) => application.estimate(env),
             Proposition::Constraint(constraint) => constraint.estimate(env),
-        }
-    }
-
-    /// Evaluate this application against the given context, producing a selection stream
-    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
-        match self {
-            Proposition::Attribute(query) => Either::Left(Either::Left(Either::Left(
-                Application::evaluate(*query, selection, source),
-            ))),
-            Proposition::Concept(application) => Either::Left(Either::Left(Either::Right(
-                application.evaluate(selection, source),
-            ))),
-            Proposition::Formula(application) => {
-                Either::Left(Either::Right(application.evaluate(selection)))
-            }
-            Proposition::Constraint(constraint) => Either::Right(constraint.evaluate(selection)),
         }
     }
 
@@ -75,6 +60,7 @@ impl Proposition {
     pub fn parameters(&self) -> Parameters {
         match self {
             Proposition::Attribute(query) => query.parameters(),
+            Proposition::OptionalAttribute(query) => query.parameters(),
             Proposition::Concept(application) => application.parameters(),
             Proposition::Formula(application) => application.parameters(),
             Proposition::Constraint(constraint) => constraint.parameters(),
@@ -85,6 +71,7 @@ impl Proposition {
     pub fn schema(&self) -> Schema {
         match self {
             Proposition::Attribute(query) => query.schema(),
+            Proposition::OptionalAttribute(query) => query.schema(),
             Proposition::Concept(application) => application.schema(),
             Proposition::Formula(application) => application.schema(),
             Proposition::Constraint(constraint) => constraint.schema(),
@@ -113,6 +100,7 @@ impl Display for Proposition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Proposition::Attribute(query) => Display::fmt(query, f),
+            Proposition::OptionalAttribute(query) => Display::fmt(query, f),
             Proposition::Concept(application) => Display::fmt(application, f),
             Proposition::Formula(application) => Display::fmt(application, f),
             Proposition::Constraint(constraint) => Display::fmt(constraint, f),
@@ -129,16 +117,14 @@ impl From<Constraint> for Proposition {
 impl Serialize for Proposition {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
-            Proposition::Concept(cq) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("assert", &cq.predicate)?;
-                map.serialize_entry("where", &cq.terms)?;
-                map.end()
-            }
+            Proposition::Concept(cq) => cq.serialize(serializer),
             Proposition::Formula(fq) => fq.serialize(serializer),
             Proposition::Constraint(c) => c.serialize(serializer),
             Proposition::Attribute(_) => Err(ser::Error::custom(
                 "Attribute propositions cannot be serialized in formal notation",
+            )),
+            Proposition::OptionalAttribute(_) => Err(ser::Error::custom(
+                "Optional attribute propositions cannot be serialized in formal notation",
             )),
         }
     }
@@ -154,26 +140,23 @@ impl<'de> Deserialize<'de> for Proposition {
             .ok_or_else(|| de::Error::missing_field("assert"))?;
 
         match assert_val {
-            // Object → concept descriptor
+            // Object → concept query
             serde_json::Value::Object(_) => {
-                let predicate: ConceptDescriptor =
-                    serde_json::from_value(assert_val.clone()).map_err(de::Error::custom)?;
-                let terms: Parameters = raw
-                    .get("where")
-                    .ok_or_else(|| de::Error::missing_field("where"))
-                    .and_then(|v| serde_json::from_value(v.clone()).map_err(de::Error::custom))?;
-                Ok(Proposition::Concept(ConceptQuery { predicate, terms }))
+                let cq: ConceptQuery = serde_json::from_value(raw).map_err(de::Error::custom)?;
+                Ok(Proposition::Concept(cq))
             }
-            // String "==" → Constraint
-            serde_json::Value::String(name) if name == "==" => {
-                let constraint: Constraint =
-                    serde_json::from_value(raw).map_err(de::Error::custom)?;
-                Ok(Proposition::Constraint(constraint))
-            }
-            // Other string → FormulaQuery
+            // String → Constraint or FormulaQuery. Try Constraint
+            // first because its variants are named ("==", "coalesce",
+            // etc.); FormulaQuery is the catchall fallback for any
+            // other formula name.
             serde_json::Value::String(_) => {
-                let fq: FormulaQuery = serde_json::from_value(raw).map_err(de::Error::custom)?;
-                Ok(Proposition::Formula(fq))
+                if let Ok(constraint) = serde_json::from_value::<Constraint>(raw.clone()) {
+                    Ok(Proposition::Constraint(constraint))
+                } else {
+                    let fq: FormulaQuery =
+                        serde_json::from_value(raw).map_err(de::Error::custom)?;
+                    Ok(Proposition::Formula(fq))
+                }
             }
             _ => Err(de::Error::custom(
                 "\"assert\" must be a concept object or a formula/constraint name string",

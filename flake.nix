@@ -228,6 +228,11 @@
         inherit (menuHelpers) makeMenu makeDevShellHook menuTestCommand;
 
         commands = {
+          "bench" = {
+            description = "Run all benchmarks";
+            command = "cargo bench";
+          };
+
           "lint" = {
             description = "Lint the full source tree";
             command = "nix flake check";
@@ -240,8 +245,6 @@
               test:native:release
               test:web:debug
               test:web:release
-              test:native:ucan
-              test:web:ucan
               test:cross:integration
               test:npm
             '';
@@ -266,16 +269,6 @@
           "test:web:release" = menuTestCommand {
             description = "Unit and integration tests (wasm32-unknown-unknown, release)";
             package = "tests-web-debug";
-          };
-
-          "test:native:ucan" = menuTestCommand {
-            description = "UCAN-specific tests (${system}, debug)";
-            package = "tests-native-ucan";
-          };
-
-          "test:web:ucan" = menuTestCommand {
-            description = "UCAN-specific tests (wasm32-unknown-unknown, debug)";
-            package = "tests-web-ucan";
           };
 
           "test:cross:integration" = menuTestCommand {
@@ -318,40 +311,28 @@
 
           tests-native-debug = buildTestArchive {
             name = "native-debug";
-            args = "--features s3,s3-list,integration-tests";
+            args = "--features integration-tests";
           };
 
           tests-native-release = buildTestArchive {
             name = "native-release";
-            args = "--release --features s3,s3-list,integration-tests";
+            args = "--release --features integration-tests";
           };
 
           tests-web-debug = buildTestArchive {
             name = "web-debug";
             target = "wasm32-unknown-unknown";
-            args = "--features s3,s3-list";
           };
 
           tests-web-release = buildTestArchive {
             name = "web-debug";
             target = "wasm32-unknown-unknown";
-            args = "--features s3,s3-list --release";
-          };
-
-          tests-native-ucan = buildTestArchive {
-            name = "native-ucan";
-            args = "--features ucan";
-          };
-
-          tests-web-ucan = buildTestArchive {
-            name = "web-ucan";
-            target = "wasm32-unknown-unknown";
-            args = "--features ucan";
+            args = "--release";
           };
 
           tests-cross-integration = buildTestArchive {
             name = "cross-integration";
-            args = "--features s3,s3-list,web-integration-tests";
+            args = "--features web-integration-tests";
           };
         };
 
@@ -361,6 +342,7 @@
 
         devShells = with pkgs; {
           default = mkShell {
+            name = "dialog";
             env = developmentEnvVars;
             nativeBuildInputs = menu.commands ++ developmentBuildInputs;
             shellHook = makeDevShellHook menu;

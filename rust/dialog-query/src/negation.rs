@@ -1,9 +1,7 @@
 use std::fmt::{self, Display};
 
 use super::proposition::Proposition;
-use crate::selection::Selection;
-use crate::{Environment, Parameters, Requirement, Schema, Source, try_stream};
-pub use futures_util::{TryStreamExt, stream};
+use crate::{Environment, Parameters, Requirement, Schema};
 use serde::{Deserialize, Serialize};
 
 /// Cost overhead added for negation operations (checking non-existence)
@@ -16,7 +14,7 @@ pub const NEGATION_OVERHEAD: usize = 100;
 /// evaluated. If it produces *any* results the match is discarded; if it
 /// produces *no* results the match passes through unchanged.
 ///
-/// Negations never bind new variables — they only constrain existing ones.
+/// Negations never bind new variables; they only constrain existing ones.
 /// The planner accounts for this by never adding a negation's parameters to
 /// the `binds` set of an [`Candidate`](crate::planner::Candidate).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,26 +66,6 @@ impl Negation {
 
         schema
     }
-
-    /// Evaluate this negation, yielding matches that do NOT match the inner application
-    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
-        let application = self.0;
-        let source = source.clone();
-        try_stream! {
-            for await candidate in selection {
-                let base = candidate?;
-                let output = application.clone().evaluate(base.clone().seed(), &source);
-
-                tokio::pin!(output);
-
-                if let Ok(Some(_)) = output.try_next().await {
-                    continue;
-                }
-
-                yield base;
-            }
-        }
-    }
 }
 
 impl Display for Negation {
@@ -99,34 +77,50 @@ impl Display for Negation {
 
 #[cfg(test)]
 mod tests {
-    use crate::Session;
-    use crate::artifact::Artifacts;
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use crate::error::EvaluationError;
+    use crate::planner::{Conjunction, Planner};
     use crate::selection::Match;
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
     use crate::types::Any;
-    use crate::{Term, Value};
-    use dialog_storage::MemoryStorageBackend;
+    use crate::{Environment, Premise, Term, Value};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
+
+    /// Lower a single negated premise to its compiled `Plan` and
+    /// evaluate it. Negation requires its variables bound, so the
+    /// planning scope declares them; the filter behavior under test
+    /// lives on `Plan::Negate`.
+    fn plan_negation(premise: Premise, vars: &[&str]) -> Conjunction {
+        let mut scope = Environment::new();
+        for var in vars {
+            scope.add(*var);
+        }
+        Planner::from(vec![premise])
+            .plan(&scope)
+            .expect("negation over bound vars should plan")
+    }
 
     #[dialog_common::test]
     async fn it_passes_match_when_negated_equality_not_satisfied() -> Result<(), EvaluationError> {
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await.unwrap();
-        let session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await.unwrap();
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // a=1, b=2 → equality finds no match → negation keeps the match
         let a = Term::<String>::var("a");
         let b = Term::<String>::var("b");
-        let premise = !a.clone().is(b.clone());
+        let plan = plan_negation(!a.clone().is(b.clone()), &["a", "b"]);
 
         let mut input = Match::new();
-        input.bind(&Term::<Any>::from(&a), Value::from(1))?;
-        input.bind(&Term::<Any>::from(&b), Value::from(2))?;
+        input.bind(&Term::<Any>::from(&a), Value::from("1".to_string()))?;
+        input.bind(&Term::<Any>::from(&b), Value::from("2".to_string()))?;
 
-        let results: Vec<Match> = premise
-            .evaluate(input.seed(), &session)
-            .try_collect()
-            .await?;
+        let results: Vec<Match> = plan.evaluate(input.seed(), &source).try_collect().await?;
 
         assert_eq!(
             results.len(),
@@ -139,22 +133,20 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_filters_match_when_negated_equality_satisfied() -> Result<(), EvaluationError> {
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await.unwrap();
-        let session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await.unwrap();
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let a = Term::<String>::var("a");
         let b = Term::<String>::var("b");
-        let premise = !a.clone().is(b.clone());
+        let plan = plan_negation(!a.clone().is(b.clone()), &["a", "b"]);
 
         let mut input = Match::new();
-        input.bind(&Term::<Any>::from(&a), Value::from(1))?;
-        input.bind(&Term::<Any>::from(&b), Value::from(1))?;
+        input.bind(&Term::<Any>::from(&a), Value::from("1".to_string()))?;
+        input.bind(&Term::<Any>::from(&b), Value::from("1".to_string()))?;
 
-        let results: Vec<Match> = premise
-            .evaluate(input.seed(), &session)
-            .try_collect()
-            .await?;
+        let results: Vec<Match> = plan.evaluate(input.seed(), &source).try_collect().await?;
 
         assert_eq!(
             results.len(),

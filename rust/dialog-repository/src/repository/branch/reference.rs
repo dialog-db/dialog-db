@@ -1,0 +1,63 @@
+use dialog_capability::{Capability, Did, Policy, Subject};
+use dialog_effects::memory::Space;
+use dialog_effects::memory::prelude::SpaceExt;
+
+use crate::{Cell, LoadBranch, OpenBranch, Revision, Upstream};
+
+/// A reference to a named branch within a repository's memory.
+///
+/// Wraps `Capability<Space>` scoped to `branch/{name}`.
+/// Use `.open()` or `.load()` to create a command, then `.perform(&env)`.
+#[derive(Debug, Clone)]
+pub struct BranchReference(Capability<Space>);
+
+impl From<Capability<Space>> for BranchReference {
+    fn from(space: Capability<Space>) -> Self {
+        Self(space)
+    }
+}
+
+impl BranchReference {
+    /// The DID of the repository this branch belongs to.
+    pub fn of(&self) -> &Did {
+        self.0.subject()
+    }
+
+    /// The subject (repository) this branch belongs to.
+    pub fn subject(&self) -> Subject {
+        Subject::from(self.of().clone())
+    }
+
+    /// The branch name, extracted from the space path.
+    pub fn name(&self) -> &str {
+        Space::of(&self.0)
+            .space
+            .strip_prefix("branch/")
+            .unwrap_or("")
+    }
+
+    /// Open the branch, creating it if it doesn't exist.
+    pub fn open(self) -> OpenBranch {
+        self.into()
+    }
+
+    /// Load the branch, returning an error if it doesn't exist.
+    pub fn load(self) -> LoadBranch {
+        self.into()
+    }
+
+    /// The cell holding this branch's latest [`Revision`].
+    pub fn revision(&self) -> Cell<Revision> {
+        self.cell("revision")
+    }
+
+    /// The cell holding this branch's [`UpstreamBranch`], if any.
+    pub fn upstream(&self) -> Cell<Upstream> {
+        self.cell("upstream")
+    }
+
+    /// Create a typed cell within this branch's space.
+    pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
+        self.0.clone().cell(cell_name).into()
+    }
+}

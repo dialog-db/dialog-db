@@ -17,11 +17,13 @@ web-integration-tests = ["helpers"]
 
 [dependencies]
 base58 = { workspace = true }
+base64 = { workspace = true }
 blake3 = { workspace = true }
 futures-util = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 web-time = { workspace = true }
 zerocopy = { workspace = true }

@@ -68,8 +68,10 @@
 //! // Formula::write() for FullNameFormula (writes output cells to bindings)
 //! ```
 
+use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::{extract_doc_comments, parse_output_attribute, type_to_value_data_type};
@@ -78,6 +80,25 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
     let struct_name = &input.ident;
+    let generics = &input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    // Type-parameter idents: a field whose type is exactly one of
+    // these is a *scheme* field — its cell carries the parameter's
+    // SchemeBound and a scheme label, and cells sharing a parameter
+    // share one type variable at inference time.
+    let scheme_params: Vec<syn::Ident> = generics.type_params().map(|p| p.ident.clone()).collect();
+    let scheme_param_of = |ty: &syn::Type| -> Option<syn::Ident> {
+        if let syn::Type::Path(tp) = ty
+            && tp.qself.is_none()
+            && tp.path.segments.len() == 1
+        {
+            let ident = &tp.path.segments[0].ident;
+            if tp.path.segments[0].arguments.is_none() && scheme_params.contains(ident) {
+                return Some(ident.clone());
+            }
+        }
+        None
+    };
 
     // Extract fields from the struct
     let fields = match &input.data {
@@ -149,11 +170,18 @@ pub fn derive(input: TokenStream) -> TokenStream {
         struct_name.span(),
     );
 
-    // Generate Input struct fields (only non-output fields)
+    // Generate Input struct fields (only non-output fields). Forward the
+    // user's field doc when present; otherwise synthesize a fallback so
+    // downstream crates with `#![deny(missing_docs)]` still compile.
     let input_struct_fields: Vec<_> = input_fields
         .iter()
         .map(|(name, ty, doc)| {
-            let doc_lit = syn::LitStr::new(doc, proc_macro2::Span::call_site());
+            let doc_text = if doc.is_empty() {
+                format!("The `{name}` input to [`{struct_name}`].")
+            } else {
+                doc.clone()
+            };
+            let doc_lit = syn::LitStr::new(&doc_text, proc_macro2::Span::call_site());
             quote! {
                 #[doc = #doc_lit]
                 pub #name: #ty
@@ -161,11 +189,16 @@ pub fn derive(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Generate Query struct fields — each field becomes Term<T> for pattern matching
+    // Generate Query struct fields: each field becomes Term<T> for pattern matching
     let query_struct_fields: Vec<_> = all_fields
         .iter()
         .map(|(name, ty, doc, _is_output, _cost)| {
-            let doc_lit = syn::LitStr::new(doc, proc_macro2::Span::call_site());
+            let doc_text = if doc.is_empty() {
+                format!("Term matching the `{name}` field of [`{struct_name}`].")
+            } else {
+                doc.clone()
+            };
+            let doc_lit = syn::LitStr::new(&doc_text, proc_macro2::Span::call_site());
             quote! {
                 #[doc = #doc_lit]
                 pub #name: dialog_query::Term<#ty>
@@ -181,13 +214,32 @@ pub fn derive(input: TokenStream) -> TokenStream {
             let name_str = name.to_string();
             let name_lit = syn::LitStr::new(&name_str, proc_macro2::Span::call_site());
             let doc_lit = syn::LitStr::new(doc, proc_macro2::Span::call_site());
-            let data_type = type_to_value_data_type(ty);
+
+            // A scheme field's cell carries the bound of its type
+            // parameter and the parameter name as the scheme label;
+            // a concrete field's cell carries its singleton kind.
+            let (data_type, scheme) = match scheme_param_of(ty) {
+                Some(param) => {
+                    let label =
+                        syn::LitStr::new(&param.to_string(), proc_macro2::Span::call_site());
+                    (
+                        quote! {
+                            Some(dialog_query::type_system::Type::from(
+                                <#param as dialog_query::SchemeBound>::BOUND,
+                            ))
+                        },
+                        Some(quote! { .scheme(#label) }),
+                    )
+                }
+                None => (type_to_value_data_type(ty), None),
+            };
 
             if *is_output {
                 quote! {
                     builder
                         .cell(#name_lit, #data_type)
                         .the(#doc_lit)
+                        #scheme
                         .output(#cost);
                 }
             } else {
@@ -195,18 +247,24 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     builder
                         .cell(#name_lit, #data_type)
                         .the(#doc_lit)
+                        #scheme
                         .required();
                 }
             }
         })
         .collect();
 
+    // The Rust field name is normalized for the parameter surface:
+    // `unraw()` drops any `r#` raw-identifier prefix, then
+    // `to_case(Case::Kebab)` matches the formal-notation convention
+    // used by attribute names elsewhere.
+
     // Generate field names for Input TryFrom
     let input_field_names: Vec<_> = input_fields.iter().map(|(name, _, _)| name).collect();
     let input_field_name_lits: Vec<_> = input_fields
         .iter()
         .map(|(name, _, _)| {
-            let name_str = name.to_string();
+            let name_str = name.unraw().to_string().to_case(Case::Kebab);
             syn::LitStr::new(&name_str, proc_macro2::Span::call_site())
         })
         .collect();
@@ -216,12 +274,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let all_field_name_lits: Vec<_> = all_fields
         .iter()
         .map(|(name, _, _, _, _)| {
-            let name_str = name.to_string();
+            let name_str = name.unraw().to_string().to_case(Case::Kebab);
             syn::LitStr::new(&name_str, proc_macro2::Span::call_site())
         })
         .collect();
 
-    // Generate Formula::write() statements — only output fields are written
+    // Generate Formula::write() statements: only output fields are written
     // back to the bindings after computation.
     let write_statements: Vec<_> = output_fields
         .iter()
@@ -240,47 +298,79 @@ pub fn derive(input: TokenStream) -> TokenStream {
         .iter()
         .map(|(name, ty, _, _, _)| {
             quote! {
-                #name: #ty::try_from(source.lookup(&dialog_query::Term::from(&self.#name))?)?
+                #name: #ty::try_from(source.lookup(&dialog_query::Term::from(&self.#name))?.content()?)?
             }
         })
         .collect();
+
+    let input_struct_doc = syn::LitStr::new(
+        &format!(
+            "Input structure for the [`{struct_name}`] formula. Holds only the required (non-output) fields that must be provided to compute the formula.",
+        ),
+        proc_macro2::Span::call_site(),
+    );
+    let query_struct_doc = syn::LitStr::new(
+        &format!(
+            "Query pattern for the [`{struct_name}`] formula. Holds every field (input and output) as a [`dialog_query::Term`] for pattern matching.",
+        ),
+        proc_macro2::Span::call_site(),
+    );
+
+    // Impls that convert through `FormulaQuery` only exist for the
+    // instantiation(s) registered in `define_formulas!` (the
+    // canonical dynamic instantiation for generic formulas), so they
+    // are bounded on that conversion existing.
+    let mut fq_where: syn::WhereClause = generics
+        .where_clause
+        .clone()
+        .unwrap_or_else(|| syn::parse_quote!(where));
+    fq_where.predicates.push(syn::parse_quote!(
+        dialog_query::FormulaQuery: ::std::convert::From<#query_name #ty_generics>
+    ));
 
     let expanded = quote! {
             /// Input structure for #struct_name formula
             ///
             /// Contains only the required (non-output) fields that must be provided
             /// to compute the formula.
+            #[doc = #input_struct_doc]
             #[derive(Debug, Clone)]
-            pub struct #input_name {
+            pub struct #input_name #generics #where_clause {
                 #(#input_struct_fields),*
             }
 
             /// Query pattern for #struct_name formula.
             ///
             /// Contains all fields (both input and output) as Term<T> for pattern matching.
+            #[doc = #query_struct_doc]
             #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-            pub struct #query_name {
+            pub struct #query_name #generics #where_clause {
                 #(#query_struct_fields),*
             }
 
             /// Static storage for formula cells
             static #cells_name: ::std::sync::OnceLock<dialog_query::Cells> = ::std::sync::OnceLock::new();
 
-            impl dialog_query::Predicate for #struct_name {
-                type Conclusion = #struct_name;
-                type Application = #query_name;
+            impl #impl_generics dialog_query::Predicate for #struct_name #ty_generics #fq_where {
+                type Conclusion = #struct_name #ty_generics;
+                type Application = #query_name #ty_generics;
                 type Descriptor = dialog_query::Entity;
             }
 
-            impl dialog_query::Application for #query_name
+            impl #impl_generics dialog_query::Application for #query_name #ty_generics #fq_where
     {
-                type Conclusion = #struct_name;
+                type Conclusion = #struct_name #ty_generics;
 
-                fn evaluate<S: dialog_query::Source, M: dialog_query::Selection>(
+                fn evaluate<'__a, __Env, __M: dialog_query::Selection + '__a>(
                     self,
-                    selection: M,
-                    _source: &S,
-                ) -> impl dialog_query::Selection {
+                    selection: __M,
+                    _env: &'__a __Env,
+                ) -> impl dialog_query::Selection + '__a
+                where
+                    __Env: dialog_query::Provider<dialog_query::Select<'__a>>
+                        + dialog_query::Provider<dialog_query::source::SelectRules>
+                        + dialog_query::ConditionalSync,
+                {
                     let formula: dialog_query::FormulaQuery = self.into();
                     formula.evaluate(selection)
                 }
@@ -292,31 +382,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             }
 
-            impl ::std::convert::From<#query_name> for dialog_query::Parameters {
-                fn from(terms: #query_name) -> Self {
+            impl #impl_generics ::std::convert::From<#query_name #ty_generics> for dialog_query::Parameters #where_clause {
+                fn from(terms: #query_name #ty_generics) -> Self {
                     let mut parameters = Self::new();
                     #(parameters.insert(#all_field_name_lits.into(), dialog_query::Term::<dialog_query::types::Any>::from(terms.#all_field_names));)*
                     parameters
                 }
             }
 
-            impl From<#query_name> for dialog_query::Premise
+            impl #impl_generics From<#query_name #ty_generics> for dialog_query::Premise #fq_where
     {
-                fn from(source: #query_name) -> Self {
+                fn from(source: #query_name #ty_generics) -> Self {
                     let formula: dialog_query::FormulaQuery = source.into();
                     dialog_query::Premise::Assert(dialog_query::Proposition::from(formula))
                 }
             }
 
-            impl From<#query_name> for dialog_query::Proposition
+            impl #impl_generics From<#query_name #ty_generics> for dialog_query::Proposition #fq_where
     {
-                fn from(source: #query_name) -> Self {
+                fn from(source: #query_name #ty_generics) -> Self {
                     let formula: dialog_query::FormulaQuery = source.into();
                     dialog_query::Proposition::from(formula)
                 }
             }
 
-            impl ::std::ops::Not for #query_name
+            impl #impl_generics ::std::ops::Not for #query_name #ty_generics #fq_where
     {
                 type Output = dialog_query::Premise;
 
@@ -326,7 +416,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             }
 
-            impl ::std::convert::TryFrom<&mut dialog_query::Bindings> for #input_name {
+            impl #impl_generics ::std::convert::TryFrom<&mut dialog_query::Bindings> for #input_name #ty_generics #where_clause {
                 type Error = dialog_query::EvaluationError;
 
                 fn try_from(bindings: &mut dialog_query::Bindings) -> ::std::result::Result<Self, Self::Error> {
@@ -336,8 +426,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             }
 
-            impl dialog_query::Formula for #struct_name {
-                type Input = #input_name;
+            impl #impl_generics dialog_query::Formula for #struct_name #ty_generics #fq_where {
+                type Input = #input_name #ty_generics;
 
                 fn cells() -> &'static dialog_query::Cells {
                     #cells_name.get_or_init(|| {
@@ -351,8 +441,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     #total_cost
                 }
 
-                fn apply(terms: dialog_query::Parameters) -> ::std::result::Result<#query_name, dialog_query::error::TypeError> {
-                    let cells = <#struct_name as dialog_query::Formula>::cells();
+                fn apply(terms: dialog_query::Parameters) -> ::std::result::Result<#query_name #ty_generics, dialog_query::error::TypeError> {
+                    let cells = <#struct_name #ty_generics as dialog_query::Formula>::cells();
                     let conformed = cells.conform(terms)?;
                     ::std::result::Result::Ok(#query_name {
                         #(#all_field_names: conformed

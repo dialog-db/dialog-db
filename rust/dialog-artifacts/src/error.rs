@@ -1,4 +1,6 @@
-use dialog_prolly_tree::DialogProllyTreeError;
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::memory::MemoryError;
+use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::DialogStorageError;
 use thiserror::Error;
 
@@ -66,8 +68,20 @@ impl From<DialogStorageError> for DialogArtifactsError {
     }
 }
 
-impl From<DialogProllyTreeError> for DialogArtifactsError {
-    fn from(value: DialogProllyTreeError) -> Self {
+impl From<ArchiveError> for DialogArtifactsError {
+    fn from(e: ArchiveError) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
+impl From<MemoryError> for DialogArtifactsError {
+    fn from(e: MemoryError) -> Self {
+        Self::Storage(e.to_string())
+    }
+}
+
+impl From<DialogSearchTreeError> for DialogArtifactsError {
+    fn from(value: DialogSearchTreeError) -> Self {
         DialogArtifactsError::Tree(format!("{value}"))
     }
 }

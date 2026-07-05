@@ -1,0 +1,22 @@
+[package]
+name = "dialog-network"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-remote-s3 = { workspace = true }
+dialog-remote-ucan-s3 = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+dialog-remote-s3 = { workspace = true, features = ["helpers"] }
+dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }

@@ -34,8 +34,11 @@ pub mod indexeddb;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use indexeddb::*;
 
-pub mod network;
-pub use network::*;
-
 pub mod volatile;
 pub use volatile::*;
+
+pub mod space;
+pub use space::{Space, SpaceProvider};
+
+pub mod storage;
+pub use storage::Storage;
