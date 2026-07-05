@@ -240,8 +240,12 @@ impl<'a> Pull<'a> {
                     authority.did(),
                     authority.profile().clone(),
                 );
+                // A merge records no skip table: a skip chain must never
+                // cross a revision with more than one parent, or leaping
+                // it would lose the ancestry entering through the other
+                // parent (see `dialog_artifacts::history::skip`).
                 let entries = revision
-                    .records([local.version(), upstream_revision.version()])?
+                    .records([local.version(), upstream_revision.version()], &[])?
                     .into_iter()
                     .map(|(version, record)| record.into_entry(&version))
                     .collect();
