@@ -186,7 +186,10 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
     let payload: Vec<u8> = (0..50_000u32).map(|i| (i % 199) as u8).collect();
     let hash = branch_a
         .write_blob(stream::iter(
-            payload.chunks(8192).map(|c| c.to_vec()).collect::<Vec<_>>(),
+            payload
+                .chunks(8192)
+                .map(|c| Ok(c.to_vec()))
+                .collect::<Vec<_>>(),
         ))
         .perform(&operator_a)
         .await?;
