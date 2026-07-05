@@ -1,0 +1,223 @@
+//! UCAN access service test server.
+//!
+//! Provides a local UCAN access service for integration testing.
+//! Receives UCAN invocation containers, verifies them using [`UcanAuthorizer`],
+//! and returns presigned S3 request descriptors.
+
+use super::UcanS3Address;
+use crate::UcanAuthorizer;
+use dialog_common::helpers::{Provider, Service};
+use dialog_remote_s3::helpers::LocalS3;
+use dialog_remote_s3::{Address, S3Credential};
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
+use std::convert::Infallible;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::sync::RwLock;
+
+/// A running UCAN access service test server instance.
+pub struct UcanAccessServer {
+    /// The endpoint URL where the access service is listening.
+    pub endpoint: String,
+    /// The backing S3 server.
+    pub s3_server: LocalS3,
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+impl UcanAccessServer {
+    /// Start a UCAN access service backed by a local S3 server.
+    pub async fn start(
+        s3_server: LocalS3,
+        bucket: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> anyhow::Result<Self> {
+        let address = Address::builder(&s3_server.endpoint)
+            .region("us-east-1")
+            .bucket(bucket)
+            .path_style(true)
+            .build()?;
+
+        let credential = S3Credential::new(access_key, secret_key);
+
+        let authorizer = Arc::new(RwLock::new(UcanAuthorizer::new(address, Some(credential))));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let endpoint = format!("http://{}", addr);
+
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let authorizer_clone = authorizer.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    result = listener.accept() => {
+                        if let Ok((stream, _)) = result {
+                            let authorizer = authorizer_clone.clone();
+                            tokio::spawn(async move {
+                                let service = hyper::service::service_fn(move |req| {
+                                    let authorizer = authorizer.clone();
+                                    async move {
+                                        handle_request(req, authorizer).await
+                                    }
+                                });
+                                let _ = http1::Builder::new()
+                                    .serve_connection(TokioIo::new(stream), service)
+                                    .await;
+                            });
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(UcanAccessServer {
+            endpoint,
+            s3_server,
+            shutdown_tx,
+        })
+    }
+}
+
+fn add_cors_headers(builder: hyper::http::response::Builder) -> hyper::http::response::Builder {
+    builder
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", "Content-Type")
+        .header("Access-Control-Max-Age", "86400")
+        .header("Cache-Control", "no-store")
+}
+
+async fn handle_request(
+    req: Request<Incoming>,
+    authorizer: Arc<RwLock<UcanAuthorizer>>,
+) -> Result<Response<http_body_util::Full<bytes::Bytes>>, Infallible> {
+    use bytes::Bytes;
+    use http_body_util::Full;
+
+    if req.method() == Method::OPTIONS {
+        return Ok(add_cors_headers(Response::builder())
+            .status(StatusCode::NO_CONTENT)
+            .body(Full::new(Bytes::new()))
+            .unwrap());
+    }
+
+    if req.method() != Method::POST {
+        return Ok(add_cors_headers(Response::builder())
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .body(Full::new(Bytes::from("Method not allowed")))
+            .unwrap());
+    }
+
+    use http_body_util::BodyExt;
+    let body_bytes = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            return Ok(add_cors_headers(Response::builder())
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::new(Bytes::from(format!(
+                    "Failed to read body: {}",
+                    e
+                ))))
+                .unwrap());
+        }
+    };
+
+    let authorizer = authorizer.read().await;
+    match authorizer.authorize(&body_bytes).await {
+        Ok(descriptor) => match serde_ipld_dagcbor::to_vec(&descriptor) {
+            Ok(cbor_bytes) => Ok(add_cors_headers(Response::builder())
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/cbor")
+                .body(Full::new(Bytes::from(cbor_bytes)))
+                .unwrap()),
+            Err(e) => Ok(add_cors_headers(Response::builder())
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Full::new(Bytes::from(format!(
+                    "Failed to encode response: {}",
+                    e
+                ))))
+                .unwrap()),
+        },
+        Err(e) => Ok(add_cors_headers(Response::builder())
+            .status(StatusCode::FORBIDDEN)
+            .body(Full::new(Bytes::from(format!(
+                "Authorization failed: {}",
+                e
+            ))))
+            .unwrap()),
+    }
+}
+
+#[async_trait::async_trait]
+impl Provider for UcanAccessServer {
+    async fn stop(self) -> anyhow::Result<()> {
+        let _ = self.shutdown_tx.send(());
+        self.s3_server.stop().await
+    }
+}
+
+/// Settings for configuring the UCAN access service test server.
+#[derive(Debug, Clone)]
+pub struct UcanS3Settings {
+    /// The bucket name to create. Defaults to "test-bucket".
+    pub bucket: String,
+    /// AWS access key ID. Defaults to "test-access-key".
+    pub access_key_id: String,
+    /// AWS secret access key. Defaults to "test-secret-key".
+    pub secret_access_key: String,
+}
+
+impl Default for UcanS3Settings {
+    fn default() -> Self {
+        Self {
+            bucket: String::new(),
+            access_key_id: "test-access-key".to_string(),
+            secret_access_key: "test-secret-key".to_string(),
+        }
+    }
+}
+
+/// Starts both an S3 server and a UCAN access service.
+#[dialog_common::provider]
+pub async fn ucan_s3(
+    settings: UcanS3Settings,
+) -> anyhow::Result<Service<UcanS3Address, UcanAccessServer>> {
+    let bucket = if settings.bucket.is_empty() {
+        "test-bucket"
+    } else {
+        &settings.bucket
+    };
+
+    let s3_server = LocalS3::start_with_auth(
+        &settings.access_key_id,
+        &settings.secret_access_key,
+        &[bucket],
+    )
+    .await?;
+
+    let s3_endpoint = s3_server.endpoint.clone();
+
+    let ucan_server = UcanAccessServer::start(
+        s3_server,
+        bucket,
+        &settings.access_key_id,
+        &settings.secret_access_key,
+    )
+    .await?;
+
+    let address = UcanS3Address {
+        access_service_url: ucan_server.endpoint.clone(),
+        s3_endpoint,
+        bucket: bucket.to_string(),
+        access_key_id: settings.access_key_id,
+        secret_access_key: settings.secret_access_key,
+    };
+
+    Ok(Service::new(address, ucan_server))
+}

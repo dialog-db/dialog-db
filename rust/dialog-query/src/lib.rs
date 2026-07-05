@@ -40,8 +40,16 @@ pub mod environment;
 pub mod error;
 /// Built-in formulas for data transformations and computations.
 pub mod formula;
+/// Benchmark helpers (`BenchEnv`). Available to the crate's own tests;
+/// the benches include this same source via `#[path]` so they can build
+/// it against the dev-dependency cycle (dialog-repository depends on
+/// dialog-query, so it can only ever be a dev-dependency here).
+#[cfg(test)]
+pub mod helpers;
 /// Negation support for excluding matching results.
 pub mod negation;
+/// Left-join projection realizing optional (`maybe`) concept fields.
+pub mod optional;
 /// Named parameter bindings for rule and formula applications.
 pub mod parameters;
 /// Query planner that compiles premises into execution plans.
@@ -60,12 +68,17 @@ pub mod schema;
 pub mod selection;
 /// Database sessions for querying and committing changes.
 pub mod session;
+/// Data source for query evaluation (branch + env + rules).
+pub mod source;
 /// Statement trait for asserting and retracting facts.
 pub mod statement;
 /// Stream utilities for async query result iteration.
 pub mod stream;
 /// Term types for pattern matching with variables and constants.
 pub mod term;
+/// Unified schema-layer type system (`Type`, `Primitive`,
+/// `Composite`, set-operations).
+pub mod type_system;
 /// Type system utilities bridging Rust types to dialog-artifacts types.
 pub mod types;
 
@@ -73,15 +86,16 @@ pub use artifact::*;
 pub use attribute::query::{AttributeQuery, DynamicAttributeQuery};
 pub use attribute::*;
 pub use claim::Claim;
-pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor};
+pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor, ConceptFieldDescriptor};
 pub use concept::query::{ConceptQuery, ConceptRules};
-pub use concept::{Concept, Conclusion};
+pub use concept::{Concept, ConceptField, Conclusion};
 pub use constraint::Constraint;
 pub use descriptor::Descriptor;
 pub use environment::*;
 pub use error::*;
 pub use formula::*;
 pub use negation::*;
+pub use optional::OptionalAttributeQuery;
 pub use parameters::*;
 pub use planner::*;
 pub use predicate::*;
@@ -98,4 +112,7 @@ pub use term::*;
 pub use types::*;
 
 pub use async_stream::try_stream;
+pub use dialog_capability::Provider;
+pub use dialog_common::ConditionalSync;
+pub use dialog_effects::archive;
 pub use dialog_macros::{Attribute, Concept, Formula};

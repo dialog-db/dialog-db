@@ -108,24 +108,30 @@ impl ParseFloat {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
     use crate::query::{Application, Output};
     use crate::selection::Match;
-    use crate::{Entity, Query, Session, Term, artifact::Artifacts};
-    use dialog_storage::MemoryStorageBackend;
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
+    use crate::{Entity, Query, Term};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     #[dialog_common::test]
     async fn it_converts_number_to_string() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ToString> {
             value: Term::from(42u32).into(),
             is: Term::var("result"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, "42");
@@ -134,15 +140,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_converts_boolean_to_string() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ToString> {
             value: Term::from(true).into(),
             is: Term::var("result"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, "true");
@@ -151,15 +158,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_passes_string_through() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ToString> {
             value: Term::from("hello".to_string()).into(),
             is: Term::var("result"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, "hello");
@@ -168,16 +176,17 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_converts_entity_to_string() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let entity = Entity::new()?;
         let query = Query::<ToString> {
             value: Term::from(entity.clone()).into(),
             is: Term::var("result"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, entity.to_string());
@@ -186,15 +195,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_converts_float_to_string() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ToString> {
             value: Term::from(3.15f64).into(),
             is: Term::var("result"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, "3.15");
@@ -203,9 +213,10 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_converts_variable_input_to_string() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ToString> {
             value: Term::var("input"),
@@ -215,7 +226,7 @@ mod tests {
         candidate.bind(&Term::var("input"), 42u32.into())?;
         let query_copy = query.clone();
         let matches: Vec<Match> = query
-            .evaluate(candidate.seed(), &session)
+            .evaluate(candidate.seed(), &source)
             .try_collect()
             .await?;
 
@@ -227,15 +238,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_unsigned_integer() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseUnsignedInteger> {
             text: Term::from("123".to_string()),
             is: Term::var("num"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, 123);
@@ -244,15 +256,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_unsigned_integer_with_whitespace() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseUnsignedInteger> {
             text: Term::from("  456  ".to_string()),
             is: Term::var("num"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, 456);
@@ -261,15 +274,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_rejects_negative_as_unsigned() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseUnsignedInteger> {
             text: Term::from("-123".to_string()),
             is: Term::var("num"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 0);
         Ok(())
@@ -277,15 +291,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_signed_integer() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseSignedInteger> {
             text: Term::from("-123".to_string()),
             is: Term::var("num"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, -123);
@@ -294,15 +309,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_positive_as_signed() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseSignedInteger> {
             text: Term::from("42".to_string()),
             is: Term::var("num"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, 42);
@@ -311,15 +327,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_float() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseFloat> {
             text: Term::from("3.15".to_string()),
             is: Term::var("num"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert!((results[0].is - 3.15).abs() < f64::EPSILON);
@@ -328,15 +345,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_negative_float() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseFloat> {
             text: Term::from("-2.5".to_string()),
             is: Term::var("num"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert!((results[0].is - -2.5).abs() < f64::EPSILON);
@@ -345,15 +363,16 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_parses_integer_as_float() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         let query = Query::<ParseFloat> {
             text: Term::from("42".to_string()),
             is: Term::var("num"),
         };
-        let results = query.perform(&session).try_vec().await?;
+        let results = query.perform(&source).try_vec().await?;
 
         assert_eq!(results.len(), 1);
         assert!((results[0].is - 42.0).abs() < f64::EPSILON);
@@ -362,28 +381,29 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_rejects_invalid_text() -> anyhow::Result<()> {
-        let storage = MemoryStorageBackend::default();
-        let artifacts = Artifacts::anonymous(storage).await?;
-        let session = Session::open(artifacts);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         for text in ["not a number", ""] {
             let query = Query::<ParseUnsignedInteger> {
                 text: Term::from(text.to_string()),
                 is: Term::var("num"),
             };
-            assert_eq!(query.perform(&session).try_vec().await?.len(), 0);
+            assert_eq!(query.perform(&source).try_vec().await?.len(), 0);
 
             let query = Query::<ParseSignedInteger> {
                 text: Term::from(text.to_string()),
                 is: Term::var("num"),
             };
-            assert_eq!(query.perform(&session).try_vec().await?.len(), 0);
+            assert_eq!(query.perform(&source).try_vec().await?.len(), 0);
 
             let query = Query::<ParseFloat> {
                 text: Term::from(text.to_string()),
                 is: Term::var("num"),
             };
-            assert_eq!(query.perform(&session).try_vec().await?.len(), 0);
+            assert_eq!(query.perform(&source).try_vec().await?.len(), 0);
         }
         Ok(())
     }

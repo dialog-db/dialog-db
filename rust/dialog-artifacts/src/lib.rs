@@ -1,4 +1,13 @@
 #![warn(missing_docs)]
+#![warn(clippy::absolute_paths)]
+#![warn(clippy::default_trait_access)]
+#![warn(clippy::fallible_impl_from)]
+#![warn(clippy::panicking_unwrap)]
+#![warn(clippy::unused_async)]
+#![deny(clippy::partial_pub_fields)]
+#![deny(clippy::unnecessary_self_imports)]
+#![cfg_attr(not(test), warn(clippy::large_futures))]
+#![cfg_attr(not(test), deny(clippy::panic))]
 
 //! This package embodies a data storage primitive called [`Artifacts`]. [`Artifacts`]
 //! is a triple store backed by indexes that are represented as prolly trees.
@@ -50,6 +59,14 @@ pub use reference::*;
 mod error;
 pub use error::*;
 
+/// Format-agnostic export trait for artifacts.
+pub mod exporter;
+pub use exporter::Exporter;
+
+/// Format-agnostic import trait for artifacts.
+pub mod importer;
+pub use importer::Importer;
+
 mod state;
 pub use state::*;
 
@@ -59,10 +76,12 @@ pub use constants::*;
 mod key;
 pub use key::*;
 
+/// Shared tree-ops on the artifact prolly tree.
+pub mod tree;
+
 mod uri;
 pub use uri::*;
 
+/// Test helpers for generating deterministic test data.
 #[cfg(any(test, feature = "helpers"))]
-mod helpers;
-#[cfg(any(test, feature = "helpers"))]
-pub use helpers::*;
+pub mod helpers;

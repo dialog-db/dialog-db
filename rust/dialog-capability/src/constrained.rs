@@ -1,6 +1,9 @@
+use crate::fork::Fork;
+use crate::site::SiteAddress;
 use crate::{
     Ability, Capability, Constraint, Did, Effect, Here, Policy, Provider, Selector, There,
 };
+use serde::{Deserialize, Serialize};
 
 /// A capability chain element - constraint applied to a parent capability.
 ///
@@ -22,7 +25,8 @@ use crate::{
 /// let cap: Capability<Storage> = Subject::from(did!("key:zSpace"))
 ///     .attenuate(Storage);
 /// ```
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(bound(deserialize = ""))]
 pub struct Constrained<P: Policy, Of: Ability> {
     /// The policy/ability being added.
     pub constraint: P,
@@ -82,12 +86,25 @@ where
     ///
     /// Use this when the provider trusts the caller (e.g., local execution).
     /// For operations that require authorization, use `acquire` first.
-    pub async fn perform<Env>(self, env: &mut Env) -> Fx::Output
+    pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where
         Self: Into<Capability<Fx>>,
         Env: Provider<Fx>,
     {
         env.execute(self.into()).await
+    }
+
+    /// Attach a site address to this invocation capability for remote execution.
+    ///
+    /// Returns a [`Fork`] that can be authorized (`.acquire()`) or
+    /// authorized and executed in one step (`.perform()`).
+    ///
+    /// The site type is inferred from the address via [`SiteAddress`].
+    pub fn fork<A: SiteAddress>(self, address: &A) -> Fork<A::Site, Fx>
+    where
+        Self: Into<Capability<Fx>>,
+    {
+        Fork::new(self.into(), address.clone())
     }
 }
 

@@ -4,7 +4,10 @@
 //! of semantic triples. Attributes must follow a namespace/predicate format and
 //! are limited to 64 bytes in length.
 
-use std::{fmt::Display, str::FromStr};
+use std::{
+    fmt::{Display, Formatter, Result as FmtResult},
+    str::FromStr,
+};
 
 use ::serde::{Deserialize, Serialize};
 
@@ -74,7 +77,7 @@ impl From<&Attribute> for String {
 }
 
 impl Display for Attribute {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", String::from(self))
     }
 }

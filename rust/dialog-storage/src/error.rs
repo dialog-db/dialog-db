@@ -1,3 +1,5 @@
+use dialog_effects::archive::ArchiveError;
+use dialog_effects::memory::MemoryError;
 use thiserror::Error;
 
 /// The common error type used by this crate
@@ -18,4 +20,16 @@ pub enum DialogStorageError {
     /// An error that occurs when byte hash verification fails
     #[error("Byte hash verification failed: {0}")]
     Verification(String),
+}
+
+impl From<ArchiveError> for DialogStorageError {
+    fn from(e: ArchiveError) -> Self {
+        Self::StorageBackend(e.to_string())
+    }
+}
+
+impl From<MemoryError> for DialogStorageError {
+    fn from(e: MemoryError) -> Self {
+        Self::StorageBackend(e.to_string())
+    }
 }

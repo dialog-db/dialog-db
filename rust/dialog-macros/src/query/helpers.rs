@@ -16,6 +16,7 @@ use syn::{Attribute, Expr, Lit, Meta, Type};
 pub fn type_to_value_data_type(ty: &Type) -> TokenStream {
     quote! {
         <<#ty as dialog_query::Typed>::Descriptor as dialog_query::TypeDescriptor>::TYPE
+            .map(dialog_query::type_system::Type::from)
     }
 }
 

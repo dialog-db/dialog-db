@@ -2,8 +2,6 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSync;
 
 mod backend;
-#[cfg(feature = "s3")]
-pub use backend::s3;
 pub use backend::*;
 
 /// Capability-based storage providers.

@@ -2,11 +2,14 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::{Datum, DialogArtifactsError, Index, Key, State};
-use dialog_prolly_tree::{Block, Entry};
-use dialog_storage::{Blake3Hash, ContentAddressedStorage, MemoryStorageBackend};
+use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, KeyBytes, State, Storage};
+use dialog_common::Blake3Hash as NodeHash;
+use dialog_search_tree::{ArchivedNodeBody, Buffer, Entry, PersistentNode, into_owned};
+use dialog_storage::{Blake3Hash, MemoryStorageBackend, StorageBackend};
 
 use super::store::WorkerMessage;
+
+type DiagnoseStorage = Storage<CborEncoder, MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
 
 /// Represents a node in the prolly tree hierarchy.
 ///
@@ -33,8 +36,8 @@ pub enum TreeNode {
 /// This worker loads individual tree nodes on-demand as the UI navigates
 /// the prolly tree structure.
 pub struct ArtifactsHierarchy {
-    /// The prolly tree index to load nodes from
-    tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    /// The storage backend for tree operations
+    storage: DiagnoseStorage,
     /// Channel sender for worker messages
     tx: Sender<WorkerMessage>,
 }
@@ -46,11 +49,8 @@ impl ArtifactsHierarchy {
     ///
     /// * `tree` - The prolly tree index to load nodes from
     /// * `tx` - Channel sender for worker messages
-    pub fn new(
-        tree: Index<Key, Datum, MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
-        tx: Sender<WorkerMessage>,
-    ) -> Self {
-        Self { tree, tx }
+    pub fn new(storage: DiagnoseStorage, tx: Sender<WorkerMessage>) -> Self {
+        Self { storage, tx }
     }
 
     /// Looks up a tree node by its hash, loading it in the background.
@@ -62,30 +62,47 @@ impl ArtifactsHierarchy {
     ///
     /// * `hash` - The hash of the node to look up
     pub fn lookup_node(&self, hash: &Blake3Hash) {
-        let tree = self.tree.clone();
+        let storage = self.storage.clone();
         let tx = self.tx.clone();
         let hash = hash.to_owned();
 
         tokio::spawn(async move {
-            let Some(block): Option<Block<Key, State<Datum>, Blake3Hash>> =
-                tree.storage().read(&hash).await?
-            else {
+            let Some(bytes) = storage.get(&hash).await? else {
                 // TODO: This should be an error condition
                 return Ok(());
             };
 
-            let node = match &block {
-                Block::Branch(_) => TreeNode::Branch {
-                    upper_bound: block.upper_bound().clone(),
-                    children: block
-                        .references()?
+            let block: PersistentNode<KeyBytes, State<Datum>> =
+                PersistentNode::new(Buffer::from(bytes));
+            let node = match block.body()? {
+                ArchivedNodeBody::Index(index) => TreeNode::Branch {
+                    upper_bound: Key::from(into_owned::<KeyBytes>(
+                        &index
+                            .links
+                            .last()
+                            .ok_or_else(|| {
+                                DialogArtifactsError::MalformedIndex(
+                                    "Index node had no children".into(),
+                                )
+                            })?
+                            .upper_bound,
+                    )?),
+                    children: index
+                        .links
                         .iter()
-                        .map(|reference| reference.hash().to_owned())
+                        .map(|link| *<&NodeHash>::from(&link.node).as_bytes())
                         .collect(),
                 },
-                Block::Segment(_) => TreeNode::Segment {
-                    entries: Vec::from(block.into_entries()?),
-                },
+                ArchivedNodeBody::Segment(segment) => {
+                    let mut entries = Vec::with_capacity(segment.entries.len());
+                    for entry in segment.entries.iter() {
+                        entries.push(Entry {
+                            key: Key::from(into_owned::<KeyBytes>(&entry.key)?),
+                            value: into_owned::<State<Datum>>(&entry.value)?,
+                        });
+                    }
+                    TreeNode::Segment { entries }
+                }
             };
 
             tx.send(WorkerMessage::Node { hash, node }).unwrap();

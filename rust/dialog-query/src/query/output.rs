@@ -10,7 +10,7 @@ use std::future::Future;
 /// `Output<T>` carries fully realized `T` values (e.g. a concept conclusion
 /// struct). It is produced by [`Application::perform`](crate::query::Application::perform).
 pub trait Output<T: ConditionalSend>:
-    Stream<Item = Result<T, EvaluationError>> + 'static + ConditionalSend
+    Stream<Item = Result<T, EvaluationError>> + ConditionalSend
 {
     /// Collect all items into a Vec, propagating any errors
     #[allow(async_fn_in_trait)]
@@ -23,6 +23,6 @@ pub trait Output<T: ConditionalSend>:
 }
 
 impl<S, T: ConditionalSend> Output<T> for S where
-    S: Stream<Item = Result<T, EvaluationError>> + 'static + ConditionalSend
+    S: Stream<Item = Result<T, EvaluationError>> + ConditionalSend
 {
 }

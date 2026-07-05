@@ -1,26 +1,33 @@
 /// Adornment types for parameter binding pattern caching.
 pub mod adornment;
+/// Shared, branch-owned plan cache keyed by (rule identity, adornment).
+mod plan_cache;
 /// Per-concept rule management with adornment-keyed plan caching.
 pub mod rules;
 
+pub use plan_cache::PlanCache;
 pub use rules::ConceptRules;
 
 use std::fmt;
 
-use crate::attribute::AttributeDescriptor;
-use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::Disjunction;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
+use crate::source::SelectRules;
 use crate::{
-    Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Source, Term, try_stream,
+    Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
 };
+use dialog_artifacts::Select;
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
-/// Extract a Match with parameter names from a Match with user variable names
-///
-/// This maps values from user-specified variable names to internal parameter names
-/// for scoped evaluation. All factors are copied with their original provenance.
+/// Extract a Match with parameter names from a Match with user
+/// variable names. Maps values from user-specified variable names
+/// to internal parameter names for scoped evaluation. Both Present
+/// and Absent bindings are propagated.
 fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, EvaluationError> {
     let mut matched = Match::new();
 
@@ -28,8 +35,21 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
         match user_param {
             Term::Variable { name: Some(_), .. } => {
                 let param = Term::var(param_name);
-                if let Ok(value) = source.lookup(user_param) {
-                    matched.bind(&param, value)?;
+                match source.lookup(user_param) {
+                    Ok(Binding::Present(value)) => {
+                        matched.bind(&param, value)?;
+                    }
+                    Ok(Binding::Absent) => {
+                        matched.bind_absent(&param)?;
+                    }
+                    // Unbound is expected here: the user supplied a
+                    // placeholder term (e.g. `Term::var("alice")` in
+                    // `Query<Person> { this: ..., ... }`) that the
+                    // concept query is about to bind. Skip it:
+                    // downstream evaluation fills it in. Propagate
+                    // any other error.
+                    Err(EvaluationError::UnboundVariable { .. }) => {}
+                    Err(e) => return Err(e),
                 }
             }
             Term::Constant(value) => {
@@ -43,10 +63,9 @@ fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, Evalu
     Ok(matched)
 }
 
-/// Merge a Match with parameter names back into a Match with user variable names
-///
-/// This maps values from internal parameter names back to user-specified variable names
-/// after evaluation. All factors are copied with their original provenance.
+/// Merge a Match with parameter names back into a Match with user
+/// variable names after evaluation. Both Present and Absent
+/// bindings are propagated.
 fn merge_parameters(
     base: &Match,
     result: &Match,
@@ -60,8 +79,19 @@ fn merge_parameters(
         }
 
         let param = Term::var(param_name);
-        if let Ok(value) = result.lookup(&param) {
-            merged.bind(user_param, value)?;
+        match result.lookup(&param) {
+            Ok(Binding::Present(value)) => {
+                merged.bind(user_param, value)?;
+            }
+            Ok(Binding::Absent) => {
+                merged.bind_absent(user_param)?;
+            }
+            // Unbound is expected: not every parameter survives the
+            // concept evaluation (e.g. a blank slot the rule never
+            // touched). Skip and let the user variable stay
+            // un-extended. Propagate any other error.
+            Err(EvaluationError::UnboundVariable { .. }) => {}
+            Err(e) => return Err(e),
         }
     }
 
@@ -70,12 +100,17 @@ fn merge_parameters(
 
 /// Represents an application of a concept with specific term bindings.
 /// This is used when querying for entities that match a concept pattern.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serializes as the formal notation:
+/// `{ "assert": <ConceptDescriptor>, "where": <Parameters> }`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConceptQuery {
-    /// The term bindings for this concept application.
-    pub terms: Parameters,
     /// The concept predicate being applied.
+    #[serde(rename = "assert")]
     pub predicate: ConceptDescriptor,
+    /// The term bindings for this concept application.
+    #[serde(rename = "where")]
+    pub terms: Parameters,
 }
 
 impl ConceptQuery {
@@ -119,10 +154,10 @@ impl ConceptQuery {
             Some(total)
         } else {
             // Entity is not bound - categorize attributes to find best execution strategy
-            let mut bound_one: Option<&AttributeDescriptor> = None;
-            let mut bound_many: Option<&AttributeDescriptor> = None;
-            let mut unbound_one: Option<&AttributeDescriptor> = None;
-            let mut unbound_many: Option<&AttributeDescriptor> = None;
+            let mut bound_one: Option<&ConceptFieldDescriptor> = None;
+            let mut bound_many: Option<&ConceptFieldDescriptor> = None;
+            let mut unbound_one: Option<&ConceptFieldDescriptor> = None;
+            let mut unbound_many: Option<&ConceptFieldDescriptor> = None;
 
             for (name, attribute) in self.predicate.with().iter() {
                 if let Some(param) = self.terms.get(name) {
@@ -221,9 +256,15 @@ impl ConceptQuery {
     /// key insight from magic set optimization applied locally: the adornment
     /// is computed at the point of use from what's actually bound, rather
     /// than carried globally through every evaluation step.
-    pub fn evaluate<S: Source, M: Selection>(self, selection: M, source: &S) -> impl Selection {
+    pub fn evaluate<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        env: &'a Env,
+    ) -> impl Selection + 'a
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
         let app = self;
-        let source = source.clone();
 
         try_stream! {
             let mut plan = None;
@@ -235,7 +276,7 @@ impl ConceptQuery {
                 // plan. All matches in the selection share the same binding pattern
                 // (same variables bound), only the values differ.
                 if plan.is_none() {
-                    let rules = source.acquire(&app.predicate)?;
+                    let rules = Provider::<SelectRules>::execute(env, app.predicate.clone()).await?;
                     plan = Some(rules.plan(&app.terms, &input));
                 }
                 let plan = plan.as_ref().unwrap();
@@ -248,7 +289,7 @@ impl ConceptQuery {
 
                 // Merge results back, mapping parameter names → user variable names
                 // All factors are copied with their original provenance
-                for await result in Disjunction::clone(plan).evaluate(seed, &source) {
+                for await result in Disjunction::clone(plan).evaluate(seed, env) {
                     let result_match = result?;
                     let merged = merge_parameters(&input, &result_match, &app.terms)
                         .map_err(|e| EvaluationError::Store(e.to_string()))?;
@@ -272,15 +313,27 @@ impl Display for ConceptQuery {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
+    use crate::Binding;
     use crate::attribute::query::AttributeQuery;
     use crate::concept::descriptor::ConceptDescriptor;
+    use crate::error::{AnalyzerError, TypeError};
     use crate::the;
+    use crate::types::Any;
+    use std::collections::{BTreeSet, HashSet};
 
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
     use crate::{
         AttributeDescriptor, Cardinality, DeductiveRule, Negation, Parameters, Premise,
-        Proposition, Session, Term, Type, Value,
+        Proposition, Query, Term, Type, Value,
     };
+    use dialog_artifacts::Entity;
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use futures_util::TryStreamExt;
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
     // with deeply nested async streams. The functionality is tested indirectly through integration
@@ -288,32 +341,31 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_concept_query() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
-
-        // Create a store and session
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = session.edit();
-            tx.assert(
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            session.commit(tx).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
         // Create a person concept
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -332,7 +384,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("person"));
@@ -345,10 +398,9 @@ mod tests {
         };
 
         // Execute the query
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            application.evaluate(Match::new().seed(), &session),
-        )
-        .await?;
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(application.evaluate(Match::new().seed(), &source))
+                .await?;
 
         // Should find both Alice and Bob with their name and age
         assert_eq!(selection.len(), 2, "Should find 2 people");
@@ -360,8 +412,8 @@ mod tests {
         let mut found_bob = false;
 
         for match_result in selection.iter() {
-            let name = match_result.lookup(&name_param)?;
-            let age = match_result.lookup(&age_param)?;
+            let name = match_result.lookup(&name_param)?.content()?;
+            let age = match_result.lookup(&age_param)?.content()?;
 
             match name {
                 Value::String(n) if n == "Alice" => {
@@ -382,31 +434,344 @@ mod tests {
         Ok(())
     }
 
+    /// End-to-end: a concept with a `maybe` attribute returns
+    /// rows for entities that lack the optional fact, with the
+    /// optional slot bound to `Binding::Absent`. Entities that
+    /// have the fact get `Binding::Present(value)` for the slot.
+    /// This is the v2 set-widening behavior at the concept
+    /// projection layer, realized by the `OptionalAttributeQuery` left-join the
+    /// concept lowering emits for `maybe` fields.
     #[dialog_common::test]
-    async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
-
-        // Create a store and session
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+    async fn it_executes_concept_with_optional_field() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
+        let bob = Entity::new()?;
 
-        {
-            let mut tx = session.edit();
-            tx.assert(
+        // Alice has both name and nickname; Bob has only name.
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(the!("person/age").of(alice.clone()).is(25u32));
-            session.commit(tx).await?;
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+        ])
+        .unwrap();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("nickname".to_string(), Term::var("nickname"));
+
+        let application = ConceptQuery {
+            terms,
+            predicate: concept,
+        };
+
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(application.evaluate(Match::new().seed(), &source))
+                .await?;
+
+        assert_eq!(
+            selection.len(),
+            2,
+            "Should find 2 people (both Alice and Bob)"
+        );
+
+        let nickname_param = Term::var("nickname");
+        let name_param = Term::var("name");
+
+        let mut found_alice_with_nickname = false;
+        let mut found_bob_without_nickname = false;
+        for match_result in selection.iter() {
+            let name = match_result.lookup(&name_param)?.content()?;
+            let nickname = match_result.lookup(&nickname_param)?;
+            match (&name, nickname) {
+                (Value::String(n), Binding::Present(Value::String(nick)))
+                    if n == "Alice" && nick == "Ali" =>
+                {
+                    found_alice_with_nickname = true;
+                }
+                (Value::String(n), Binding::Absent) if n == "Bob" => {
+                    found_bob_without_nickname = true;
+                }
+                _ => panic!(
+                    "unexpected (name, nickname): ({:?}, {:?})",
+                    name,
+                    match_result.lookup(&nickname_param)
+                ),
+            }
+        }
+        assert!(
+            found_alice_with_nickname,
+            "Alice should have nickname Present"
+        );
+        assert!(
+            found_bob_without_nickname,
+            "Bob should have nickname Absent"
+        );
+
+        Ok(())
+    }
+
+    /// Regression (PR #348): a `this`-unbound concept query whose
+    /// alphabetically-first field is *optional* must still set-widen
+    /// it, not drop entities that lack the optional fact. `bio`
+    /// (optional) sorts before `name` (required); Alice has only
+    /// `name`, Bob has both. Both must be returned (Alice's `bio`
+    /// Absent, Bob's Present).
+    ///
+    /// Fixed by making an optional attribute *require* its entity
+    /// (`of`) bound rather than letting the choice group bind it: an
+    /// unbound-entity optional scan suppresses its `Absent` fallback,
+    /// so it must never lead an unbound scan. Feasibility now forces a
+    /// required premise (`name`) to bind `this` first; the optional
+    /// `bio` then runs with `this` known and set-widens correctly.
+    #[dialog_common::test]
+    async fn it_set_widens_optional_field_sorted_before_required() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        // Alice has only name; Bob has both name and bio.
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .assert(the!("person/bio").of(bob.clone()).is("Hi".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        // `bio` (optional) sorts before `name` (required).
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "bio".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/bio"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+        ])
+        .unwrap();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::var("person"));
+        terms.insert("name".to_string(), Term::var("name"));
+        terms.insert("bio".to_string(), Term::var("bio"));
+
+        let application = ConceptQuery {
+            terms,
+            predicate: concept,
+        };
+
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(application.evaluate(Match::new().seed(), &source))
+                .await?;
+
+        assert_eq!(
+            selection.len(),
+            2,
+            "Should find 2 people (both Alice and Bob), even though the \
+             optional `bio` field sorts before the required `name`"
+        );
+
+        let name_param = Term::var("name");
+        let bio_param = Term::var("bio");
+
+        let mut found_alice_without_bio = false;
+        let mut found_bob_with_bio = false;
+        for match_result in selection.iter() {
+            let name = match_result.lookup(&name_param)?.content()?;
+            let bio = match_result.lookup(&bio_param)?;
+            match (&name, bio) {
+                (Value::String(n), Binding::Absent) if n == "Alice" => {
+                    found_alice_without_bio = true;
+                }
+                (Value::String(n), Binding::Present(Value::String(b)))
+                    if n == "Bob" && b == "Hi" =>
+                {
+                    found_bob_with_bio = true;
+                }
+                _ => panic!(
+                    "unexpected (name, bio): ({:?}, {:?})",
+                    name,
+                    match_result.lookup(&bio_param)
+                ),
+            }
+        }
+        assert!(found_alice_without_bio, "Alice should have bio Absent");
+        assert!(found_bob_with_bio, "Bob should have bio Present");
+
+        Ok(())
+    }
+
+    /// End-to-end: a `#[derive(Concept)]` struct with an `Option<T>`
+    /// field round-trips through the full query pipeline. Alice has
+    /// both `name` and `nickname`; Bob has only `name`. The macro
+    /// emits `Term<Option<String>>` for the `nickname` field; at
+    /// realize time, Alice's nickname appears as `Some(_)` and Bob's
+    /// as `None`.
+    #[dialog_common::test]
+    async fn it_executes_macro_concept_with_optional_field() -> anyhow::Result<()> {
+        mod employee {
+            use crate::Attribute;
+
+            /// Employee given name
+            #[derive(Attribute, Clone, PartialEq)]
+            #[domain("person")]
+            pub struct Name(pub String);
+
+            /// Employee preferred nickname
+            #[derive(Attribute, Clone, PartialEq)]
+            #[domain("person")]
+            pub struct Nickname(pub String);
         }
 
+        /// Employee with required name and optional nickname.
+        #[derive(crate::Concept, Debug, Clone)]
+        pub struct Employee {
+            /// Employee entity
+            pub this: Entity,
+            /// Required given name
+            pub name: employee::Name,
+            /// Optional nickname
+            pub nickname: Option<employee::Nickname>,
+        }
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/nickname")
+                    .of(alice.clone())
+                    .is("Ali".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let query = Query::<Employee>::default();
+        let employees: Vec<Employee> = query.perform(&source).try_collect().await?;
+
+        assert_eq!(employees.len(), 2);
+
+        let mut found_alice = false;
+        let mut found_bob = false;
+        for emp in employees {
+            match emp.name.0.as_str() {
+                "Alice" => {
+                    assert_eq!(
+                        emp.nickname.as_ref().map(|n| n.0.as_str()),
+                        Some("Ali"),
+                        "Alice should have nickname Some(Ali)"
+                    );
+                    found_alice = true;
+                }
+                "Bob" => {
+                    assert!(emp.nickname.is_none(), "Bob should have nickname None");
+                    found_bob = true;
+                }
+                other => panic!("Unexpected name: {other}"),
+            }
+        }
+        assert!(found_alice && found_bob);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/age").of(alice.clone()).is(25u32))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
         // Create a person concept
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -425,7 +790,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::var("person"));
@@ -444,7 +810,7 @@ mod tests {
 
         // Execute with bound entity via match
         application
-            .evaluate(input.seed(), &session)
+            .evaluate(input.seed(), &source)
             .try_vec()
             .await?;
 
@@ -453,7 +819,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_operates_on_concept_conclusion() {
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -472,7 +838,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // Test that attributes are present
         let param_names: Vec<&str> = concept.with().keys().collect();
@@ -484,7 +851,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_creates_concept_descriptor() {
-        let concept = ConceptDescriptor::from(vec![(
+        let concept = ConceptDescriptor::try_from(vec![(
             "name".to_string(),
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -492,7 +859,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         // Operator is now a computed URI
         assert!(
@@ -505,7 +873,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_analyzes_concept_application() {
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name".to_string(),
                 AttributeDescriptor::new(
@@ -524,7 +892,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("name".to_string(), Term::var("person_name"));
@@ -548,9 +917,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_extracts_deductive_rule_parameters() {
-        use std::collections::HashSet;
-
-        let predicate = ConceptDescriptor::from([
+        let predicate = ConceptDescriptor::try_from([
             (
                 "name".to_string(),
                 AttributeDescriptor::new(
@@ -569,7 +936,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
         let rule = DeductiveRule::from(&predicate);
 
         let params: HashSet<&str> = rule.parameters().collect();
@@ -601,17 +969,16 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_expected_error_types() {
-        use crate::error::{AnalyzerError, TypeError};
-
         // Test AnalyzerError creation
-        let predicate = ConceptDescriptor::from(vec![(
+        let predicate = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(the!("test/name"), "", Cardinality::One, Some(Type::String)),
-        )]);
+        )])
+        .unwrap();
         let rule = DeductiveRule::from(&predicate);
 
         let analyzer_error = AnalyzerError::UnusedParameter {
-            rule: rule.clone(),
+            rule: Box::new(rule.clone().into()),
             parameter: "test_param".to_string(),
         };
 
@@ -654,7 +1021,7 @@ mod tests {
         terms.insert("test".to_string(), Term::var("test_var"));
         let concept_app = Proposition::Concept(ConceptQuery {
             terms,
-            predicate: ConceptDescriptor::from([(
+            predicate: ConceptDescriptor::try_from([(
                 "name",
                 AttributeDescriptor::new(
                     the!("test/name"),
@@ -662,7 +1029,8 @@ mod tests {
                     Cardinality::One,
                     Some(Type::String),
                 ),
-            )]),
+            )])
+            .unwrap(),
         });
 
         match concept_app {
@@ -696,26 +1064,26 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_constant_entity_parameter() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
-
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        session
-            .transact(vec![
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-                the!("person/name").of(bob.clone()).is("Bob".to_string()),
-            ])
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
             .await?;
 
-        let concept = ConceptDescriptor::from(vec![(
+        let concept = ConceptDescriptor::try_from(vec![(
             "name",
             AttributeDescriptor::new(
                 the!("person/name"),
@@ -723,7 +1091,8 @@ mod tests {
                 Cardinality::One,
                 Some(Type::String),
             ),
-        )]);
+        )])
+        .unwrap();
 
         // Query with constant entity - should only return Alice
         let mut terms = Parameters::new();
@@ -733,14 +1102,13 @@ mod tests {
         );
         terms.insert("name".to_string(), Term::var("name"));
 
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let app = ConceptQuery {
             terms,
             predicate: concept,
         };
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Match::new().seed(), &session),
-        )
-        .await?;
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(app.evaluate(Match::new().seed(), &source)).await?;
 
         assert_eq!(
             selection.len(),
@@ -748,7 +1116,7 @@ mod tests {
             "Should find only Alice, not both people"
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("name"))?,
+            selection[0].lookup(&Term::var("name"))?.content()?,
             Value::String("Alice".to_string())
         );
 
@@ -757,30 +1125,28 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_constant_attribute_parameter() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
-
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = session.edit();
-            tx.assert(
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            session.commit(tx).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
 
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -799,7 +1165,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // Query with constant name value - should only return Bob
         let mut terms = Parameters::new();
@@ -807,22 +1174,21 @@ mod tests {
         terms.insert("name".to_string(), Term::constant("Bob".to_string()));
         terms.insert("age".to_string(), Term::var("age"));
 
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let app = ConceptQuery {
             terms,
             predicate: concept,
         };
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Match::new().seed(), &session),
-        )
-        .await?;
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(app.evaluate(Match::new().seed(), &source)).await?;
 
         assert_eq!(selection.len(), 1, "Should find only Bob");
         assert_eq!(
-            selection[0].lookup(&Term::var("entity"))?,
+            selection[0].lookup(&Term::var("entity"))?.content()?,
             Value::Entity(bob.clone())
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("age"))?,
+            selection[0].lookup(&Term::var("age"))?.content()?,
             Value::UnsignedInt(30)
         );
 
@@ -831,30 +1197,28 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_multiple_constant_parameters() -> anyhow::Result<()> {
-        use dialog_artifacts::{Artifacts, Entity};
-        use dialog_storage::MemoryStorageBackend;
-
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
-        let mut session = Session::open(store);
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        {
-            let mut tx = session.edit();
-            tx.assert(
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
             .assert(the!("person/age").of(alice.clone()).is(25u32))
             .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
-            .assert(the!("person/age").of(bob.clone()).is(30u32));
-            session.commit(tx).await?;
-        }
+            .assert(the!("person/age").of(bob.clone()).is(30u32))
+            .commit()
+            .perform(&operator)
+            .await?;
 
-        let concept = ConceptDescriptor::from(vec![
+        let concept = ConceptDescriptor::try_from(vec![
             (
                 "name",
                 AttributeDescriptor::new(
@@ -873,7 +1237,8 @@ mod tests {
                     Some(Type::UnsignedInt),
                 ),
             ),
-        ]);
+        ])
+        .unwrap();
 
         // Query with both name and age constants - should only match Alice
         let mut terms = Parameters::new();
@@ -881,14 +1246,13 @@ mod tests {
         terms.insert("name".to_string(), Term::constant("Alice".to_string()));
         terms.insert("age".to_string(), Term::constant(25u32));
 
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let app = ConceptQuery {
             terms,
             predicate: concept,
         };
-        let selection = futures_util::TryStreamExt::try_collect::<Vec<_>>(
-            app.evaluate(Match::new().seed(), &session),
-        )
-        .await?;
+        let selection =
+            TryStreamExt::try_collect::<Vec<_>>(app.evaluate(Match::new().seed(), &source)).await?;
 
         assert_eq!(
             selection.len(),
@@ -896,10 +1260,140 @@ mod tests {
             "Should find only Alice with exact name and age match"
         );
         assert_eq!(
-            selection[0].lookup(&Term::var("entity"))?,
+            selection[0].lookup(&Term::var("entity"))?.content()?,
             Value::Entity(alice.clone())
         );
 
         Ok(())
+    }
+
+    /// Build a representative two-attribute Person concept query with mixed
+    /// variable / constant bindings for the serde round-trip tests.
+    fn sample_concept_query() -> ConceptQuery {
+        let predicate = ConceptDescriptor::try_from(vec![
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            ),
+        ])
+        .unwrap();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::<Any>::var("entity"));
+        terms.insert("name".into(), Term::Constant(Value::String("Alice".into())));
+        terms.insert("age".into(), Term::<Any>::var("age"));
+
+        ConceptQuery { predicate, terms }
+    }
+
+    #[dialog_common::test]
+    fn it_serializes_concept_query_in_formal_notation_shape() {
+        let cq = sample_concept_query();
+        let value: serde_json::Value = serde_json::to_value(&cq).expect("serialize");
+
+        let obj = value.as_object().expect("object");
+        assert_eq!(
+            obj.keys().collect::<BTreeSet<_>>(),
+            ["assert".to_string(), "where".to_string()]
+                .iter()
+                .collect::<BTreeSet<_>>(),
+            "ConceptQuery must serialize as {{assert, where}}"
+        );
+
+        assert!(
+            value["assert"].is_object(),
+            "`assert` must hold the concept descriptor"
+        );
+        assert!(
+            value["where"].is_object(),
+            "`where` must hold the parameter map"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_round_trips_concept_query_through_json() {
+        let cq = sample_concept_query();
+
+        let json = serde_json::to_string(&cq).expect("serialize");
+        let restored: ConceptQuery = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(
+            restored.predicate.this(),
+            cq.predicate.this(),
+            "predicate content hash must survive round-trip"
+        );
+
+        let original_keys: BTreeSet<&String> = cq.terms.keys().collect();
+        let restored_keys: BTreeSet<&String> = restored.terms.keys().collect();
+        assert_eq!(
+            original_keys, restored_keys,
+            "parameter names must survive round-trip"
+        );
+
+        for (name, original_term) in cq.terms.iter() {
+            assert_eq!(
+                restored.terms.get(name),
+                Some(original_term),
+                "binding for `{name}` must survive round-trip"
+            );
+        }
+    }
+
+    #[dialog_common::test]
+    fn it_matches_proposition_concept_serialization() {
+        let cq = sample_concept_query();
+        let prop: Proposition = cq.clone().into();
+
+        let cq_json = serde_json::to_value(&cq).expect("serialize");
+        let prop_json = serde_json::to_value(&prop).expect("serialize");
+
+        assert_eq!(
+            cq_json, prop_json,
+            "ConceptQuery and Proposition::Concept must produce identical JSON"
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_validates_concept_query_deserialization() {
+        let only_assert = serde_json::json!({ "assert": { "with": {
+            "name": { "the": "person/name", "as": "Text" }
+        }}});
+        assert!(
+            serde_json::from_value::<ConceptQuery>(only_assert).is_err(),
+            "missing `where` must fail to deserialize"
+        );
+
+        let only_where = serde_json::json!({ "where": {} });
+        assert!(
+            serde_json::from_value::<ConceptQuery>(only_where).is_err(),
+            "missing `assert` must fail to deserialize"
+        );
+
+        // Unknown fields are ignored, consistent with other formal-notation
+        // types in this crate. This keeps wire-format readers tolerant of
+        // forward-compatible additions.
+        let extra_field = serde_json::json!({
+            "assert": { "with": { "name": { "the": "person/name", "as": "Text" } } },
+            "where": {},
+            "stranger": true,
+        });
+        assert!(
+            serde_json::from_value::<ConceptQuery>(extra_field).is_ok(),
+            "unknown fields must be ignored on deserialize"
+        );
     }
 }

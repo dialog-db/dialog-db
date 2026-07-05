@@ -2,10 +2,17 @@
 //!
 //! This module provides a schema system that describes the structure,
 //! types, and requirements of parameters for different premise types.
+//!
+//! As of v2, [`Field::content_type`] uses the unified
+//! [`type_system::Type`] enum rather than the legacy
+//! `Option<artifact::Type>`. The conversion between them is
+//! lossless: `None` becomes a fresh anonymous type variable,
+//! `Some(vt)` becomes `Type::Primitive(singleton(vt))`.
 
-use crate::Type;
+use crate::type_system;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Describes the parameter signature of a premise.
 ///
@@ -41,6 +48,11 @@ impl Schema {
     /// Returns a reference to the field with the given name, if present.
     pub fn get(&self, name: &str) -> Option<&Field> {
         self.fields.get(name)
+    }
+
+    /// Returns a mutable reference to the field with the given name, if present.
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Field> {
+        self.fields.get_mut(name)
     }
 
     /// Returns an iterator over all `(name, field)` pairs.
@@ -122,35 +134,35 @@ impl Cardinality {
     /// - 0 known: Unbound (should be rejected)
     pub fn estimate(&self, the: bool, of: bool, is: bool) -> Option<usize> {
         match (the, of, is, self) {
-            // {the, of, is} — EAV full prefix
+            // {the, of, is}: EAV full prefix
             (true, true, true, Cardinality::One) => Some(LOOKUP_COST),
             (true, true, true, Cardinality::Many) => Some(LOOKUP_COST),
 
-            // {of, the} — EAV prefix (entity + attribute)
+            // {of, the}: EAV prefix (entity + attribute)
             (true, true, false, Cardinality::One) => Some(LOOKUP_COST),
             (true, true, false, Cardinality::Many) => Some(RANGE_READ_COST),
 
-            // {the, is} — VAE prefix (value + attribute, no entity → verification)
+            // {the, is}: VAE prefix (value + attribute, no entity → verification)
             (true, false, true, Cardinality::One) => Some(RANGE_READ_COST + VERIFICATION_COST),
             (true, false, true, Cardinality::Many) => Some(RANGE_READ_COST),
 
-            // {of, is} — EAV scan (entity known, value constraint post-filtered)
+            // {of, is}: EAV scan (entity known, value constraint post-filtered)
             (false, true, true, Cardinality::One) => Some(RANGE_READ_COST),
             (false, true, true, Cardinality::Many) => Some(RANGE_SCAN_COST),
 
-            // {of} — EAV prefix (entity only)
+            // {of}: EAV prefix (entity only)
             (false, true, false, Cardinality::One) => Some(RANGE_READ_COST),
             (false, true, false, Cardinality::Many) => Some(RANGE_SCAN_COST),
 
-            // {the} — AEV prefix (attribute only, entity unknown → needs verification)
+            // {the}: AEV prefix (attribute only, entity unknown → needs verification)
             (true, false, false, Cardinality::One) => Some(RANGE_SCAN_COST + VERIFICATION_COST),
             (true, false, false, Cardinality::Many) => Some(INDEX_SCAN_COST),
 
-            // {is} — VAE prefix (value only)
+            // {is}: VAE prefix (value only)
             (false, false, true, Cardinality::One) => Some(INDEX_SCAN_COST + VERIFICATION_COST),
             (false, false, true, Cardinality::Many) => Some(INDEX_SCAN_COST),
 
-            // No constraints — unbound
+            // No constraints: unbound
             (false, false, false, _) => None,
         }
     }
@@ -158,16 +170,16 @@ impl Cardinality {
 
 /// Metadata for a single named parameter in a [`Schema`].
 ///
-/// Captures the parameter's expected value type, whether it accepts one or
-/// many values ([`Cardinality`]), and whether it must be bound before the
-/// premise can execute ([`Requirement`]). The planner reads these fields
-/// to classify each parameter as a prerequisite or a produced binding.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `content_type` is the unified
+/// [`type_system::Type`], wrapped in `Option` so that "no static
+/// info known" is representable directly (the unifier resolves
+/// it at rule-compile time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Field {
     /// Human-readable description of the field.
     pub description: String,
-    /// Expected value type, or `None` if unconstrained.
-    pub content_type: Option<Type>,
+    /// Expected value type, or `None` if unknown.
+    pub content_type: Option<type_system::Type>,
     /// Whether the field is required or optional.
     pub requirement: Requirement,
     /// Whether the field holds one or many values.
@@ -177,7 +189,11 @@ pub struct Field {
 impl Field {
     /// Creates a new field with the given description, type, and requirement.
     /// Cardinality defaults to [`Cardinality::One`].
-    pub fn new(description: String, content_type: Option<Type>, requirement: Requirement) -> Self {
+    pub fn new(
+        description: String,
+        content_type: Option<type_system::Type>,
+        requirement: Requirement,
+    ) -> Self {
         Self {
             description,
             content_type,
@@ -191,9 +207,9 @@ impl Field {
         &self.description
     }
 
-    /// Returns the expected content type, if any.
-    pub fn content_type(&self) -> Option<Type> {
-        self.content_type
+    /// Returns the expected content type, if known.
+    pub fn content_type(&self) -> Option<&type_system::Type> {
+        self.content_type.as_ref()
     }
 
     /// Returns the field's requirement level.
@@ -212,7 +228,7 @@ impl Field {
 /// The planner uses this to partition a premise's parameters into
 /// prerequisites (must be bound) and
 /// bindings the premise will produce. Parameters in the same [`Group`] form
-/// a *choice group* — if any member of the group is bound, the entire group
+/// a *choice group*: if any member of the group is bound, the entire group
 /// is satisfied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Requirement {
@@ -273,7 +289,6 @@ impl Default for Group {
 impl Group {
     /// Creates a new group with a unique auto-incremented identifier.
     pub fn new() -> Self {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         Group(id)
@@ -293,6 +308,8 @@ impl Group {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::Type as ValueType;
+    use crate::type_system::Type as Kind;
 
     #[dialog_common::test]
     fn it_tracks_requirement_properties() {
@@ -301,5 +318,27 @@ mod tests {
 
         assert!(required.is_required());
         assert!(!derived.is_required());
+    }
+
+    /// `Field::new` accepts the unified type directly.
+    #[dialog_common::test]
+    fn field_new_accepts_unified_type() {
+        let f = Field::new(
+            "test".into(),
+            Some(Kind::from(ValueType::Boolean)),
+            Requirement::Required(None),
+        );
+        assert_eq!(
+            f.content_type().unwrap().as_value_type(),
+            Some(ValueType::Boolean)
+        );
+        assert!(matches!(f.requirement(), Requirement::Required(_)));
+    }
+
+    /// A field with no static info reports `None`.
+    #[dialog_common::test]
+    fn field_unknown_type_reports_none() {
+        let f = Field::new("x".into(), None, Requirement::Optional);
+        assert!(f.content_type().is_none());
     }
 }

@@ -5,18 +5,23 @@ use crate::attribute::statement::AttributeStatement;
 use crate::negation::Negation;
 use crate::query::Output;
 use crate::schema::Cardinality;
+use crate::source::SelectRules;
 use crate::statement::Statement;
 use crate::term::Term;
 use crate::types::{Scalar, Typed};
-use crate::{Claim, Premise, Proposition, Source, Transaction};
+use crate::{Claim, Premise, Proposition};
+use dialog_artifacts::Select;
+use dialog_artifacts::Update;
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 use std::ops::Not;
 
 /// Converts a value into a [`Term`], resolving the type unambiguously
 /// from the input.
 ///
 /// Implemented for:
-/// - Concrete scalar values (`String`, `u32`, etc.) — produces a constant term.
-/// - [`Term<T>`] variables — passes through unchanged.
+/// - Concrete scalar values (`String`, `u32`, etc.): produces a constant term.
+/// - [`Term<T>`] variables: passes through unchanged.
 pub trait IntoTerm {
     /// The scalar type this value represents.
     type Type: Typed;
@@ -69,11 +74,11 @@ impl<T, Of> DynamicAttributeExpressionBuilder<T, Of> {
 /// A dynamic attribute expression binding an attribute name to an entity
 /// and a value.
 ///
-/// All three positions use deferred conversion — raw values are stored
+/// All three positions use deferred conversion: raw values are stored
 /// as-is and converted only when needed for queries or statements.
 ///
 /// - [`Statement`] requires `Relation = The`, `Of = Entity`, `Is: Scalar`
-///   — all concrete positions.
+///   (all concrete positions).
 /// - [`From<...> for Premise`] requires each position to convert into
 ///   the corresponding [`Term`].
 #[derive(Clone, Debug)]
@@ -136,31 +141,34 @@ where
     Is::Type: Scalar,
 {
     /// Execute this expression as a query, returning a stream of claims.
-    pub fn perform<S: Source>(self, source: &S) -> impl Output<Claim> {
+    pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Claim> + 'a
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
         let query: AttributeQuery = self.into();
-        query.perform(source)
+        query.perform(env)
     }
 }
 
 // Statement: requires all three positions to be concrete.
 impl<Is: Scalar> Statement for DynamicAttributeExpression<The, Entity, Is> {
-    fn assert(self, transaction: &mut Transaction) {
+    fn assert(self, update: &mut impl Update) {
         let the = self.the;
         let value: Value = self.is.into();
         match self.cardinality {
             Some(Cardinality::One) => {
-                transaction.associate_unique(the, self.of, value);
+                update.associate_unique(the.into(), self.of, value);
             }
             _ => {
-                transaction.associate(the, self.of, value);
+                update.associate(the.into(), self.of, value);
             }
         }
     }
 
-    fn retract(self, transaction: &mut Transaction) {
+    fn retract(self, update: &mut impl Update) {
         let the = self.the;
         let value: Value = self.is.into();
-        transaction.dissociate(the, self.of, value);
+        update.dissociate(the.into(), self.of, value);
     }
 }
 
@@ -215,18 +223,25 @@ impl<Is: Scalar> From<DynamicAttributeExpression<The, Entity, Is>> for Attribute
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
 
-    use crate::{Match, the};
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
+    use crate::{Changes, Environment, Match, Planner, the};
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use futures_util::TryStreamExt;
 
     #[dialog_common::test]
     fn it_asserts_with_string() {
         let alice = Entity::new().unwrap();
         let statement = the!("person/name").of(alice).is("Alice".to_string());
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -234,9 +249,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = the!("person/age").of(alice).is(25u32);
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -244,9 +259,9 @@ mod tests {
         let alice = Entity::new().unwrap();
         let statement = the!("person/name").of(alice).is("Alice".to_string());
 
-        let mut transaction = Transaction::new();
-        statement.retract(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.retract(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
@@ -357,9 +372,9 @@ mod tests {
         let expr = the!("person/name")
             .of(alice.clone())
             .is("Alice".to_string());
-        let mut transaction = Transaction::new();
-        expr.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        expr.assert(&mut changes);
+        assert!(!changes.is_empty());
 
         let expression = the!("person/name").of(alice).is("Alice".to_string());
         let premise: Premise = expression.into();
@@ -402,46 +417,42 @@ mod tests {
             .is("Alice".to_string())
             .cardinality(Cardinality::One);
 
-        let mut transaction = Transaction::new();
-        statement.assert(&mut transaction);
-        assert!(!transaction.is_empty());
+        let mut changes = Changes::new();
+        statement.assert(&mut changes);
+        assert!(!changes.is_empty());
     }
 
     #[dialog_common::test]
     async fn it_roundtrips_assert_and_query() -> anyhow::Result<()> {
-        use crate::Session;
-        use crate::artifact::Artifacts;
-        use dialog_storage::MemoryStorageBackend;
-        use futures_util::TryStreamExt;
-
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
 
-        let mut session = Session::open(store.clone());
-        {
-            let mut tx = session.edit();
-            tx.assert(
+        branch
+            .transaction()
+            .assert(
                 the!("person/name")
                     .of(alice.clone())
                     .is("Alice".to_string()),
-            );
-            session.commit(tx).await?;
-        }
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
 
         let premise: Premise = the!("person/name")
             .of(alice.clone())
             .is(Term::<String>::var("name"))
             .into();
 
-        let prop = match premise {
-            Premise::Assert(prop) => prop,
-            _ => panic!("Expected Assert"),
-        };
+        let plan = Planner::from(vec![premise])
+            .plan(&Environment::new())
+            .expect("premise should plan");
 
-        let results = prop
-            .evaluate(Match::new().seed(), &Session::open(store.clone()))
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = plan
+            .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;
 
@@ -452,26 +463,22 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_finds_all_relations_between_entities() -> anyhow::Result<()> {
-        use crate::Session;
-        use crate::artifact::Artifacts;
-        use dialog_storage::MemoryStorageBackend;
-        use futures_util::TryStreamExt;
-
-        let backend = MemoryStorageBackend::default();
-        let store = Artifacts::anonymous(backend).await?;
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
         // Assert multiple relations between alice and bob
-        let mut session = Session::open(store.clone());
-        {
-            let mut tx = session.edit();
-            tx.assert(the!("team/colleague").of(alice.clone()).is(bob.clone()))
-                .assert(the!("team/manager").of(alice.clone()).is(bob.clone()))
-                .assert(the!("team/mentor").of(alice.clone()).is(bob.clone()));
-            session.commit(tx).await?;
-        }
+        branch
+            .transaction()
+            .assert(the!("team/colleague").of(alice.clone()).is(bob.clone()))
+            .assert(the!("team/manager").of(alice.clone()).is(bob.clone()))
+            .assert(the!("team/mentor").of(alice.clone()).is(bob.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
 
         // Use Term::<The>::var to find all relations between alice and bob
         let premise: Premise = Term::<The>::var("relation")
@@ -479,13 +486,13 @@ mod tests {
             .is(bob.clone())
             .into();
 
-        let prop = match premise {
-            Premise::Assert(prop) => prop,
-            _ => panic!("Expected Assert"),
-        };
+        let plan = Planner::from(vec![premise])
+            .plan(&Environment::new())
+            .expect("premise should plan");
 
-        let results = prop
-            .evaluate(Match::new().seed(), &Session::open(store.clone()))
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = plan
+            .evaluate(Match::new().seed(), &source)
             .try_collect::<Vec<_>>()
             .await?;
 

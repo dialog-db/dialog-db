@@ -1,0 +1,63 @@
+use crate::{Branch, LoadBranchError, OpenBranch};
+use dialog_capability::Provider;
+use dialog_effects::memory::Resolve;
+
+/// Command to load an existing branch, erroring if it has no revision yet.
+///
+/// Behaves like [`OpenBranch`] but errors if the branch has no
+/// revision published yet (i.e. has never been committed to).
+pub struct LoadBranch {
+    open: OpenBranch,
+}
+
+impl<T> From<T> for LoadBranch
+where
+    T: Into<OpenBranch>,
+{
+    fn from(value: T) -> Self {
+        Self { open: value.into() }
+    }
+}
+
+impl LoadBranch {
+    /// Execute the load operation.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Branch, LoadBranchError>
+    where
+        Env: Provider<Resolve>,
+    {
+        let branch = self.open.perform(env).await?;
+        if branch.revision().is_none() {
+            return Err(LoadBranchError::NotFound {
+                name: branch.name().to_string(),
+            });
+        }
+        Ok(branch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use anyhow::Result;
+    use dialog_capability::Subject;
+    use dialog_storage::provider::Volatile;
+    use dialog_varsig::did;
+
+    use crate::{LoadBranchError, RepositoryMemoryExt};
+
+    #[dialog_common::test]
+    async fn it_fails_loading_missing_branch() -> Result<()> {
+        let provider = Volatile::new();
+
+        let result = Subject::from(did!("key:zBranchLoadTest"))
+            .branch("nonexistent")
+            .load()
+            .perform(&provider)
+            .await;
+
+        assert!(matches!(result, Err(LoadBranchError::NotFound { .. })));
+        Ok(())
+    }
+}

@@ -4,9 +4,10 @@
 //! between artifacts, enabling proper versioning and update semantics in the
 //! triple store.
 
-use std::fmt::Display;
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 use base58::ToBase58;
+use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 
 use crate::{make_reference, reference_type};
@@ -19,7 +20,19 @@ use super::{Artifact, Blake3Hash, Value};
 /// version of the same [`Artifact`] (where same implies same [`Entity`] and
 /// same [`Attribute`]).
 #[repr(transparent)]
-#[derive(Clone, Debug, PartialEq, PartialOrd, Serialize, Deserialize, Eq, Hash)]
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+    Deserialize,
+    Eq,
+    Hash,
+    Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
 pub struct Cause(pub Blake3Hash);
 
 impl From<&Artifact> for Cause {
@@ -39,7 +52,7 @@ impl From<&Artifact> for Cause {
 }
 
 impl Display for Cause {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", self.0.to_base58())
     }
 }

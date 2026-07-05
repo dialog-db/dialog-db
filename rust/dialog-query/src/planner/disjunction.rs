@@ -1,8 +1,12 @@
 use core::pin::Pin;
 
 use crate::selection::Selection;
+use crate::source::SelectRules;
 use crate::stream::{fork_stream, stream_select};
-use crate::{Source, try_stream};
+use crate::try_stream;
+use dialog_artifacts::Select;
+use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 use futures_util::stream::empty;
 
 use super::Conjunction;
@@ -46,16 +50,19 @@ impl Disjunction {
     /// Returns `Pin<Box<...>>` because Disjunction is recursive — Or holds a
     /// `Box<Disjunction>` whose evaluate calls back into this method. Boxing
     /// keeps each alternative at pointer size on the stack.
-    pub fn evaluate<S: Source, M: Selection>(
+    pub fn evaluate<'a, Env, M: Selection + 'static>(
         self,
         selection: M,
-        source: &S,
-    ) -> Pin<Box<dyn Selection>> {
+        env: &'a Env,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
         match self {
             Self::Empty => Box::pin(empty()),
-            Self::Solo(join) => Box::pin(join.evaluate(selection, source)),
-            Self::Duet(left, right) => Self::merge(Self::Solo(left), right, selection, source),
-            Self::Or(left, right) => Self::merge(*left, right, selection, source),
+            Self::Solo(join) => Box::pin(join.evaluate(selection, env)),
+            Self::Duet(left, right) => Self::merge(Self::Solo(left), right, selection, env),
+            Self::Or(left, right) => Self::merge(*left, right, selection, env),
         }
     }
 }
@@ -69,18 +76,20 @@ impl FromIterator<Conjunction> for Disjunction {
 
 impl Disjunction {
     /// Disjunction the input stream and merge two alternative evaluations.
-    fn merge<S: Source, M: Selection>(
+    fn merge<'a, Env, M: Selection + 'static>(
         left: Disjunction,
         right: Conjunction,
         selection: M,
-        source: &S,
-    ) -> Pin<Box<dyn Selection>> {
-        let source = source.clone();
+        env: &'a Env,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
         Box::pin(try_stream! {
             let (left_input, right_input) = fork_stream(selection);
 
-            let left_output = left.evaluate(left_input, &source);
-            let right_output = right.evaluate(right_input, &source);
+            let left_output = left.evaluate(left_input, env);
+            let right_output = right.evaluate(right_input, env);
 
             tokio::pin!(left_output);
             tokio::pin!(right_output);

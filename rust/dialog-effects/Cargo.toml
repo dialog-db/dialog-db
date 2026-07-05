@@ -6,23 +6,23 @@ authors.workspace = true
 license.workspace = true
 
 [features]
-ucan = ["dep:ipld-core", "dep:dialog-ucan", "dialog-capability/ucan"]
+integration-tests = []
+web-integration-tests = []
 
 [dependencies]
 dialog-capability = { workspace = true }
+dialog-credentials = { workspace = true }
 dialog-common = { workspace = true }
-
 async-trait = { workspace = true }
+base58 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
 thiserror = { workspace = true }
 
-# Optional UCAN support
-ipld-core = { workspace = true, optional = true }
-dialog-ucan = { workspace = true, optional = true }
-
-[dev-dependencies]
-ipld-core = { workspace = true }
-
 [lints.rust]
 missing_docs = "warn"
+
+[dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
+serde_ipld_dagcbor = { workspace = true }
+wasm-bindgen-test = { workspace = true }

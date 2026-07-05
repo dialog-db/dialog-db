@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
+use crate::KeyType;
 use arrayref::array_ref;
-use dialog_prolly_tree::KeyType;
 use serde::{Deserialize, Serialize};
 
 use crate::{
