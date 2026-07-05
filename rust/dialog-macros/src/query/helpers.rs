@@ -154,6 +154,40 @@ pub fn parse_domain_attribute(attrs: &[Attribute]) -> Option<String> {
     None
 }
 
+/// Parse the `#[dialog(rename = "...")]` attribute.
+///
+/// Allows overriding the generated name for an attribute or concept field.
+///
+/// Supports:
+/// - `#[dialog(rename = "type")]` - rename to a specific string
+///
+/// Returns `Ok(Some(name))` if rename is specified, `Ok(None)` to use default.
+pub fn parse_dialog_rename_attribute(attrs: &[Attribute]) -> Result<Option<String>, syn::Error> {
+    for attr in attrs {
+        if attr.path().is_ident("dialog") {
+            let mut rename_value = None;
+
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename") {
+                    let value = meta.value()?;
+                    let lit: Lit = value.parse()?;
+                    if let Lit::Str(lit_str) = lit {
+                        rename_value = Some(lit_str.value());
+                        Ok(())
+                    } else {
+                        Err(meta.error("rename value must be a string literal"))
+                    }
+                } else {
+                    Err(meta.error("unknown dialog attribute parameter; expected `rename`"))
+                }
+            })?;
+
+            return Ok(rename_value);
+        }
+    }
+    Ok(None)
+}
+
 /// Parse the `#[cardinality(one)]` or `#[cardinality(many)]` attribute.
 /// Returns the appropriate Cardinality token stream, defaulting to `One`.
 pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> Result<TokenStream, syn::Error> {
