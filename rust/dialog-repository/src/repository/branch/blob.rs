@@ -243,17 +243,17 @@ impl ReadBlob<'_> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use crate::helpers::unique_name;
     use crate::RepositoryExt as _;
+    use crate::helpers::unique_name;
     use anyhow::Result;
     use dialog_capability::Subject;
-    use dialog_effects::blob::ByteRange;
+    use dialog_effects::blob::{BlobReader, ByteRange};
     use dialog_network::Network;
     use dialog_operator::Profile;
     use dialog_storage::provider::storage::Storage;
     use futures_util::stream;
 
-    async fn drain(mut reader: dialog_effects::blob::BlobReader) -> Vec<u8> {
+    async fn drain(mut reader: BlobReader) -> Vec<u8> {
         let mut out = Vec::new();
         while let Some(chunk) = reader.next().await.unwrap() {
             out.extend(chunk);
@@ -286,7 +286,7 @@ mod tests {
 
         let payload = b"the quick brown blob".to_vec();
         let hash = branch
-            .write_blob(stream::iter(vec![payload.clone()]))
+            .write_blob(stream::iter(vec![payload.clone()].into_iter().map(Ok)))
             .perform(&operator)
             .await?;
 
