@@ -1,6 +1,6 @@
 use crate::schema;
 use crate::{
-    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
+    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
 use dialog_artifacts::history::{Edition, TreeHistory, Version, extend_skips};
@@ -22,11 +22,29 @@ use futures_util::Stream;
 pub struct Commit<'a, Changes> {
     branch: &'a Branch,
     changes: Changes,
+    allow_empty: bool,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
     fn new(branch: &'a Branch, changes: Changes) -> Self {
-        Self { branch, changes }
+        Self {
+            branch,
+            changes,
+            allow_empty: false,
+        }
+    }
+
+    /// Mint a revision even when the change stream leaves the indexes
+    /// untouched (analogous to git's `--allow-empty`).
+    ///
+    /// By default such a commit is a no-op: the branch keeps its current
+    /// revision. With `allow_empty` the revision is minted anyway — its
+    /// DAG edge, skip links, and attribute claims land in the tree, so
+    /// the lineage advances even though the data did not. Useful for
+    /// marking a point in history or forcing a sync point.
+    pub fn allow_empty(mut self) -> Self {
+        self.allow_empty = true;
+        self
     }
 }
 
@@ -69,6 +87,7 @@ where
         // it — the caller refreshes and retries. See `Cell::checkpoint`.
         let head = branch.revision.checkpoint();
         let base_revision = branch.revision();
+        let base_version = branch.revision.edition().map(|edition| edition.version);
 
         // If the branch tracks a remote upstream, commits must be able
         // to read remote-only blocks on demand (pull only merges the
@@ -133,9 +152,31 @@ where
         // A batch that left the indexes untouched (e.g. a transaction
         // re-asserting metadata that is already in place) is a no-op:
         // keep the current revision rather than minting one that differs
-        // only by edition. Only a branch with no revision at all still
-        // publishes, to establish its genesis.
-        if !changed && let Some(base) = base_revision {
+        // only by edition (unless `allow_empty` asks for one). Only a
+        // branch with no revision at all still publishes, to establish
+        // its genesis.
+        //
+        // A no-op verdict is only true of the snapshot it was judged
+        // against, and this early return never reaches the publish CAS
+        // below — so re-read the head before reporting "nothing to do".
+        // If another writer advanced it, the same instructions may not be
+        // no-ops against the current head (a re-assertion of a value the
+        // head has since retracted, for example): fail with the same
+        // `VersionMismatch` any other stale write gets, so the caller
+        // refreshes and retries against the fresh snapshot.
+        if !changed
+            && !self.allow_empty
+            && let Some(base) = base_revision
+        {
+            branch.revision.resolve().perform(env).await?;
+            let actual = branch.revision.edition().map(|edition| edition.version);
+            if actual != base_version {
+                return Err(PublishError::VersionMismatch {
+                    expected: base_version,
+                    actual,
+                }
+                .into());
+            }
             return Ok(base);
         }
 
@@ -479,7 +520,27 @@ mod history_tests {
             .perform(&operator)
             .await?;
         assert_eq!(unchanged, first, "an empty commit mints no revision");
-        assert_eq!(branch.revision(), Some(first));
+        assert_eq!(branch.revision(), Some(first.clone()));
+
+        // `allow_empty` mints the revision anyway: the lineage advances —
+        // DAG edge and all — even though the data did not.
+        let empty = branch
+            .commit(stream::iter(Vec::<Instruction>::new()))
+            .allow_empty()
+            .perform(&operator)
+            .await?;
+        assert_eq!(empty.edition, first.edition.successor());
+        assert_eq!(branch.revision(), Some(empty.clone()));
+        assert_ne!(
+            empty.tree, first.tree,
+            "the empty revision's own records still land in the tree"
+        );
+
+        branch.refresh(&operator).await?;
+        let history = branch.history(&operator);
+        let edge = history.revision_at(&empty.version()).await?;
+        assert_eq!(edge.len(), 1);
+        assert!(edge[0].cause.contains(&first.version()));
 
         Ok(())
     }
@@ -491,16 +552,11 @@ mod history_tests {
     /// has retracted in the meantime — succeeding silently would lose
     /// the re-assertion.
     ///
-    /// KNOWN BUG: the no-op early return in `Commit::perform` skips the
-    /// head CAS entirely, so the staleness this test provokes goes
-    /// undetected and the re-assertion is lost. Candidate fix: before
-    /// returning the base revision, verify the head cell's version still
-    /// matches the checkpoint (a resolve + compare — not a same-value
-    /// publish, which would bump the cell version and make concurrent
-    /// no-ops fail each other spuriously) and surface the usual
-    /// `VersionMismatch` when it moved, so callers refresh and retry
-    /// exactly like the non-no-op race.
-    #[ignore = "no-op commits skip the head CAS and can silently lose a stale re-assertion"]
+    /// The no-op verdict is reported only after re-reading the head: a
+    /// resolve + compare rather than a same-value publish, so concurrent
+    /// no-ops don't bump the cell version and fail each other spuriously,
+    /// while a genuinely stale snapshot surfaces the usual
+    /// `VersionMismatch` and the caller refreshes and retries.
     #[dialog_common::test]
     async fn it_does_not_treat_a_stale_snapshot_as_a_noop() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
