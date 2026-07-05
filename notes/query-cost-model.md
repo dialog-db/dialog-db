@@ -6,7 +6,7 @@ A datalog query decomposes into premises, each resolved by a range scan over a p
 
 ## Index Structure
 
-All claims are is stored in a search tree index with three key layouts distinguished by a tag byte. Every key is 162 bytes:
+All claims are stored in a search tree index with three key layouts distinguished by a tag byte. Every key is 162 bytes:
 
 
 ```
