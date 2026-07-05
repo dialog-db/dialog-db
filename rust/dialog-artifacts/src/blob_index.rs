@@ -125,16 +125,16 @@ impl BlobChange {
 /// `checkpoint` and `current` — the set push must ship (additions) without
 /// re-reading subtrees that did not change. Both trees must be readable from
 /// `store`.
-pub fn blob_changes<S>(
+pub fn blob_changes<'s, S>(
     checkpoint: ArtifactTree,
     current: ArtifactTree,
     store: S,
-) -> impl Stream<Item = Result<BlobChange, DialogArtifactsError>> + ConditionalSend
+) -> impl Stream<Item = Result<BlobChange, DialogArtifactsError>> + 's + ConditionalSend
 where
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + Clone
         + ConditionalSync
-        + 'static,
+        + 's,
 {
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
     try_stream! {
