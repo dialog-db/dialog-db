@@ -32,6 +32,78 @@ use url::Url;
 /// platform's data and temp directories.
 const STORAGE_NAMESPACE: &str = "dialog";
 
+/// Percent-encode characters illegal in a Windows path component.
+///
+/// DIDs (`did:key:z6Mk...`) are used directly as directory names by the
+/// certificate/credential layout. Windows forbids `< > : " \ | ? *` and
+/// control characters in filenames, so writing e.g. `certificate/{did}/...`
+/// fails with ERROR_INVALID_NAME (os error 123). `Url::to_file_path` does not
+/// escape these (it only percent-decodes and handles structural conversion),
+/// so the colon passes straight through into an invalid path.
+///
+/// We keep the URL/logical layer OS-agnostic and escape only when rendering to
+/// an OS path, like escaping at render time for HTML. The mapping is reversible
+/// (`:` -> `%3A`), so distinct names never collide and reads recover the
+/// original. `%` is encoded too so decoding is unambiguous. Applied per
+/// `Normal` path component, so the drive-letter colon (a `Prefix` component) is
+/// never touched. Windows-only; other targets keep their exact layout.
+#[cfg(windows)]
+fn encode_reserved(component: &str) -> String {
+    fn reserved(c: char) -> bool {
+        matches!(c, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*' | '%') || (c as u32) < 0x20
+    }
+    let mut out = String::with_capacity(component.len());
+    for c in component.chars() {
+        if reserved(c) {
+            out.push_str(&format!("%{:02X}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Inverse of [`encode_reserved`]. Only ASCII bytes are ever encoded, so a
+/// decoded `%XX` is always a valid single-byte char.
+#[cfg(windows)]
+fn decode_reserved(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut out = String::with_capacity(name.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&name[i + 1..i + 3], 16)
+        {
+            out.push(byte as char);
+            i += 3;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Render an OS path, percent-encoding reserved characters in every `Normal`
+/// component. Rebuilding from `components()` also drops any trailing separator
+/// (which on Windows otherwise yields os error 267).
+#[cfg(windows)]
+fn encode_windows_path(path: PathBuf) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Normal(os) => match os.to_str() {
+                Some(s) => out.push(encode_reserved(s)),
+                None => out.push(os),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Filesystem-based storage provider.
 ///
 /// A transparent wrapper over a [`Location`] that manages storage directories
@@ -180,17 +252,28 @@ impl TryFrom<FileSystemHandle> for PathBuf {
             .to_file_path()
             .map_err(|_| FileSystemError::Io("Failed to convert URL to path".to_string()))?;
 
+        // On Windows, escape characters illegal in filenames (DIDs carry
+        // colons) per path component, and drop the trailing separator that
+        // `components()` rebuilding naturally removes. See `encode_windows_path`.
+        #[cfg(windows)]
+        {
+            Ok(encode_windows_path(path))
+        }
+
         // Strip trailing slash added by FileSystemHandle for URL semantics.
         // Filesystem operations (read, write, rename) need clean file paths.
         // Use `to_str` (not `to_string_lossy`) so non-UTF-8 paths don't
         // collide via lossy substitutions; require UTF-8 for the trim.
-        let s = path.to_str().ok_or_else(|| {
-            FileSystemError::Io("Path is not valid UTF-8 and cannot be normalized".to_string())
-        })?;
-        if s.ends_with('/') && s.len() > 1 {
-            Ok(PathBuf::from(s.trim_end_matches('/')))
-        } else {
-            Ok(path)
+        #[cfg(not(windows))]
+        {
+            let s = path.to_str().ok_or_else(|| {
+                FileSystemError::Io("Path is not valid UTF-8 and cannot be normalized".to_string())
+            })?;
+            if s.ends_with('/') && s.len() > 1 {
+                Ok(PathBuf::from(s.trim_end_matches('/')))
+            } else {
+                Ok(path)
+            }
         }
     }
 }
@@ -322,6 +405,12 @@ impl FileSystemHandle {
             .map_err(|e| FileSystemError::Io(e.to_string()))?
         {
             if let Some(name) = entry.file_name().to_str() {
+                // On-disk names are escaped (see `encode_windows_path`); decode
+                // so callers always see logical names and re-encode correctly on
+                // the next resolve.
+                #[cfg(windows)]
+                names.push(decode_reserved(name));
+                #[cfg(not(windows))]
                 names.push(name.to_string());
             }
         }
@@ -384,6 +473,53 @@ mod tests {
         let archive = space.archive().unwrap();
         let nested = archive.resolve("deep/nested/catalog").unwrap();
         assert!(nested.path().ends_with("/archive/deep/nested/catalog"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn it_encodes_and_decodes_reserved_chars_reversibly() {
+        let did = "did:key:z6MkExampleColonSegment";
+        let encoded = encode_reserved(did);
+        assert!(!encoded.contains(':'), "encoded name must not contain ':'");
+        assert_eq!(encoded, "did%3Akey%3Az6MkExampleColonSegment");
+        assert_eq!(decode_reserved(&encoded), did, "must round-trip");
+
+        // Distinct inputs that the lossy '_' mapping would have collided.
+        assert_ne!(encode_reserved("a:b"), encode_reserved("a|b"));
+        assert_eq!(decode_reserved(&encode_reserved("a:b")), "a:b");
+        // A literal '%' is preserved (encoded so decoding stays unambiguous).
+        assert_eq!(decode_reserved(&encode_reserved("a%3Ab")), "a%3Ab");
+    }
+
+    #[cfg(windows)]
+    #[dialog_common::test]
+    async fn it_round_trips_a_did_named_path_on_windows() {
+        let space = test_space("did-path-round-trip").await;
+        let did = "did:key:z6MkExampleColonSegment";
+
+        // Write under a DID-named directory (would fail with os error 123
+        // before the fix).
+        let handle = space.certificate().unwrap().resolve(did).unwrap();
+        handle.write(b"x").await.unwrap();
+
+        // On disk the colon is escaped, never present.
+        let names = space.certificate().unwrap().list().await.unwrap();
+        assert_eq!(names, vec![did.to_string()], "list recovers the logical name");
+
+        // The decoded name resolves back to the same bytes, no double-encoding.
+        let again = space.certificate().unwrap().resolve(&names[0]).unwrap();
+        assert_eq!(again.read().await.unwrap(), b"x");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn it_preserves_the_drive_letter_colon() {
+        let path = env::temp_dir().join("dialog-file-handle.tmp");
+        let handle = FileSystemHandle::try_from(path.clone()).unwrap();
+        let round_trip: PathBuf = handle.try_into().unwrap();
+        // Drive-letter colon (a Prefix component) is untouched; trailing
+        // separators are dropped.
+        assert_eq!(round_trip, path);
     }
 
     #[dialog_common::test]
