@@ -9,8 +9,8 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Identify, OperatorExt as _};
-use dialog_effects::blob::Write as BlobWrite;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+use dialog_effects::blob::{BlobError, Write as BlobWrite};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::Delta;
 use futures_util::{Stream, StreamExt};
@@ -42,7 +42,7 @@ impl Branch {
 
 impl<S> WriteBlob<'_, S>
 where
-    S: Stream<Item = Vec<u8>> + ConditionalSend + Unpin,
+    S: Stream<Item = Result<Vec<u8>, BlobError>> + ConditionalSend + Unpin,
 {
     /// Execute the write, returning the blob's discovered content hash.
     ///
@@ -75,6 +75,7 @@ where
         let mut sink = branch.archive().blob().write().perform(env).await?;
         let mut size: u64 = 0;
         while let Some(chunk) = self.source.next().await {
+            let chunk = chunk?;
             size += chunk.len() as u64;
             sink.write_all(&chunk).await?;
         }
@@ -177,7 +178,7 @@ mod tests {
         let expected = dialog_common::Blake3Hash::hash(&payload);
 
         let hash = branch
-            .write_blob(stream::iter(chunks))
+            .write_blob(stream::iter(chunks.into_iter().map(Ok)))
             .perform(&operator)
             .await?;
         assert_eq!(hash, expected);
