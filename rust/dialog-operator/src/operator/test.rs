@@ -1356,6 +1356,57 @@ mod tests {
         }
     }
 
+    // Blob effects stream through a real filesystem, so these tests build
+    // the operator over a temp-dir native space (`Storage::temp()`) rather
+    // than the volatile (memory) space used elsewhere: the volatile space
+    // has no blob provider.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod blob_tests {
+        use super::*;
+        use dialog_capability::Subject;
+        use dialog_effects::archive::prelude::*;
+        use dialog_effects::blob::prelude::*;
+
+        #[dialog_common::test]
+        async fn it_routes_blob_effects_to_the_space() -> anyhow::Result<()> {
+            let storage = Storage::temp();
+            let profile = Profile::open(unique_name("blob-route"))
+                .perform(&storage)
+                .await?;
+            let operator = profile
+                .derive(b"test")
+                .allow(Subject::any())
+                .network(Network::default())
+                .build(storage)
+                .await?;
+            let subject = Subject::from(profile.did());
+
+            let payload = b"hello blob routing".to_vec();
+            let mut sink = subject
+                .clone()
+                .archive()
+                .blob()
+                .write()
+                .perform(&operator)
+                .await?;
+            sink.write_all(&payload).await?;
+            let hash = sink.finish().await?;
+
+            let mut reader = subject
+                .archive()
+                .blob()
+                .read(hash)
+                .perform(&operator)
+                .await?;
+            let mut out = Vec::new();
+            while let Some(chunk) = reader.next().await? {
+                out.extend(chunk);
+            }
+            assert_eq!(out, payload);
+            Ok(())
+        }
+    }
+
     mod space_tests {
         use super::*;
         use dialog_capability::{Subject, did};
