@@ -7,8 +7,8 @@ use futures_util::TryStreamExt;
 
 use crate::tree::{ArtifactTree, TreeStorageBridge};
 use crate::{
-    Attribute, DialogArtifactsError, Entity, State, history_attribute_head, history_claim_range,
-    history_key_attribute_head, history_key_version, history_region_range, history_version_range,
+    Attribute, DialogArtifactsError, Entity, State, history_attribute_range, history_claim_range,
+    history_key_version, history_region_range,
 };
 
 use super::{Claim, History, REVISION_ATTRIBUTE, Record, SKIP_ATTRIBUTE, Version};
@@ -65,29 +65,34 @@ where
     }
 
     /// Every claim recorded by the revision identified by `version` under
-    /// the given attribute. The attribute fits the raw attribute head of
-    /// the history key layout, so the filter is an exact in-key comparison
-    /// — non-matching records skip without decoding.
+    /// the given attribute. The attribute head leads the entity head in
+    /// history keys, so this is an exact range scan over just the matches
+    /// — not a walk over everything the revision recorded — which keeps
+    /// each ancestor-traversal step O(result) even for revisions minted by
+    /// huge commits.
     async fn claims_by_attribute(
         &self,
         version: &Version,
         attribute: &str,
     ) -> Result<Vec<Claim>, DialogArtifactsError> {
         let attribute = Attribute::from_str(attribute)?;
-        let head = history_attribute_head(&attribute);
-        let (min, max) = history_version_range(version);
+        let (min, max) = history_attribute_range(version, &attribute);
         let stream = self.tree.stream_range(
             crate::KeyBytes::from(min)..=crate::KeyBytes::from(max),
             &self.storage,
         );
         tokio::pin!(stream);
 
+        // The range is exact for attributes that fit the raw head (both
+        // callers' attributes do); the re-check guards a longer attribute
+        // sharing a head, per the history key contract.
+        let attribute = attribute.to_string();
         let mut claims = Vec::new();
         while let Some(entry) = stream.try_next().await? {
-            if history_key_attribute_head(&entry.key) != head {
-                continue;
-            }
             if let State::Added(datum) = entry.value {
+                if datum.attribute != attribute {
+                    continue;
+                }
                 claims.push(Record::try_from_datum(datum)?.claim().clone());
             }
         }

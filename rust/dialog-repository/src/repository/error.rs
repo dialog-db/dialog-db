@@ -306,6 +306,10 @@ pub enum CommitError {
     /// Ingesting a blob's bytes into the store failed.
     #[error("Blob ingest failed during write: {0}")]
     Blob(#[from] BlobError),
+
+    /// A cell resolve during commit failed.
+    #[error("Failed to resolve during commit: {0}")]
+    Resolve(#[from] ResolveError),
 }
 
 /// Errors specific to a pull operation.
