@@ -77,7 +77,7 @@ use quote::quote;
 use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
-use super::helpers::extract_doc_comments;
+use super::helpers::{extract_doc_comments, parse_dialog_rename_attribute};
 
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -170,7 +170,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
 
         let field_type = &field.ty;
-        let field_name_lit = syn::LitStr::new(&field_name_str, proc_macro2::Span::call_site());
+
+        // Check for #[dialog(rename = "...")] to override the string key
+        let effective_name_str = match parse_dialog_rename_attribute(&field.attrs) {
+            Ok(rename) => rename.unwrap_or_else(|| field_name_str.clone()),
+            Err(e) => return e.to_compile_error().into(),
+        };
+        let field_name_lit = syn::LitStr::new(&effective_name_str, proc_macro2::Span::call_site());
 
         // Forward the user's field doc when present, otherwise synthesize a
         // fallback so `#![deny(missing_docs)]` in consumer crates is happy.
