@@ -56,7 +56,7 @@ use std::collections::BTreeMap;
 
 use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_credentials::Ed25519KeyResolver;
-use dialog_effects::{archive, memory};
+use dialog_effects::{archive, blob, memory};
 use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
 use dialog_ucan_core::InvocationChain;
 use dialog_ucan_core::promise::Promised;
@@ -115,6 +115,22 @@ where
     Ok(dialog_capability::Subject::from(subject.clone())
         .attenuate(archive::Archive)
         .attenuate(catalog)
+        .attenuate(claim))
+}
+
+/// Build a blob capability from UCAN args: `Subject -> Archive -> Blob -> Attenuation`.
+///
+/// `Blob` is a unit ability segment (no arguments), so only the leaf
+/// attenuation is deserialized from the args map.
+fn blob_claim_from_args<C>(subject: &Did, args: &Args) -> Result<Capability<C>, S3Error>
+where
+    C: Policy<Of = blob::Blob> + DeserializeOwned,
+    <C as Constraint>::Capability: dialog_capability::Ability,
+{
+    let claim: C = deserialize_from_args(args)?;
+    Ok(dialog_capability::Subject::from(subject.clone())
+        .attenuate(archive::Archive)
+        .attenuate(blob::Blob)
         .attenuate(claim))
 }
 
@@ -186,16 +202,34 @@ impl FromUcanArgs for archive::Put {
         archive_claim_from_args(subject, args)
     }
 }
+impl FromUcanArgs for blob::Read {
+    type Attenuation = blob::Read;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
+        blob_claim_from_args(subject, args)
+    }
+}
+impl FromUcanArgs for blob::Import {
+    type Attenuation = blob::Import;
+    fn capability_from_args(
+        subject: &Did,
+        args: &Args,
+    ) -> Result<Capability<Self::Attenuation>, S3Error> {
+        blob_claim_from_args(subject, args)
+    }
+}
 
 /// Dispatch UCAN command to the appropriate `FromUcanArgs` handler and authorize
 /// the resulting capability directly against the S3 address.
 macro_rules! dispatch {
     ($self:expr, $subject:expr, $args:expr, $segments:expr, {
-        $( [$seg1:literal, $seg2:literal] => $fx:ty ),+ $(,)?
+        $( [$($seg:literal),+ $(,)?] => $fx:ty ),+ $(,)?
     }) => {
         match $segments {
             $(
-                [$seg1, $seg2] => {
+                [$($seg),+] => {
                     let capability = <$fx as FromUcanArgs>::capability_from_args($subject, $args)?;
                     let request = ::dialog_remote_s3::request::S3Request::from(&capability);
                     let authorization = match $self.credential.clone() {
@@ -276,6 +310,8 @@ impl UcanAuthorizer {
             ["memory", "retract"]  => dialog_effects::memory::Retract,
             ["archive", "get"]     => dialog_effects::archive::Get,
             ["archive", "put"]     => dialog_effects::archive::Put,
+            ["archive", "blob", "read"]   => dialog_effects::blob::Read,
+            ["archive", "blob", "import"] => dialog_effects::blob::Import,
         })
     }
 }
