@@ -418,6 +418,45 @@ mod tests {
         Ok(())
     }
 
+    /// Pushing to an untracked target that already has its own history is
+    /// refused as non-fast-forward: with no recorded sync base, only an
+    /// empty target can be fast-forwarded onto. Pull it first.
+    #[dialog_common::test]
+    async fn it_refuses_pushing_to_an_untracked_nonempty_target() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let occupied = repo.branch("occupied").open().perform(&operator).await?;
+        occupied
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:theirs".parse()?,
+                is: Value::String("Existing".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:ours".parse()?,
+                is: Value::String("New".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let result = feature.push().to(&occupied).perform(&operator).await;
+        assert!(
+            matches!(result, Err(PushError::NonFastForward { .. })),
+            "an untracked, nonempty target must not be overwritten: {result:?}"
+        );
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_errors_non_fast_forward_on_local_upstream_diverged() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;

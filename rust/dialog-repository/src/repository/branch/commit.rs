@@ -457,6 +457,109 @@ mod history_tests {
         Ok(())
     }
 
+    /// A commit whose instruction stream is empty (or entirely no-op)
+    /// leaves the branch exactly where it was: same revision, same
+    /// edition, no new history.
+    #[dialog_common::test]
+    async fn it_keeps_the_revision_for_an_empty_commit() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let first = branch
+            .commit(stream::iter(vec![Instruction::Assert(title(
+                "post:1", "Hej",
+            ))]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let unchanged = branch
+            .commit(stream::iter(Vec::<Instruction>::new()))
+            .perform(&operator)
+            .await?;
+        assert_eq!(unchanged, first, "an empty commit mints no revision");
+        assert_eq!(branch.revision(), Some(first));
+
+        Ok(())
+    }
+
+    /// A no-op commit from a stale handle must not silently succeed: the
+    /// instructions were judged no-op against a snapshot another writer
+    /// has since superseded, so "nothing to do" may be wrong at the
+    /// current head. Here the stale handle re-asserts a value the head
+    /// has retracted in the meantime — succeeding silently would lose
+    /// the re-assertion.
+    ///
+    /// KNOWN BUG: the no-op early return in `Commit::perform` skips the
+    /// head CAS entirely, so the staleness this test provokes goes
+    /// undetected and the re-assertion is lost. Candidate fix: before
+    /// returning the base revision, verify the head cell's version still
+    /// matches the checkpoint (a resolve + compare — not a same-value
+    /// publish, which would bump the cell version and make concurrent
+    /// no-ops fail each other spuriously) and surface the usual
+    /// `VersionMismatch` when it moved, so callers refresh and retry
+    /// exactly like the non-no-op race.
+    #[ignore = "no-op commits skip the head CAS and can silently lose a stale re-assertion"]
+    #[dialog_common::test]
+    async fn it_does_not_treat_a_stale_snapshot_as_a_noop() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let seed = repo.branch("main").open().perform(&operator).await?;
+        seed.commit(stream::iter(vec![Instruction::Assert(title(
+            "post:1", "Hej",
+        ))]))
+        .perform(&operator)
+        .await?;
+
+        // Both handles snapshot the head with the title asserted.
+        let retractor = repo.branch("main").open().perform(&operator).await?;
+        let reasserter = repo.branch("main").open().perform(&operator).await?;
+
+        // One handle retracts the title, advancing the head.
+        retractor
+            .commit(stream::iter(vec![Instruction::Retract(title(
+                "post:1", "Hej",
+            ))]))
+            .perform(&operator)
+            .await?;
+
+        // The other re-asserts the same value from its stale snapshot,
+        // where the write looks like a cardinality-one no-op. It must not
+        // report success while leaving the title retracted at the head.
+        let raced = reasserter
+            .commit(stream::iter(vec![Instruction::Replace(title(
+                "post:1", "Hej",
+            ))]))
+            .perform(&operator)
+            .await;
+
+        use futures_util::StreamExt as _;
+        let head = repo.branch("main").load().perform(&operator).await?;
+        let reasserted = !head
+            .claims()
+            .select(
+                dialog_artifacts::ArtifactSelector::new()
+                    .the("post/title".parse()?)
+                    .of("post:1".parse()?),
+            )
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .is_empty();
+
+        assert!(
+            raced.is_err() || reasserted,
+            "a stale no-op either fails loudly (so the caller refreshes \
+             and retries) or lands the re-assertion; it silently did \
+             neither: {raced:?}"
+        );
+
+        Ok(())
+    }
+
     /// Data committed through a branch is tagged with the revision's
     /// version, so later commits can derive what they supersede.
     #[dialog_common::test]

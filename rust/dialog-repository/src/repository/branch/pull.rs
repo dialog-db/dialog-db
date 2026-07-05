@@ -887,6 +887,281 @@ mod history_tests {
             Some(first.version())
         );
 
+        // The supersession holds in the merged *data* region too: the
+        // replaced value must not resurrect when the deletion crosses the
+        // sync boundary through the differential.
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+        let titles: Vec<_> = feature
+            .claims()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(titles.len(), 1, "the superseded value must not resurrect");
+        assert_eq!(titles[0].is, Value::String("Hi".to_string()));
+
+        // Skip tables regrow after the merge without ever crossing it: the
+        // first commit on top of a merge has no table (its parent has
+        // several parents), the next one leaps to the merge and stops.
+        let after_merge = feature
+            .commit(stream::iter(vec![assert_one("post/tag", "post:1", "a")]))
+            .perform(&operator)
+            .await?;
+        feature.refresh(&operator).await?;
+        let next = feature
+            .commit(stream::iter(vec![assert_one("post/tag", "post:2", "b")]))
+            .perform(&operator)
+            .await?;
+        feature.refresh(&operator).await?;
+        let history = feature.history(&operator);
+        assert!(
+            history.skips_at(&after_merge.version()).await?.is_empty(),
+            "a commit on top of a merge records no skip table"
+        );
+        let skips = history.skips_at(&next.version()).await?;
+        assert_eq!(skips.len(), 1);
+        assert!(
+            skips[0].cause.contains(&merged.version()),
+            "the regrown chain leaps to the merge and stops there"
+        );
+
+        Ok(())
+    }
+
+    /// Concurrent replacements of the same cardinality-one fact on two
+    /// branches: the merge surfaces the conflict rather than silently
+    /// dropping a side. Both values stand in the merged data region, both
+    /// history records are present, and the tiered conflict detection
+    /// reports them concurrent — resolution is deferred to whoever asks.
+    #[dialog_common::test]
+    async fn it_surfaces_concurrent_replacements_after_a_merge() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // A shared base: both branches see title = "Base".
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Base",
+        )]))
+        .perform(&operator)
+        .await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+
+        // Both sides replace it, without seeing each other.
+        let replace = |value: &str| -> Result<Instruction> {
+            Ok(Instruction::Replace(Artifact {
+                the: "post/title".parse()?,
+                of: "post:1".parse()?,
+                is: Value::String(value.to_string()),
+                cause: None,
+            }))
+        };
+        main.commit(stream::iter(vec![replace("MainSide")?]))
+            .perform(&operator)
+            .await?;
+        let theirs = main.revision().expect("main has a revision");
+        feature
+            .commit(stream::iter(vec![replace("FeatureSide")?]))
+            .perform(&operator)
+            .await?;
+        let ours = feature.revision().expect("feature has a revision");
+
+        feature
+            .pull()
+            .perform(&operator)
+            .await?
+            .expect("pull merges");
+
+        // Neither side is dropped: the merged tree carries both claims at
+        // the cardinality-one (entity, attribute).
+        let titles: Vec<_> = feature
+            .claims()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut values: Vec<_> = titles.iter().map(|artifact| artifact.is.clone()).collect();
+        values.sort_by_key(|value| value.to_utf8());
+        assert_eq!(
+            values,
+            vec![
+                Value::String("FeatureSide".to_string()),
+                Value::String("MainSide".to_string()),
+            ],
+            "a merge surfaces concurrent values instead of dropping one"
+        );
+
+        // ... and the recorded lineage proves they are concurrent.
+        let history = feature.history(&operator);
+        let ours_claims = history
+            .claims_at(&ours.version(), &"post:1".parse()?, &"post/title".parse()?)
+            .await?;
+        let theirs_claims = history
+            .claims_at(
+                &theirs.version(),
+                &"post:1".parse()?,
+                &"post/title".parse()?,
+            )
+            .await?;
+        assert_eq!((ours_claims.len(), theirs_claims.len()), (1, 1));
+        assert_eq!(
+            causality(
+                (&ours_claims[0], &ours.version()),
+                (&theirs_claims[0], &theirs.version()),
+                &history
+            )
+            .await?,
+            Causality::Concurrent
+        );
+
+        Ok(())
+    }
+
+    /// A retraction made strictly after the retracted assertion — no
+    /// concurrency on the fact at all — must survive a three-way merge:
+    /// the tombstone rides the differential like any other change, and the
+    /// merged tree must not resurrect the retracted value.
+    #[dialog_common::test]
+    async fn it_propagates_a_retraction_across_a_merge() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // A shared base: both branches see the title.
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&operator)
+        .await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+
+        // Feature retracts the title — causally after the assertion.
+        feature
+            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+                the: "post/title".parse()?,
+                of: "post:1".parse()?,
+                is: Value::String("Hej".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        // Main commits something unrelated, so the pull is a real merge.
+        main.commit(stream::iter(vec![assert_one(
+            "user/name",
+            "user:1",
+            "Alice",
+        )]))
+        .perform(&operator)
+        .await?;
+
+        feature
+            .pull()
+            .perform(&operator)
+            .await?
+            .expect("pull merges");
+
+        let titles: Vec<_> = feature
+            .claims()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            titles.is_empty(),
+            "a causal retraction must not resurrect in a merge: {titles:?}"
+        );
+
+        Ok(())
+    }
+
+    /// A pull landing while another handle advanced the upstream cell for a
+    /// *different* target must not clobber that advance — the commit phase
+    /// re-reads and folds its own entry in.
+    #[dialog_common::test]
+    async fn it_folds_tracking_updates_racing_from_another_handle() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![assert_one(
+            "user/name",
+            "user:1",
+            "Alice",
+        )]))
+        .perform(&operator)
+        .await?;
+        let backup = repo.branch("backup").open().perform(&operator).await?;
+
+        // Two handles to the same branch, each with its own cell caches.
+        let puller = repo.branch("feature").open().perform(&operator).await?;
+        puller.set_upstream(&main).perform(&operator).await?;
+        puller
+            .commit(stream::iter(vec![assert_one(
+                "user/email",
+                "user:1",
+                "alice@test.com",
+            )]))
+            .perform(&operator)
+            .await?;
+        let pusher = repo.branch("feature").open().perform(&operator).await?;
+
+        // The pull is prepared from one handle; before it commits, the
+        // other handle pushes to a different target, advancing the shared
+        // upstream cell underneath it.
+        let prepared = puller.pull().prepare(&operator).await?;
+        pusher.push().to(&backup).perform(&operator).await?;
+        let merged = prepared.commit(&operator).await?;
+        assert!(merged.is_some(), "the racing pull still lands");
+
+        // Both tracking advances survive: the pull's sync base for main and
+        // the push's tracking entry for backup.
+        let fresh = repo.branch("feature").open().perform(&operator).await?;
+        let upstreams = fresh.upstreams();
+        assert_eq!(upstreams.iter().count(), 2);
+        let main_head = repo
+            .branch("main")
+            .load()
+            .perform(&operator)
+            .await?
+            .revision()
+            .expect("main has a revision");
+        assert!(
+            upstreams.iter().any(|entry| matches!(
+                entry,
+                crate::Upstream::Local { branch, tree } if branch == "main" && *tree == main_head.tree
+            )),
+            "the pull's sync-base advance survives the race"
+        );
+        assert!(
+            upstreams.iter().any(
+                |entry| matches!(entry, crate::Upstream::Local { branch, .. } if branch == "backup")
+            ),
+            "the racing push's tracking entry survives the pull"
+        );
+
         Ok(())
     }
 }
