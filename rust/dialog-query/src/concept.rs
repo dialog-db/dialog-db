@@ -1521,7 +1521,10 @@ mod tests {
     fn it_preserves_attribute_metadata() {
         assert_eq!(item::Kind::descriptor().domain(), "item");
         assert_eq!(item::Kind::descriptor().description(), "The type of item");
-        assert_eq!(item::Kind::descriptor().cardinality(), Cardinality::One,);
+        assert_eq!(
+            item::Kind::descriptor().cardinality(),
+            crate::Cardinality::One
+        );
     }
 
     #[dialog_common::test]
@@ -1552,7 +1555,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_renames_concept_field_in_descriptor() {
-        let descriptor: ConceptDescriptor = ItemQuery::default().into();
+        let descriptor = Item::descriptor();
         let attrs: Vec<_> = descriptor.with().iter().collect();
 
         assert_eq!(attrs.len(), 2);
@@ -1668,7 +1671,7 @@ mod tests {
         assert_eq!(task::Reference::the().to_string(), "task/reference");
 
         // Concept descriptor should have "ref" key (concept field rename)
-        let descriptor: ConceptDescriptor = TaskQuery::default().into();
+        let descriptor = Task::descriptor();
         let attrs: Vec<_> = descriptor.with().iter().collect();
         let ref_attr = attrs.iter().find(|(k, _)| *k == "ref");
         assert!(ref_attr.is_some(), "Should have 'ref' key in descriptor");

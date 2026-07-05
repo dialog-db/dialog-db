@@ -161,13 +161,13 @@ pub fn parse_domain_attribute(attrs: &[Attribute]) -> Option<String> {
 /// Supports:
 /// - `#[dialog(rename = "type")]` - rename to a specific string
 ///
-/// Returns `Some(name)` if rename is specified, `None` to use default.
-pub fn parse_dialog_rename_attribute(attrs: &[Attribute]) -> Option<String> {
+/// Returns `Ok(Some(name))` if rename is specified, `Ok(None)` to use default.
+pub fn parse_dialog_rename_attribute(attrs: &[Attribute]) -> Result<Option<String>, syn::Error> {
     for attr in attrs {
         if attr.path().is_ident("dialog") {
             let mut rename_value = None;
 
-            let result = attr.parse_nested_meta(|meta| {
+            attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename") {
                     let value = meta.value()?;
                     let lit: Lit = value.parse()?;
@@ -180,17 +180,12 @@ pub fn parse_dialog_rename_attribute(attrs: &[Attribute]) -> Option<String> {
                 } else {
                     Err(meta.error("unknown dialog attribute parameter; expected `rename`"))
                 }
-            });
+            })?;
 
-            match result {
-                Ok(()) => return rename_value,
-                Err(e) => {
-                    panic!("Error parsing dialog attribute: {}", e);
-                }
-            }
+            return Ok(rename_value);
         }
     }
-    None
+    Ok(None)
 }
 
 /// Parse the `#[cardinality(one)]` or `#[cardinality(many)]` attribute.
