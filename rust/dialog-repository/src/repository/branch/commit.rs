@@ -3,7 +3,7 @@ use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
-use dialog_artifacts::history::{Edition, Version};
+use dialog_artifacts::history::{Edition, TreeHistory, Version, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{DialogArtifactsError, Instruction};
 use dialog_capability::{Fork, Provider};
@@ -141,10 +141,27 @@ where
 
         // Mint the revision (the placeholder tree root is replaced below,
         // after its own records are in the tree) and record its DAG edge on
-        // the branch lineage entity plus its attribute claims on the
-        // revision entity, in the same batch delta. None of those records
-        // depend on the final root — a root cannot appear inside itself.
+        // the branch lineage entity, its skip links, plus its attribute
+        // claims on the revision entity, in the same batch delta. None of
+        // those records depend on the final root — a root cannot appear
+        // inside itself.
+        //
+        // The skip table (logarithmic leaps through the revision DAG for
+        // `common_ancestor` — see `dialog_artifacts::history::extend_skips`)
+        // is lifted from the parent's recorded table, read out of the base
+        // tree through the branch's shared node cache.
         let parent = base_revision.as_ref().map(Revision::version);
+        let skips = match &parent {
+            Some(parent) => {
+                let history = TreeHistory::from_root_with_cache(
+                    &base_tree_hash,
+                    store.clone(),
+                    branch.node_cache(),
+                );
+                extend_skips(&history, parent).await?
+            }
+            None => Vec::new(),
+        };
         let mut revision = match base_revision {
             Some(base) => base.advance(TreeReference::default(), branch.name(), issuer, profile),
             None => Revision::new(
@@ -157,7 +174,7 @@ where
         };
         debug_assert_eq!(revision.version(), version);
         let entries = revision
-            .records(parent)?
+            .records(parent, &skips)?
             .into_iter()
             .map(|(version, record)| record.into_entry(&version))
             .collect();
@@ -420,6 +437,22 @@ mod history_tests {
             common_ancestor(&second.version(), &first.version(), &history).await?,
             Some(first.version())
         );
+
+        // A third commit records its skip table: the level-1 link leaps two
+        // first-parent steps back, from the third revision to the first.
+        branch.refresh(&operator).await?;
+        let third = branch
+            .commit(stream::iter(vec![Instruction::Replace(title(
+                "post:1", "Hello",
+            ))]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let history = branch.history(&operator);
+        let skips = history.skips_at(&third.version()).await?;
+        assert_eq!(skips.len(), 1);
+        assert_eq!(skips[0].is, Value::UnsignedInt(1));
+        assert!(skips[0].cause.contains(&first.version()));
 
         Ok(())
     }

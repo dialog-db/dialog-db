@@ -197,7 +197,7 @@ impl Branch {
             .revision()
             .map(|revision| *revision.tree.hash())
             .unwrap_or(crate::EMPTY_TREE_HASH);
-        TreeHistory::from_root(&root, store)
+        TreeHistory::from_root_with_cache(&root, store, self.node_cache())
     }
 
     /// Export all artifacts from this branch to the given exporter.

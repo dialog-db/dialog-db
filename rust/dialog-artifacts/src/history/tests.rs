@@ -1,6 +1,7 @@
 //! Tests reproducing the scenarios illustrated in `notes/version-control.md`
 
 use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use dialog_storage::MemoryStorageBackend;
@@ -11,7 +12,7 @@ use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Valu
 
 use super::{
     Authority, Causality, Cause, Claim, Edition, History, MemoryHistory, Origin, Revision,
-    TreeHistory, Version, causality, common_ancestor,
+    SKIP_ATTRIBUTE, TreeHistory, Version, causality, common_ancestor, extend_skips,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -636,6 +637,184 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
         tree.select_data(store.clone(), &entity, &the)
             .await?
             .is_empty()
+    );
+
+    Ok(())
+}
+
+/// A [`History`] wrapper counting revision DAG reads, to assert the skip
+/// links actually shrink traversals rather than merely not breaking them.
+struct CountingHistory<'a> {
+    inner: &'a MemoryHistory,
+    reads: AtomicUsize,
+}
+
+impl<'a> CountingHistory<'a> {
+    fn new(inner: &'a MemoryHistory) -> Self {
+        Self {
+            inner,
+            reads: AtomicUsize::new(0),
+        }
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
+
+impl History for CountingHistory<'_> {
+    async fn claims_at(
+        &self,
+        version: &Version,
+        of: &Entity,
+        the: &Attribute,
+    ) -> Result<Vec<Claim>, DialogArtifactsError> {
+        self.inner.claims_at(version, of, the).await
+    }
+
+    async fn revision_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.revision_at(version).await
+    }
+
+    async fn skips_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
+        self.inner.skips_at(version).await
+    }
+}
+
+/// Record the skip table claims for a revision, the way a branch commit
+/// does (see `dialog-repository`'s `Revision::records`).
+fn record_skips(
+    history: &mut MemoryHistory,
+    revision: &Revision,
+    skips: &[(u32, Version)],
+) -> Result<()> {
+    for (level, target) in skips {
+        history.record(
+            &revision.version(),
+            Claim {
+                the: Attribute::from_str(SKIP_ATTRIBUTE)?,
+                of: revision.entity()?,
+                is: Value::UnsignedInt(u128::from(*level)),
+                cause: Cause::from(*target),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// Skip links let `common_ancestor` leap over long linear runs: a head far
+/// ahead of the other descends to the other's causal depth in
+/// logarithmically many reads, and the result is exactly what the stepwise
+/// walk would find.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_finds_ancestors_in_logarithmic_reads_via_skip_links() -> Result<()> {
+    let repo = Entity::new()?;
+    let alice = signing_key(1);
+    let bob = signing_key(2);
+
+    // A long linear run by Alice, each revision recording the skip table
+    // lifted from its parent's.
+    let mut history = MemoryHistory::default();
+    let mut chain = vec![revise(&repo, &alice, &[], 0)];
+    history.record_revision(&chain[0])?;
+    for _ in 1..=128 {
+        let parent = chain.last().expect("chain is nonempty");
+        let skips = extend_skips(&history, &parent.version()).await?;
+        let next = revise(&repo, &alice, &[parent], 1);
+        history.record_revision(&next)?;
+        record_skips(&mut history, &next, &skips)?;
+        chain.push(next);
+    }
+
+    // Bob forked early and made one commit of his own.
+    let fork = revise(&repo, &bob, &[&chain[5]], 2);
+    history.record_revision(&fork)?;
+
+    let counting = CountingHistory::new(&history);
+    let ancestor = common_ancestor(
+        &chain.last().expect("chain is nonempty").version(),
+        &fork.version(),
+        &counting,
+    )
+    .await?;
+    assert_eq!(
+        ancestor,
+        Some(chain[5].version()),
+        "the accelerated traversal finds the exact fork point"
+    );
+    assert!(
+        counting.reads() < 30,
+        "the 123-revision gap should be leapt, not walked: {} reads",
+        counting.reads()
+    );
+
+    Ok(())
+}
+
+/// A leap must never cross a merge: ancestry entering the run through a
+/// merge's second parent stays reachable, because merges record no skip
+/// table and the chains recorded after one never lift across it.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_never_leaps_over_a_merge() -> Result<()> {
+    let repo = Entity::new()?;
+    let alice = signing_key(1);
+    let bob = signing_key(2);
+
+    let mut history = MemoryHistory::default();
+    let extend = async |history: &mut MemoryHistory,
+                        parents: &[&Revision],
+                        key: &ed25519_dalek::SigningKey|
+           -> Result<Revision> {
+        let skips = match parents {
+            [parent] => extend_skips(&*history, &parent.version()).await?,
+            _ => Vec::new(),
+        };
+        let next = revise(&repo, key, parents, 3);
+        history.record_revision(&next)?;
+        record_skips(history, &next, &skips)?;
+        Ok(next)
+    };
+
+    // Alice's chain, with a dormant branch by Bob hanging off revision 2;
+    // the dormant work merges back in at revision 10, and the chain runs
+    // long past the merge.
+    let mut chain = vec![revise(&repo, &alice, &[], 0)];
+    history.record_revision(&chain[0])?;
+    for _ in 1..=10 {
+        let next = extend(&mut history, &[chain.last().expect("nonempty")], &alice).await?;
+        chain.push(next);
+    }
+    let dormant = extend(&mut history, &[&chain[2]], &bob).await?;
+    let merge = extend(
+        &mut history,
+        &[chain.last().expect("nonempty"), &dormant],
+        &alice,
+    )
+    .await?;
+    chain.push(merge);
+    for _ in 0..40 {
+        let next = extend(&mut history, &[chain.last().expect("nonempty")], &alice).await?;
+        chain.push(next);
+    }
+
+    // Bob continues the dormant line without ever seeing the merge. The
+    // only meeting point is his dormant revision, reachable from Alice's
+    // head solely through the merge's second parent.
+    let bob_head = extend(&mut history, &[&dormant], &bob).await?;
+
+    let ancestor = common_ancestor(
+        &chain.last().expect("nonempty").version(),
+        &bob_head.version(),
+        &history,
+    )
+    .await?;
+    assert_eq!(
+        ancestor,
+        Some(dormant.version()),
+        "ancestry through the merge's second parent must not be leapt over"
     );
 
     Ok(())

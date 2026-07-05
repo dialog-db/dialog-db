@@ -3,7 +3,7 @@ use std::str::FromStr;
 
 use crate::{Attribute, DialogArtifactsError, Entity, Value};
 
-use super::{Claim, History, HistoryKey, REVISION_ATTRIBUTE, Revision, Version};
+use super::{Claim, History, HistoryKey, REVISION_ATTRIBUTE, Revision, SKIP_ATTRIBUTE, Version};
 
 /// An in-memory [`History`] index, mapping
 /// `/edition/origin/entity/attribute/value_hash` keys to [`Claim`]s.
@@ -81,6 +81,17 @@ impl History for MemoryHistory {
 
     async fn revision_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
         let attribute = Attribute::from_str(REVISION_ATTRIBUTE)?;
+        let (min, max) = HistoryKey::version_range(version);
+        Ok(self
+            .claims
+            .range(min..=max)
+            .filter(|(key, _)| key.attribute_bytes() == attribute.key_bytes().as_slice())
+            .map(|(_, claim)| claim.clone())
+            .collect())
+    }
+
+    async fn skips_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
+        let attribute = Attribute::from_str(SKIP_ATTRIBUTE)?;
         let (min, max) = HistoryKey::version_range(version);
         Ok(self
             .claims

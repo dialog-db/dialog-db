@@ -56,6 +56,18 @@ pub trait History: ConditionalSync {
     /// [`REVISION_ATTRIBUTE`](super::REVISION_ATTRIBUTE)). An empty result
     /// means the revision has not been replicated.
     async fn revision_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError>;
+
+    /// The skip link claim(s) recorded by the revision identified by
+    /// `version` (claims whose attribute is
+    /// [`SKIP_ATTRIBUTE`](super::SKIP_ATTRIBUTE)): shortcuts 2^k
+    /// first-parent steps back through the revision DAG — see
+    /// [`extend_skips`](super::extend_skips). Skip links are an
+    /// accelerator, so the default is none: traversal falls back to
+    /// walking cause edges.
+    async fn skips_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
+        let _ = version;
+        Ok(Vec::new())
+    }
 }
 
 /// Determine the causal relationship between two claims on the same
@@ -167,6 +179,17 @@ pub async fn causality<H: History>(
 /// edition order. Returns the first version reachable from both heads (the
 /// one with the greatest edition), or `None` when the lineages share no
 /// history.
+///
+/// Where the traversed revisions recorded skip links (see
+/// [`extend_skips`](super::extend_skips)), long linear runs are leapt over
+/// instead of walked edge by edge, so a head far ahead of the other
+/// descends to the other's causal depth in O(log gap) reads. The result is
+/// unchanged: a leap never crosses a merge (merges record no skip table),
+/// and no leap descends past the horizon — the lower head's edition —
+/// below which every remaining ancestor of the lower head lives. The
+/// region a leap jumps over is therefore strictly linear and strictly
+/// above anything the other side can reach, so nothing the stepwise walk
+/// would have found is missed.
 pub async fn common_ancestor<H: History>(
     a: &Version,
     b: &Version,
@@ -177,6 +200,10 @@ pub async fn common_ancestor<H: History>(
     if a == b {
         return Ok(Some(*a));
     }
+
+    // No common ancestor can sit above the lower head: editions strictly
+    // decrease along causal paths. Leaps must not descend past this line.
+    let horizon = a.edition.min(b.edition);
 
     // Which heads (bit 0b01 = a, bit 0b10 = b) each version is reachable from
     let mut reached: HashMap<Version, u8> = HashMap::new();
@@ -199,14 +226,42 @@ pub async fn common_ancestor<H: History>(
                 "{version}"
             )));
         }
-        for revision in revisions {
-            for cause in revision.cause.versions() {
-                let entry = reached.entry(*cause).or_insert(0);
-                if *entry & side != side {
-                    *entry |= side;
-                    frontier.push((*cause, side));
-                }
+        let causes: Vec<Version> = revisions
+            .iter()
+            .flat_map(|revision| revision.cause.versions().to_vec())
+            .collect();
+
+        // The farthest recorded leap that stays at or above the horizon.
+        // Deepest target = longest leap.
+        let leap = history
+            .skips_at(&version)
+            .await?
+            .iter()
+            .flat_map(|claim| claim.cause.versions().to_vec())
+            .filter(|target| target.edition >= horizon)
+            .min_by_key(|target| target.edition);
+
+        let mut push = |version: Version| {
+            let entry = reached.entry(version).or_insert(0);
+            if *entry & side != side {
+                *entry |= side;
+                frontier.push((version, side));
             }
+        };
+
+        match leap {
+            // A single-parent revision with a safe leap: the leapt region
+            // is linear (skip chains never cross merges), so the parent
+            // edge is subsumed by the leap.
+            Some(target) if causes.len() == 1 => push(target),
+            // A merge, or a leap that would cross the horizon: walk the
+            // cause edges. (A merge records no skips, but if one ever
+            // carried both, following both stays exact — just redundant.)
+            Some(target) => {
+                causes.into_iter().for_each(&mut push);
+                push(target);
+            }
+            None => causes.into_iter().for_each(&mut push),
         }
     }
 

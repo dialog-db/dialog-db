@@ -11,7 +11,7 @@ use crate::{
     history_key_attribute_head, history_key_version, history_region_range, history_version_range,
 };
 
-use super::{Claim, History, REVISION_ATTRIBUTE, Record, Version};
+use super::{Claim, History, REVISION_ATTRIBUTE, Record, SKIP_ATTRIBUTE, Version};
 
 /// Read access to the history region of an artifact tree.
 ///
@@ -45,6 +45,53 @@ where
     /// Read history from the artifact tree rooted at `root`
     pub fn from_root(root: &Blake3Hash, store: S) -> Self {
         Self::new(ArtifactTree::from_hash(NodeHash::from(*root)), store)
+    }
+
+    /// Read history from the artifact tree rooted at `root`, sharing the
+    /// given node cache: repeated history lookups (e.g. the frontier reads
+    /// of [`common_ancestor`](super::common_ancestor), or the skip table
+    /// construction of [`extend_skips`](super::extend_skips)) re-walk the
+    /// same tree spine, and content-addressed keys make sharing the cache
+    /// with other readers of the same store safe.
+    pub fn from_root_with_cache(
+        root: &Blake3Hash,
+        store: S,
+        cache: dialog_search_tree::Cache<NodeHash, dialog_search_tree::Buffer>,
+    ) -> Self {
+        Self::new(
+            ArtifactTree::from_hash_with_cache(NodeHash::from(*root), cache),
+            store,
+        )
+    }
+
+    /// Every claim recorded by the revision identified by `version` under
+    /// the given attribute. The attribute fits the raw attribute head of
+    /// the history key layout, so the filter is an exact in-key comparison
+    /// — non-matching records skip without decoding.
+    async fn claims_by_attribute(
+        &self,
+        version: &Version,
+        attribute: &str,
+    ) -> Result<Vec<Claim>, DialogArtifactsError> {
+        let attribute = Attribute::from_str(attribute)?;
+        let head = history_attribute_head(&attribute);
+        let (min, max) = history_version_range(version);
+        let stream = self.tree.stream_range(
+            crate::KeyBytes::from(min)..=crate::KeyBytes::from(max),
+            &self.storage,
+        );
+        tokio::pin!(stream);
+
+        let mut claims = Vec::new();
+        while let Some(entry) = stream.try_next().await? {
+            if history_key_attribute_head(&entry.key) != head {
+                continue;
+            }
+            if let State::Added(datum) = entry.value {
+                claims.push(Record::try_from_datum(datum)?.claim().clone());
+            }
+        }
+        Ok(claims)
     }
 
     /// Every record in the history region, in key order (ascending by
@@ -106,26 +153,10 @@ where
     }
 
     async fn revision_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
-        // The revision attribute fits the raw attribute head, so the in-key
-        // comparison is exact — non-matching records skip without decoding.
-        let attribute = Attribute::from_str(REVISION_ATTRIBUTE)?;
-        let head = history_attribute_head(&attribute);
-        let (min, max) = history_version_range(version);
-        let stream = self.tree.stream_range(
-            crate::KeyBytes::from(min)..=crate::KeyBytes::from(max),
-            &self.storage,
-        );
-        tokio::pin!(stream);
+        self.claims_by_attribute(version, REVISION_ATTRIBUTE).await
+    }
 
-        let mut claims = Vec::new();
-        while let Some(entry) = stream.try_next().await? {
-            if history_key_attribute_head(&entry.key) != head {
-                continue;
-            }
-            if let State::Added(datum) = entry.value {
-                claims.push(Record::try_from_datum(datum)?.claim().clone());
-            }
-        }
-        Ok(claims)
+    async fn skips_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
+        self.claims_by_attribute(version, SKIP_ATTRIBUTE).await
     }
 }

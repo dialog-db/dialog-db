@@ -1,7 +1,7 @@
 use crate::TreeReference;
 use crate::schema::{self, EntityExt as _};
 use dialog_artifacts::history::{
-    Cause, Claim, Edition, Origin, REVISION_ATTRIBUTE, Record, Version,
+    Cause, Claim, Edition, Origin, REVISION_ATTRIBUTE, Record, SKIP_ATTRIBUTE, Version,
 };
 use dialog_artifacts::{Attribute, DialogArtifactsError, Entity, Value};
 use dialog_capability::Did;
@@ -184,7 +184,11 @@ impl Revision {
     ///   entity whose value is the revision entity and whose cause lists the
     ///   parent revision versions (what
     ///   [`common_ancestor`](dialog_artifacts::history::common_ancestor)
-    ///   traverses), and
+    ///   traverses),
+    /// - its skip links — one `dialog.db/skip` claim per level, whose cause
+    ///   leaps 2^level first-parent steps back (computed by
+    ///   [`extend_skips`](dialog_artifacts::history::extend_skips); empty
+    ///   for genesis and merge revisions), and
     /// - its attribute claims on the revision entity (edition, branch,
     ///   issuer, authority, and one `cause` per parent revision entity), so
     ///   the revision is describable and joinable like any other entity.
@@ -196,6 +200,7 @@ impl Revision {
     pub fn records(
         &self,
         parents: impl IntoIterator<Item = Version>,
+        skips: &[(u32, Version)],
     ) -> Result<Vec<(Version, Record)>, DialogArtifactsError> {
         // Derive the schema entities once: `version()` and `entity()` each
         // recompute the lineage (two content-derived entities) on their own.
@@ -204,7 +209,7 @@ impl Revision {
         let this = Self::entity_of(&version);
         let parents: Vec<Version> = parents.into_iter().collect();
 
-        let mut records = Vec::with_capacity(5 + parents.len());
+        let mut records = Vec::with_capacity(5 + parents.len() + skips.len());
         records.push((
             version,
             Record::Assert(Claim {
@@ -214,6 +219,18 @@ impl Revision {
                 cause: parents.iter().copied().collect(),
             }),
         ));
+
+        for (level, target) in skips {
+            records.push((
+                version,
+                Record::Assert(Claim {
+                    the: Attribute::from_str(SKIP_ATTRIBUTE)?,
+                    of: this.clone(),
+                    is: Value::UnsignedInt(u128::from(*level)),
+                    cause: Cause::from(*target),
+                }),
+            ));
+        }
 
         let mut attribute = |the: &str, is: Value| -> Result<(), DialogArtifactsError> {
             records.push((

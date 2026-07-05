@@ -168,6 +168,8 @@ This key structure serves two purposes.
 
 **Revision DAG traversal:** revision claims are stored under `entity = repository_did`. Because edition leads the key, scanning the index and filtering on `entity = repository_did` yields revision history in a total order consistent with causality (concurrent revisions interleave, but no revision ever appears before one of its ancestors). Finding a common ancestor between two revision lineages is done by following `cause` pointers backward from each head.
 
+To keep that walk from costing one read per revision when one head is far ahead of the other, a revision advanced from a single parent also records *skip links* — claims whose causes leap 2^k first-parent steps back, built by binary lifting from the parent's own table. Ancestor search follows the longest recorded leap that stays at or above the lower head's edition, descending long linear runs in logarithmically many reads. Exactness is preserved by two rules: a leap never crosses a merge (merges record no skip table, and chains built after one cannot lift across it — so every leapt region is strictly linear), and no leap descends past the lower head's edition, below which all of that head's ancestors live.
+
 **Claim conflict resolution:** when two conflicting claims on the same `(entity, attribute)` are encountered, the index allows efficient traversal of the attribute's causal lineage. Given a conflicting claim's `Version`, the key `/edition/origin/entity/attribute` locates it directly and its `cause` chain can be followed backward.
 
 ## Conflict Detection
