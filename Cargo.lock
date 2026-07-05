@@ -943,33 +943,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialog-blobs"
-version = "0.1.0"
-dependencies = [
- "base58",
- "blake3",
- "bytes",
- "dialog-common",
- "dirs",
- "futures-core",
- "futures-util",
- "getrandom 0.2.16",
- "getrandom 0.3.3",
- "js-sys",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "ulid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test",
- "wasm-streams",
- "web-sys",
-]
-
-[[package]]
 name = "dialog-capability"
 version = "0.1.0"
 dependencies = [
@@ -4296,16 +4269,6 @@ name = "typenum"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
-
-[[package]]
-name = "ulid"
-version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
-dependencies = [
- "rand 0.9.2",
- "web-time",
-]
 
 [[package]]
 name = "unarray"
