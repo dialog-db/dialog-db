@@ -8,4 +8,5 @@
 //! atomic writes, CAS locking — lives in `dialog_storage`'s isomorphic provider.
 
 pub mod archive;
+pub mod blob;
 pub mod memory;

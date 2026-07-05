@@ -194,9 +194,8 @@ mod tests {
         let record = tree.get_blob(&store, &index_hash).await?;
         assert_eq!(record.map(|r| r.size), Some(payload.len() as u64));
 
-        // Task 4: `blob_size` is not implemented yet.
-        // let size = branch.blob_size(&hash).perform(&operator).await?;
-        // assert_eq!(size, Some(payload.len() as u64));
+        let size = branch.blob_size(&hash).perform(&operator).await?;
+        assert_eq!(size, Some(payload.len() as u64));
         Ok(())
     }
 }
