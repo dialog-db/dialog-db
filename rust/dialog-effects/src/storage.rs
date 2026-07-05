@@ -59,7 +59,7 @@ pub enum Directory {
 ///
 /// Used as a policy in the storage capability chain. The provider
 /// resolves this to a platform-specific address.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct Location {
     /// The directory category.
     pub directory: Directory,

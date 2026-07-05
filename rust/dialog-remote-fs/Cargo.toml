@@ -1,0 +1,50 @@
+[package]
+name = "dialog-remote-fs"
+description = "Local-filesystem remote backend for dialog-db: resolves an FsAddress to a user-picked directory and delegates to dialog-storage's isomorphic FileSystem provider"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+integration-tests = ["dialog-common/integration-tests"]
+web-integration-tests = ["dialog-common/web-integration-tests"]
+
+[dependencies]
+async-trait = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-storage = { workspace = true }
+dialog-ucan = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+dialog-repository = { workspace = true }
+dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-network = { workspace = true }
+dialog-artifacts = { workspace = true }
+anyhow = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-credentials = { workspace = true }
+dialog-storage = { workspace = true, features = ["helpers"] }
+dialog-varsig = { workspace = true }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\"))",
+  "cfg(dialog_test_wasm_integration)",
+] }

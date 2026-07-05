@@ -7,14 +7,10 @@
 //! content hashing for edition tracking.
 
 use super::{FileSystem, FileSystemError, FileSystemHandle};
-use async_trait::async_trait;
-use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
 use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
-use pidlock::Pidlock;
-use std::path::PathBuf;
 
 const MEMORY: &str = "memory";
 
@@ -39,70 +35,6 @@ impl From<FileSystemError> for MemoryError {
     }
 }
 
-/// RAII guard that acquires a PID lock and releases it when dropped.
-///
-/// Handles stale lock detection and recovery automatically.
-struct PidlockGuard(Pidlock);
-
-impl PidlockGuard {
-    /// Acquire a PID lock at the given handle.
-    ///
-    /// If a stale lock exists (from a dead process), it will be automatically
-    /// cleaned up and the lock acquired.
-    ///
-    /// If the lock is held by an active process, returns an error immediately
-    /// rather than waiting. This is intentional - the STM layer will retry
-    /// the entire transaction, which is the correct behavior since the locked
-    /// value will likely change anyway.
-    fn acquire(path: PathBuf) -> Result<Self, FileSystemError> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| FileSystemError::Lock("Lock path is not valid UTF-8".to_string()))?;
-
-        // If something other than a regular file exists at the lock path
-        // (e.g. a directory from a previous bug), fail early. Pidlock
-        // panics if it tries to remove_file on a directory.
-        if path.exists() && !path.is_file() {
-            return Err(FileSystemError::Lock(format!(
-                "Lock path is not a regular file: {}",
-                path_str
-            )));
-        }
-
-        let mut lock = Pidlock::new(path_str);
-
-        match lock.acquire() {
-            Ok(()) => Ok(Self(lock)),
-            Err(pidlock::PidlockError::LockExists) => {
-                // get_owner() checks if the PID in the lock file is still
-                // alive. If not, it removes the stale file so a retry can
-                // succeed. If the process is alive, we fail immediately
-                // and let the STM layer retry the whole transaction.
-                match lock.get_owner() {
-                    Some(pid) => Err(FileSystemError::Lock(format!(
-                        "Concurrent write in progress (lock held by pid {pid})",
-                    ))),
-                    None => {
-                        // Stale lock was removed by get_owner(). Retry once.
-                        lock.acquire().map(|()| Self(lock)).map_err(|e| {
-                            FileSystemError::Lock(format!("Failed to acquire lock: {e:?}"))
-                        })
-                    }
-                }
-            }
-            Err(e) => Err(FileSystemError::Lock(format!(
-                "Failed to acquire lock: {e:?}"
-            ))),
-        }
-    }
-}
-
-impl Drop for PidlockGuard {
-    fn drop(&mut self) {
-        let _ = self.0.release();
-    }
-}
-
 /// Format edition bytes for error messages.
 fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
     edition.map(Version::from)
@@ -114,30 +46,20 @@ impl FileSystemHandle {
         self.resolve(name)
     }
 
-    /// Acquire a PID lock for this handle by appending `.lock` to its path.
-    fn lock(&self) -> Result<PidlockGuard, FileSystemError> {
-        let path: PathBuf = self.clone().try_into()?;
-        let lock_path = path.with_extension("lock");
-        // Ensure parent directory exists for the lock file
-        if let Some(parent) = lock_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| FileSystemError::Io(e.to_string()))?;
-        }
-        PidlockGuard::acquire(lock_path)
-    }
-
-    fn temp(&self, hash: &[u8; 32]) -> Result<Self, FileSystemError> {
-        let path: PathBuf = self.clone().try_into()?;
-        let tmp_name = format!(
-            "{}.{}.tmp",
-            path.file_name().and_then(|n| n.to_str()).unwrap_or("cell"),
-            hash.to_base58()
-        );
-        let tmp_path = path.with_file_name(tmp_name);
-        tmp_path.try_into()
+    /// Acquire a cross-writer lock on this handle for a CAS critical section.
+    ///
+    /// On native this is a PID-based file lock at `{path}.lock`; on the web it
+    /// is a [Web Locks API][weblocks] lock keyed by this handle's URL. The
+    /// guard releases the lock when dropped.
+    ///
+    /// [weblocks]: https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API
+    async fn lock(&self) -> Result<super::LockGuard, FileSystemError> {
+        super::lock(self).await
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Resolve> for FileSystem {
     async fn execute(
         &self,
@@ -161,7 +83,8 @@ impl Provider<Resolve> for FileSystem {
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Publish> for FileSystem {
     async fn execute(&self, effect: Capability<Publish>) -> Result<Version, MemoryError> {
         let space = effect.space();
@@ -172,7 +95,7 @@ impl Provider<Publish> for FileSystem {
         let cell_handle = self.memory()?.resolve(space)?.cell(cell)?;
 
         // Acquire lock for exclusive access
-        let _guard = cell_handle.lock()?;
+        let _guard = cell_handle.lock().await?;
 
         // Read current value to check CAS condition
         let current_edition: Option<[u8; 32]> = cell_handle
@@ -217,17 +140,18 @@ impl Provider<Publish> for FileSystem {
             (None, None) => {}
         }
 
-        // Write to temp file (hash in name prevents conflicts if cleanup fails),
-        // then atomic rename to final location. write() creates parent dirs.
-        let tmp_handle = cell_handle.temp(&new_edition)?;
-        tmp_handle.write(&content).await?;
-        tmp_handle.rename(&cell_handle).await?;
+        // Publish atomically so a concurrent reader sees either the old edition
+        // or the complete new one. The surrounding CAS lock already serializes
+        // writers; `write_atomic` keeps the swap atomic against readers (a
+        // direct createWritable on the web, a staged temp+rename on native).
+        cell_handle.write_atomic(&content).await?;
 
         Ok(Version::from(new_edition.as_slice()))
     }
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<Retract> for FileSystem {
     async fn execute(&self, effect: Capability<Retract>) -> Result<(), MemoryError> {
         let space = effect.space();
@@ -242,7 +166,7 @@ impl Provider<Retract> for FileSystem {
         }
 
         // Acquire lock for exclusive access
-        let _guard = cell_handle.lock()?;
+        let _guard = cell_handle.lock().await?;
 
         // Read current value to check CAS condition
         let current_bytes = match cell_handle.read_optional().await? {
@@ -266,7 +190,7 @@ impl Provider<Retract> for FileSystem {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::helpers::{unique_did, unique_name};
@@ -840,71 +764,6 @@ mod tests {
             .await?;
 
         assert!(!v2.is_empty());
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_fails_lock_when_held_by_same_process() -> anyhow::Result<()> {
-        // Verifies that when our own process holds the lock, acquire returns
-        // an error immediately (not a spin). This matters because all tests
-        // run in the same process and share a PID.
-        let dir = tempfile::tempdir()?;
-        let lock_path = dir.path().join("cell.lock");
-        let _guard = PidlockGuard::acquire(lock_path.clone())?;
-
-        // Second acquire from same process should fail immediately
-        let result = PidlockGuard::acquire(lock_path);
-        let err = match result {
-            Ok(_) => panic!("expected lock to fail when held by same process"),
-            Err(e) => e,
-        };
-        assert!(
-            matches!(err, FileSystemError::Lock(_)),
-            "expected Lock error, got: {err:?}"
-        );
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_fails_lock_with_trailing_slash_path() -> anyhow::Result<()> {
-        // Reproduces the bug where FileSystemHandle's trailing-slash URLs
-        // produced PathBufs like "/tmp/.../test.lock/" which pidlock can
-        // never create (create_new fails on trailing-slash paths) and
-        // get_owner returns None (no file exists), causing an infinite
-        // busy loop in the old unbounded retry code.
-        let dir = tempfile::tempdir()?;
-        let bad_path = dir.path().join("cell.lock/"); // trailing slash
-        let result = PidlockGuard::acquire(bad_path);
-
-        // Should fail with a bounded retry error, not spin forever
-        let err = match result {
-            Ok(_) => panic!("expected lock to fail with trailing-slash path"),
-            Err(e) => e,
-        };
-        assert!(
-            matches!(err, FileSystemError::Lock(_)),
-            "expected Lock error, got: {err:?}"
-        );
-        Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn it_fails_lock_when_directory_exists_at_lock_path() -> anyhow::Result<()> {
-        // If a directory exists where the lock file should be (e.g. from
-        // a previous buggy run), acquire should fail, not spin or panic.
-        let dir = tempfile::tempdir()?;
-        let lock_path = dir.path().join("cell.lock");
-        std::fs::create_dir_all(&lock_path)?;
-        assert!(lock_path.is_dir());
-
-        let err = match PidlockGuard::acquire(lock_path) {
-            Ok(_) => panic!("expected lock to fail when a directory exists at the lock path"),
-            Err(e) => e,
-        };
-        assert!(
-            matches!(err, FileSystemError::Lock(_)),
-            "expected Lock error, got: {err:?}"
-        );
         Ok(())
     }
 }
