@@ -67,6 +67,7 @@ dirs = { workspace = true }
 js-sys = { workspace = true }
 rexie = { workspace = true }
 wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
 web-time = { workspace = true }
 
 [dev-dependencies]
