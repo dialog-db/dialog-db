@@ -286,7 +286,7 @@ mod tests {
 
         let payload = b"the quick brown blob".to_vec();
         let hash = branch
-            .write_blob(stream::iter(vec![payload.clone()]))
+            .write_blob(stream::iter(vec![payload.clone()].into_iter().map(Ok)))
             .perform(&operator)
             .await?;
 
