@@ -183,4 +183,21 @@ where
                 .map_err(|e| StorageError::Storage(e.to_string()))?,
         })
     }
+
+    async fn load(location: &Location) -> Result<Self, StorageError> {
+        Ok(Space {
+            archive: A::load(location)
+                .await
+                .map_err(|e| StorageError::Storage(e.to_string()))?,
+            memory: M::load(location)
+                .await
+                .map_err(|e| StorageError::Storage(e.to_string()))?,
+            credential: C::load(location)
+                .await
+                .map_err(|e| StorageError::Storage(e.to_string()))?,
+            certificate: P::load(location)
+                .await
+                .map_err(|e| StorageError::Storage(e.to_string()))?,
+        })
+    }
 }

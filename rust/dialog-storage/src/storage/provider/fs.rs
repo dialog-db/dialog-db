@@ -504,7 +504,11 @@ mod tests {
 
         // On disk the colon is escaped, never present.
         let names = space.certificate().unwrap().list().await.unwrap();
-        assert_eq!(names, vec![did.to_string()], "list recovers the logical name");
+        assert_eq!(
+            names,
+            vec![did.to_string()],
+            "list recovers the logical name"
+        );
 
         // The decoded name resolves back to the same bytes, no double-encoding.
         let again = space.certificate().unwrap().resolve(&names[0]).unwrap();

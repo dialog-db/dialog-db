@@ -55,11 +55,13 @@ mod certificate;
 mod credential;
 mod memory;
 
-use js_sys::Uint8Array;
+use js_sys::{Array, Function, Promise, Reflect, Uint8Array, global};
 use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
 
 /// Convert bytes to a JS Uint8Array.
 fn to_uint8array(bytes: &[u8]) -> Uint8Array {
@@ -271,18 +273,69 @@ impl Drop for IndexedDb {
 use crate::resource::Resource;
 use dialog_effects::storage::{Directory, Location};
 
+/// Derive the IndexedDB database name for a [`Location`].
+fn database_name(location: &Location) -> String {
+    match &location.directory {
+        Directory::Profile => format!("{}.profile", location.name),
+        Directory::Current => location.name.clone(),
+        Directory::Temp => format!("temp.{}", location.name),
+        Directory::At(path) => format!("{}/{}", path, location.name),
+    }
+}
+
+/// Whether an IndexedDB database with this name currently exists.
+///
+/// Uses `indexedDB.databases()`, which enumerates existing databases
+/// *without opening* (so it never creates one). The factory is read off
+/// the global scope (`self`) rather than `window`, so it works in a
+/// worker where `window` is absent.
+async fn database_exists(name: &str) -> Result<bool, IndexedDbError> {
+    let err = |m: String| IndexedDbError::Database(m);
+
+    let scope = global();
+    let factory = Reflect::get(&scope, &JsValue::from_str("indexedDB"))
+        .map_err(|e| err(format!("reading global indexedDB: {e:?}")))?;
+    let databases: Function = Reflect::get(&factory, &JsValue::from_str("databases"))
+        .map_err(|e| err(format!("reading indexedDB.databases: {e:?}")))?
+        .dyn_into()
+        .map_err(|_| err("indexedDB.databases is not callable".into()))?;
+    let promise: Promise = databases
+        .call0(&factory)
+        .map_err(|e| err(format!("calling indexedDB.databases(): {e:?}")))?
+        .dyn_into()
+        .map_err(|_| err("indexedDB.databases() did not return a promise".into()))?;
+    let list = JsFuture::from(promise)
+        .await
+        .map_err(|e| err(format!("indexedDB.databases() rejected: {e:?}")))?;
+
+    Ok(Array::from(&list).iter().any(|info| {
+        Reflect::get(&info, &JsValue::from_str("name"))
+            .ok()
+            .and_then(|n| n.as_string())
+            .as_deref()
+            == Some(name)
+    }))
+}
+
 #[async_trait::async_trait(?Send)]
 impl Resource<Location> for IndexedDb {
     type Error = IndexedDbError;
 
     async fn open(location: &Location) -> Result<Self, Self::Error> {
-        let name = match &location.directory {
-            Directory::Profile => format!("{}.profile", location.name),
-            Directory::Current => location.name.clone(),
-            Directory::Temp => format!("temp.{}", location.name),
-            Directory::At(path) => format!("{}/{}", path, location.name),
-        };
+        Self::connect(database_name(location)).await
+    }
 
+    /// Open an existing database, failing if it was never created.
+    ///
+    /// IndexedDB's `open` brings a database into being, so the base
+    /// `Resource::load` (which delegates to `open`) would leak a fresh
+    /// empty database on every miss. Probe `indexedDB.databases()` first
+    /// and refuse when absent — creating nothing.
+    async fn load(location: &Location) -> Result<Self, Self::Error> {
+        let name = database_name(location);
+        if !database_exists(&name).await? {
+            return Err(IndexedDbError::NotFound(name));
+        }
         Self::connect(name).await
     }
 }
@@ -305,6 +358,11 @@ pub enum IndexedDbError {
     /// Value conversion failed.
     #[error("Value conversion error: {0}")]
     Conversion(String),
+
+    /// No database exists at the requested name (a `load` of something
+    /// that was never created).
+    #[error("IndexedDB database not found: {0}")]
+    NotFound(String),
 }
 
 use dialog_capability::access::AuthorizeError;

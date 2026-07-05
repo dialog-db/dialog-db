@@ -1406,6 +1406,7 @@ dependencies = [
  "tower-http",
  "url",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-time",
 ]
