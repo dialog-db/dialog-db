@@ -1,11 +1,15 @@
 use dialog_artifacts::tree::TreeStorageBridge;
+use dialog_artifacts::{BlobChange, BlobIndexExt as _, blob_changes};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
+use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, TreeDifference};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use crate::{
     Branch, Index, LocalIndex, PushError, RemoteSite, RepositoryArchiveExt as _,
@@ -54,10 +58,12 @@ impl Push<'_> {
             + Provider<Put>
             + Provider<Resolve>
             + Provider<Publish>
+            + Provider<BlobRead>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Put>>
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, Publish>>
+            + Provider<Fork<RemoteSite, BlobImport>>
             + ConditionalSync
             + 'static,
     {
@@ -147,6 +153,60 @@ impl Push<'_> {
                 // Boxed because the upload future carries the full
                 // stream type and produces large futures.
                 Box::pin(upload).await?;
+
+                // Ship blobs newly referenced since the sync checkpoint. The
+                // entry-level view of the same differential, restricted to the
+                // BLOB tag, names exactly what the remote lacks under
+                // fast-forward. Bytes must land on the remote before we publish
+                // a revision that references them, so a failed upload here
+                // aborts the push with the revision still unpublished.
+                let blob_store = LocalIndex::new(env, index.clone());
+                let current_index = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+                let address = remote.address();
+                let mut changes = std::pin::pin!(blob_changes(
+                    Index::from_hash(NodeHash::from(*base.hash())),
+                    Index::from_hash(NodeHash::from(*revision.tree.hash())),
+                    blob_store.clone(),
+                ));
+                while let Some(change) = changes.next().await {
+                    // Removals ship nothing; the remote keeps its bytes.
+                    let BlobChange::Added(hash) = change? else {
+                        continue;
+                    };
+                    let digest = dialog_common::Blake3Hash::from(hash);
+                    // Size from the current tree's blob index (no byte fetch).
+                    let record = current_index
+                        .get_blob(&blob_store, &hash)
+                        .await?
+                        .ok_or_else(|| {
+                            BlobError::ExecutionError(format!(
+                                "blob {digest:?} referenced by the tree but absent from its index"
+                            ))
+                        })?;
+                    // Local bytes -> remote import sink. Mirrors the remote
+                    // `Read` fork in `branch/blob.rs` and `RemotePut`'s `Put`
+                    // fork in `remote/archive.rs`, substituting the blob
+                    // `Import` effect (single-part on the current providers).
+                    let mut source = branch
+                        .archive()
+                        .blob()
+                        .read(digest.clone())
+                        .perform(env)
+                        .await?;
+                    let mut sink = address
+                        .subject
+                        .clone()
+                        .archive()
+                        .blob()
+                        .import(digest.clone(), record.size)
+                        .fork(address.site())
+                        .perform(env)
+                        .await?;
+                    while let Some(chunk) = source.next().await? {
+                        sink.write_all(&chunk).await?;
+                    }
+                    sink.finish().await?;
+                }
 
                 upstream.publish(revision.clone()).perform(env).await?;
             }

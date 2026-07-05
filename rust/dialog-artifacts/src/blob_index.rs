@@ -125,16 +125,16 @@ impl BlobChange {
 /// `checkpoint` and `current` — the set push must ship (additions) without
 /// re-reading subtrees that did not change. Both trees must be readable from
 /// `store`.
-pub fn blob_changes<S>(
+pub fn blob_changes<'s, S>(
     checkpoint: ArtifactTree,
     current: ArtifactTree,
     store: S,
-) -> impl Stream<Item = Result<BlobChange, DialogArtifactsError>> + ConditionalSend
+) -> impl Stream<Item = Result<BlobChange, DialogArtifactsError>> + 's + ConditionalSend
 where
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + Clone
         + ConditionalSync
-        + 'static,
+        + 's,
 {
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
     try_stream! {
@@ -214,9 +214,7 @@ pub trait BlobIndexExt {
     fn list_blobs<'s, S>(
         self,
         store: S,
-    ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>>
-    + 's
-    + ConditionalSend
+    ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -242,7 +240,10 @@ impl BlobIndexExt for ArtifactTree {
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
         let key = KeyBytes::from(BlobKey::new(hash).into_key());
-        let transient = self.edit().insert(key, record.into_state(), &storage).await?;
+        let transient = self
+            .edit()
+            .insert(key, record.into_state(), &storage)
+            .await?;
         *self = transient.persist(delta)?;
         Ok(())
     }
@@ -268,9 +269,7 @@ impl BlobIndexExt for ArtifactTree {
     fn list_blobs<'s, S>(
         self,
         store: S,
-    ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>>
-    + 's
-    + ConditionalSend
+    ) -> impl Stream<Item = Result<(Blake3Hash, BlobRecord), DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -318,7 +317,9 @@ mod tests {
         tree.put_blob(&mut store, &mut delta, &hash(1), BlobRecord::new(4096))
             .await?;
         for (_, buffer) in delta.flush() {
-            store.set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec()).await?;
+            store
+                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                .await?;
         }
 
         assert_eq!(
@@ -338,10 +339,17 @@ mod tests {
         let mut tree = ArtifactTree::empty();
 
         for seed in [3u8, 1, 2] {
-            tree.put_blob(&mut store, &mut delta, &hash(seed), BlobRecord::new(seed as u64))
-                .await?;
+            tree.put_blob(
+                &mut store,
+                &mut delta,
+                &hash(seed),
+                BlobRecord::new(seed as u64),
+            )
+            .await?;
             for (_, buffer) in delta.flush() {
-                store.set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec()).await?;
+                store
+                    .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                    .await?;
             }
         }
 
