@@ -14,6 +14,9 @@ use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_query::query::Application;
 use dialog_search_tree::{Buffer, Cache};
 
+mod blob;
+pub use blob::*;
+
 mod claims;
 pub use claims::*;
 
