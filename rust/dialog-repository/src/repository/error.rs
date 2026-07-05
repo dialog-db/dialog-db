@@ -412,6 +412,14 @@ pub enum PushError {
     /// A search-tree operation during push failed.
     #[error("Tree operation failed during push: {0}")]
     Tree(#[from] DialogSearchTreeError),
+
+    /// Reading the blob differential or a blob record from the index failed.
+    #[error("Artifact operation failed during push: {0}")]
+    Artifact(#[from] DialogArtifactsError),
+
+    /// Shipping a newly-referenced blob to the remote failed.
+    #[error("Blob operation failed during push: {0}")]
+    Blob(#[from] BlobError),
 }
 
 /// Errors returned by cell resolve operations.
