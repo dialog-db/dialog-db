@@ -15,7 +15,7 @@ use dialog_capability::{Capability, Did, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
 use dialog_effects::credential::Secret;
-use dialog_effects::{archive, credential, memory, storage};
+use dialog_effects::{archive, blob, credential, memory, storage};
 
 use loader::Loader;
 use router::Router;
@@ -38,6 +38,9 @@ pub struct Storage<S: Clone> {
         archive::Get,
         archive::Put,
         archive::Import,
+        blob::Read,
+        blob::Write,
+        blob::Import,
         memory::Resolve,
         memory::Publish,
         memory::Retract,

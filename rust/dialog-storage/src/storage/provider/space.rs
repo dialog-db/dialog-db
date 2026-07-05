@@ -47,7 +47,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
 use dialog_effects::credential::Secret;
 use dialog_effects::storage::{Location, StorageError};
-use dialog_effects::{archive, credential, memory};
+use dialog_effects::{archive, blob, credential, memory};
 
 use std::fmt::Display;
 
@@ -93,8 +93,18 @@ impl<T> SpaceProvider for T where
 /// A composed set of providers for a single mounted space.
 #[derive(Clone, dialog_capability::Provider)]
 pub struct Space<A, M, C, D> {
-    /// Archive provider.
-    #[provide(archive::Get, archive::Put, archive::Import)]
+    /// Archive provider. Blob effects live under the archive
+    /// (`/archive/blob`), so they dispatch to the same field; the
+    /// generated impls are bound-conditional, so providers without blob
+    /// support (e.g. `Volatile`) still compose.
+    #[provide(
+        archive::Get,
+        archive::Put,
+        archive::Import,
+        blob::Read,
+        blob::Write,
+        blob::Import
+    )]
     pub archive: A,
 
     /// Memory provider.
