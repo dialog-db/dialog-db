@@ -3,6 +3,7 @@ use dialog_artifacts::DialogArtifactsError;
 use dialog_credentials::Ed25519SignerError;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
+use dialog_effects::blob::BlobError;
 use dialog_effects::memory::{MemoryError, Version};
 use dialog_effects::storage::StorageError;
 use dialog_search_tree::DialogSearchTreeError;
@@ -301,6 +302,10 @@ pub enum CommitError {
     /// Publishing the new revision failed.
     #[error("Failed to publish new revision: {0}")]
     Publish(#[from] PublishError),
+
+    /// Ingesting a blob's bytes into the store failed.
+    #[error("Blob ingest failed during write: {0}")]
+    Blob(#[from] BlobError),
 }
 
 /// Errors specific to a pull operation.
