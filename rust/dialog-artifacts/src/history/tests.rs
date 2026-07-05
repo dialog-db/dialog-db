@@ -819,3 +819,246 @@ async fn it_never_leaps_over_a_merge() -> Result<()> {
 
     Ok(())
 }
+
+/// A batch that asserts and retracts the same fact leaves one history
+/// record — the retraction, degenerated to a genesis retraction since a
+/// record must not claim itself as its cause — and no data.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::stream;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let entity = Entity::new()?;
+    let the: Attribute = "post/title".parse()?;
+    let title = Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::String("Hej".into()),
+        cause: None,
+    };
+    let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+
+    let mut tree = ArtifactTree::empty();
+    let mut delta = Delta::zero();
+    let changed = tree
+        .apply_versioned(
+            &mut store,
+            &mut delta,
+            Some(version),
+            stream::iter(vec![
+                Instruction::Assert(title.clone()),
+                Instruction::Retract(title),
+            ]),
+        )
+        .await?;
+    assert!(changed);
+    for (digest, buffer) in delta.flush() {
+        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+    }
+
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let records = history.records().await?;
+    assert_eq!(records.len(), 1, "the retraction overwrites the assertion");
+    let (recorded_version, record) = &records[0];
+    assert_eq!(*recorded_version, version);
+    assert!(!record.is_assertion());
+    assert!(
+        record.claim().cause.is_genesis(),
+        "a record must not claim its own version as its cause"
+    );
+    assert!(
+        tree.select_data(store.clone(), &entity, &the)
+            .await?
+            .is_empty()
+    );
+
+    Ok(())
+}
+
+/// A replacement over a cardinality-many anomaly — several values standing
+/// at one (entity, attribute), one of them already the replacement's value
+/// — supersedes exactly the different-valued claims: they are removed and
+/// listed as the record's cause, while the same-valued claim survives at
+/// its original version.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()> {
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::stream;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let entity = Entity::new()?;
+    let the: Attribute = "post/title".parse()?;
+    let title = |value: &str| Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::String(value.into()),
+        cause: None,
+    };
+
+    let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+    let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
+    let third = Version::new(Origin::from([7u8; 32]), Edition::new(2));
+
+    let mut tree = ArtifactTree::empty();
+    let apply = async |tree: &mut ArtifactTree,
+                       store: &mut Storage<
+        CborEncoder,
+        MemoryStorageBackend<dialog_storage::Blake3Hash, Vec<u8>>,
+    >,
+                       version: Version,
+                       instruction: Instruction|
+           -> Result<bool> {
+        let mut delta = Delta::zero();
+        let changed = tree
+            .apply_versioned(
+                store,
+                &mut delta,
+                Some(version),
+                stream::iter(vec![instruction]),
+            )
+            .await?;
+        for (digest, buffer) in delta.flush() {
+            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+        }
+        Ok(changed)
+    };
+
+    // Two values stand at the same (entity, attribute) — assertions are
+    // additive, so this is the cardinality-many shape.
+    apply(
+        &mut tree,
+        &mut store,
+        first,
+        Instruction::Assert(title("Hej")),
+    )
+    .await?;
+    apply(
+        &mut tree,
+        &mut store,
+        second,
+        Instruction::Assert(title("Hi")),
+    )
+    .await?;
+
+    // Replacing with one of the standing values repairs the anomaly:
+    // the different-valued claim is superseded, the same-valued one stays.
+    let changed = apply(
+        &mut tree,
+        &mut store,
+        third,
+        Instruction::Replace(title("Hi")),
+    )
+    .await?;
+    assert!(changed, "superseding a standing value is a change");
+
+    let data = tree.select_data(store.clone(), &entity, &the).await?;
+    assert_eq!(data.len(), 1);
+    assert_eq!(
+        data[0].version,
+        Some(second),
+        "the surviving claim keeps its original version"
+    );
+
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let records = history.records().await?;
+    assert_eq!(records.len(), 3);
+    let (_, replacement) = &records[2];
+    assert!(replacement.claim().cause.contains(&first));
+    assert!(
+        !replacement.claim().cause.contains(&second),
+        "the surviving same-valued claim is not superseded"
+    );
+
+    // And replaying the exact same replacement is now a pure no-op.
+    let changed = apply(
+        &mut tree,
+        &mut store,
+        Version::new(Origin::from([7u8; 32]), Edition::new(3)),
+        Instruction::Replace(title("Hi")),
+    )
+    .await?;
+    assert!(!changed, "re-replacing the only standing value is a no-op");
+
+    Ok(())
+}
+
+/// History keys truncate entity and attribute to raw heads; queries must
+/// disambiguate collisions against the stored record. Two attributes
+/// sharing the 57-byte head — and two entities sharing the 32-byte URI
+/// head — recorded at the same version must not bleed into each other's
+/// `claims_at`.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::stream;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let head = "test/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let long_x: Attribute = format!("{head}x").parse()?;
+    let long_y: Attribute = format!("{head}y").parse()?;
+    let shared = "test:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let left: Entity = format!("{shared}left").parse()?;
+    let right: Entity = format!("{shared}right").parse()?;
+
+    let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+    let claim = |of: &Entity, the: &Attribute, value: &str| {
+        Instruction::Assert(Artifact {
+            the: the.clone(),
+            of: of.clone(),
+            is: Value::String(value.into()),
+            cause: None,
+        })
+    };
+
+    let mut tree = ArtifactTree::empty();
+    let mut delta = Delta::zero();
+    tree.apply_versioned(
+        &mut store,
+        &mut delta,
+        Some(version),
+        stream::iter(vec![
+            claim(&left, &long_x, "left-x"),
+            claim(&left, &long_y, "left-y"),
+            claim(&right, &long_x, "right-x"),
+        ]),
+    )
+    .await?;
+    for (digest, buffer) in delta.flush() {
+        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+    }
+
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let x_claims = history.claims_at(&version, &left, &long_x).await?;
+    assert_eq!(x_claims.len(), 1, "head-sharing neighbors are filtered out");
+    assert_eq!(x_claims[0].is, Value::String("left-x".into()));
+    assert_eq!(x_claims[0].the, long_x);
+
+    let y_claims = history.claims_at(&version, &left, &long_y).await?;
+    assert_eq!(y_claims.len(), 1);
+    assert_eq!(y_claims[0].is, Value::String("left-y".into()));
+
+    let right_claims = history.claims_at(&version, &right, &long_x).await?;
+    assert_eq!(right_claims.len(), 1);
+    assert_eq!(right_claims[0].is, Value::String("right-x".into()));
+
+    Ok(())
+}
