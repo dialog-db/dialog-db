@@ -187,7 +187,7 @@ where
         // (each layer is an Arc-backed node plus a child index), so the read
         // pays nothing for the siblings an update would later decode.
         if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
-            if let Some(entry) = result.leaf.body()?.find_entry(key)? {
+            if let Some(entry) = result.leaf.body().find_entry(key)? {
                 into_owned(&entry.value).map(|value| Some(value))
             } else {
                 Ok(None)

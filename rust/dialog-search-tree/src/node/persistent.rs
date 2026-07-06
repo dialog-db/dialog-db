@@ -18,6 +18,13 @@ use std::marker::PhantomData;
 /// a [`Buffer`] and is identified by its [`Blake3Hash`]. The structured
 /// contents are recovered as a zero-copy [`ArchivedNodeBody`] view via
 /// [`body`](PersistentNode::body).
+///
+/// Validity is a type invariant: a `PersistentNode` can only be constructed
+/// from bytes that passed archive validation ([`try_new`](Self::try_new)) or
+/// bytes this crate itself just serialized
+/// ([`from_serialized`](Self::from_serialized)), so
+/// [`body`](Self::body) is infallible and costs a pointer cast rather than a
+/// bytecheck pass per access.
 #[derive(Clone, Debug)]
 pub struct PersistentNode<Key, Value> {
     key: PhantomData<Key>,
@@ -41,10 +48,32 @@ where
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
 {
-    /// Creates a new node from a serialized buffer.
-    pub fn new(buffer: Buffer) -> Self {
-        Self {
+    /// Creates a node from a buffer of untrusted bytes (storage, cache, the
+    /// network), validating that it archives as
+    /// `ArchivedNodeBody<Key, Value>`. This is the only validation the node
+    /// ever runs: it proves the invariant that [`body`](Self::body) relies
+    /// on for the lifetime of the node and all of its clones.
+    pub fn try_new(buffer: Buffer) -> Result<Self, DialogSearchTreeError> {
+        rkyv::access::<ArchivedNodeBody<Key, Value>, rkyv::rancor::Error>(buffer.as_ref())
+            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+        Ok(Self {
             buffer,
+            key: PhantomData,
+            value: PhantomData,
+        })
+    }
+
+    /// Creates a node from bytes this crate just serialized out of a
+    /// [`PersistentNodeBody<Key, Value>`], which are a valid archive of that
+    /// exact type by construction — no validation pass is needed to uphold
+    /// [`body`](Self::body)'s invariant.
+    ///
+    /// The serializer's [`AlignedVec`] is taken directly so the alignment
+    /// that in-place archive access depends on is preserved into the
+    /// [`Buffer`].
+    pub(crate) fn from_serialized(bytes: AlignedVec) -> Self {
+        Self {
+            buffer: Buffer::from(bytes),
             key: PhantomData,
             value: PhantomData,
         }
@@ -62,7 +91,7 @@ where
 
     /// Converts this node into a [`Link`] referencing it.
     pub fn to_link(&self) -> Result<Link<Key>, DialogSearchTreeError> {
-        let upper_bound: Key = self.body()?.upper_bound().and_then(into_owned)?;
+        let upper_bound: Key = self.body().upper_bound().and_then(into_owned)?;
         let self_hash = self.buffer.blake3_hash().clone();
 
         Ok(Link {
@@ -72,47 +101,52 @@ where
     }
 
     /// Returns the upper bound key of this node, if it has one.
-    pub fn upper_bound(&self) -> Result<Option<&Key::Archived>, DialogSearchTreeError> {
-        self.body().map(|body| match body {
+    pub fn upper_bound(&self) -> Option<&Key::Archived> {
+        match self.body() {
             ArchivedNodeBody::Index(index) => index.upper_bound(),
             ArchivedNodeBody::Segment(segment) => segment.upper_bound(),
-        })
+        }
     }
 
     /// Accesses the deserialized body of this node.
-    pub fn body(&self) -> Result<&ArchivedNodeBody<Key, Value>, DialogSearchTreeError> {
-        rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
-            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
+    ///
+    /// Infallible: validity is the type's construction invariant (see
+    /// [`try_new`](Self::try_new) / [`from_serialized`](Self::from_serialized)),
+    /// so no per-access validation runs.
+    pub fn body(&self) -> &ArchivedNodeBody<Key, Value> {
+        // SAFETY: every constructor upholds the invariant that `buffer` is a
+        // valid archive of exactly `ArchivedNodeBody<Key, Value>` — `try_new`
+        // ran the full bytecheck validation, `from_serialized` took the bytes
+        // straight from this crate's serializer for that type. Buffers are
+        // immutable and 16-byte aligned.
+        unsafe { rkyv::access_unchecked::<ArchivedNodeBody<Key, Value>>(self.buffer.as_ref()) }
     }
 
     /// Interprets this node as an index node, returning an error if it's a
     /// segment.
     pub fn as_index(&self) -> Result<&ArchivedIndex<Key>, DialogSearchTreeError> {
-        self.body().and_then(|body| match body {
+        match self.body() {
             ArchivedNodeBody::Index(index) => Ok(index),
             ArchivedNodeBody::Segment(_) => Err(DialogSearchTreeError::Access(
                 "Attempted to interpret a segment node as an index node".to_string(),
             )),
-        })
+        }
     }
 
     /// Interprets this node as a segment node, returning an error if it's an
     /// index.
     pub fn as_segment(&self) -> Result<&ArchivedSegment<Key, Value>, DialogSearchTreeError> {
-        self.body().and_then(|body| match body {
+        match self.body() {
             ArchivedNodeBody::Segment(segment) => Ok(segment),
             ArchivedNodeBody::Index(_) => Err(DialogSearchTreeError::Access(
                 "Attempted to interpret a index node as an segment node".to_string(),
             )),
-        })
+        }
     }
 
     /// Finds the index of the child containing the given key.
-    pub fn get_child_index(
-        &self,
-        key: &Key::Archived,
-    ) -> Result<Option<usize>, DialogSearchTreeError> {
-        self.body().map(|body| match body {
+    pub fn get_child_index(&self, key: &Key::Archived) -> Option<usize> {
+        match self.body() {
             ArchivedNodeBody::Index(index) => index
                 .links
                 .binary_search_by(|link| Ord::cmp(&link.upper_bound, key))
@@ -121,7 +155,7 @@ where
                 .entries
                 .binary_search_by(|entry| Ord::cmp(&entry.key, key))
                 .ok(),
-        })
+        }
     }
 }
 
