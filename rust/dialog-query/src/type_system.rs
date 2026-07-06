@@ -7,12 +7,11 @@
 //! and the schema layer.
 //!
 //! A [`Type`] is the set of admissible value shapes a slot may
-//! bind. It is built from a [`Primitive`] bitfield (the atomic
-//! shapes, plus a `Nothing` bit for set-widened optionality) and an
-//! optional set of [`Composite`] shapes (Product records, Variant
-//! tags). The two parts compose by set-union: a value satisfies
-//! [`Type`] iff it inhabits at least one of the primitive bits or
-//! one of the composite shapes.
+//! bind: a [`Primitive`] bitfield (the atomic shapes, plus a
+//! `Nothing` bit for set-widened optionality), optionally narrowed
+//! by a value-level [`Refinement`]. A value satisfies [`Type`] iff
+//! its data type is a member of the primitive set and the
+//! refinement (if any) admits the value itself.
 //!
 //! Type variables (used for compile-time unification of rules)
 //! live in the [`unifier`] submodule, never in the user-facing
@@ -26,7 +25,7 @@ pub mod unifier;
 use crate::artifact::Type as ValueType;
 use crate::artifact::Value;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// A bitfield over [`ValueType`] variants plus a `Nothing` bit:
@@ -271,49 +270,21 @@ impl From<Primitive> for Type {
     }
 }
 
-/// Schema-layer type: the set of admissible value shapes a slot
-/// can bind.
-///
-/// A [`Type`] is the union of two parts:
-///
-/// - A [`Primitive`] bitfield carrying atomic [`ValueType`] bits
-///   plus an optional `Nothing` atom (row-level absence).
-/// - An optional non-empty set of [`Composite`] shapes for
-///   structured values (records, variants).
-///
-/// Smart constructors enforce the invariant that
-/// `Composite(_, set)` always has `!set.is_empty()`; a request to
-/// build a composite with an empty set collapses to a plain
-/// `Primitive`.
-///
-/// Composites live in a [`BTreeSet`] rather than a [`HashSet`].
-/// Two reasons:
-///
 impl Display for Type {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Type::Primitive(p) => write!(f, "{p}"),
-            Type::Composite(p, c) => write!(f, "{p}+{} composite", c.len()),
-            Type::Refined(p, r) => write!(f, "{p}[starts-with {:?}]", r.prefix),
+            Type::Refined(p, r) => write!(f, "{p}[{r}]"),
         }
     }
 }
 
-/// 1. `Type` derives [`Hash`]. `BTreeSet` iterates in a stable
-///    `Ord`-based order, so the derived hash is canonical:
-///    `Type::Composite(p, {a, b})` and `Type::Composite(p, {b, a})`
-///    have identical hashes. `HashSet` does not implement `Hash`
-///    in std, and any hand-rolled order-independent hash would
-///    have to sort internally anyway, and `BTreeSet` is that already.
+/// Schema-layer type: the set of admissible value shapes a slot
+/// can bind.
 ///
-/// 2. Insertion order at construction never affects equality.
-///    Building the same set via different paths (different unions,
-///    different insert orders) yields equal [`Type`]s.
-///
-/// The cost is requiring [`Ord`] on [`Composite`], [`Type`], and
-/// [`Primitive`]. The ordering is structural plumbing; it has no
-/// semantic meaning (no claim that `u32 < String`); it exists only
-/// to keep the set canonical.
+/// A [`Type`] is a [`Primitive`] bitfield carrying atomic
+/// [`ValueType`] bits plus an optional `Nothing` atom (row-level
+/// absence), optionally narrowed by a value-level [`Refinement`].
 ///
 /// `Type` is fully static: no type variables, no allocation
 /// state. Deriving [`PartialEq`]/[`Eq`]/[`Hash`] is safe and
@@ -321,23 +292,32 @@ impl Display for Type {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Type {
-    /// Pure primitive set (no composite shapes admitted).
+    /// Pure primitive membership set.
     Primitive(Primitive),
-    /// The union of a primitive set and a non-empty set of composite
-    /// shapes: a value satisfies it if it inhabits one of the
-    /// primitive bits OR matches one of the composite shapes (not
-    /// the intersection of the two). The primitive set may be empty,
-    /// giving a pure composite type. Invariant: the composite set is
-    /// never empty (an empty one collapses to `Primitive`).
-    Composite(Primitive, BTreeSet<Composite>),
     /// Primitive set narrowed by a [`Refinement`] on the *values*
     /// of the member types — not just which types are admitted, but
     /// which of their inhabitants. Produced by refinement
     /// predicates (`starts-with`); consumed by scan-range pushdown
     /// and, like every kind, by [`Type::admits`] at the data
-    /// boundary. Admits no composite shapes (refinements constrain
-    /// lexical forms, which composites do not have).
+    /// boundary.
     Refined(Primitive, Refinement),
+}
+
+/// Opaque identity of a concept an entity must conform to — the
+/// concept's content-derived entity URI (`concept:{hash}`).
+///
+/// Deliberately opaque on the lattice: subsumption *between*
+/// concepts (attribute-set inclusion) needs their descriptors,
+/// which the lattice does not carry. The analyzer canonicalizes
+/// conformance sets against the registry before refinements enter
+/// unification; the lattice orders them by plain set inclusion.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ConceptRef(pub String);
+
+impl Display for ConceptRef {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}", self.0)
+    }
 }
 
 /// A value-level constraint layered onto a primitive membership
@@ -345,53 +325,142 @@ pub enum Type {
 /// constraints), the join their weakest common implication — see
 /// [`Refinement::meet`] and [`Refinement::join`].
 ///
-/// Today one refinement exists: a lexical prefix over the TEXTUAL
-/// kinds. Numeric intervals and Entity concept-membership (M3)
-/// extend this struct rather than adding lattice variants.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+/// Two constraints exist: a lexical prefix over the TEXTUAL kinds,
+/// and a conformance set over Entity — the value must satisfy a
+/// concept-typed field's target concepts. Numeric intervals extend
+/// this struct the same way rather than adding lattice variants.
+///
+/// Invariant: never empty (no prefix and no conformance is no
+/// refinement; the constructors collapse it to an unrefined type).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Refinement {
     /// Lexical prefix every admitted value must begin with.
-    /// Invariant: non-empty (an empty prefix is no refinement; the
-    /// constructors collapse it).
-    pub prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// Concepts the value's entity must conform to — all of them
+    /// (the meet unions this set). Carried as *information*: an
+    /// entity's conformance is not a property of the scalar (it is
+    /// "facts exist"), so enforcement is structural — the analyzer
+    /// conjoins the target concept's premises on the field — while
+    /// this set feeds inclusion ordering, demand covers, and
+    /// diagnostics.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub conforms: BTreeSet<ConceptRef>,
 }
 
 impl Refinement {
-    /// Meet: the conjunction of both constraints. Two prefixes are
-    /// jointly satisfiable iff one extends the other, and the meet
-    /// is the longer; disjoint prefixes admit nothing.
-    fn meet(&self, other: &Refinement) -> Option<Refinement> {
-        if self.prefix.starts_with(&other.prefix) {
-            Some(self.clone())
-        } else if other.prefix.starts_with(&self.prefix) {
-            Some(other.clone())
-        } else {
-            None
+    /// A prefix-only refinement.
+    fn prefix(prefix: String) -> Refinement {
+        Refinement {
+            prefix: Some(prefix),
+            conforms: BTreeSet::new(),
         }
+    }
+
+    /// True when the refinement constrains nothing — the shape the
+    /// constructors collapse to an unrefined type.
+    fn is_empty(&self) -> bool {
+        self.prefix.is_none() && self.conforms.is_empty()
+    }
+
+    /// Meet: the conjunction of both constraints. Two prefixes are
+    /// jointly satisfiable iff one extends the other (the meet is
+    /// the longer; disjoint prefixes admit nothing); conformance
+    /// sets union — the value must satisfy both sides' concepts.
+    fn meet(&self, other: &Refinement) -> Option<Refinement> {
+        let prefix = match (&self.prefix, &other.prefix) {
+            (Some(a), Some(b)) => {
+                if a.starts_with(b.as_str()) {
+                    Some(a.clone())
+                } else if b.starts_with(a.as_str()) {
+                    Some(b.clone())
+                } else {
+                    return None;
+                }
+            }
+            (Some(p), None) | (None, Some(p)) => Some(p.clone()),
+            (None, None) => None,
+        };
+        let conforms = self.conforms.union(&other.conforms).cloned().collect();
+        Some(Refinement { prefix, conforms })
     }
 
     /// Join: the weakest constraint both sides imply — the longest
-    /// common prefix. `None` when nothing is common (the join
-    /// carries no refinement).
+    /// common prefix (a side without one implies none) and the
+    /// intersection of the conformance sets. `None` when nothing
+    /// remains (the join carries no refinement).
     fn join(&self, other: &Refinement) -> Option<Refinement> {
-        let common: String = self
-            .prefix
-            .chars()
-            .zip(other.prefix.chars())
-            .take_while(|(a, b)| a == b)
-            .map(|(a, _)| a)
+        let prefix = match (&self.prefix, &other.prefix) {
+            (Some(a), Some(b)) => {
+                let common: String = a
+                    .chars()
+                    .zip(b.chars())
+                    .take_while(|(x, y)| x == y)
+                    .map(|(x, _)| x)
+                    .collect();
+                if common.is_empty() {
+                    None
+                } else {
+                    Some(common)
+                }
+            }
+            _ => None,
+        };
+        let conforms: BTreeSet<ConceptRef> = self
+            .conforms
+            .intersection(&other.conforms)
+            .cloned()
             .collect();
-        if common.is_empty() {
+        let joined = Refinement { prefix, conforms };
+        if joined.is_empty() {
             None
         } else {
-            Some(Refinement { prefix: common })
+            Some(joined)
         }
     }
 
-    /// True when the value's lexical form satisfies the refinement.
-    /// Values without a lexical form satisfy no prefix.
+    /// True when `other` is at least as constrained as `self` —
+    /// every value satisfying `other` satisfies `self`. The
+    /// inclusion check behind [`Type::includes`].
+    fn implied_by(&self, other: &Refinement) -> bool {
+        let prefix_implied = match (&self.prefix, &other.prefix) {
+            (Some(a), Some(b)) => b.starts_with(a.as_str()),
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        prefix_implied && self.conforms.is_subset(&other.conforms)
+    }
+
+    /// True when the value satisfies the row-locally checkable half
+    /// of the refinement: the lexical prefix. Values without a
+    /// lexical form satisfy no prefix. Conformance is deliberately
+    /// not checked here — see the field doc; its enforcement is the
+    /// desugared premises' job.
     pub fn admits(&self, value: &Value) -> bool {
-        lexical_form(value).is_some_and(|form| form.starts_with(&self.prefix))
+        match &self.prefix {
+            Some(prefix) => {
+                lexical_form(value).is_some_and(|form| form.starts_with(prefix.as_str()))
+            }
+            None => true,
+        }
+    }
+}
+
+impl Display for Refinement {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let mut separate = false;
+        if let Some(prefix) = &self.prefix {
+            write!(f, "starts-with {prefix:?}")?;
+            separate = true;
+        }
+        for concept in &self.conforms {
+            if separate {
+                write!(f, " & ")?;
+            }
+            write!(f, "conforms-to {concept}")?;
+            separate = true;
+        }
+        Ok(())
     }
 }
 
@@ -408,23 +477,6 @@ pub fn lexical_form(value: &Value) -> Option<String> {
     }
 }
 
-/// A composite (structured) value shape. Ordered by derived
-/// [`Ord`] for stable iteration and hashing inside a [`BTreeSet`].
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Composite {
-    /// Product (record) type with named fields. Field names ordered
-    /// by [`BTreeMap`] for stable equality and hashing.
-    Product(BTreeMap<String, Type>),
-    /// Sum-type variant carrying a single label and its payload.
-    Variant {
-        /// The discriminator label.
-        label: String,
-        /// The payload type for this label.
-        value: Type,
-    },
-}
-
 impl Type {
     /// The type whose only inhabitant is the `Nothing` atom: the
     /// "absent" row-layer value.
@@ -437,7 +489,6 @@ impl Type {
     pub fn optional(self) -> Type {
         match self {
             Type::Primitive(p) => Type::Primitive(p.union(Primitive::NOTHING)),
-            Type::Composite(p, c) => Type::Composite(p.union(Primitive::NOTHING), c),
             Type::Refined(p, r) => Type::Refined(p.union(Primitive::NOTHING), r),
         }
     }
@@ -445,15 +496,13 @@ impl Type {
     /// True when the given runtime value inhabits this type: the
     /// value's data type is a member of the primitive part, and the
     /// refinement (if any) admits the value itself.
-    /// Composite refinements are not yet checked; no composite
-    /// values flow through evaluation today.
     pub fn admits(&self, value: &Value) -> bool {
         if !self.primitive_part().contains(value.data_type()) {
             return false;
         }
         match self {
             Type::Refined(_, r) => r.admits(value),
-            _ => true,
+            Type::Primitive(_) => true,
         }
     }
 
@@ -463,7 +512,6 @@ impl Type {
     pub fn required(self) -> Type {
         match self {
             Type::Primitive(p) => Type::Primitive(p.required()),
-            Type::Composite(p, c) => Type::Composite(p.required(), c),
             Type::Refined(p, r) => Type::Refined(p.required(), r),
         }
     }
@@ -489,9 +537,33 @@ impl Type {
             return None;
         }
         let refinement = match &self {
-            Type::Refined(_, existing) => existing.meet(&Refinement { prefix })?,
-            _ => Refinement { prefix },
+            Type::Refined(_, existing) => existing.meet(&Refinement::prefix(prefix))?,
+            _ => Refinement::prefix(prefix),
         };
+        Some(Type::Refined(membership, refinement))
+    }
+
+    /// Constrain this type's values to entities conforming to the
+    /// given concept — the lattice form of a concept-typed field.
+    ///
+    /// The membership narrows to Entity (the `Nothing` bit, if
+    /// present, rides along — an optional concept-typed field is
+    /// still optional). Returns `None` when no entity could inhabit
+    /// the type — an empty meet, the ordinary
+    /// known-types-misalign conflict. Conformance accumulates: an
+    /// existing refinement gains the concept.
+    pub fn with_conformance(self, concept: ConceptRef) -> Option<Type> {
+        let membership = self
+            .primitive_part()
+            .intersect(Primitive::from(ValueType::Entity).union(Primitive::NOTHING))?;
+        if membership.required().is_empty() {
+            return None;
+        }
+        let mut refinement = match self {
+            Type::Refined(_, r) => r,
+            Type::Primitive(_) => Refinement::default(),
+        };
+        refinement.conforms.insert(concept);
         Some(Type::Refined(membership, refinement))
     }
 
@@ -499,100 +571,42 @@ impl Type {
     pub fn refinement(&self) -> Option<&Refinement> {
         match self {
             Type::Refined(_, r) => Some(r),
-            _ => None,
+            Type::Primitive(_) => None,
         }
     }
 
     /// Rebuild this type around a replacement primitive part,
-    /// preserving its composite or refinement structure. The
-    /// unifier uses this so a resolution that narrows membership
-    /// does not silently shed the rest of the type.
+    /// preserving its refinement structure. The unifier uses this
+    /// so a resolution that narrows membership does not silently
+    /// shed the rest of the type.
     pub(crate) fn with_primitive_part(&self, p: Primitive) -> Type {
         match self {
             Type::Primitive(_) => Type::Primitive(p),
-            Type::Composite(_, c) => Type::composite(p, c.clone()),
             Type::Refined(_, r) => Type::Refined(p, r.clone()),
         }
     }
 
-    /// Smart constructor. Collapses `Composite(p, empty)` to
-    /// `Primitive(p)`. Use this rather than building the
-    /// `Composite` variant directly.
-    pub fn composite(primitive: Primitive, composite: BTreeSet<Composite>) -> Type {
-        if composite.is_empty() {
-            Type::Primitive(primitive)
-        } else {
-            Type::Composite(primitive, composite)
-        }
-    }
-
-    /// Build a record type from named fields.
-    pub fn product(fields: BTreeMap<String, Type>) -> Type {
-        let mut set = BTreeSet::new();
-        set.insert(Composite::Product(fields));
-        Type::Composite(Primitive::EMPTY, set)
-    }
-
-    /// Build a singleton variant type from a label and payload.
-    pub fn variant(label: impl Into<String>, value: Type) -> Type {
-        let mut set = BTreeSet::new();
-        set.insert(Composite::Variant {
-            label: label.into(),
-            value,
-        });
-        Type::Composite(Primitive::EMPTY, set)
-    }
-
-    /// Set intersection over both primitive and composite parts.
-    /// Returns `None` when the result is empty: no admissible
-    /// shapes survive.
+    /// Set intersection: the meet of both memberships and both
+    /// refinements. Returns `None` when the result is empty: no
+    /// admissible shapes survive.
     ///
-    /// Composite shapes narrow structurally: two
-    /// `Composite::Product` values with the same field-name set
-    /// intersect their field types recursively (if any field
-    /// intersection is empty, the product is eliminated). Products
-    /// with disjoint field-name sets do not intersect; they
-    /// describe disjoint records. Variants intersect by matching
-    /// label, recursing into payload types.
+    /// Refinements are constraints: the meet carries the
+    /// conjunction. Two refined sides must have jointly
+    /// satisfiable refinements.
     pub fn intersect(&self, other: &Type) -> Option<Type> {
-        let p_self = self.primitive_part();
-        let p_other = other.primitive_part();
-        let p = Primitive {
-            bits: p_self.bits & p_other.bits,
-        };
-
-        // Refinements are constraints: the meet carries the
-        // conjunction. Two refined sides must have jointly
-        // satisfiable refinements; a refined side admits no
-        // composite shapes, so any composite part on the other
-        // side is dropped.
+        let p = self.primitive_part().intersect(other.primitive_part())?;
         let refinement = match (self.refinement(), other.refinement()) {
             (Some(a), Some(b)) => Some(a.meet(b)?),
             (Some(r), None) | (None, Some(r)) => Some(r.clone()),
             (None, None) => None,
         };
-        if let Some(refinement) = refinement {
-            return if p.is_empty() {
-                None
-            } else {
-                Some(Type::Refined(p, refinement))
-            };
-        }
-
-        let composite_intersection: BTreeSet<Composite> =
-            match (self.composite_part(), other.composite_part()) {
-                (Some(a), Some(b)) => intersect_composite_sets(a, b),
-                _ => BTreeSet::new(),
-            };
-
-        if p.is_empty() && composite_intersection.is_empty() {
-            None
-        } else {
-            Some(Type::composite(p, composite_intersection))
-        }
+        Some(match refinement {
+            Some(refinement) => Type::Refined(p, refinement),
+            None => Type::Primitive(p),
+        })
     }
 
-    /// Set union over both primitive and composite parts.
+    /// Set union of both memberships.
     ///
     /// Refinements weaken at a join: two refined sides keep their
     /// weakest common implication (the longest common prefix), a
@@ -601,55 +615,28 @@ impl Type {
     /// side admits.
     pub fn union(&self, other: &Type) -> Type {
         let p = self.primitive_part().union(other.primitive_part());
-
         if let (Some(a), Some(b)) = (self.refinement(), other.refinement())
             && let Some(joined) = a.join(b)
         {
             return Type::Refined(p, joined);
         }
-
-        let mut composites: BTreeSet<Composite> = BTreeSet::new();
-        if let Some(s) = self.composite_part() {
-            composites.extend(s.iter().cloned());
-        }
-        if let Some(s) = other.composite_part() {
-            composites.extend(s.iter().cloned());
-        }
-        Type::composite(p, composites)
+        Type::Primitive(p)
     }
 
     /// Subtype check. Returns `true` iff every shape `other`
     /// admits is also admitted by `self`.
-    ///
-    /// For composites: each shape in `other` must be included by
-    /// some shape in `self`. Inclusion is structural: a Product
-    /// `{x: T1, y: T2}` includes a Product `{x: T1', y: T2'}` when
-    /// the field-name sets match and each `Ti` includes `Ti'`. A
-    /// product with extra fields includes one with fewer fields
-    /// (width subtyping is not assumed; equal field sets only).
     pub fn includes(&self, other: &Type) -> bool {
         if !self.primitive_part().includes(other.primitive_part()) {
             return false;
         }
         // A refined type admits fewer values than its membership: it
         // includes `other` only if `other` is at least as
-        // constrained (other's prefix extends ours). An unrefined
+        // constrained (other's constraints imply ours). An unrefined
         // type over-approximates any refinement of its membership.
         match (self.refinement(), other.refinement()) {
-            (Some(a), Some(b)) => {
-                if !b.prefix.starts_with(&a.prefix) {
-                    return false;
-                }
-            }
-            (Some(_), None) => return false,
-            (None, _) => {}
-        }
-        match (self.composite_part(), other.composite_part()) {
-            (_, None) => true,
-            (None, Some(b)) => b.is_empty(),
-            (Some(a), Some(b)) => b
-                .iter()
-                .all(|b_shape| a.iter().any(|a_shape| composite_includes(a_shape, b_shape))),
+            (Some(a), Some(b)) => a.implied_by(b),
+            (Some(_), None) => false,
+            (None, _) => true,
         }
     }
 
@@ -662,129 +649,19 @@ impl Type {
     pub fn primitive_part(&self) -> Primitive {
         match self {
             Type::Primitive(p) => *p,
-            Type::Composite(p, _) => *p,
             Type::Refined(p, _) => *p,
         }
     }
 
-    /// The composite part of this type, or `None` if the type has
-    /// only a primitive part.
-    pub fn composite_part(&self) -> Option<&BTreeSet<Composite>> {
-        match self {
-            Type::Primitive(_) => None,
-            Type::Composite(_, c) => Some(c),
-            Type::Refined(_, _) => None,
-        }
-    }
-
     /// Legacy storage-codec view: if this type reduces to exactly
-    /// one [`ValueType`] (no `Nothing`, no composites), return it.
-    /// A refinement does not change the storage type, so a refined
-    /// singleton still reports its member.
+    /// one [`ValueType`] (no `Nothing`), return it. A refinement
+    /// does not change the storage type, so a refined singleton
+    /// still reports its member.
     pub fn as_value_type(&self) -> Option<ValueType> {
         match self {
             Type::Primitive(p) => p.as_singleton(),
-            Type::Composite(_, _) => None,
             Type::Refined(p, _) => p.as_singleton(),
         }
-    }
-}
-
-/// Structurally intersect two sets of [`Composite`] shapes.
-///
-/// For each `Composite::Product` in `a`, look for a same-field-set
-/// `Composite::Product` in `b` and intersect their field types
-/// pairwise; if any field intersection is empty, the product is
-/// eliminated. For each `Composite::Variant` in `a`, look for a
-/// same-label `Composite::Variant` in `b` and intersect their
-/// payload types. Anything in `a` or `b` without a structural
-/// counterpart on the other side is dropped: set intersection
-/// only keeps shapes admitted by both sides.
-fn intersect_composite_sets(
-    a: &BTreeSet<Composite>,
-    b: &BTreeSet<Composite>,
-) -> BTreeSet<Composite> {
-    let mut result = BTreeSet::new();
-    for a_shape in a {
-        for b_shape in b {
-            if let Some(merged) = intersect_composite(a_shape, b_shape) {
-                result.insert(merged);
-            }
-        }
-    }
-    result
-}
-
-/// Pairwise intersection of two [`Composite`] shapes. Two
-/// products intersect iff they share the same set of field names;
-/// two variants iff they share the same label.
-fn intersect_composite(a: &Composite, b: &Composite) -> Option<Composite> {
-    match (a, b) {
-        (Composite::Product(fa), Composite::Product(fb)) => {
-            if fa.len() != fb.len() {
-                return None;
-            }
-            let mut out = BTreeMap::new();
-            for (name, ta) in fa {
-                let tb = fb.get(name)?;
-                let merged = ta.intersect(tb)?;
-                out.insert(name.clone(), merged);
-            }
-            Some(Composite::Product(out))
-        }
-        (
-            Composite::Variant {
-                label: la,
-                value: va,
-            },
-            Composite::Variant {
-                label: lb,
-                value: vb,
-            },
-        ) => {
-            if la != lb {
-                return None;
-            }
-            let merged = va.intersect(vb)?;
-            Some(Composite::Variant {
-                label: la.clone(),
-                value: merged,
-            })
-        }
-        _ => None,
-    }
-}
-
-/// Structural inclusion check between two [`Composite`] shapes.
-/// `a` includes `b` iff they are the same shape kind, have matching
-/// keys/labels, and each of `a`'s recursive types includes `b`'s.
-fn composite_includes(a: &Composite, b: &Composite) -> bool {
-    match (a, b) {
-        (Composite::Product(fa), Composite::Product(fb)) => {
-            if fa.len() != fb.len() {
-                return false;
-            }
-            for (name, ta) in fa {
-                let Some(tb) = fb.get(name) else {
-                    return false;
-                };
-                if !ta.includes(tb) {
-                    return false;
-                }
-            }
-            true
-        }
-        (
-            Composite::Variant {
-                label: la,
-                value: va,
-            },
-            Composite::Variant {
-                label: lb,
-                value: vb,
-            },
-        ) => la == lb && va.includes(vb),
-        _ => false,
     }
 }
 
@@ -792,13 +669,7 @@ fn composite_includes(a: &Composite, b: &Composite) -> bool {
 mod tests {
     use super::*;
     use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hash as HashTrait, Hasher};
-
-    fn hash_of<T: HashTrait>(t: &T) -> u64 {
-        let mut h = DefaultHasher::new();
-        t.hash(&mut h);
-        h.finish()
-    }
+    use std::hash::{Hash, Hasher};
 
     fn p(vt: ValueType) -> Type {
         Type::from(vt)
@@ -925,185 +796,23 @@ mod tests {
         assert_eq!(a, b);
     }
 
+    /// Intersection and union reduce to primitive-part set algebra
+    /// when no refinements are involved.
     #[dialog_common::test]
-    fn product_constructor_round_trip() {
-        let mut fields = BTreeMap::new();
-        fields.insert("name".to_string(), Type::from(ValueType::String));
-        fields.insert("age".to_string(), Type::from(ValueType::UnsignedInt));
-        let a = Type::product(fields.clone());
-        let b = Type::product(fields);
-        assert_eq!(a, b);
-        let mut ha = DefaultHasher::new();
-        let mut hb = DefaultHasher::new();
-        a.hash(&mut ha);
-        b.hash(&mut hb);
-        assert_eq!(ha.finish(), hb.finish());
-    }
+    fn intersect_and_union_are_primitive_set_algebra() {
+        let numeric = Type::from(Primitive::NUMERIC);
+        let uint = Type::from(ValueType::UnsignedInt);
+        let met = numeric.intersect(&uint).expect("overlap");
+        assert_eq!(met.as_value_type(), Some(ValueType::UnsignedInt));
 
-    #[dialog_common::test]
-    fn variant_constructor_carries_label_and_payload() {
-        let some = Type::variant("Some", Type::from(ValueType::String));
-        let composites = some.composite_part().unwrap();
-        assert_eq!(composites.len(), 1);
-        let first = composites.iter().next().unwrap();
-        match first {
-            Composite::Variant { label, value } => {
-                assert_eq!(label, "Some");
-                assert_eq!(*value, Type::from(ValueType::String));
-            }
-            other => panic!("expected Variant, got {:?}", other),
-        }
-    }
+        let string = Type::from(ValueType::String);
+        assert!(uint.intersect(&string).is_none(), "disjoint memberships");
 
-    #[dialog_common::test]
-    fn intersect_two_records_same_fields() {
-        let mut fields = BTreeMap::new();
-        fields.insert("x".to_string(), Type::from(ValueType::String));
-        let a = Type::product(fields.clone());
-        let b = Type::product(fields);
-        let c = a.intersect(&b).expect("intersection non-empty");
-        assert_eq!(a, c);
-    }
-
-    /// Two products with the same field names but different field
-    /// types narrow structurally: intersect each field's type
-    /// recursively. If every field intersection is non-empty, the
-    /// product survives with the narrowed fields.
-    #[dialog_common::test]
-    fn intersect_products_narrows_field_types() {
-        let mut a_fields = BTreeMap::new();
-        a_fields.insert("x".to_string(), Type::from(Primitive::NUMERIC));
-        let a = Type::product(a_fields);
-
-        let mut b_fields = BTreeMap::new();
-        b_fields.insert("x".to_string(), Type::from(ValueType::UnsignedInt));
-        let b = Type::product(b_fields);
-
-        let merged = a.intersect(&b).expect("narrows to UnsignedInt");
-        let composite = merged.composite_part().expect("composite present");
-        let product = composite.iter().next().expect("one product");
-        match product {
-            Composite::Product(fields) => {
-                let x_type = fields.get("x").expect("x field");
-                assert_eq!(x_type.as_value_type(), Some(ValueType::UnsignedInt));
-            }
-            other => panic!("expected Product, got {other:?}"),
-        }
-    }
-
-    /// Two products with disjoint field types fail to intersect.
-    #[dialog_common::test]
-    fn intersect_products_disjoint_fields_eliminated() {
-        let mut a_fields = BTreeMap::new();
-        a_fields.insert("x".to_string(), Type::from(ValueType::String));
-        let a = Type::product(a_fields);
-
-        let mut b_fields = BTreeMap::new();
-        b_fields.insert("x".to_string(), Type::from(ValueType::UnsignedInt));
-        let b = Type::product(b_fields);
-
-        assert!(a.intersect(&b).is_none());
-    }
-
-    /// Two products with different field-name sets do not
-    /// intersect; they describe disjoint record shapes.
-    #[dialog_common::test]
-    fn intersect_products_different_keys_eliminated() {
-        let mut a_fields = BTreeMap::new();
-        a_fields.insert("x".to_string(), Type::from(ValueType::String));
-        let a = Type::product(a_fields);
-
-        let mut b_fields = BTreeMap::new();
-        b_fields.insert("y".to_string(), Type::from(ValueType::String));
-        let b = Type::product(b_fields);
-
-        assert!(a.intersect(&b).is_none());
-    }
-
-    /// Two variants with the same label intersect their payloads;
-    /// different labels do not intersect.
-    #[dialog_common::test]
-    fn intersect_variants_by_label() {
-        let a = Type::variant("Some", Type::from(Primitive::NUMERIC));
-        let b = Type::variant("Some", Type::from(ValueType::UnsignedInt));
-        let merged = a.intersect(&b).expect("same label narrows payload");
-        let composite = merged.composite_part().expect("composite present");
-        match composite.iter().next().expect("one variant") {
-            Composite::Variant { label, value } => {
-                assert_eq!(label, "Some");
-                assert_eq!(value.as_value_type(), Some(ValueType::UnsignedInt));
-            }
-            other => panic!("expected Variant, got {other:?}"),
-        }
-
-        let c = Type::variant("Other", Type::from(ValueType::UnsignedInt));
-        assert!(a.intersect(&c).is_none());
-    }
-
-    #[dialog_common::test]
-    fn intersect_primitive_and_composite_keeps_primitive_only() {
-        let mut fields = BTreeMap::new();
-        fields.insert("x".to_string(), Type::from(ValueType::String));
-        let composite = Type::product(fields);
-        let prim = Type::from(ValueType::String);
-        // primitive part of `composite` is EMPTY; composite part of `prim` is None.
-        // Intersection of primitive parts: EMPTY ∩ {String} = EMPTY.
-        // Intersection of composite parts: None ∩ {Product{...}} = empty.
-        // Overall: empty → None.
-        assert!(prim.intersect(&composite).is_none());
-
-        // But if the composite carries a Record primitive bit, the
-        // intersection has that bit alone.
-        let composite_with_record = Type::composite(
-            Primitive::singleton(ValueType::Record),
-            composite
-                .composite_part()
-                .cloned()
-                .unwrap_or_else(BTreeSet::new),
-        );
-        let record_prim = Type::from(ValueType::Record);
-        let intersected = record_prim.intersect(&composite_with_record).unwrap();
-        assert_eq!(
-            intersected.primitive_part().as_singleton(),
-            Some(ValueType::Record)
-        );
-        assert!(intersected.composite_part().is_none());
-    }
-
-    #[dialog_common::test]
-    fn includes_product_subtype_extra_fields_in_subject() {
-        // A type T "includes" U iff T admits every shape U admits.
-        // For our set semantics, T includes U requires every
-        // composite of U to be present in T's composite set. So
-        // larger composite sets in T are fine; an extra Product in
-        // U not in T breaks inclusion.
-        let mut a_fields = BTreeMap::new();
-        a_fields.insert("x".to_string(), Type::from(ValueType::String));
-        let a = Type::product(a_fields.clone());
-
-        let mut b_fields = BTreeMap::new();
-        b_fields.insert("x".to_string(), Type::from(ValueType::String));
-        b_fields.insert("y".to_string(), Type::from(ValueType::UnsignedInt));
-        let b = Type::product(b_fields);
-
-        // a and b are different products; neither includes the other.
-        assert!(!a.includes(&b));
-        assert!(!b.includes(&a));
-
-        // a includes itself.
-        assert!(a.includes(&a));
-
-        // Union of {a, b} includes both.
-        let union = a.union(&b);
-        assert!(union.includes(&a));
-        assert!(union.includes(&b));
-    }
-
-    #[dialog_common::test]
-    fn smart_constructor_collapses_empty_composite_set() {
-        let collapsed = Type::composite(Primitive::singleton(ValueType::String), BTreeSet::new());
-        assert!(matches!(collapsed, Type::Primitive(_)));
-        assert_eq!(collapsed.as_value_type(), Some(ValueType::String));
+        let joined = uint.union(&string);
+        assert!(joined.primitive_part().contains(ValueType::UnsignedInt));
+        assert!(joined.primitive_part().contains(ValueType::String));
+        assert!(joined.includes(&uint));
+        assert!(joined.includes(&string));
     }
 
     #[dialog_common::test]
@@ -1124,51 +833,6 @@ mod tests {
         assert_eq!(Type::from(Primitive::NUMERIC).as_value_type(), None);
     }
 
-    /// Insertion order of composite elements does not affect
-    /// equality or hash. The [`BTreeSet`] storage canonicalizes
-    /// the set, so different paths to the same set of shapes
-    /// produce equal `Type`s with equal hashes.
-    #[dialog_common::test]
-    fn composite_set_is_insertion_order_independent() {
-        let a = Type::variant("A", p(ValueType::String));
-        let b = Type::variant("B", p(ValueType::UnsignedInt));
-
-        // Build the same multi-element set two different ways:
-        // ({A, B}) via a.union(b), and ({B, A}) via b.union(a).
-        let ab = a.union(&b);
-        let ba = b.union(&a);
-
-        assert_eq!(ab, ba, "set equality is order-independent");
-        assert_eq!(hash_of(&ab), hash_of(&ba), "set hash is order-independent");
-    }
-
-    /// Field insertion order into a `BTreeMap<String, Type>` does
-    /// not affect product equality or hash: the BTreeMap sorts
-    /// by key. Same product built via `{x, y}` vs `{y, x}` insert
-    /// orders must compare equal and hash equal.
-    #[dialog_common::test]
-    fn product_field_insertion_order_independent() {
-        let mut a_fields = BTreeMap::new();
-        a_fields.insert("x".to_string(), Type::from(ValueType::String));
-        a_fields.insert("y".to_string(), Type::from(ValueType::UnsignedInt));
-        let a = Type::product(a_fields);
-
-        let mut b_fields = BTreeMap::new();
-        b_fields.insert("y".to_string(), Type::from(ValueType::UnsignedInt));
-        b_fields.insert("x".to_string(), Type::from(ValueType::String));
-        let b = Type::product(b_fields);
-
-        assert_eq!(
-            a, b,
-            "product equality is field-insertion-order independent"
-        );
-        assert_eq!(
-            hash_of(&a),
-            hash_of(&b),
-            "product hash is field-insertion-order independent"
-        );
-    }
-
     /// `with_prefix` narrows membership to the TEXTUAL kinds and
     /// attaches the refinement; non-textual membership is an empty
     /// meet.
@@ -1178,7 +842,10 @@ mod tests {
             .with_prefix("did:")
             .expect("textual members remain");
         assert_eq!(refined.primitive_part(), Primitive::TEXTUAL);
-        assert_eq!(refined.refinement().expect("refined").prefix, "did:");
+        assert_eq!(
+            refined.refinement().expect("refined").prefix.as_deref(),
+            Some("did:")
+        );
 
         assert!(
             Type::from(Primitive::NUMERIC).with_prefix("did:").is_none(),
@@ -1200,7 +867,10 @@ mod tests {
             .with_prefix("did:key:")
             .unwrap();
         let met = did.intersect(&did_key).expect("compatible prefixes");
-        assert_eq!(met.refinement().unwrap().prefix, "did:key:");
+        assert_eq!(
+            met.refinement().unwrap().prefix.as_deref(),
+            Some("did:key:")
+        );
 
         let http = Type::from(ValueType::Entity).with_prefix("http:").unwrap();
         assert!(
@@ -1211,8 +881,8 @@ mod tests {
         let unrefined = Type::from(Primitive::TEXTUAL);
         let met = did.intersect(&unrefined).expect("memberships overlap");
         assert_eq!(
-            met.refinement().unwrap().prefix,
-            "did:",
+            met.refinement().unwrap().prefix.as_deref(),
+            Some("did:"),
             "the refinement survives a meet with an unrefined side"
         );
         assert_eq!(met.primitive_part().as_singleton(), Some(ValueType::Entity));
@@ -1229,7 +899,10 @@ mod tests {
             .with_prefix("user/guest")
             .unwrap();
         let joined = a.union(&b);
-        assert_eq!(joined.refinement().unwrap().prefix, "user/");
+        assert_eq!(
+            joined.refinement().unwrap().prefix.as_deref(),
+            Some("user/")
+        );
 
         let unrefined = Type::from(ValueType::String);
         assert_eq!(
@@ -1281,22 +954,138 @@ mod tests {
         assert_eq!(t, back);
     }
 
-    /// Combining two products via union also produces identical
-    /// hashes regardless of which product was unioned first.
+    fn concept(uri: &str) -> ConceptRef {
+        ConceptRef(uri.to_string())
+    }
+
+    /// `with_conformance` narrows membership to Entity (keeping the
+    /// `Nothing` bit for optional fields) and rejects memberships
+    /// with no entity in them.
     #[dialog_common::test]
-    fn product_union_is_order_independent() {
-        let mut a_fields = BTreeMap::new();
-        a_fields.insert("x".to_string(), Type::from(ValueType::String));
-        let a = Type::product(a_fields);
+    fn with_conformance_narrows_to_entity() {
+        let person = concept("concept:person");
+        let refined = Type::from(Primitive::ALL)
+            .with_conformance(person.clone())
+            .expect("Entity is a member");
+        assert_eq!(
+            refined.primitive_part().as_singleton(),
+            Some(ValueType::Entity)
+        );
+        assert!(refined.refinement().unwrap().conforms.contains(&person));
 
-        let mut b_fields = BTreeMap::new();
-        b_fields.insert("y".to_string(), Type::from(ValueType::UnsignedInt));
-        let b = Type::product(b_fields);
+        let optional = Type::from(ValueType::Entity)
+            .optional()
+            .with_conformance(person.clone())
+            .expect("optional entity remains inhabited");
+        assert!(
+            optional.primitive_part().contains_nothing(),
+            "the Nothing bit rides along"
+        );
 
-        let ab = a.union(&b);
-        let ba = b.union(&a);
+        assert!(
+            Type::from(Primitive::NUMERIC)
+                .with_conformance(person)
+                .is_none(),
+            "no numeric value is an entity"
+        );
+    }
 
-        assert_eq!(ab, ba);
-        assert_eq!(hash_of(&ab), hash_of(&ba));
+    /// The meet unions conformance sets (the value must satisfy both
+    /// sides); the join intersects them (only what both sides imply
+    /// survives).
+    #[dialog_common::test]
+    fn conformance_meet_unions_join_intersects() {
+        let person = concept("concept:person");
+        let employee = concept("concept:employee");
+        let a = Type::from(ValueType::Entity)
+            .with_conformance(person.clone())
+            .unwrap();
+        let b = Type::from(ValueType::Entity)
+            .with_conformance(employee.clone())
+            .unwrap();
+
+        let met = a.intersect(&b).expect("memberships overlap");
+        let conforms = &met.refinement().unwrap().conforms;
+        assert!(conforms.contains(&person) && conforms.contains(&employee));
+
+        assert!(
+            a.union(&b).refinement().is_none(),
+            "disjoint conformance sets imply nothing in common"
+        );
+        let both = a.clone().with_conformance(employee).unwrap();
+        assert_eq!(
+            both.union(&a),
+            a,
+            "the join keeps exactly the shared concepts"
+        );
+    }
+
+    /// Inclusion: a larger conformance set is more constrained, so
+    /// the superset side is the subtype.
+    #[dialog_common::test]
+    fn conformance_includes_is_subset_ordered() {
+        let person = concept("concept:person");
+        let a = Type::from(ValueType::Entity)
+            .with_conformance(person.clone())
+            .unwrap();
+        let both = a
+            .clone()
+            .with_conformance(concept("concept:employee"))
+            .unwrap();
+        let unrefined = Type::from(ValueType::Entity);
+
+        assert!(a.includes(&both), "more concepts is more constrained");
+        assert!(!both.includes(&a));
+        assert!(unrefined.includes(&a), "unrefined over-approximates");
+        assert!(!a.includes(&unrefined));
+
+        let prefixed = a.clone().with_prefix("did:").unwrap();
+        assert!(
+            a.includes(&prefixed) && !prefixed.includes(&a),
+            "both halves participate in the ordering"
+        );
+    }
+
+    /// Conformance is not row-checkable ("facts exist" is not a
+    /// property of the scalar): `admits` enforces only the prefix
+    /// half, enforcement of conformance is the desugared premises'
+    /// job.
+    #[dialog_common::test]
+    fn conformance_is_not_row_checked() {
+        let refined = Type::from(ValueType::Entity)
+            .with_conformance(concept("concept:person"))
+            .unwrap();
+        let entity = Value::Entity("did:key:z6Mk".parse().expect("valid entity"));
+        assert!(
+            refined.admits(&entity),
+            "any entity passes the row-local check"
+        );
+        assert!(
+            !refined.admits(&Value::UnsignedInt(7)),
+            "membership still applies"
+        );
+    }
+
+    /// Conformance survives serde, and the extended [`Refinement`]
+    /// still reads the prefix-only wire shape older peers produce.
+    #[dialog_common::test]
+    fn conformance_serde_round_trip_and_wire_compat() {
+        let t = Type::from(ValueType::Entity)
+            .with_conformance(concept("concept:person"))
+            .unwrap()
+            .with_prefix("did:")
+            .unwrap();
+        let j = serde_json::to_string(&t).unwrap();
+        let back: Type = serde_json::from_str(&j).unwrap();
+        assert_eq!(t, back);
+
+        let old = Type::from(ValueType::Entity).with_prefix("did:").unwrap();
+        let old_wire = serde_json::to_string(&old).unwrap();
+        assert!(
+            !old_wire.contains("conforms"),
+            "an empty conformance set stays off the wire"
+        );
+        let read: Type = serde_json::from_str(&old_wire).unwrap();
+        assert_eq!(read, old);
     }
 }

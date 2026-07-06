@@ -62,7 +62,7 @@ pub enum UnifyError {
     },
     /// Occurs check: unifying a variable with a type that
     /// transitively contains the variable would produce an
-    /// infinite type. Reserved for future composite shapes.
+    /// infinite type. Reserved for future recursive types.
     #[error("occurs check failed for variable {var:?}")]
     OccursCheck {
         /// The offending variable.
@@ -189,8 +189,7 @@ impl Context {
     /// Returns `Err` on constraint conflict (an empty meet).
     ///
     /// Static types intersect via [`StaticType::intersect`], which
-    /// narrows both primitive and composite parts (products by
-    /// shared field-name set, variants by label). Variables carry
+    /// meets both memberships and refinements. Variables carry
     /// a [`Primitive`] constraint that's intersected with the
     /// primitive part of any concrete type they're unified with.
     pub fn unify(&mut self, a: &Type, b: &Type) -> Result<Type, UnifyError> {
@@ -253,8 +252,7 @@ impl Context {
                     .ok_or(UnifyError::ConstraintConflict { left: cx, right: p })?;
                 self.constraints.insert(x, merged);
                 // Rebuild around the merged membership without
-                // shedding the static's composite or refinement
-                // structure.
+                // shedding the static's refinement structure.
                 let resolved = narrowed_static.with_primitive_part(merged);
                 self.substitution.insert(x, Type::Static(resolved.clone()));
                 Ok(Type::Static(resolved))
@@ -479,7 +477,13 @@ mod tests {
         match resolved {
             Type::Static(s) => {
                 assert_eq!(s.primitive_part().as_singleton(), Some(ValueType::Entity));
-                assert_eq!(s.refinement().expect("refinement preserved").prefix, "did:");
+                assert_eq!(
+                    s.refinement()
+                        .expect("refinement preserved")
+                        .prefix
+                        .as_deref(),
+                    Some("did:")
+                );
             }
             other => panic!("expected static, got {other:?}"),
         }
