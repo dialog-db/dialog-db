@@ -54,6 +54,11 @@ pub trait History: ConditionalSync {
     /// The [`RevisionRecord`] minted by the revision identified by
     /// `version` — its parents, skip links, and attribution, atomically.
     /// `None` means the revision has not been replicated.
+    ///
+    /// Implementations reading storage that may hold peer-supplied blocks
+    /// (like [`TreeHistory`](super::TreeHistory)) verify the record against
+    /// the slot before returning it — see [`RevisionRecord::verify`] — so
+    /// traversals never follow forged edges.
     async fn revision_record(
         &self,
         version: &Version,

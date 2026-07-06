@@ -11,7 +11,7 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Identify, OperatorExt};
+use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::Delta;
 use futures_util::Stream;
@@ -73,6 +73,7 @@ where
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
+            + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
@@ -214,8 +215,14 @@ where
             ),
         };
         debug_assert_eq!(revision.version(), version);
-        let entries = revision.record_entries(parent.into_iter().collect(), skips)?;
-        tree.record(&mut store, &mut delta, entries).await?;
+        // Sign the record before it enters the tree: the issuer's signature
+        // covers everything the revision states about itself, and readers
+        // (`TreeHistory::revision_record`) refuse records that don't verify
+        // against the slot they were found at.
+        let mut record = revision.record(parent.into_iter().collect(), skips);
+        record.signature = Attest::new(record.payload()?).perform(env).await?;
+        debug_assert_eq!(record.version(), version);
+        tree.record(&mut store, &mut delta, record.entries()?).await?;
 
         // Persist the tree's pending nodes before referencing the root in
         // a revision; a revision must only point at durable blocks. The
@@ -232,6 +239,11 @@ where
             .map_err(DialogArtifactsError::from)?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
+        // Sign the head last: only now is the tree root final, and the head
+        // signature is what binds that root to the issuer (the in-tree
+        // record cannot contain the root of the tree it lives in). A
+        // replica adopting this head verifies it first — see `Pull`.
+        revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
         head.publish(revision.clone(), env).await?;
 
@@ -480,6 +492,46 @@ mod history_tests {
             .await?
             .expect("the third revision's record is retrievable");
         assert_eq!(record.skips, vec![first.version()]);
+
+        Ok(())
+    }
+
+    /// A commit signs what it publishes: the head revision verifies as
+    /// issued by the session's operator key, and any tampering with a
+    /// signed field — the tree root above all, since it is what a replica
+    /// adopts on pull — breaks verification.
+    #[dialog_common::test]
+    async fn it_signs_the_published_head() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let revision = branch
+            .commit(stream::iter(vec![Instruction::Assert(title(
+                "post:1", "Hej",
+            ))]))
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(revision.issuer, operator.did());
+        revision.verify()?;
+
+        let mut swapped_root = revision.clone();
+        swapped_root.tree = crate::TreeReference::from([9u8; 32]);
+        assert!(
+            swapped_root.verify().is_err(),
+            "a head with a swapped tree root must not verify"
+        );
+
+        // Reattributing the head to another principal (here the profile,
+        // a real key the operator does not hold) fails too: the signature
+        // is not by the newly-named issuer.
+        let mut reattributed = revision.clone();
+        reattributed.issuer = profile.did();
+        assert!(
+            reattributed.verify().is_err(),
+            "a reattributed head must not verify"
+        );
 
         Ok(())
     }

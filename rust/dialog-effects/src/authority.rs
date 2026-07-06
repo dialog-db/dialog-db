@@ -24,6 +24,10 @@ pub enum AuthorityError {
     /// Identity resolution failed.
     #[error("Identity error: {0}")]
     Identity(String),
+
+    /// Signing a payload failed.
+    #[error("Attestation error: {0}")]
+    Attestation(String),
 }
 
 /// Device identity — attenuates from Subject.
@@ -103,6 +107,41 @@ impl Identify {
     pub async fn perform<Env>(self, env: &Env) -> Result<Capability<Operator>, AuthorityError>
     where
         Env: Provider<Identify> + ConditionalSync,
+    {
+        env.execute(self).await
+    }
+}
+
+/// Attest command — sign a payload with the current session's operator key.
+///
+/// Like [`Identify`], attestation is ambient session state: whoever the
+/// current operator is signs, with the same key whose DID [`Identify`]
+/// reports as the operator. Verifiers resolve that `did:key` to check the
+/// signature, so an attested payload is bound to the issuer identity that
+/// produced it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attest {
+    /// The bytes to sign.
+    pub payload: Vec<u8>,
+}
+
+impl Attest {
+    /// Attest the given payload.
+    pub fn new(payload: Vec<u8>) -> Self {
+        Self { payload }
+    }
+}
+
+impl Command for Attest {
+    type Input = Self;
+    type Output = Result<Vec<u8>, AuthorityError>;
+}
+
+impl Attest {
+    /// Perform this command against an env that can provide it.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Vec<u8>, AuthorityError>
+    where
+        Env: Provider<Attest> + ConditionalSync,
     {
         env.execute(self).await
     }

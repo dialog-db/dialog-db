@@ -140,7 +140,13 @@ where
         let the = Attribute::from_str(REVISION_ATTRIBUTE)?;
         for datum in self.tree.select_data(self.store.clone(), &of, &the).await? {
             if ValueDataType::from(datum.value_type) == ValueDataType::Record {
-                return Ok(Some(RevisionRecord::try_from_bytes(&datum.value)?));
+                let record = RevisionRecord::try_from_bytes(&datum.value)?;
+                // Tree blocks may have arrived from an untrusted peer;
+                // a record only counts if it vouches for itself — issuer
+                // signature valid, and derived version matching the slot
+                // it was found at.
+                record.verify(version)?;
+                return Ok(Some(record));
             }
         }
         Ok(None)
