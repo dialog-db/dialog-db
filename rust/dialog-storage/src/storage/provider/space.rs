@@ -92,19 +92,9 @@ impl<T> SpaceProvider for T where
 
 /// A composed set of providers for a single mounted space.
 #[derive(Clone, dialog_capability::Provider)]
-pub struct Space<A, M, C, D> {
-    /// Archive provider. Blob effects live under the archive
-    /// (`/archive/blob`), so they dispatch to the same field; the
-    /// generated impls are bound-conditional, so providers without blob
-    /// support (e.g. `Volatile`) still compose.
-    #[provide(
-        archive::Get,
-        archive::Put,
-        archive::Import,
-        blob::Read,
-        blob::Write,
-        blob::Import
-    )]
+pub struct Space<A, M, C, D, B> {
+    /// Archive provider (content-addressed blocks).
+    #[provide(archive::Get, archive::Put, archive::Import)]
     pub archive: A,
 
     /// Memory provider.
@@ -123,12 +113,22 @@ pub struct Space<A, M, C, D> {
     /// Certificate provider manual implementation are used because of the
     /// complex generics
     pub certificate: D,
+
+    /// Blob provider: whole, hash-addressable binary objects, held in a
+    /// dedicated field so a space can back blobs with a provider distinct
+    /// from its block archive. Native spaces reuse the same `FileSystem`;
+    /// the web space keeps archive/memory on IndexedDB but routes blobs to
+    /// an OPFS-backed `FileSystem` for streaming throughput. The generated
+    /// impls are bound-conditional, so a provider without blob support still
+    /// composes as long as nothing performs a blob effect on it.
+    #[provide(blob::Read, blob::Write, blob::Import)]
+    pub blob: B,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Archive, Memory, Credential, Certificate, P> Provider<Prove<P>>
-    for Space<Archive, Memory, Credential, Certificate>
+impl<Archive, Memory, Credential, Certificate, Blob, P> Provider<Prove<P>>
+    for Space<Archive, Memory, Credential, Certificate, Blob>
 where
     P: Protocol,
     P::Access: Clone + ConditionalSend + ConditionalSync,
@@ -138,6 +138,7 @@ where
     Archive: ConditionalSend + ConditionalSync,
     Memory: ConditionalSend + ConditionalSync,
     Credential: ConditionalSend + ConditionalSync,
+    Blob: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Prove<P>>) -> Result<P::Proof, AuthorizeError> {
         input.perform(&self.certificate).await
@@ -146,8 +147,8 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Archive, Memory, Credential, Certificate, P> Provider<AccessRetain<P>>
-    for Space<Archive, Memory, Credential, Certificate>
+impl<Archive, Memory, Credential, Certificate, Blob, P> Provider<AccessRetain<P>>
+    for Space<Archive, Memory, Credential, Certificate, Blob>
 where
     P: Protocol,
     P::Delegation: ConditionalSend + ConditionalSync,
@@ -155,6 +156,7 @@ where
     Archive: ConditionalSend + ConditionalSync,
     Memory: ConditionalSend + ConditionalSync,
     Credential: ConditionalSend + ConditionalSync,
+    Blob: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<AccessRetain<P>>) -> Result<(), AuthorizeError> {
         input.perform(&self.certificate).await
@@ -164,16 +166,18 @@ where
 /// Resource<Location> for Space: each field opens from the same Location.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<A, M, C, P> Resource<Location> for Space<A, M, C, P>
+impl<A, M, C, P, B> Resource<Location> for Space<A, M, C, P, B>
 where
     A: Resource<Location> + ConditionalSend,
     M: Resource<Location> + ConditionalSend,
     C: Resource<Location> + ConditionalSend,
     P: Resource<Location> + ConditionalSend,
+    B: Resource<Location> + ConditionalSend,
     A::Error: Display,
     M::Error: Display,
     C::Error: Display,
     P::Error: Display,
+    B::Error: Display,
 {
     type Error = StorageError;
 
@@ -191,6 +195,9 @@ where
             certificate: P::open(location)
                 .await
                 .map_err(|e| StorageError::Storage(e.to_string()))?,
+            blob: B::open(location)
+                .await
+                .map_err(|e| StorageError::Storage(e.to_string()))?,
         })
     }
 
@@ -206,6 +213,9 @@ where
                 .await
                 .map_err(|e| StorageError::Storage(e.to_string()))?,
             certificate: P::load(location)
+                .await
+                .map_err(|e| StorageError::Storage(e.to_string()))?,
+            blob: B::load(location)
                 .await
                 .map_err(|e| StorageError::Storage(e.to_string()))?,
         })
