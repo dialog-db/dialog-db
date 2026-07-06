@@ -1,10 +1,9 @@
 use crate::TreeReference;
 use crate::schema;
-use dialog_artifacts::history::{Edition, Origin, REVISION_RECORD_FORMAT, RevisionRecord, Version};
-use dialog_artifacts::{
-    AttributeKey, Datum, DialogArtifactsError, Entity, EntityKey, FromKey as _, Key, State,
-    ValueKey,
+use dialog_artifacts::history::{
+    Edition, Origin, REVISION_RECORD_FORMAT, RevisionRecord, Version, verify_issuer_signature,
 };
+use dialog_artifacts::{DialogArtifactsError, Entity};
 use dialog_capability::Did;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -46,6 +45,15 @@ pub struct Revision {
     /// Causal depth of this revision: `max(cause editions) + 1`, or zero for
     /// the first revision. Isomorphic to a Lamport timestamp.
     pub edition: Edition,
+
+    /// The issuer's Ed25519 signature over [`Revision::payload`], with the
+    /// key the issuer DID names (`did:key`). This is what binds the tree
+    /// root to the issuer: the in-tree [`RevisionRecord`] signs everything
+    /// else a revision states about itself, but cannot contain the root of
+    /// the tree it lives in. Empty until the revision is published (the
+    /// root is only final at publish time) — see [`Revision::verify`].
+    #[serde(default, with = "serde_bytes")]
+    pub signature: Vec<u8>,
 }
 
 impl Revision {
@@ -66,6 +74,7 @@ impl Revision {
             tree,
             cause: HashSet::new(),
             edition: Edition::GENESIS,
+            signature: Vec::new(),
         }
     }
 
@@ -89,6 +98,7 @@ impl Revision {
             tree,
             cause: HashSet::from([self.tree.clone()]),
             edition: self.edition.successor(),
+            signature: Vec::new(),
         }
     }
 
@@ -114,6 +124,7 @@ impl Revision {
             tree,
             cause: HashSet::from([upstream.tree.clone()]),
             edition: self.edition.max(upstream.edition).successor(),
+            signature: Vec::new(),
         }
     }
 
@@ -165,10 +176,10 @@ impl Revision {
         version.entity()
     }
 
-    /// The tree entries carrying this revision's [`RevisionRecord`]: one
-    /// fact on the revision entity under the reserved revision attribute,
-    /// keyed into all three (entity / attribute / value) indexes so it is
-    /// queryable like any other fact. The record atomically carries the
+    /// This revision's [`RevisionRecord`] — everything the revision states
+    /// about itself as one atomic fact, ready to be signed
+    /// ([`RevisionRecord::payload`]) and written into the tree
+    /// ([`RevisionRecord::entries`]). The record atomically carries the
     /// revision's parents (the DAG edge ancestor traversal follows), its
     /// skip links, and its attribution; individual fields are exposed to
     /// queries through formulas over the record rather than as separate
@@ -176,40 +187,62 @@ impl Revision {
     ///
     /// The revision's tree root is deliberately not in the record: the
     /// record lives in that tree, so the root cannot appear inside itself.
-    /// The head [`Revision`] carries the root; `cause` on the head carries
-    /// the parents' roots.
-    pub fn record_entries(
-        &self,
-        parents: Vec<Version>,
-        skips: Vec<Version>,
-    ) -> Result<Vec<(Key, State<Datum>)>, DialogArtifactsError> {
-        // Derive the schema entities once: `version()` recomputes the
-        // lineage (two content-derived entities) on its own.
-        let lineage = self.lineage();
-        let version = Version::new(Self::origin_of(&lineage, &self.issuer), self.edition);
-
-        let record = RevisionRecord {
+    /// The head [`Revision`] carries the root — bound to the issuer by its
+    /// own signature over [`Revision::payload`] — and `cause` on the head
+    /// carries the parents' roots.
+    pub fn record(&self, parents: Vec<Version>, skips: Vec<Version>) -> RevisionRecord {
+        RevisionRecord {
             format: REVISION_RECORD_FORMAT,
-            lineage,
+            lineage: self.lineage(),
             issuer: self.issuer.to_string(),
             authority: self.authority.to_string(),
             parents,
             skips,
-        };
-        let artifact = record.to_artifact(&version)?;
+            signature: Vec::new(),
+        }
+    }
 
-        let entity_key = EntityKey::from(&artifact);
-        let value_key = ValueKey::from_key(&entity_key);
-        let attribute_key = AttributeKey::from_key(&entity_key);
-        let mut datum = Datum::from(artifact);
-        datum.version = Some(version);
-        let added = State::Added(datum);
+    /// The canonical signing payload of this revision: every field except
+    /// the signature, deterministically encoded. Variable-width fields are
+    /// length-prefixed to keep the encoding injective; the unordered
+    /// `cause` set is sorted.
+    ///
+    /// ```text
+    /// (length (8, big-endian) ++ UTF-8) for subject, issuer, authority, branch
+    /// tree (32)
+    /// cause count (8, big-endian) ++ roots (32 each, sorted)
+    /// edition (8, big-endian)
+    /// ```
+    pub fn payload(&self) -> Vec<u8> {
+        let mut cause: Vec<&TreeReference> = self.cause.iter().collect();
+        cause.sort_by(|left, right| left.hash().cmp(right.hash()));
 
-        Ok(vec![
-            (entity_key.into_key(), added.clone()),
-            (attribute_key.into_key(), added.clone()),
-            (value_key.into_key(), added),
-        ])
+        let mut bytes = Vec::new();
+        for field in [
+            self.subject.as_str(),
+            self.issuer.as_str(),
+            self.authority.as_str(),
+            self.branch.as_str(),
+        ] {
+            bytes.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(field.as_bytes());
+        }
+        bytes.extend_from_slice(self.tree.hash());
+        bytes.extend_from_slice(&(cause.len() as u64).to_be_bytes());
+        for tree in cause {
+            bytes.extend_from_slice(tree.hash());
+        }
+        bytes.extend_from_slice(&self.edition.key_bytes());
+        bytes
+    }
+
+    /// Verify that the signature is the issuer's Ed25519 signature over
+    /// [`Revision::payload`], resolving the key from the issuer's
+    /// `did:key`. This is the check a replica runs before adopting a head
+    /// it did not mint (e.g. on pull): a forged or tampered head — wrong
+    /// tree root, reattributed issuer, adjusted edition — fails here.
+    pub fn verify(&self) -> Result<(), DialogArtifactsError> {
+        verify_issuer_signature(self.issuer.as_str(), &self.payload(), &self.signature)
     }
 }
 

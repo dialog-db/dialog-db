@@ -1322,6 +1322,7 @@ dependencies = [
  "parking_lot",
  "reqwest",
  "serde",
+ "serde_bytes",
  "serde_ipld_dagcbor",
  "serde_json",
  "tempfile",

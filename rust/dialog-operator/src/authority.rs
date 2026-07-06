@@ -102,6 +102,23 @@ impl Provider<authority::Identify> for Authority {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<authority::Attest> for Authority {
+    async fn execute(&self, input: authority::Attest) -> Result<Vec<u8>, AuthorityError> {
+        // Sign with the operator key: the session identity `Identify`
+        // reports as the issuer, so verifiers can resolve the operator's
+        // did:key to check the signature.
+        let signature = self
+            .operator
+            .signing_key()
+            .sign_bytes(&input.payload)
+            .await
+            .map_err(|error| AuthorityError::Attestation(format!("{error}")))?;
+        Ok(signature.to_bytes().to_vec())
+    }
+}
+
 impl serde::Serialize for Authority {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

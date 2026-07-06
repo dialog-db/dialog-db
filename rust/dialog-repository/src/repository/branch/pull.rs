@@ -6,7 +6,7 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Identify, OperatorExt};
+use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
 
@@ -71,6 +71,7 @@ impl<'a> Pull<'a> {
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
+            + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
@@ -96,6 +97,7 @@ impl<'a> Pull<'a> {
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
+            + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
@@ -164,6 +166,13 @@ impl<'a> Pull<'a> {
         let Some(upstream_revision) = upstream_revision else {
             return Ok(PreparedPull::NoOp);
         };
+
+        // The trust boundary: this head was minted elsewhere. Before
+        // adopting its tree (fast-forward) or merging it in, check that
+        // the signature is the named issuer's — a forged or tampered head
+        // (wrong tree root, reattributed issuer, adjusted edition) is
+        // rejected here, before any of its blocks are walked.
+        upstream_revision.verify()?;
 
         // `base` is the upstream tree at our last sync point with this
         // particular upstream (the divergence marker). If it equals the
@@ -243,13 +252,19 @@ impl<'a> Pull<'a> {
                 // A merge records no skip table: a skip chain must never
                 // cross a revision with more than one parent, or leaping
                 // it would lose the ancestry entering through the other
-                // parent (see `dialog_artifacts::history::skip`).
-                let entries = revision.record_entries(
+                // parent (see `dialog_artifacts::history::skip`). Sign the
+                // record before it enters the tree, and the head once the
+                // merged root is final — same order as `Commit`.
+                let mut record = revision.record(
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
-                )?;
-                merged.record(&mut store, &mut delta, entries).await?;
+                );
+                record.signature = Attest::new(record.payload()?).perform(env).await?;
+                merged
+                    .record(&mut store, &mut delta, record.entries()?)
+                    .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
+                revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
                 revision
             }
@@ -936,6 +951,58 @@ mod history_tests {
                 .skips,
             vec![merged.version()],
             "the regrown chain leaps to the merge and stops there"
+        );
+
+        Ok(())
+    }
+
+    /// Pull is the trust boundary: an upstream head that does not carry a
+    /// valid signature by its named issuer is rejected before any of its
+    /// tree is adopted or merged. Here the "upstream" advertises a forged
+    /// head — attributed to the operator's own DID, but without its key's
+    /// signature — and the pull refuses it.
+    #[dialog_common::test]
+    async fn it_refuses_to_pull_a_forged_head() -> Result<()> {
+        use crate::{Revision, TreeReference};
+        use dialog_artifacts::DialogArtifactsError;
+        use dialog_artifacts::history::Edition;
+        use std::collections::HashSet;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // A branch whose head is planted rather than committed: attributed
+        // to a real issuer DID, pointing at an arbitrary tree, but not
+        // signed by that issuer's key.
+        let evil = repo.branch("evil").open().perform(&operator).await?;
+        let forged = Revision {
+            subject: evil.of().clone(),
+            issuer: operator.did(),
+            authority: profile.did(),
+            branch: "evil".into(),
+            tree: TreeReference::from([9u8; 32]),
+            cause: HashSet::new(),
+            edition: Edition::GENESIS,
+            signature: Vec::new(),
+        };
+        evil.reset(forged).perform(&operator).await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&evil).perform(&operator).await?;
+        let pulled = feature.pull().perform(&operator).await;
+
+        assert!(
+            matches!(
+                pulled,
+                Err(crate::PullError::Artifact(
+                    DialogArtifactsError::InvalidSignature(_)
+                ))
+            ),
+            "pulling a forged head must fail verification; got {pulled:?}"
+        );
+        assert!(
+            feature.revision().is_none(),
+            "nothing of the forged head may be adopted"
         );
 
         Ok(())

@@ -4,6 +4,8 @@ use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
+use crate::DialogArtifactsError;
+
 /// Ed25519 principal committing (and signing) a revision, represented by its
 /// verifying key bytes
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -40,6 +42,50 @@ impl From<ed25519_dalek::Signature> for Signature {
     fn from(signature: ed25519_dalek::Signature) -> Self {
         Self(signature.to_bytes())
     }
+}
+
+/// Decode the Ed25519 verifying key named by a `did:key` identifier: the
+/// `z`-multibase base58btc encoding of the two-byte ed25519 multicodec
+/// prefix (`0xed 0x01`) followed by the 32 key bytes.
+pub fn ed25519_key_of(did: &str) -> Result<ed25519_dalek::VerifyingKey, DialogArtifactsError> {
+    use base58::FromBase58 as _;
+    let encoded = did.strip_prefix("did:key:z").ok_or_else(|| {
+        DialogArtifactsError::InvalidSignature(format!("Issuer {did} is not a did:key"))
+    })?;
+    let bytes = encoded.from_base58().map_err(|_| {
+        DialogArtifactsError::InvalidSignature(format!("Issuer {did} is not valid base58"))
+    })?;
+    let key: [u8; 32] = bytes
+        .strip_prefix(&[0xed, 0x01])
+        .and_then(|key| key.try_into().ok())
+        .ok_or_else(|| {
+            DialogArtifactsError::InvalidSignature(format!(
+                "Issuer {did} is not an ed25519 did:key"
+            ))
+        })?;
+    ed25519_dalek::VerifyingKey::from_bytes(&key).map_err(|error| {
+        DialogArtifactsError::InvalidSignature(format!("Invalid issuer key: {error}"))
+    })
+}
+
+/// Verify `signature` as an Ed25519 signature over `payload` by the key the
+/// issuer's `did:key` identifier names
+pub fn verify_issuer_signature(
+    issuer: &str,
+    payload: &[u8],
+    signature: &[u8],
+) -> Result<(), DialogArtifactsError> {
+    let key = ed25519_key_of(issuer)?;
+    let signature: [u8; 64] = signature.try_into().map_err(|_| {
+        DialogArtifactsError::InvalidSignature(format!(
+            "Signature must be 64 bytes, got {}",
+            signature.len()
+        ))
+    })?;
+    key.verify_strict(payload, &ed25519_dalek::Signature::from_bytes(&signature))
+        .map_err(|error| {
+            DialogArtifactsError::InvalidSignature(format!("Signature mismatch: {error}"))
+        })
 }
 
 impl Display for Issuer {

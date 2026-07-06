@@ -1025,3 +1025,137 @@ async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
 
     Ok(())
 }
+
+/// A [`RevisionRecord`] is bound to its issuer and its slot: the version it
+/// was recorded under is derivable from the record's own contents, and the
+/// signature covers every other field. Tampering with any of them — or
+/// replaying a valid record at another version — fails verification.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_verifies_signed_revision_records() -> Result<()> {
+    use base58::ToBase58 as _;
+    use ed25519_dalek::Signer as _;
+
+    let key = signing_key(7);
+    let did_key = {
+        let mut bytes = vec![0xed, 0x01];
+        bytes.extend_from_slice(key.verifying_key().as_bytes());
+        format!("did:key:z{}", bytes.to_base58())
+    };
+
+    let lineage = Entity::new()?;
+    let parent = Version::new(Origin::from([3u8; 32]), Edition::new(4));
+    let mut record = RevisionRecord {
+        format: super::REVISION_RECORD_FORMAT,
+        lineage,
+        issuer: did_key.clone(),
+        authority: did_key.clone(),
+        parents: vec![parent],
+        skips: vec![parent],
+        signature: Vec::new(),
+    };
+    record.signature = key.sign(&record.payload()?).to_bytes().to_vec();
+
+    // The derived version reflects the record's own contents: origin from
+    // (lineage, issuer), edition from the parents.
+    let version = record.version();
+    assert_eq!(version.edition, Edition::new(5));
+    record.verify(&version)?;
+
+    // A valid record replayed at a different slot is rejected.
+    let elsewhere = Version::new(version.origin, Edition::new(9));
+    assert!(record.verify(&elsewhere).is_err());
+
+    // Tampering with a signed field breaks the signature.
+    let mut tampered = record.clone();
+    tampered.skips = Vec::new();
+    assert!(matches!(
+        tampered.verify(&tampered.version()),
+        Err(DialogArtifactsError::InvalidSignature(_))
+    ));
+
+    // Reattributing the record to another key changes the derived origin
+    // *and* fails the signature; verifying at the reattributed slot still
+    // fails because the original issuer's signature does not verify under
+    // the new issuer's key.
+    let other = signing_key(8);
+    let mut reattributed = record.clone();
+    reattributed.issuer = {
+        let mut bytes = vec![0xed, 0x01];
+        bytes.extend_from_slice(other.verifying_key().as_bytes());
+        format!("did:key:z{}", bytes.to_base58())
+    };
+    assert!(reattributed.verify(&reattributed.version()).is_err());
+
+    // An issuer that names no resolvable key cannot vouch for anything.
+    let mut unresolvable = record.clone();
+    unresolvable.issuer = "did:web:example.com".to_string();
+    assert!(unresolvable.verify(&unresolvable.version()).is_err());
+
+    Ok(())
+}
+
+/// The durable history reader refuses records that don't vouch for
+/// themselves: an unsigned (or badly signed) record planted in the tree at
+/// a revision entity errors out of `revision_record`, while a properly
+/// signed one is returned.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
+    use base58::ToBase58 as _;
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use ed25519_dalek::Signer as _;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let key = signing_key(7);
+    let did_key = {
+        let mut bytes = vec![0xed, 0x01];
+        bytes.extend_from_slice(key.verifying_key().as_bytes());
+        format!("did:key:z{}", bytes.to_base58())
+    };
+    let mut signed = RevisionRecord {
+        format: super::REVISION_RECORD_FORMAT,
+        lineage: Entity::new()?,
+        issuer: did_key,
+        authority: "did:web:example.com".to_string(),
+        parents: Vec::new(),
+        skips: Vec::new(),
+        signature: Vec::new(),
+    };
+    let forged = RevisionRecord {
+        lineage: Entity::new()?,
+        ..signed.clone()
+    };
+    signed.signature = key.sign(&signed.payload()?).to_bytes().to_vec();
+
+    let mut tree = ArtifactTree::empty();
+    let mut delta = Delta::zero();
+    tree.record(&mut store, &mut delta, signed.entries()?)
+        .await?;
+    tree.record(&mut store, &mut delta, forged.entries()?)
+        .await?;
+    for (digest, buffer) in delta.flush() {
+        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+    }
+
+    let history = TreeHistory::new(tree, store);
+    assert_eq!(
+        history.revision_record(&signed.version()).await?,
+        Some(signed),
+        "a properly signed record reads back"
+    );
+    assert!(
+        matches!(
+            history.revision_record(&forged.version()).await,
+            Err(DialogArtifactsError::InvalidSignature(_))
+        ),
+        "an unsigned record planted in the tree is refused"
+    );
+
+    Ok(())
+}
