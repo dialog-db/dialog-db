@@ -1,23 +1,13 @@
 use crate::TreeReference;
-use crate::schema::{self, EntityExt as _};
-use dialog_artifacts::history::{
-    Cause, Claim, Edition, Origin, REVISION_ATTRIBUTE, Record, SKIP_ATTRIBUTE, Version,
+use crate::schema;
+use dialog_artifacts::history::{Edition, Origin, REVISION_RECORD_FORMAT, RevisionRecord, Version};
+use dialog_artifacts::{
+    AttributeKey, Datum, DialogArtifactsError, Entity, EntityKey, FromKey as _, Key, State,
+    ValueKey,
 };
-use dialog_artifacts::{Attribute, DialogArtifactsError, Entity, Value};
 use dialog_capability::Did;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::str::FromStr;
-
-/// Canonical dag-cbor input for deriving a revision's entity from its
-/// [`Version`] (see [`EntityExt`](crate::schema::EntityExt)). The version is
-/// globally unique, so two replicas that know a revision's version converge
-/// on the same entity — and can attach (or query) metadata for it without
-/// holding the revision itself.
-#[derive(Serialize)]
-enum RevisionHash<'a> {
-    Revision { origin: &'a [u8], edition: u64 },
-}
 
 /// A revision represents a concrete state of the repository at a point in time.
 ///
@@ -172,100 +162,54 @@ impl Revision {
     /// The entity for the revision identified by `version`. Any replica that
     /// knows a revision's version derives the same entity.
     pub fn entity_of(version: &Version) -> Entity {
-        Entity::of(&RevisionHash::Revision {
-            origin: version.origin.key_bytes().as_slice(),
-            edition: version.edition.value(),
-        })
+        version.entity()
     }
 
-    /// The history records describing this revision:
+    /// The tree entries carrying this revision's [`RevisionRecord`]: one
+    /// fact on the revision entity under the reserved revision attribute,
+    /// keyed into all three (entity / attribute / value) indexes so it is
+    /// queryable like any other fact. The record atomically carries the
+    /// revision's parents (the DAG edge ancestor traversal follows), its
+    /// skip links, and its attribution; individual fields are exposed to
+    /// queries through formulas over the record rather than as separate
+    /// facts.
     ///
-    /// - its DAG edge — a `dialog.db/revision` claim on the branch lineage
-    ///   entity whose value is the revision entity and whose cause lists the
-    ///   parent revision versions (what
-    ///   [`common_ancestor`](dialog_artifacts::history::common_ancestor)
-    ///   traverses),
-    /// - its skip links — one `dialog.db/skip` claim per level, whose cause
-    ///   leaps 2^level first-parent steps back (computed by
-    ///   [`extend_skips`](dialog_artifacts::history::extend_skips); empty
-    ///   for genesis and merge revisions), and
-    /// - its attribute claims on the revision entity (edition, branch,
-    ///   issuer, authority, and one `cause` per parent revision entity), so
-    ///   the revision is describable and joinable like any other entity.
-    ///
-    /// The revision's tree root is deliberately not among the claims: the
-    /// records themselves live in that tree, so the root cannot appear
-    /// inside itself. The head [`Revision`] carries the root; `cause` on
-    /// the head carries the parents' roots.
-    pub fn records(
+    /// The revision's tree root is deliberately not in the record: the
+    /// record lives in that tree, so the root cannot appear inside itself.
+    /// The head [`Revision`] carries the root; `cause` on the head carries
+    /// the parents' roots.
+    pub fn record_entries(
         &self,
-        parents: impl IntoIterator<Item = Version>,
-        skips: &[(u32, Version)],
-    ) -> Result<Vec<(Version, Record)>, DialogArtifactsError> {
-        // Derive the schema entities once: `version()` and `entity()` each
-        // recompute the lineage (two content-derived entities) on their own.
+        parents: Vec<Version>,
+        skips: Vec<Version>,
+    ) -> Result<Vec<(Key, State<Datum>)>, DialogArtifactsError> {
+        // Derive the schema entities once: `version()` recomputes the
+        // lineage (two content-derived entities) on its own.
         let lineage = self.lineage();
         let version = Version::new(Self::origin_of(&lineage, &self.issuer), self.edition);
-        let this = Self::entity_of(&version);
-        let parents: Vec<Version> = parents.into_iter().collect();
 
-        let mut records = Vec::with_capacity(5 + parents.len() + skips.len());
-        records.push((
-            version,
-            Record::Assert(Claim {
-                the: Attribute::from_str(REVISION_ATTRIBUTE)?,
-                of: lineage.clone(),
-                is: Value::Entity(this.clone()),
-                cause: parents.iter().copied().collect(),
-            }),
-        ));
-
-        for (level, target) in skips {
-            records.push((
-                version,
-                Record::Assert(Claim {
-                    the: Attribute::from_str(SKIP_ATTRIBUTE)?,
-                    of: this.clone(),
-                    is: Value::UnsignedInt(u128::from(*level)),
-                    cause: Cause::from(*target),
-                }),
-            ));
-        }
-
-        let mut attribute = |the: &str, is: Value| -> Result<(), DialogArtifactsError> {
-            records.push((
-                version,
-                Record::Assert(Claim {
-                    the: Attribute::from_str(the)?,
-                    of: this.clone(),
-                    is,
-                    cause: Cause::genesis(),
-                }),
-            ));
-            Ok(())
+        let record = RevisionRecord {
+            format: REVISION_RECORD_FORMAT,
+            lineage,
+            issuer: self.issuer.to_string(),
+            authority: self.authority.to_string(),
+            parents,
+            skips,
         };
+        let artifact = record.to_artifact(&version)?;
 
-        attribute(
-            "dialog.revision/edition",
-            Value::UnsignedInt(u128::from(self.edition.value())),
-        )?;
-        attribute("dialog.revision/branch", Value::Entity(lineage))?;
-        attribute(
-            "dialog.revision/issuer",
-            Value::Entity(Entity::from_str(self.issuer.as_str())?),
-        )?;
-        attribute(
-            "dialog.revision/authority",
-            Value::Entity(Entity::from_str(self.authority.as_str())?),
-        )?;
-        for parent in &parents {
-            attribute(
-                "dialog.revision/cause",
-                Value::Entity(Self::entity_of(parent)),
-            )?;
-        }
+        let entity_key = EntityKey::from(&artifact);
+        let value_key = ValueKey::from_key(&entity_key);
+        let attribute_key = AttributeKey::from_key(&entity_key);
+        let mut datum = Datum::from(artifact);
+        datum.version = Some(version);
+        let added = State::Added(datum);
 
-        Ok(records)
+        Ok(vec![
+            (entity_key.into_key(), added.clone()),
+            (attribute_key.into_key(), added.clone()),
+            (value_key.into_key(), added),
+        ])
     }
 }
 

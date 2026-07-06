@@ -808,7 +808,7 @@ mod tests {
             /// default), so re-pointing a name supersedes the prior
             /// claim instead of accumulating.
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
+            #[domain("app.meta")]
             pub struct NamedEntity(pub Entity);
 
             /// A user-published name — an `id:<n>` entity carrying a
@@ -905,7 +905,7 @@ mod tests {
             // both — cardinality-many accumulates, it does not collapse.
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
             #[cardinality(many)]
-            #[domain("dialog.meta")]
+            #[domain("app.meta")]
             pub struct Tag(pub String);
 
             #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -968,7 +968,7 @@ mod tests {
             // must be a no-op at the storage layer: the tree must not
             // change, so the revision's tree hash stays the same.
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
+            #[domain("app.meta")]
             pub struct NamedEntity(pub Entity);
 
             #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1039,11 +1039,11 @@ mod tests {
 
         mod branch_meta {
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
+            #[domain("app.meta")]
             pub struct Name(pub String);
 
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
+            #[domain("app.meta")]
             pub struct RevisionHash(pub String);
         }
 
@@ -1192,7 +1192,7 @@ mod tests {
             branch
                 .transaction()
                 .assert(
-                    the!("dialog.meta/name")
+                    the!("app.meta/name")
                         .of(alice.clone())
                         .is("Alice".to_string()),
                 )
@@ -1310,6 +1310,7 @@ mod tests {
                     this: branch_concept.this.clone().into(),
                     tree: Term::var("tree"),
                     edition: Term::var("edition"),
+                    revision: Term::var("revision"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1342,6 +1343,7 @@ mod tests {
                     this: branch_concept.this.into(),
                     tree: Term::var("tree"),
                     edition: Term::var("edition"),
+                    revision: Term::var("revision"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1387,6 +1389,7 @@ mod tests {
                     this: branch_concept.this.clone().into(),
                     tree: Term::var("tree"),
                     edition: Term::var("edition"),
+                    revision: Term::var("revision"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1412,6 +1415,7 @@ mod tests {
                     this: branch_concept.this.into(),
                     tree: Term::var("tree"),
                     edition: Term::var("edition"),
+                    revision: Term::var("revision"),
                 })
                 .perform(&operator)
                 .try_vec()

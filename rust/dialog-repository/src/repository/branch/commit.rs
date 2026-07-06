@@ -214,11 +214,7 @@ where
             ),
         };
         debug_assert_eq!(revision.version(), version);
-        let entries = revision
-            .records(parent, &skips)?
-            .into_iter()
-            .map(|(version, record)| record.into_entry(&version))
-            .collect();
+        let entries = revision.record_entries(parent.into_iter().collect(), skips)?;
         tree.record(&mut store, &mut delta, entries).await?;
 
         // Persist the tree's pending nodes before referencing the root in
@@ -451,29 +447,18 @@ mod history_tests {
             Causality::Supersedes
         );
 
-        // The revision DAG edges are recorded too: each revision's lineage
-        // claim is present, attached to the branch lineage entity and
-        // pointing at the content-derived revision entity...
-        let edge = history.revision_at(&second.version()).await?;
-        assert_eq!(history.revision_at(&first.version()).await?.len(), 1);
-        assert_eq!(edge.len(), 1);
-        assert_eq!(edge[0].of, second.lineage());
-        assert_eq!(edge[0].is, Value::Entity(second.entity()));
-
-        // ... and the revision entity is describable like any other entity:
-        // its attribute claims are recorded on it
-        let described = history
-            .claims_at(
-                &second.version(),
-                &second.entity(),
-                &"dialog.revision/edition".parse()?,
-            )
-            .await?;
-        assert_eq!(described.len(), 1);
-        assert_eq!(
-            described[0].is,
-            Value::UnsignedInt(u128::from(second.edition.value()))
-        );
+        // Each revision's record is retrievable from the tree — parents,
+        // attribution, and lineage as one atomic fact on the revision
+        // entity.
+        let record = history
+            .revision_record(&second.version())
+            .await?
+            .expect("the revision record is retrievable");
+        assert!(history.revision_record(&first.version()).await?.is_some());
+        assert_eq!(record.lineage, second.lineage());
+        assert_eq!(record.parents, vec![first.version()]);
+        assert_eq!(record.issuer, second.issuer.to_string());
+        assert_eq!(record.authority, second.authority.to_string());
         assert_eq!(
             common_ancestor(&second.version(), &first.version(), &history).await?,
             Some(first.version())
@@ -490,10 +475,51 @@ mod history_tests {
             .await?;
         branch.refresh(&operator).await?;
         let history = branch.history(&operator);
-        let skips = history.skips_at(&third.version()).await?;
-        assert_eq!(skips.len(), 1);
-        assert_eq!(skips[0].is, Value::UnsignedInt(1));
-        assert!(skips[0].cause.contains(&first.version()));
+        let record = history
+            .revision_record(&third.version())
+            .await?
+            .expect("the third revision's record is retrievable");
+        assert_eq!(record.skips, vec![first.version()]);
+
+        Ok(())
+    }
+
+    /// The `dialog.` namespace is reserved for version-control machinery:
+    /// user instructions cannot assert, replace, or retract under it, so
+    /// lineage cannot be corrupted through the ordinary write path.
+    #[dialog_common::test]
+    async fn it_rejects_writes_to_the_reserved_dialog_namespace() -> Result<()> {
+        use dialog_artifacts::DialogArtifactsError;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let forged = Artifact {
+            the: "dialog.db/revision".parse()?,
+            of: "forged:revision".parse()?,
+            is: Value::String("lies".to_string()),
+            cause: None,
+        };
+        for instruction in [
+            Instruction::Assert(forged.clone()),
+            Instruction::Replace(forged.clone()),
+            Instruction::Retract(forged),
+        ] {
+            let result = branch
+                .commit(stream::iter(vec![instruction]))
+                .perform(&operator)
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(crate::CommitError::Artifact(
+                        DialogArtifactsError::ReservedAttribute(_)
+                    ))
+                ),
+                "writes to the reserved namespace must be refused: {result:?}"
+            );
+        }
 
         Ok(())
     }
@@ -538,9 +564,11 @@ mod history_tests {
 
         branch.refresh(&operator).await?;
         let history = branch.history(&operator);
-        let edge = history.revision_at(&empty.version()).await?;
-        assert_eq!(edge.len(), 1);
-        assert!(edge[0].cause.contains(&first.version()));
+        let record = history
+            .revision_record(&empty.version())
+            .await?
+            .expect("the empty revision's record is retrievable");
+        assert!(record.parents.contains(&first.version()));
 
         Ok(())
     }

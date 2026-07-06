@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
-use std::str::FromStr;
 
-use crate::{Attribute, DialogArtifactsError, Entity, Value};
+use crate::{Attribute, DialogArtifactsError, Entity};
 
-use super::{Claim, History, HistoryKey, REVISION_ATTRIBUTE, Revision, SKIP_ATTRIBUTE, Version};
+use super::{
+    Claim, History, HistoryKey, REVISION_RECORD_FORMAT, Revision, RevisionRecord, Version,
+};
 
 /// An in-memory [`History`] index, mapping
 /// `/edition/origin/entity/attribute/value_hash` keys to [`Claim`]s.
@@ -14,6 +15,7 @@ use super::{Claim, History, HistoryKey, REVISION_ATTRIBUTE, Revision, SKIP_ATTRI
 #[derive(Clone, Debug, Default)]
 pub struct MemoryHistory {
     claims: BTreeMap<HistoryKey, Claim>,
+    records: BTreeMap<Version, RevisionRecord>,
 }
 
 impl MemoryHistory {
@@ -22,35 +24,26 @@ impl MemoryHistory {
         self.claims.insert(HistoryKey::new(version, &claim), claim);
     }
 
-    /// Record the lineage claim for the given revision: a claim under the
-    /// repository DID whose value is the revision's content-addressed entity
-    /// and whose cause lists the parent revision versions
+    /// Record the [`RevisionRecord`] for the given revision, deriving the
+    /// attribution and parents from the signed revision itself
     pub fn record_revision(&mut self, revision: &Revision) -> Result<(), DialogArtifactsError> {
-        let claim = Claim {
-            the: Attribute::from_str(REVISION_ATTRIBUTE)?,
-            of: revision.subject().clone(),
-            is: Value::Entity(revision.entity()?),
-            cause: revision.cause().clone(),
+        let record = RevisionRecord {
+            format: REVISION_RECORD_FORMAT,
+            lineage: revision.subject().clone(),
+            issuer: revision.issuer().to_string(),
+            authority: revision.authority().to_string(),
+            parents: revision.cause().versions().to_vec(),
+            skips: Vec::new(),
         };
-        self.record(&revision.version(), claim);
+        self.records.insert(revision.version(), record);
         Ok(())
     }
 
-    /// The recorded revision lineage claims for the repository identified by
-    /// `subject`, in a total order consistent with causality (ascending by
-    /// version; no revision appears before one of its ancestors)
-    pub fn revisions(&self, subject: &Entity) -> Vec<(Version, Claim)> {
-        let subject = subject.key_bytes();
-        let attribute =
-            Attribute::from_str(REVISION_ATTRIBUTE).expect("the revision attribute is well-formed");
-        self.claims
-            .iter()
-            .filter(|(key, _)| {
-                key.entity_bytes() == subject.as_slice()
-                    && key.attribute_bytes() == attribute.key_bytes().as_slice()
-            })
-            .map(|(key, claim)| (key.version(), claim.clone()))
-            .collect()
+    /// Attach a skip table to an already-recorded revision
+    pub fn record_skips(&mut self, version: &Version, skips: Vec<Version>) {
+        if let Some(record) = self.records.get_mut(version) {
+            record.skips = skips;
+        }
     }
 
     /// The number of recorded claims
@@ -79,25 +72,10 @@ impl History for MemoryHistory {
             .collect())
     }
 
-    async fn revision_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
-        let attribute = Attribute::from_str(REVISION_ATTRIBUTE)?;
-        let (min, max) = HistoryKey::version_range(version);
-        Ok(self
-            .claims
-            .range(min..=max)
-            .filter(|(key, _)| key.attribute_bytes() == attribute.key_bytes().as_slice())
-            .map(|(_, claim)| claim.clone())
-            .collect())
-    }
-
-    async fn skips_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
-        let attribute = Attribute::from_str(SKIP_ATTRIBUTE)?;
-        let (min, max) = HistoryKey::version_range(version);
-        Ok(self
-            .claims
-            .range(min..=max)
-            .filter(|(key, _)| key.attribute_bytes() == attribute.key_bytes().as_slice())
-            .map(|(_, claim)| claim.clone())
-            .collect())
+    async fn revision_record(
+        &self,
+        version: &Version,
+    ) -> Result<Option<RevisionRecord>, DialogArtifactsError> {
+        Ok(self.records.get(version).cloned())
     }
 }

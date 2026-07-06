@@ -335,6 +335,22 @@ impl ArtifactTreeExt for ArtifactTree {
 
         tokio::pin!(instructions);
         while let Some(instruction) = instructions.next().await {
+            // The `dialog.` namespace is reserved for version-control
+            // machinery (revision records — see
+            // `history::RevisionRecord`), which writes through
+            // [`ArtifactTreeExt::record`] rather than instructions. At the
+            // library level lineage therefore cannot be corrupted through
+            // the ordinary write path.
+            {
+                let (Instruction::Assert(artifact)
+                | Instruction::Replace(artifact)
+                | Instruction::Retract(artifact)) = &instruction;
+                if artifact.the.as_str().starts_with("dialog.") {
+                    return Err(DialogArtifactsError::ReservedAttribute(
+                        artifact.the.to_string(),
+                    ));
+                }
+            }
             match instruction {
                 Instruction::Assert(artifact) => {
                     changed = true;

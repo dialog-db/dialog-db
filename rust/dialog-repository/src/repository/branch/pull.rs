@@ -244,11 +244,10 @@ impl<'a> Pull<'a> {
                 // cross a revision with more than one parent, or leaping
                 // it would lose the ancestry entering through the other
                 // parent (see `dialog_artifacts::history::skip`).
-                let entries = revision
-                    .records([local.version(), upstream_revision.version()], &[])?
-                    .into_iter()
-                    .map(|(version, record)| record.into_entry(&version))
-                    .collect();
+                let entries = revision.record_entries(
+                    vec![local.version(), upstream_revision.version()],
+                    Vec::new(),
+                )?;
                 merged.record(&mut store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
 
@@ -876,12 +875,14 @@ mod history_tests {
             Causality::Supersedes
         );
 
-        // The merge's DAG edge lists both parents, and the two lineages
+        // The merge's record lists both parents, and the two lineages
         // meet at main's first revision.
-        let edge = history.revision_at(&merged.version()).await?;
-        assert_eq!(edge.len(), 1);
-        assert!(edge[0].cause.contains(&replacement.version()));
-        assert!(edge[0].cause.contains(&concurrent.version()));
+        let record = history
+            .revision_record(&merged.version())
+            .await?
+            .expect("the merge's record is retrievable");
+        assert!(record.parents.contains(&replacement.version()));
+        assert!(record.parents.contains(&concurrent.version()));
         assert_eq!(
             common_ancestor(&replacement.version(), &concurrent.version(), &history).await?,
             Some(first.version())
@@ -919,13 +920,21 @@ mod history_tests {
         feature.refresh(&operator).await?;
         let history = feature.history(&operator);
         assert!(
-            history.skips_at(&after_merge.version()).await?.is_empty(),
+            history
+                .revision_record(&after_merge.version())
+                .await?
+                .expect("the record is retrievable")
+                .skips
+                .is_empty(),
             "a commit on top of a merge records no skip table"
         );
-        let skips = history.skips_at(&next.version()).await?;
-        assert_eq!(skips.len(), 1);
-        assert!(
-            skips[0].cause.contains(&merged.version()),
+        assert_eq!(
+            history
+                .revision_record(&next.version())
+                .await?
+                .expect("the record is retrievable")
+                .skips,
+            vec![merged.version()],
             "the regrown chain leaps to the merge and stops there"
         );
 

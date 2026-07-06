@@ -49,6 +49,11 @@ pub enum DialogArtifactsError {
     #[error("Invalid attribute: {0}")]
     InvalidAttribute(String),
 
+    /// The attribute belongs to the reserved `dialog.` namespace, which
+    /// only version-control machinery may write
+    #[error("Reserved attribute (the dialog. namespace is reserved): {0}")]
+    ReservedAttribute(String),
+
     /// Raw bytes could not be interpreted as an entity
     #[error("Could not convert bytes into entity: {0}")]
     InvalidEntity(String),

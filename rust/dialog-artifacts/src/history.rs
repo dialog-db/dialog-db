@@ -65,6 +65,9 @@ pub use query::*;
 mod skip;
 pub use skip::*;
 
+mod revision_record;
+pub use revision_record::*;
+
 /// The attribute under which a repository's revision lineage claims are
 /// recorded. The claim's entity is the repository DID and its value is the
 /// content-addressed entity of the [`Revision`].
