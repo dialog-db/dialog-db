@@ -2,8 +2,18 @@
 
 use crate::provider::{FileSystem, IndexedDb, Space, Storage};
 
-/// Space backed by IndexedDB providers.
-pub type WebSpace = Space<IndexedDb, IndexedDb, IndexedDb, IndexedDb>;
+/// Space backed by IndexedDB providers for blocks, memory, credentials, and
+/// certificates, with blobs on an OPFS-backed
+/// [`FileSystem`](crate::provider::FileSystem).
+///
+/// IndexedDB has no blob provider (and buffering whole binary objects through
+/// it would forfeit streaming), so blob effects route to OPFS, which gives
+/// whole, hash-addressable objects direct File System Access throughput and
+/// range reads. Blocks and cells stay on IndexedDB. The same
+/// [`Location`](dialog_effects::storage::Location) opens both: the IndexedDB
+/// database for archive/memory/credential/certificate, an OPFS subtree for
+/// blobs.
+pub type WebSpace = Space<IndexedDb, IndexedDb, IndexedDb, IndexedDb, FileSystem>;
 
 impl Default for Storage<WebSpace> {
     fn default() -> Self {
@@ -21,7 +31,7 @@ impl Default for Storage<WebSpace> {
 /// them) stay on IndexedDB. The same [`Location`](dialog_effects::storage::Location)
 /// opens every slot: the OPFS subdirectory for archive/memory, an IndexedDB
 /// database for credential/certificate.
-pub type WebOpfsSpace = Space<FileSystem, FileSystem, IndexedDb, IndexedDb>;
+pub type WebOpfsSpace = Space<FileSystem, FileSystem, IndexedDb, IndexedDb, FileSystem>;
 
 impl Storage<WebOpfsSpace> {
     /// Create an environment that stores archive and memory in OPFS, with
