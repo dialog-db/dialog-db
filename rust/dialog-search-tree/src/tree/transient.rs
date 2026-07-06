@@ -136,6 +136,53 @@ where
         }
     }
 
+    /// Seeds an empty tree with a batch of entries in one bottom-up pass.
+    ///
+    /// Every key is ranked once and every node is built exactly once: the
+    /// entries are cut into leaf segments by the canonical rank rule, then
+    /// each level is grouped into indices until a single root remains — the
+    /// same cut rule the per-edit re-shape applies, so the result is the
+    /// byte-identical canonical tree an insert loop would converge on.
+    /// Duplicate keys resolve to the last value in iteration order.
+    ///
+    /// The build is synchronous and performs no reads; the produced nodes
+    /// are serialized by [`persist`](Self::persist) like any other batch.
+    ///
+    /// Errors when this batch is not over an empty tree: a bulk seed of a
+    /// non-empty tree would have to merge against existing entries, which
+    /// is [`insert`](Self::insert)'s job.
+    pub fn seed<I>(mut self, entries: I) -> Result<Self, DialogSearchTreeError>
+    where
+        I: IntoIterator<Item = (Key, Value)>,
+    {
+        match &self.root {
+            TransientRoot::Unloaded(hash) if hash == NULL_BLAKE3_HASH => {}
+            _ => {
+                return Err(DialogSearchTreeError::Node(
+                    "Seed requires an empty tree".into(),
+                ));
+            }
+        }
+
+        let collection: std::collections::BTreeMap<Key, Value> = entries.into_iter().collect();
+        if collection.is_empty() {
+            return Ok(self);
+        }
+
+        let run = regroup_entries::<Key, Value, D>(
+            collection
+                .into_iter()
+                .map(|(key, value)| Entry { key, value })
+                .collect(),
+        );
+        let root = seal_root::<Key, Value, D>(run, 0)?.ok_or_else(|| {
+            DialogSearchTreeError::Node("Seeding a non-empty batch produced no root".into())
+        })?;
+
+        self.root = TransientRoot::Loaded(root);
+        Ok(self)
+    }
+
     /// Inserts a key/value pair, mutating the transient tree in place.
     pub async fn insert<Backend>(
         mut self,
@@ -1281,6 +1328,72 @@ mod tests {
             tree.root(),
             expected.root(),
             "batched inserts must match sequential inserts"
+        );
+        Ok(())
+    }
+
+    /// Bulk seeding must be canonical: byte-identical root to the same
+    /// entries arriving through an insert loop, regardless of iteration
+    /// order or duplicate keys (last value wins).
+    #[dialog_common::test]
+    async fn it_seeds_the_same_canonical_tree_as_an_insert_loop() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // Insert in reverse order to exercise order independence.
+        let keys: Vec<u32> = (0..1000).rev().collect();
+        let expected = sequential(&keys, &mut storage).await?;
+
+        // Seed with a stale duplicate first; the later value must win.
+        let entries = std::iter::once((7u32.to_le_bytes(), vec![0xFF])).chain(
+            keys.iter()
+                .map(|&k| (k.to_le_bytes(), k.to_le_bytes().to_vec())),
+        );
+        let mut delta = Delta::zero();
+        let tree = TestTree::empty()
+            .edit()
+            .seed(entries)?
+            .persist(&mut delta)?;
+
+        assert_eq!(
+            tree.root(),
+            expected.root(),
+            "bulk seed must produce the canonical tree"
+        );
+
+        // Every node of the seeded tree must be in the delta: the build
+        // performed no reads, so nothing was assumed present in storage.
+        assert!(
+            delta.flush().any(|(hash, _)| &hash == tree.root()),
+            "the seeded root must be part of the batch's delta"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_seeds_an_empty_batch_to_an_empty_tree() -> Result<()> {
+        let mut delta = Delta::zero();
+        let tree = TestTree::empty()
+            .edit()
+            .seed(std::iter::empty::<([u8; 4], Vec<u8>)>())?
+            .persist(&mut delta)?;
+        assert_eq!(tree.root(), TestTree::empty().root());
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_refuses_to_seed_a_non_empty_tree() -> Result<()> {
+        let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let mut delta = Delta::zero();
+        let tree = TestTree::empty()
+            .edit()
+            .insert(1u32.to_le_bytes(), vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+
+        assert!(
+            tree.edit().seed([(2u32.to_le_bytes(), vec![2])]).is_err(),
+            "seeding a non-empty tree must fail"
         );
         Ok(())
     }

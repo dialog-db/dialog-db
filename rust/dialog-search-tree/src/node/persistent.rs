@@ -11,6 +11,7 @@ use rkyv::{
 
 use crate::{Buffer, DialogSearchTreeError, Entry, Key, Link, SymmetryWith, Value, into_owned};
 use std::marker::PhantomData;
+use std::sync::OnceLock;
 
 /// A tree node in its serialized, content-addressed form.
 ///
@@ -24,6 +25,14 @@ pub struct PersistentNode<Key, Value> {
     value: PhantomData<Value>,
 
     buffer: Buffer,
+
+    /// Proof that `buffer` passed archive validation as
+    /// `ArchivedNodeBody<Key, Value>`. Living on the typed node (rather
+    /// than the type-erased buffer) ties the proof to the exact archived
+    /// type by construction. Held inline (not behind an `Arc`) so node
+    /// construction allocates nothing; cloning copies the current state,
+    /// so a validated node's clones stay validated.
+    validated: OnceLock<()>,
 }
 
 impl<Key, Value> PersistentNode<Key, Value>
@@ -47,6 +56,7 @@ where
             buffer,
             key: PhantomData,
             value: PhantomData,
+            validated: OnceLock::new(),
         }
     }
 
@@ -80,9 +90,26 @@ where
     }
 
     /// Accesses the deserialized body of this node.
+    ///
+    /// The first access runs a full bytecheck validation of the buffer;
+    /// subsequent accesses (on this node or any clone of it) reuse that
+    /// validation and reduce to a pointer cast.
     pub fn body(&self) -> Result<&ArchivedNodeBody<Key, Value>, DialogSearchTreeError> {
-        rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
-            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
+        if self.validated.get().is_some() {
+            // SAFETY: the marker is set only after this node's buffer passed
+            // a full `rkyv::access` validation as exactly this
+            // `ArchivedNodeBody<Key, Value>` (the marker lives on the typed
+            // node, so no other archived type can set it), and buffers are
+            // immutable and 16-byte aligned.
+            return Ok(unsafe {
+                rkyv::access_unchecked::<ArchivedNodeBody<Key, Value>>(self.buffer.as_ref())
+            });
+        }
+
+        let body = rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
+            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+        let _ = self.validated.set(());
+        Ok(body)
     }
 
     /// Interprets this node as an index node, returning an error if it's a

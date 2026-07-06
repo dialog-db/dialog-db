@@ -43,6 +43,10 @@ futures-util = { workspace = true }
 tokio-test = { workspace = true }
 
 [[bench]]
+name = "bulk"
+harness = false
+
+[[bench]]
 name = "insert"
 harness = false
 
