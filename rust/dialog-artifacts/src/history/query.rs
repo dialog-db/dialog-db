@@ -5,13 +5,14 @@ use dialog_search_tree::ContentAddressedStorage as NodeStorage;
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::TryStreamExt;
 
+use crate::tree::ArtifactTreeExt as _;
 use crate::tree::{ArtifactTree, TreeStorageBridge};
 use crate::{
-    Attribute, DialogArtifactsError, Entity, State, history_attribute_range, history_claim_range,
+    Attribute, DialogArtifactsError, Entity, State, ValueDataType, history_claim_range,
     history_key_version, history_region_range,
 };
 
-use super::{Claim, History, REVISION_ATTRIBUTE, Record, SKIP_ATTRIBUTE, Version};
+use super::{Claim, History, REVISION_ATTRIBUTE, Record, RevisionRecord, Version};
 
 /// Read access to the history region of an artifact tree.
 ///
@@ -26,6 +27,7 @@ where
         + ConditionalSync,
 {
     tree: ArtifactTree,
+    store: S,
     storage: NodeStorage<TreeStorageBridge<S>>,
 }
 
@@ -35,9 +37,13 @@ where
         + ConditionalSync,
 {
     /// Read history from the given artifact tree
-    pub fn new(tree: ArtifactTree, store: S) -> Self {
+    pub fn new(tree: ArtifactTree, store: S) -> Self
+    where
+        S: Clone,
+    {
         Self {
             tree,
+            store: store.clone(),
             storage: NodeStorage::new(TreeStorageBridge(store)),
         }
     }
@@ -62,41 +68,6 @@ where
             ArtifactTree::from_hash_with_cache(NodeHash::from(*root), cache),
             store,
         )
-    }
-
-    /// Every claim recorded by the revision identified by `version` under
-    /// the given attribute. The attribute head leads the entity head in
-    /// history keys, so this is an exact range scan over just the matches
-    /// — not a walk over everything the revision recorded — which keeps
-    /// each ancestor-traversal step O(result) even for revisions minted by
-    /// huge commits.
-    async fn claims_by_attribute(
-        &self,
-        version: &Version,
-        attribute: &str,
-    ) -> Result<Vec<Claim>, DialogArtifactsError> {
-        let attribute = Attribute::from_str(attribute)?;
-        let (min, max) = history_attribute_range(version, &attribute);
-        let stream = self.tree.stream_range(
-            crate::KeyBytes::from(min)..=crate::KeyBytes::from(max),
-            &self.storage,
-        );
-        tokio::pin!(stream);
-
-        // The range is exact for attributes that fit the raw head (both
-        // callers' attributes do); the re-check guards a longer attribute
-        // sharing a head, per the history key contract.
-        let attribute = attribute.to_string();
-        let mut claims = Vec::new();
-        while let Some(entry) = stream.try_next().await? {
-            if let State::Added(datum) = entry.value {
-                if datum.attribute != attribute {
-                    continue;
-                }
-                claims.push(Record::try_from_datum(datum)?.claim().clone());
-            }
-        }
-        Ok(claims)
     }
 
     /// Every record in the history region, in key order (ascending by
@@ -126,6 +97,7 @@ where
 impl<S> History for TreeHistory<S>
 where
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + Clone
         + ConditionalSync,
 {
     async fn claims_at(
@@ -157,11 +129,20 @@ where
         Ok(claims)
     }
 
-    async fn revision_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
-        self.claims_by_attribute(version, REVISION_ATTRIBUTE).await
-    }
-
-    async fn skips_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
-        self.claims_by_attribute(version, SKIP_ATTRIBUTE).await
+    async fn revision_record(
+        &self,
+        version: &Version,
+    ) -> Result<Option<RevisionRecord>, DialogArtifactsError> {
+        // The record is an ordinary fact in the EAV index: entity derived
+        // from the version, reserved attribute, `Value::Record` payload.
+        // One exact lookup per traversal step.
+        let of = version.entity();
+        let the = Attribute::from_str(REVISION_ATTRIBUTE)?;
+        for datum in self.tree.select_data(self.store.clone(), &of, &the).await? {
+            if ValueDataType::from(datum.value_type) == ValueDataType::Record {
+                return Ok(Some(RevisionRecord::try_from_bytes(&datum.value)?));
+            }
+        }
+        Ok(None)
     }
 }

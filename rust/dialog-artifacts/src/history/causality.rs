@@ -4,7 +4,7 @@ use dialog_common::ConditionalSync;
 
 use crate::{Attribute, DialogArtifactsError, Entity};
 
-use super::{Claim, Version};
+use super::{Claim, RevisionRecord, Version};
 
 /// The causal relationship between two claims on the same
 /// `(entity, attribute)`
@@ -51,23 +51,13 @@ pub trait History: ConditionalSync {
         the: &Attribute,
     ) -> Result<Vec<Claim>, DialogArtifactsError>;
 
-    /// The revision lineage claim(s) recorded by the revision identified by
-    /// `version` (claims whose attribute is
-    /// [`REVISION_ATTRIBUTE`](super::REVISION_ATTRIBUTE)). An empty result
-    /// means the revision has not been replicated.
-    async fn revision_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError>;
-
-    /// The skip link claim(s) recorded by the revision identified by
-    /// `version` (claims whose attribute is
-    /// [`SKIP_ATTRIBUTE`](super::SKIP_ATTRIBUTE)): shortcuts 2^k
-    /// first-parent steps back through the revision DAG — see
-    /// [`extend_skips`](super::extend_skips). Skip links are an
-    /// accelerator, so the default is none: traversal falls back to
-    /// walking cause edges.
-    async fn skips_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
-        let _ = version;
-        Ok(Vec::new())
-    }
+    /// The [`RevisionRecord`] minted by the revision identified by
+    /// `version` — its parents, skip links, and attribution, atomically.
+    /// `None` means the revision has not been replicated.
+    async fn revision_record(
+        &self,
+        version: &Version,
+    ) -> Result<Option<RevisionRecord>, DialogArtifactsError>;
 }
 
 /// Determine the causal relationship between two claims on the same
@@ -220,26 +210,20 @@ pub async fn common_ancestor<H: History>(
             return Ok(Some(version));
         }
 
-        let revisions = history.revision_at(&version).await?;
-        if revisions.is_empty() {
+        let Some(record) = history.revision_record(&version).await? else {
             return Err(DialogArtifactsError::IncompleteHistory(format!(
                 "{version}"
             )));
-        }
-        let causes: Vec<Version> = revisions
-            .iter()
-            .flat_map(|revision| revision.cause.versions().to_vec())
-            .collect();
+        };
 
         // The farthest recorded leap that stays at or above the horizon.
         // Deepest target = longest leap.
-        let leap = history
-            .skips_at(&version)
-            .await?
+        let leap = record
+            .skips
             .iter()
-            .flat_map(|claim| claim.cause.versions().to_vec())
             .filter(|target| target.edition >= horizon)
-            .min_by_key(|target| target.edition);
+            .min_by_key(|target| target.edition)
+            .copied();
 
         let mut push = |version: Version| {
             let entry = reached.entry(version).or_insert(0);
@@ -253,15 +237,15 @@ pub async fn common_ancestor<H: History>(
             // A single-parent revision with a safe leap: the leapt region
             // is linear (skip chains never cross merges), so the parent
             // edge is subsumed by the leap.
-            Some(target) if causes.len() == 1 => push(target),
+            Some(target) if record.parents.len() == 1 => push(target),
             // A merge, or a leap that would cross the horizon: walk the
-            // cause edges. (A merge records no skips, but if one ever
+            // parent edges. (A merge records no skips, but if one ever
             // carried both, following both stays exact — just redundant.)
             Some(target) => {
-                causes.into_iter().for_each(&mut push);
+                record.parents.into_iter().for_each(&mut push);
                 push(target);
             }
-            None => causes.into_iter().for_each(&mut push),
+            None => record.parents.into_iter().for_each(&mut push),
         }
     }
 

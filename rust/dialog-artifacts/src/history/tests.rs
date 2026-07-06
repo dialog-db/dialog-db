@@ -12,7 +12,7 @@ use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Valu
 
 use super::{
     Authority, Causality, Cause, Claim, Edition, History, MemoryHistory, Origin, Revision,
-    SKIP_ATTRIBUTE, TreeHistory, Version, causality, common_ancestor, extend_skips,
+    RevisionRecord, TreeHistory, Version, causality, common_ancestor, extend_skips,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -431,31 +431,15 @@ async fn it_forks_and_merges_across_repositories() -> Result<()> {
         Some(b2.version())
     );
 
-    // Each repository maintains its own lineage under its own DID, in a
-    // total order consistent with causality
-    let bob_lineage = history.revisions(&bob_repo);
-    assert_eq!(
-        bob_lineage
-            .iter()
-            .map(|(version, _)| version.edition)
-            .collect::<Vec<_>>(),
-        vec![
-            Edition::new(0),
-            Edition::new(1),
-            Edition::new(2),
-            Edition::new(3),
-            Edition::new(4)
-        ]
-    );
-
-    let alice_lineage = history.revisions(&alice_repo);
-    assert_eq!(
-        alice_lineage
-            .iter()
-            .map(|(version, _)| version.edition)
-            .collect::<Vec<_>>(),
-        vec![Edition::new(3), Edition::new(4), Edition::new(5)]
-    );
+    // Every revision's record is retrievable and carries its parents
+    let merged = history
+        .revision_record(&a5.version())
+        .await?
+        .expect("the merge's record is retrievable");
+    assert!(merged.parents.contains(&a4.version()));
+    assert!(merged.parents.contains(&b4.version()));
+    assert_eq!(merged.parents.len(), 2);
+    assert_eq!(merged.lineage, alice_repo);
 
     // Independent lineages share no history
     let stranger_repo = Entity::new()?;
@@ -642,8 +626,9 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
     Ok(())
 }
 
-/// A [`History`] wrapper counting revision DAG reads, to assert the skip
-/// links actually shrink traversals rather than merely not breaking them.
+/// A [`History`] wrapper counting revision record reads, to assert the
+/// skip links actually shrink traversals rather than merely not breaking
+/// them.
 struct CountingHistory<'a> {
     inner: &'a MemoryHistory,
     reads: AtomicUsize,
@@ -672,35 +657,13 @@ impl History for CountingHistory<'_> {
         self.inner.claims_at(version, of, the).await
     }
 
-    async fn revision_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
+    async fn revision_record(
+        &self,
+        version: &Version,
+    ) -> Result<Option<RevisionRecord>, DialogArtifactsError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        self.inner.revision_at(version).await
+        self.inner.revision_record(version).await
     }
-
-    async fn skips_at(&self, version: &Version) -> Result<Vec<Claim>, DialogArtifactsError> {
-        self.inner.skips_at(version).await
-    }
-}
-
-/// Record the skip table claims for a revision, the way a branch commit
-/// does (see `dialog-repository`'s `Revision::records`).
-fn record_skips(
-    history: &mut MemoryHistory,
-    revision: &Revision,
-    skips: &[(u32, Version)],
-) -> Result<()> {
-    for (level, target) in skips {
-        history.record(
-            &revision.version(),
-            Claim {
-                the: Attribute::from_str(SKIP_ATTRIBUTE)?,
-                of: revision.entity()?,
-                is: Value::UnsignedInt(u128::from(*level)),
-                cause: Cause::from(*target),
-            },
-        );
-    }
-    Ok(())
 }
 
 /// Skip links let `common_ancestor` leap over long linear runs: a head far
@@ -724,7 +687,7 @@ async fn it_finds_ancestors_in_logarithmic_reads_via_skip_links() -> Result<()> 
         let skips = extend_skips(&history, &parent.version()).await?;
         let next = revise(&repo, &alice, &[parent], 1);
         history.record_revision(&next)?;
-        record_skips(&mut history, &next, &skips)?;
+        history.record_skips(&next.version(), skips);
         chain.push(next);
     }
 
@@ -774,7 +737,7 @@ async fn it_never_leaps_over_a_merge() -> Result<()> {
         };
         let next = revise(&repo, key, parents, 3);
         history.record_revision(&next)?;
-        record_skips(history, &next, &skips)?;
+        history.record_skips(&next.version(), skips);
         Ok(next)
     };
 

@@ -146,6 +146,17 @@ pub mod branch {
         /// Edition of the revision's logical clock.
         pub u128,
     );
+
+    /// `dialog.branch/revision` — the content-derived entity of the
+    /// current revision: the join key from "where is this branch now?"
+    /// to everything recorded about that revision (see
+    /// [`RevisionRecord`](dialog_artifacts::history::RevisionRecord)).
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.branch")]
+    pub struct Revision(
+        /// The revision entity URI.
+        pub Entity,
+    );
 }
 
 /// Attribute newtypes for [`Origin`] entities.
@@ -358,6 +369,9 @@ pub struct BranchRevision {
     pub tree: branch::Tree,
     /// Causal depth of the revision (Lamport timestamp).
     pub edition: branch::Edition,
+    /// The revision entity — the join key to the revision's recorded
+    /// metadata.
+    pub revision: branch::Revision,
 }
 
 /// What this query session is reading from.
@@ -525,6 +539,7 @@ mod tests {
             this: b.this.clone(),
             tree: branch::Tree("zSomeHash".into()),
             edition: branch::Edition(42),
+            revision: branch::Revision("test:revision".parse().expect("valid entity")),
         };
         assert_eq!(rev.this, b.this);
     }

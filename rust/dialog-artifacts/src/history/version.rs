@@ -1,9 +1,10 @@
 use std::cmp::Ordering;
 use std::fmt::{self, Display};
 
+use base58::ToBase58 as _;
 use serde::{Deserialize, Serialize};
 
-use crate::DialogArtifactsError;
+use crate::{DialogArtifactsError, Entity};
 
 use super::{EDITION_LENGTH, Edition, ORIGIN_LENGTH, Origin};
 
@@ -50,6 +51,31 @@ impl Version {
         bytes[..EDITION_LENGTH].copy_from_slice(&self.edition.key_bytes());
         bytes[EDITION_LENGTH..].copy_from_slice(self.origin.key_bytes());
         bytes
+    }
+
+    /// The content-derived [`Entity`] identifying the revision this version
+    /// names. Any replica that knows a revision's version derives the same
+    /// entity, so metadata can be attached to (or queried from) a revision
+    /// without holding it — this is the entity its
+    /// [`RevisionRecord`](super::RevisionRecord) fact is recorded under.
+    pub fn entity(&self) -> Entity {
+        /// Canonical dag-cbor input for the derivation. The shape (variant
+        /// and field names) is part of the derivation; changing it changes
+        /// every revision entity.
+        #[derive(Serialize)]
+        enum RevisionHash<'a> {
+            Revision { origin: &'a [u8], edition: u64 },
+        }
+
+        let bytes = serde_ipld_dagcbor::to_vec(&RevisionHash::Revision {
+            origin: self.origin.key_bytes().as_slice(),
+            edition: self.edition.value(),
+        })
+        .expect("dag-cbor encoding of a version cannot fail");
+        let hash = blake3::hash(&bytes);
+        format!("did:key:z6Mk{}", hash.as_bytes().to_base58())
+            .parse()
+            .expect("a did:key URI formed from a 32-byte hash is always a valid entity")
     }
 
     /// Reconstruct a [`Version`] from its key byte representation

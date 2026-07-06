@@ -20,20 +20,18 @@
 //! 0       1      HISTORY_KEY_TAG
 //! 1       8      edition (big-endian, so order matches causal depth)
 //! 9       32     origin
-//! 41      57     attribute head (attributes ≤ 57 bytes appear verbatim)
-//! 98      32     entity head (the raw span of the entity key form)
+//! 41      32     entity head (the raw span of the entity key form)
+//! 73      57     attribute head (attributes ≤ 57 bytes appear verbatim)
 //! 130     32     Blake3 of the full logical key
 //! ```
 //!
 //! Edition leads (after the tag) so that lexicographic order within the
-//! history region matches causal depth order. The attribute head leads the
-//! entity head so that per-version lookups filtered only by attribute —
-//! the revision DAG edges and skip tables that ancestor traversal reads on
-//! every step — narrow to an exact range ([`history_attribute_range`])
-//! instead of scanning everything the revision recorded (a commit records
-//! one entry per instruction, all under one version). Lookups that know
-//! both components, like [`history_claim_range`], are indifferent to the
-//! order.
+//! history region matches causal depth order, and the raw entity/attribute
+//! heads order the records of one revision by entity, then attribute. The
+//! only lookup over this region is [`history_claim_range`], which knows
+//! every component; revision metadata lives as an ordinary fact in the
+//! data indexes (see [`RevisionRecord`](crate::history::RevisionRecord)),
+//! not here.
 //!
 //! Range scans over `(version, entity, attribute)` are exact when the
 //! attribute fits its head and no other entity shares the 32-byte entity
@@ -56,9 +54,9 @@ pub const HISTORY_KEY_TAG: u8 = 3;
 
 const EDITION_OFFSET: usize = TAG_LENGTH;
 const ORIGIN_OFFSET: usize = EDITION_OFFSET + EDITION_LENGTH;
-const ATTRIBUTE_OFFSET: usize = ORIGIN_OFFSET + ORIGIN_LENGTH;
-const ENTITY_OFFSET: usize = ATTRIBUTE_OFFSET + HISTORY_ATTRIBUTE_HEAD;
-const HASH_OFFSET: usize = ENTITY_OFFSET + ENTITY_RAW_HEAD;
+const ENTITY_OFFSET: usize = ORIGIN_OFFSET + ORIGIN_LENGTH;
+const ATTRIBUTE_OFFSET: usize = ENTITY_OFFSET + ENTITY_RAW_HEAD;
+const HASH_OFFSET: usize = ATTRIBUTE_OFFSET + HISTORY_ATTRIBUTE_HEAD;
 
 /// Number of leading attribute bytes stored raw (and therefore
 /// order-preserving) in a history key: whatever the fixed key width has
@@ -105,9 +103,9 @@ pub fn history_key(
 
     let mut bytes = MINIMUM_KEY;
     bytes[0] = HISTORY_KEY_TAG;
-    bytes[EDITION_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&version_bytes);
-    bytes[ATTRIBUTE_OFFSET..ENTITY_OFFSET].copy_from_slice(&attribute[..HISTORY_ATTRIBUTE_HEAD]);
-    bytes[ENTITY_OFFSET..HASH_OFFSET].copy_from_slice(&entity[..ENTITY_RAW_HEAD]);
+    bytes[EDITION_OFFSET..ENTITY_OFFSET].copy_from_slice(&version_bytes);
+    bytes[ENTITY_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&entity[..ENTITY_RAW_HEAD]);
+    bytes[ATTRIBUTE_OFFSET..HASH_OFFSET].copy_from_slice(&attribute[..HISTORY_ATTRIBUTE_HEAD]);
     bytes[HASH_OFFSET..KEY_LENGTH].copy_from_slice(&make_reference(preimage));
     Key::from(bytes)
 }
@@ -124,38 +122,9 @@ pub fn history_claim_range(version: &Version, of: &Entity, the: &Attribute) -> (
     let mut max = MAXIMUM_KEY;
     for bytes in [&mut min, &mut max] {
         bytes[0] = HISTORY_KEY_TAG;
-        bytes[EDITION_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&version.key_bytes());
-        bytes[ATTRIBUTE_OFFSET..ENTITY_OFFSET]
-            .copy_from_slice(&the.key_bytes()[..HISTORY_ATTRIBUTE_HEAD]);
-        bytes[ENTITY_OFFSET..HASH_OFFSET].copy_from_slice(&of.key_bytes()[..ENTITY_RAW_HEAD]);
-    }
-    (Key::from(min), Key::from(max))
-}
-
-/// The inclusive bounds of the key range covering every history record
-/// produced by the revision identified by `version`
-pub fn history_version_range(version: &Version) -> (Key, Key) {
-    let mut min = MINIMUM_KEY;
-    let mut max = MAXIMUM_KEY;
-    for bytes in [&mut min, &mut max] {
-        bytes[0] = HISTORY_KEY_TAG;
-        bytes[EDITION_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&version.key_bytes());
-    }
-    (Key::from(min), Key::from(max))
-}
-
-/// The inclusive bounds of the key range covering every history record of
-/// claims under the given attribute produced by the revision identified by
-/// `version`, regardless of entity. Exact for attributes that fit the raw
-/// head — this is what makes reading a revision's DAG edge or skip table
-/// O(matches) instead of O(everything the revision recorded).
-pub fn history_attribute_range(version: &Version, the: &Attribute) -> (Key, Key) {
-    let mut min = MINIMUM_KEY;
-    let mut max = MAXIMUM_KEY;
-    for bytes in [&mut min, &mut max] {
-        bytes[0] = HISTORY_KEY_TAG;
-        bytes[EDITION_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&version.key_bytes());
-        bytes[ATTRIBUTE_OFFSET..ENTITY_OFFSET]
+        bytes[EDITION_OFFSET..ENTITY_OFFSET].copy_from_slice(&version.key_bytes());
+        bytes[ENTITY_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&of.key_bytes()[..ENTITY_RAW_HEAD]);
+        bytes[ATTRIBUTE_OFFSET..HASH_OFFSET]
             .copy_from_slice(&the.key_bytes()[..HISTORY_ATTRIBUTE_HEAD]);
     }
     (Key::from(min), Key::from(max))
@@ -187,38 +156,10 @@ mod tests {
 
     #[test]
     fn it_lays_out_the_full_key_width() {
-        assert_eq!(ENTITY_OFFSET, ATTRIBUTE_OFFSET + HISTORY_ATTRIBUTE_HEAD);
-        assert_eq!(HASH_OFFSET, ENTITY_OFFSET + ENTITY_RAW_HEAD);
+        assert_eq!(ATTRIBUTE_OFFSET, ENTITY_OFFSET + ENTITY_RAW_HEAD);
+        assert_eq!(HASH_OFFSET, ATTRIBUTE_OFFSET + HISTORY_ATTRIBUTE_HEAD);
         assert_eq!(KEY_LENGTH, HASH_OFFSET + HASH_SIZE);
         assert_eq!(HISTORY_ATTRIBUTE_HEAD, 57);
-    }
-
-    /// The attribute head leads the entity head, so an attribute-filtered
-    /// per-version lookup is a contiguous range regardless of entity.
-    #[test]
-    fn it_groups_a_version_by_attribute_before_entity() -> anyhow::Result<()> {
-        let version = version(1, 1);
-        let value = crate::Value::String("value".into());
-        let key = |of: &str, the: &str| -> anyhow::Result<Key> {
-            Ok(history_key(
-                &version,
-                &Entity::from_str(of)?,
-                &Attribute::from_str(the)?,
-                value.data_type(),
-                &value.to_reference(),
-            ))
-        };
-
-        // Same attribute across different entities stays contiguous...
-        let (min, max) = history_attribute_range(&version, &Attribute::from_str("db/revision")?);
-        let inside = |key: &Key| *key >= min && *key <= max;
-        assert!(inside(&key("test:zzz", "db/revision")?));
-        assert!(inside(&key("test:aaa", "db/revision")?));
-        // ... while other attributes recorded at the same version fall
-        // outside the range entirely.
-        assert!(!inside(&key("test:aaa", "user/name")?));
-        assert!(!inside(&key("test:zzz", "aa/name")?));
-        Ok(())
     }
 
     #[test]
