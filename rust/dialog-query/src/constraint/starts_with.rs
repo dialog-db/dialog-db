@@ -429,8 +429,11 @@ mod tests {
             "a prefix with a space excludes entities"
         );
         assert_eq!(
-            kind.refinement().expect("the prefix travels").prefix,
-            "has space",
+            kind.refinement()
+                .expect("the prefix travels")
+                .prefix
+                .as_deref(),
+            Some("has space"),
             "the inferred kind carries the prefix refinement"
         );
         Ok(())
