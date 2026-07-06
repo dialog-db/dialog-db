@@ -154,6 +154,7 @@ ucan = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", pack
 varsig = { git = "https://github.com/tonk-labs/rs-ucan.git", branch = "main", package = "varsig" }
 ulid = "1"
 url = { version = "2", features = ["serde"] }
+percent-encoding = "2"
 wasm-bindgen = "=0.2.108"
 wasm-bindgen-futures = "0.4"
 wasm-bindgen-test = "0.3"

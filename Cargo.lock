@@ -1389,6 +1389,7 @@ dependencies = [
  "ipld-core",
  "js-sys",
  "parking_lot",
+ "percent-encoding",
  "pidlock",
  "rand 0.8.5",
  "rexie",
