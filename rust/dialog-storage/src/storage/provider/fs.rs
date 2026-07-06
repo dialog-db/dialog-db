@@ -32,57 +32,55 @@ use url::Url;
 /// platform's data and temp directories.
 const STORAGE_NAMESPACE: &str = "dialog";
 
-/// Percent-encode characters illegal in a Windows path component.
+/// The characters that cannot appear in a Windows path component, as a
+/// [`percent_encoding::AsciiSet`]: `< > : " \ | ? *` and controls, per
+/// <https://learn.microsoft.com/windows/win32/fileio/naming-a-file>, plus
+/// `%` itself so decoding is unambiguous.
 ///
 /// DIDs (`did:key:z6Mk...`) are used directly as directory names by the
-/// certificate/credential layout. Windows forbids `< > : " \ | ? *` and
-/// control characters in filenames, so writing e.g. `certificate/{did}/...`
-/// fails with ERROR_INVALID_NAME (os error 123). `Url::to_file_path` does not
-/// escape these (it only percent-decodes and handles structural conversion),
-/// so the colon passes straight through into an invalid path.
+/// certificate/credential layout; writing e.g. `certificate/{did}/...` fails
+/// with ERROR_INVALID_NAME (os error 123) unless the colon is escaped.
 ///
-/// We keep the URL/logical layer OS-agnostic and escape only when rendering to
-/// an OS path, like escaping at render time for HTML. The mapping is reversible
-/// (`:` -> `%3A`), so distinct names never collide and reads recover the
-/// original. `%` is encoded too so decoding is unambiguous. Applied per
-/// `Normal` path component, so the drive-letter colon (a `Prefix` component) is
-/// never touched. Windows-only; other targets keep their exact layout.
+/// One might expect `Url::to_file_path` to take care of this, but it does
+/// the opposite: it percent-*decodes* every path segment (see
+/// `file_url_segments_to_pathbuf_windows` in the `url` crate) and escapes
+/// nothing, so a reserved character reaches the `PathBuf` raw — and one
+/// escaped at the URL layer gets unescaped on the way through. The escape
+/// therefore has to be (re)applied after that conversion, at the OS-path
+/// boundary. The encoding itself is the standard percent-encoding the URL
+/// stack already uses — only the *set* of characters is ours.
+///
+/// Applied per `Normal` path component, so the drive-letter colon (a
+/// `Prefix` component) is never touched. Windows-only; other targets keep
+/// their exact on-disk layout.
+#[cfg(windows)]
+const WINDOWS_RESERVED: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b'<')
+    .add(b'>')
+    .add(b':')
+    .add(b'"')
+    .add(b'\\')
+    .add(b'|')
+    .add(b'?')
+    .add(b'*')
+    .add(b'%');
+
+/// Percent-encode the characters of [`WINDOWS_RESERVED`] in one path
+/// component. Reversible (`:` -> `%3A`), so distinct names never collide
+/// and [`decode_reserved`] recovers the original.
 #[cfg(windows)]
 fn encode_reserved(component: &str) -> String {
-    fn reserved(c: char) -> bool {
-        matches!(c, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*' | '%') || (c as u32) < 0x20
-    }
-    let mut out = String::with_capacity(component.len());
-    for c in component.chars() {
-        if reserved(c) {
-            out.push_str(&format!("%{:02X}", c as u32));
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    percent_encoding::utf8_percent_encode(component, WINDOWS_RESERVED).to_string()
 }
 
-/// Inverse of [`encode_reserved`]. Only ASCII bytes are ever encoded, so a
-/// decoded `%XX` is always a valid single-byte char.
+/// Inverse of [`encode_reserved`]. A name that decodes to non-UTF-8 (only
+/// possible for files created out-of-band) is returned as-is.
 #[cfg(windows)]
 fn decode_reserved(name: &str) -> String {
-    let bytes = name.as_bytes();
-    let mut out = String::with_capacity(name.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && i + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&name[i + 1..i + 3], 16)
-        {
-            out.push(byte as char);
-            i += 3;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
+    percent_encoding::percent_decode_str(name)
+        .decode_utf8()
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| name.to_string())
 }
 
 /// Render an OS path, percent-encoding reserved characters in every `Normal`
@@ -484,11 +482,13 @@ mod tests {
         assert_eq!(encoded, "did%3Akey%3Az6MkExampleColonSegment");
         assert_eq!(decode_reserved(&encoded), did, "must round-trip");
 
-        // Distinct inputs that the lossy '_' mapping would have collided.
+        // Distinct inputs that a lossy sink-character mapping would collide.
         assert_ne!(encode_reserved("a:b"), encode_reserved("a|b"));
         assert_eq!(decode_reserved(&encode_reserved("a:b")), "a:b");
         // A literal '%' is preserved (encoded so decoding stays unambiguous).
         assert_eq!(decode_reserved(&encode_reserved("a%3Ab")), "a%3Ab");
+        // Multi-byte UTF-8 survives the round trip untouched.
+        assert_eq!(decode_reserved(&encode_reserved("café:名前")), "café:名前");
     }
 
     #[cfg(windows)]
