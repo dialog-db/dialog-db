@@ -100,8 +100,8 @@ impl<S: Clone> Storage<S> {
     }
 }
 
-/// Space backed by Volatile providers.
-pub type VolatileSpace = Space<Volatile, Volatile, Volatile, Volatile>;
+/// Space backed by Volatile providers (blobs held in-memory too).
+pub type VolatileSpace = Space<Volatile, Volatile, Volatile, Volatile, Volatile>;
 
 impl Storage<VolatileSpace> {
     /// Create a volatile (in-memory) environment for testing.
@@ -447,6 +447,47 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resolved.unwrap().content, cell);
+        }
+
+        // The default web space (`Storage::<WebSpace>::default()`) keeps
+        // blocks, cells, credentials, and certificates on IndexedDB but
+        // routes blob effects to OPFS. This is the regression guard for the
+        // blob-provider split: write a blob (-> OPFS) through a mounted
+        // subject and read it back by its discovered hash, while the block
+        // archive stays on IndexedDB.
+        #[dialog_common::test]
+        async fn it_round_trips_a_blob_on_the_web_space() {
+            use dialog_effects::blob::prelude::*;
+
+            let env: Storage<WebSpace> = Storage::default();
+            let did = StorageFx::profile(&unique_name("web-blob"))
+                .create(test_credential().await)
+                .perform(&env)
+                .await
+                .unwrap()
+                .did();
+
+            let payload: Vec<u8> = (0..64_000u32).map(|i| (i % 251) as u8).collect();
+            let expected = Blake3Hash::hash(&payload);
+
+            let mut sink = did
+                .clone()
+                .archive()
+                .blob()
+                .write()
+                .perform(&env)
+                .await
+                .unwrap();
+            sink.write_all(&payload).await.unwrap();
+            let hash = sink.finish().await.unwrap();
+            assert_eq!(hash, expected);
+
+            let mut reader = did.archive().blob().read(hash).perform(&env).await.unwrap();
+            let mut out = Vec::new();
+            while let Some(chunk) = reader.next().await.unwrap() {
+                out.extend(chunk);
+            }
+            assert_eq!(out, payload);
         }
 
         #[dialog_common::test]

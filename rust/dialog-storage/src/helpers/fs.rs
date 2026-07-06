@@ -116,7 +116,8 @@ impl Resource<Location> for TempFileSystem {
 ///
 /// Use via [`Storage::temp`] to get a filesystem-backed storage whose
 /// roots live entirely under the platform temp directory.
-pub type NativeTempSpace = Space<TempFileSystem, TempFileSystem, TempFileSystem, TempFileSystem>;
+pub type NativeTempSpace =
+    Space<TempFileSystem, TempFileSystem, TempFileSystem, TempFileSystem, TempFileSystem>;
 
 impl Storage<NativeTempSpace> {
     /// Create a filesystem-backed storage whose roots live under the
