@@ -32,9 +32,13 @@ pub mod math;
 /// String manipulation formulas (concatenate, length, uppercase, lowercase, like)
 pub mod string;
 
+/// Version-control revision record projections (revision, revision-parent)
+pub mod revision;
+
 pub use conversions::{ParseFloat, ParseSignedInteger, ParseUnsignedInteger, ToString};
 pub use logic::{And, Not, Or};
 pub use math::{Difference, Modulo, Product, Quotient, Sum};
+pub use revision::{Revision as RevisionFormula, RevisionParent as RevisionParentFormula};
 pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};
 
 use crate::Parameters;

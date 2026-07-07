@@ -1429,6 +1429,123 @@ mod tests {
         }
 
         #[dialog_common::test]
+        async fn it_projects_revision_attribution_from_the_signed_record() -> anyhow::Result<()> {
+            // schema::Revision has no stored facts: a built-in rule
+            // scans the head's `dialog.db/revision` record and projects
+            // its fields through the `dialog/revision` formula, which
+            // verifies the issuer's signature before projecting. The
+            // overlay's BranchRevision carries the revision entity — the
+            // join key from "where is this branch?" to this concept.
+            use crate::schema;
+            use crate::schema::DidExt as _;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+            let branch = repo.branch("main").load().perform(&operator).await?;
+            let head = branch.revision().expect("branch has a revision");
+
+            // The overlay hands out the join key.
+            let origin = schema::Origin::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&origin, "main");
+            let pointers: Vec<schema::BranchRevision> = branch
+                .query()
+                .select(Query::<schema::BranchRevision> {
+                    this: branch_concept.this.clone().into(),
+                    tree: Term::var("tree"),
+                    edition: Term::var("edition"),
+                    revision: Term::var("revision"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(pointers.len(), 1);
+            let revision_entity = pointers[0].revision.0.clone();
+            assert_eq!(revision_entity, head.entity());
+
+            // ... and the concept answers "who committed this?".
+            let rows: Vec<schema::Revision> = branch
+                .query()
+                .select(Query::<schema::Revision> {
+                    this: revision_entity.into(),
+                    lineage: Term::var("lineage"),
+                    issuer: Term::var("issuer"),
+                    authority: Term::var("authority"),
+                    edition: Term::var("edition"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(rows.len(), 1, "the revision projects exactly once");
+            assert_eq!(rows[0].issuer.0, operator.did().this());
+            assert_eq!(rows[0].authority.0, profile.did().this());
+            assert_eq!(rows[0].lineage.0, head.lineage());
+            assert_eq!(rows[0].edition.0, head.edition.value());
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_projects_the_revision_dag_edge() -> anyhow::Result<()> {
+            // schema::RevisionParent derives the DAG edge from the same
+            // signed record: one row per parent, none for genesis.
+            use crate::schema;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+            let branch = repo.branch("main").load().perform(&operator).await?;
+            let first = branch.revision().expect("first revision");
+
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Bob".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+            let branch = repo.branch("main").load().perform(&operator).await?;
+            let second = branch.revision().expect("second revision");
+
+            let edges: Vec<schema::RevisionParent> = branch
+                .query()
+                .select(Query::<schema::RevisionParent> {
+                    this: second.entity().into(),
+                    parent: Term::var("parent"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(edges.len(), 1, "a sequential commit has one parent");
+            assert_eq!(edges[0].parent.0, first.entity());
+
+            let genesis: Vec<schema::RevisionParent> = branch
+                .query()
+                .select(Query::<schema::RevisionParent> {
+                    this: first.entity().into(),
+                    parent: Term::var("parent"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert!(genesis.is_empty(), "a genesis revision has no parents");
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
         async fn it_auto_includes_session_facts() -> anyhow::Result<()> {
             // The metadata overlay also asserts a `Session` fact on
             // `db:session` carrying the profile + operator DIDs.
