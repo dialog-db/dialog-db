@@ -14,9 +14,11 @@ dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-remote-s3 = { workspace = true }
 dialog-remote-ucan-s3 = { workspace = true }
+dialog-remote-fs = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
 dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
+dialog-remote-fs = { workspace = true }
