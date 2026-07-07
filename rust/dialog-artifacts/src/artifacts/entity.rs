@@ -145,9 +145,12 @@ impl Debug for Entity {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_round_trips_a_blob_entity() {
         let hash: dialog_storage::Blake3Hash = [7u8; 32];
         let entity = Entity::from_blob(&hash).expect("constructs");
@@ -158,7 +161,7 @@ mod tests {
         assert_eq!(reparsed.blob_hash(), Some(hash));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_returns_none_for_non_blob_entities() {
         let entity: Entity = "user:alice".parse().expect("parses");
         assert_eq!(entity.blob_hash(), None);
