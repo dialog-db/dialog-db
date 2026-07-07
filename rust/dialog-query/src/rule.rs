@@ -155,6 +155,10 @@ pub trait Compile: Sized + Into<Rule> {
                     AnalysisError::NegatedOptional => TypeError::NegatedOptional {
                         rule: Box::new(rule.into()),
                     },
+                    AnalysisError::SelfNegation { concept } => TypeError::SelfNegation {
+                        rule: Box::new(rule.into()),
+                        concept,
+                    },
                 });
             }
         };

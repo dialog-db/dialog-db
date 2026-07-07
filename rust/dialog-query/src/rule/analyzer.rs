@@ -36,7 +36,7 @@ use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::Context;
-use crate::{Environment, Premise};
+use crate::{Entity, Environment, Premise};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -218,6 +218,19 @@ impl AnalyzedRule {
     pub fn type_of(&self, name: &str) -> Option<&Kind> {
         self.types.get(name)
     }
+
+    /// The concepts this rule negates: its *negative IDB edges*.
+    /// One entry per `unless` premise over a concept, identified by
+    /// the concept's content-addressed URI. Self-negation is
+    /// rejected at analysis, so none of these is the rule's own
+    /// conclusion; the global stratification pass consumes these
+    /// edges to order (or reject) cycles that span multiple rules.
+    pub fn negated_concepts(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.premises.iter().filter_map(|premise| match premise {
+            Premise::Unless(Negation(Proposition::Concept(query))) => Some(query.predicate.this()),
+            _ => None,
+        })
+    }
 }
 
 /// Run analysis over the rule's premises:
@@ -275,6 +288,23 @@ pub fn analyze(
     for premise in &premises {
         if let Premise::Unless(Negation(Proposition::OptionalAttribute(_))) = premise {
             return Err(AnalysisError::NegatedOptional);
+        }
+    }
+
+    // A rule that negates its own conclusion is a negative
+    // self-loop: it would derive a row exactly when it doesn't, and
+    // no stratification can order it. This is the local, always
+    // detectable case; negation over *other* derived concepts is a
+    // negative IDB edge, surfaced per rule by
+    // [`AnalyzedRule::negated_concepts`] for the global
+    // stratification pass to consume.
+    for premise in &premises {
+        if let Premise::Unless(Negation(Proposition::Concept(query))) = premise
+            && query.predicate.this() == conclusion.this()
+        {
+            return Err(AnalysisError::SelfNegation {
+                concept: conclusion.this().to_string(),
+            });
         }
     }
 

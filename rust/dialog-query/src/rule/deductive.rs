@@ -195,79 +195,130 @@ impl Display for DeductiveRule {
     }
 }
 
+impl DeductiveRule {
+    /// Compile *ordered variants* of a concept: spec-style
+    /// first-to-conform alternatives, each an alternative body for
+    /// the same conclusion.
+    ///
+    /// Variant `k` desugars to a rule whose body is the variant's
+    /// own premises plus one negated premise per *earlier* variant:
+    /// the entity yields variant `k`'s row only when no earlier
+    /// variant matched it. Order is semantic; the returned rules are
+    /// installed together (e.g. via
+    /// [`ConceptRules::install`](crate::ConceptRules)) and their
+    /// disjunction is deterministic per entity because the
+    /// negations make the variants pairwise disjoint.
+    ///
+    /// Every variant must ground the conclusion's required operands
+    /// with its own fields (the ordinary head-grounding contract);
+    /// a variant that doesn't fails compilation like any other rule.
+    pub fn variants(
+        conclusion: ConceptDescriptor,
+        ordered: Vec<ConceptDescriptor>,
+    ) -> Result<Vec<DeductiveRule>, TypeError> {
+        use crate::concept::query::ConceptQuery;
+
+        let mut rules = Vec::new();
+        for (position, variant) in ordered.iter().enumerate() {
+            let mut premises = concept_premises(variant);
+            for earlier in &ordered[..position] {
+                let mut terms = Parameters::new();
+                terms.insert("this".to_string(), Term::<Entity>::var("this").into());
+                premises.push(Premise::Unless(Negation(Proposition::Concept(
+                    ConceptQuery {
+                        terms,
+                        predicate: earlier.clone(),
+                    },
+                ))));
+            }
+            rules.push(DeductiveRule::new(conclusion.clone(), premises)?);
+        }
+        Ok(rules)
+    }
+}
+
+/// Lower a concept's fields into the body premises of its implicit
+/// rule: one scan (or left-join) per field, plus a conjoined target
+/// premise per concept-typed field. Shared by
+/// `From<&ConceptDescriptor>` and [`DeductiveRule::variants`].
+fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
+    use crate::concept::query::ConceptQuery;
+    use crate::type_system::ConceptRef;
+
+    let mut premises = Vec::new();
+
+    let this = Term::<Entity>::var("this");
+
+    for (name, field) in concept.with().iter() {
+        // The value term stays scalar in both cases; the
+        // associative layer never carries optionality. A
+        // required field lowers to a plain scan (a missing fact
+        // filters the row out); an optional field lowers to a
+        // `OptionalAttributeQuery` left-join, which set-widens at the
+        // projection: `this` is bound by the required fields, so
+        // a miss yields one row with the slot bound to
+        // `Binding::Absent`.
+        //
+        // A concept-typed field's slot additionally carries the
+        // conformance refinement, and the constraint itself is
+        // enforced structurally: the target concept is conjoined
+        // as a premise over the field's variable below.
+        let kind = match (field.content_type().map(Kind::from), field.conforms()) {
+            (Some(kind), Some(target)) => Some(
+                kind.with_conformance(ConceptRef(target.this().to_string()))
+                    .expect("a conforming field is entity-valued by construction"),
+            ),
+            (kind, _) => kind,
+        };
+        let value = match kind {
+            Some(kind) => Term::<Any>::typed_var(name, kind),
+            None => Term::var(name),
+        };
+
+        let premise: Premise = if field.is_optional() {
+            OptionalAttributeQuery::new(
+                Term::Constant(Value::from(field.the().clone())),
+                this.clone(),
+                value.clone(),
+                Term::blank(),
+                Some(field.cardinality()),
+            )
+            .into()
+        } else {
+            AttributeQuery::new(
+                Term::Constant(Value::from(field.the().clone())),
+                this.clone(),
+                value.clone(),
+                Term::blank(),
+                Some(field.cardinality()),
+            )
+            .into()
+        };
+        premises.push(premise);
+
+        // Conformance is "facts exist", not a property of the
+        // scalar, so it desugars to the target concept applied
+        // to the field's entity: the row survives only when the
+        // target entity satisfies the concept. Only `this` is
+        // projected; the target's own fields stay internal to
+        // the premise.
+        if let Some(target) = field.conforms() {
+            let mut terms = Parameters::new();
+            terms.insert("this".to_string(), value);
+            premises.push(Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: target.clone(),
+            })));
+        }
+    }
+
+    premises
+}
+
 impl From<&ConceptDescriptor> for DeductiveRule {
     fn from(concept: &ConceptDescriptor) -> Self {
-        use crate::concept::query::ConceptQuery;
-        use crate::type_system::ConceptRef;
-
-        let mut premises = Vec::new();
-
-        let this = Term::<Entity>::var("this");
-
-        for (name, field) in concept.with().iter() {
-            // The value term stays scalar in both cases; the
-            // associative layer never carries optionality. A
-            // required field lowers to a plain scan (a missing fact
-            // filters the row out); an optional field lowers to a
-            // `OptionalAttributeQuery` left-join, which set-widens at the
-            // projection: `this` is bound by the required fields, so
-            // a miss yields one row with the slot bound to
-            // `Binding::Absent`.
-            //
-            // A concept-typed field's slot additionally carries the
-            // conformance refinement, and the constraint itself is
-            // enforced structurally: the target concept is conjoined
-            // as a premise over the field's variable below.
-            let kind = match (field.content_type().map(Kind::from), field.conforms()) {
-                (Some(kind), Some(target)) => Some(
-                    kind.with_conformance(ConceptRef(target.this().to_string()))
-                        .expect("a conforming field is entity-valued by construction"),
-                ),
-                (kind, _) => kind,
-            };
-            let value = match kind {
-                Some(kind) => Term::<Any>::typed_var(name, kind),
-                None => Term::var(name),
-            };
-
-            let premise: Premise = if field.is_optional() {
-                OptionalAttributeQuery::new(
-                    Term::Constant(Value::from(field.the().clone())),
-                    this.clone(),
-                    value.clone(),
-                    Term::blank(),
-                    Some(field.cardinality()),
-                )
-                .into()
-            } else {
-                AttributeQuery::new(
-                    Term::Constant(Value::from(field.the().clone())),
-                    this.clone(),
-                    value.clone(),
-                    Term::blank(),
-                    Some(field.cardinality()),
-                )
-                .into()
-            };
-            premises.push(premise);
-
-            // Conformance is "facts exist", not a property of the
-            // scalar, so it desugars to the target concept applied
-            // to the field's entity: the row survives only when the
-            // target entity satisfies the concept. Only `this` is
-            // projected; the target's own fields stay internal to
-            // the premise.
-            if let Some(target) = field.conforms() {
-                let mut terms = Parameters::new();
-                terms.insert("this".to_string(), value);
-                premises.push(Premise::Assert(Proposition::Concept(ConceptQuery {
-                    terms,
-                    predicate: target.clone(),
-                })));
-            }
-        }
-
-        DeductiveRule::new(concept.clone(), premises).expect("Concept should compile")
+        DeductiveRule::new(concept.clone(), concept_premises(concept))
+            .expect("Concept should compile")
     }
 }
 
@@ -818,6 +869,153 @@ mod tests {
         }
         assert_eq!(scans, 1, "expected one scalar scan (name)");
         assert_eq!(maybes, 1, "expected one Maybe left-join (nickname)");
+    }
+
+    /// Ordered variants desugar to negated premises: variant `k`
+    /// carries one `Unless` per earlier variant, joined on `this`,
+    /// so the first conforming variant wins.
+    #[dialog_common::test]
+    fn variants_desugar_to_ordered_negations() {
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "handle",
+            AttributeDescriptor::new(
+                the!("contact/handle"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        let email = ConceptDescriptor::try_from(vec![(
+            "handle",
+            AttributeDescriptor::new(the!("user/email"), "", Cardinality::One, Some(Type::String)),
+        )])
+        .unwrap();
+        let phone = ConceptDescriptor::try_from(vec![(
+            "handle",
+            AttributeDescriptor::new(the!("user/phone"), "", Cardinality::One, Some(Type::String)),
+        )])
+        .unwrap();
+
+        let rules = DeductiveRule::variants(conclusion, vec![email.clone(), phone.clone()])
+            .expect("variants compile");
+        assert_eq!(rules.len(), 2);
+
+        let negations = |rule: &DeductiveRule| {
+            rule.analysis()
+                .premises
+                .iter()
+                .filter_map(|premise| match premise {
+                    Premise::Unless(Negation(Proposition::Concept(query))) => Some(query.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert!(
+            negations(&rules[0]).is_empty(),
+            "the first variant negates nothing"
+        );
+
+        let unless = negations(&rules[1]);
+        assert_eq!(unless.len(), 1, "one negation per earlier variant");
+        assert_eq!(
+            unless[0].predicate.this(),
+            email.this(),
+            "the later variant excludes the earlier one"
+        );
+        assert_eq!(
+            unless[0].terms.iter().count(),
+            1,
+            "the negation joins on `this` alone"
+        );
+        assert_eq!(
+            unless[0].terms.get("this").and_then(|term| term.name()),
+            Some("this")
+        );
+    }
+
+    /// A rule that negates its own conclusion concept is a negative
+    /// self-loop: rejected at analysis.
+    #[dialog_common::test]
+    fn it_rejects_self_negating_rule() {
+        use crate::concept::query::ConceptQuery;
+        use crate::negation::Negation;
+
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "handle",
+            AttributeDescriptor::new(
+                the!("contact/handle"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Entity>::var("this").into());
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("user/email")),
+                Term::<Entity>::var("this"),
+                Term::var("handle"),
+                Term::blank(),
+                Some(Cardinality::One),
+            )
+            .into(),
+            Premise::Unless(Negation(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: conclusion.clone(),
+            }))),
+        ];
+
+        match DeductiveRule::new(conclusion, premises) {
+            Err(TypeError::SelfNegation { concept, .. }) => {
+                assert!(concept.starts_with("concept:"));
+            }
+            other => panic!("expected SelfNegation, got {other:?}"),
+        }
+    }
+
+    /// Negation over *another* concept is a negative IDB edge,
+    /// surfaced by the analysis for the stratification pass.
+    #[dialog_common::test]
+    fn analysis_surfaces_negative_idb_edges() {
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "handle",
+            AttributeDescriptor::new(
+                the!("contact/handle"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        let email = ConceptDescriptor::try_from(vec![(
+            "handle",
+            AttributeDescriptor::new(the!("user/email"), "", Cardinality::One, Some(Type::String)),
+        )])
+        .unwrap();
+        let phone = ConceptDescriptor::try_from(vec![(
+            "handle",
+            AttributeDescriptor::new(the!("user/phone"), "", Cardinality::One, Some(Type::String)),
+        )])
+        .unwrap();
+
+        let rules =
+            DeductiveRule::variants(conclusion, vec![email.clone(), phone]).expect("compiles");
+
+        assert_eq!(
+            rules[0].analysis().negated_concepts().count(),
+            0,
+            "the first variant carries no negative edges"
+        );
+        assert_eq!(
+            rules[1].analysis().negated_concepts().collect::<Vec<_>>(),
+            vec![email.this()],
+            "the later variant's negative edge names the earlier variant"
+        );
     }
 
     /// A concept-typed field conjoins the target concept as a
