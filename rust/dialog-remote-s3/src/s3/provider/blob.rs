@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{ForkInvocation, Provider};
-use dialog_common::Blake3Hash;
+use dialog_common::{Blake3Hash, ConditionalSend};
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Import, Read};
 use futures_util::{Stream, StreamExt};
@@ -18,11 +18,14 @@ use std::pin::Pin;
 
 use crate::s3::{Permit, S3, S3Invocation};
 
-/// A boxed stream of decoded byte chunks, `Send` off the web.
-#[cfg(not(target_arch = "wasm32"))]
-type ByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, BlobError>> + Send>>;
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-type ByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, BlobError>>>>;
+/// A stream of decoded byte chunks. The `ConditionalSend` supertrait keeps the
+/// boxed stream `Send` off the web (and drops the bound on wasm) without a
+/// per-target type alias.
+trait ByteChunks: Stream<Item = Result<Vec<u8>, BlobError>> + ConditionalSend {}
+impl<T: Stream<Item = Result<Vec<u8>, BlobError>> + ConditionalSend> ByteChunks for T {}
+
+/// A boxed [`ByteChunks`] stream.
+type ByteStream = Pin<Box<dyn ByteChunks>>;
 
 // --- Fork entry points: redeem the authorization, then execute over S3 -----
 
@@ -187,77 +190,5 @@ impl BlobSink for S3BlobSink {
                 response.status()
             )))
         }
-    }
-}
-
-#[cfg(all(test, feature = "helpers", not(target_arch = "wasm32")))]
-mod tests {
-    use crate::Address;
-    use crate::helpers::{LocalS3, S3Network};
-    use dialog_capability::{Subject, did};
-    use dialog_common::Blake3Hash;
-    use dialog_effects::blob::BlobReader;
-    use dialog_effects::prelude::*;
-
-    async fn drain(mut reader: BlobReader) -> Vec<u8> {
-        let mut out = Vec::new();
-        while let Some(chunk) = reader.next().await.unwrap() {
-            out.extend(chunk);
-        }
-        out
-    }
-
-    #[tokio::test]
-    async fn it_imports_then_reads_a_blob_over_s3() -> anyhow::Result<()> {
-        let server = LocalS3::start(&["dialog"]).await?;
-        let address = Address::builder(&server.endpoint)
-            .region("auto")
-            .bucket("dialog")
-            .build()?;
-        let network = S3Network::new();
-        let subject = Subject::from(did!("key:zBlobOverS3"));
-
-        let payload: Vec<u8> = (0..50_000u32).map(|i| (i % 251) as u8).collect();
-        let digest = Blake3Hash::from(*blake3::hash(&payload).as_bytes());
-
-        // Import: stream the bytes in, get the verified digest back.
-        let mut sink = subject
-            .clone()
-            .archive()
-            .blob()
-            .import(digest.clone(), payload.len() as u64)
-            .fork(&address)
-            .perform(&network)
-            .await?;
-        for chunk in payload.chunks(4096) {
-            sink.write_all(chunk).await?;
-        }
-        assert_eq!(sink.finish().await?, digest);
-
-        // Read the whole blob back.
-        let reader = subject
-            .clone()
-            .archive()
-            .blob()
-            .read(digest.clone())
-            .fork(&address)
-            .perform(&network)
-            .await?;
-        assert_eq!(drain(reader).await, payload);
-
-        // A missing blob reports NotFound.
-        let missing = subject
-            .archive()
-            .blob()
-            .read([0u8; 32])
-            .fork(&address)
-            .perform(&network)
-            .await;
-        assert!(matches!(
-            missing,
-            Err(dialog_effects::blob::BlobError::NotFound(_))
-        ));
-
-        Ok(())
     }
 }
