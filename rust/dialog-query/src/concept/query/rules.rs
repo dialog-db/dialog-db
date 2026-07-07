@@ -74,6 +74,13 @@ impl ConceptRules {
         &self.installed
     }
 
+    /// Every rule for this concept: the implicit rule (derived from
+    /// the descriptor) followed by the installed ones. This is the
+    /// rule set the program-level dependency analysis walks.
+    pub fn rules(&self) -> impl Iterator<Item = &DeductiveRule> {
+        iter::once(&self.implicit).chain(self.installed.iter())
+    }
+
     /// Install every rule from `other` into this `ConceptRules`.
     ///
     /// Used when combining two rule sources (e.g. a primary registry and an
