@@ -14,7 +14,7 @@ use crate::selection::{Match, Selection};
 use crate::source::SelectRules;
 use crate::statement::Retraction;
 use crate::term::Term;
-use crate::type_system::{Primitive, Type as Kind};
+use crate::type_system::{ConceptRef, Primitive, Type as Kind};
 use crate::types::Scalar;
 use crate::{
     Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement, Schema,
@@ -136,21 +136,29 @@ impl ConceptDescriptor {
     /// - The value for a **required** attribute is an empty map `{}`.
     /// - The value for an **optional** attribute is `{ "optional":
     ///   true }`.
+    /// - The value for a **concept-typed** attribute carries the
+    ///   target's URI: `{ "conforms": "concept:{hash}" }`. The
+    ///   target participates by identity, not by embedding, so a
+    ///   conforming field adds one URI to the encoding rather than
+    ///   the target's whole attribute set.
     ///
-    /// A concept with no optional attributes therefore hashes
-    /// exactly as it did before optionality existed (every value is
-    /// `{}`), so existing concept identities are preserved. Marking
-    /// an attribute optional changes its value object, and thus the
-    /// concept's identity.
+    /// A concept with no optional or conforming attributes therefore
+    /// hashes exactly as it did before either existed (every value
+    /// is `{}`), so existing concept identities are preserved.
+    /// Marking an attribute optional or conforming changes its value
+    /// object, and thus the concept's identity.
     pub fn to_cbor_bytes(&self) -> Vec<u8> {
         /// Per-attribute hash value: `{}` for required,
-        /// `{ "optional": true }` for optional. `optional` is omitted
-        /// when false, so a required attribute encodes as an empty
-        /// map, byte-identical to the pre-optionality encoding.
+        /// `{ "optional": true }` for optional, `{ "conforms":
+        /// "concept:.." }` for concept-typed. Both keys are omitted
+        /// when absent, so a plain required attribute encodes as an
+        /// empty map, byte-identical to the earlier encodings.
         #[derive(Serialize)]
         struct AttributeIdentity {
             #[serde(skip_serializing_if = "Not::not")]
             optional: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            conforms: Option<String>,
         }
 
         let mut attr_map: BTreeMap<String, AttributeIdentity> = BTreeMap::new();
@@ -161,6 +169,7 @@ impl ConceptDescriptor {
                 uri,
                 AttributeIdentity {
                     optional: schema.is_optional(),
+                    conforms: schema.conforms().map(|target| target.this().to_string()),
                 },
             );
         }
@@ -322,6 +331,18 @@ impl From<&ConceptDescriptor> for Schema {
                 (Some(ty), true) => Some(Kind::from(ty).optional()),
                 (None, true) => Some(Kind::from(Primitive::ALL).optional()),
                 (None, false) => None,
+            };
+            // A concept-typed field's slot carries the conformance
+            // refinement, so a consuming rule's TypeEnv sees which
+            // concept the entity must satisfy. The field is
+            // entity-valued by construction, so the meet is never
+            // empty.
+            let content_type = match (content_type, field.conforms()) {
+                (Some(kind), Some(target)) => Some(
+                    kind.with_conformance(ConceptRef(target.this().to_string()))
+                        .expect("a conforming field is entity-valued by construction"),
+                ),
+                (kind, _) => kind,
             };
             schema.insert(
                 name.into(),
@@ -1614,6 +1635,190 @@ mod tests {
         );
     }
 
+    /// Helpers shared by the conformance tests below.
+    fn badge_target() -> ConceptDescriptor {
+        ConceptDescriptor::try_from(vec![(
+            "badge",
+            AttributeDescriptor::new(
+                the!("employee/badge"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap()
+    }
+
+    fn manager_attr(content: Option<Type>) -> AttributeDescriptor {
+        AttributeDescriptor::new(the!("person/manager"), "", Cardinality::One, content)
+    }
+
+    /// Only entity-valued attributes can conform to a concept.
+    #[dialog_common::test]
+    fn it_rejects_non_entity_conformance() {
+        let result =
+            ConceptFieldDescriptor::conforming(manager_attr(Some(Type::String)), badge_target());
+        match result {
+            Err(crate::TypeError::NonEntityConformance { the, .. }) => {
+                assert_eq!(the, "person/manager");
+            }
+            other => panic!("expected NonEntityConformance, got {other:?}"),
+        }
+
+        let untyped = ConceptFieldDescriptor::conforming(manager_attr(None), badge_target());
+        assert!(
+            untyped.is_err(),
+            "an attribute without a declared value type cannot conform"
+        );
+    }
+
+    /// The wire path enforces the same invariants: a conforming
+    /// field that is optional, or not entity-valued, fails to parse.
+    #[dialog_common::test]
+    fn it_validates_conformance_on_the_wire() {
+        let target = serde_json::to_value(badge_target()).unwrap();
+
+        let optional = serde_json::json!({
+            "with": {
+                "name": { "the": "person/name", "as": "Text" },
+                "manager": {
+                    "the": "person/manager",
+                    "as": "Entity",
+                    "optional": true,
+                    "conforms": target,
+                }
+            }
+        });
+        assert!(
+            serde_json::from_value::<ConceptDescriptor>(optional).is_err(),
+            "optional conformance is absence-over-IDB; rejected until stratification"
+        );
+
+        let non_entity = serde_json::json!({
+            "with": {
+                "name": { "the": "person/name", "as": "Text" },
+                "manager": {
+                    "the": "person/manager",
+                    "as": "Text",
+                    "conforms": target,
+                }
+            }
+        });
+        assert!(
+            serde_json::from_value::<ConceptDescriptor>(non_entity).is_err(),
+            "a conforming field must be entity-valued"
+        );
+    }
+
+    /// A conforming field round-trips through JSON, carrying the
+    /// full target descriptor under `conforms`; plain fields stay
+    /// free of the key.
+    #[dialog_common::test]
+    fn it_round_trips_a_conforming_field() {
+        let target = badge_target();
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "manager".to_string(),
+                ConceptFieldDescriptor::conforming(
+                    manager_attr(Some(Type::Entity)),
+                    target.clone(),
+                )
+                .unwrap(),
+            ),
+        ])
+        .unwrap();
+
+        let json = serde_json::to_value(&concept).expect("serialize");
+        let with = json["with"].as_object().expect("with map");
+        assert!(
+            with["manager"]["conforms"].is_object(),
+            "conforming field carries the target descriptor"
+        );
+        assert!(
+            with["name"].as_object().unwrap().get("conforms").is_none(),
+            "plain field omits the key"
+        );
+
+        let back: ConceptDescriptor = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.this(), concept.this());
+        let manager = back
+            .with()
+            .iter()
+            .find(|(name, _)| *name == "manager")
+            .map(|(_, field)| field)
+            .expect("manager present");
+        assert_eq!(
+            manager.conforms().map(|c| c.this()),
+            Some(target.this()),
+            "the target survives the round-trip"
+        );
+    }
+
+    /// Conformance participates in the concept's identity by the
+    /// target's URI: tagging a field changes the hash, and the hash
+    /// depends on the target's identity rather than its embedding.
+    #[dialog_common::test]
+    fn it_hashes_conformance_into_identity() {
+        let plain = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "manager".to_string(),
+                ConceptFieldDescriptor::required(manager_attr(Some(Type::Entity))),
+            ),
+        ])
+        .unwrap();
+
+        let conforming = |target: ConceptDescriptor| {
+            ConceptDescriptor::try_from(vec![
+                (
+                    "name".to_string(),
+                    ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                        the!("person/name"),
+                        "",
+                        Cardinality::One,
+                        Some(Type::String),
+                    )),
+                ),
+                (
+                    "manager".to_string(),
+                    ConceptFieldDescriptor::conforming(manager_attr(Some(Type::Entity)), target)
+                        .unwrap(),
+                ),
+            ])
+            .unwrap()
+        };
+
+        let a = conforming(badge_target());
+        assert_ne!(
+            plain.hash(),
+            a.hash(),
+            "tagging a field with conformance changes the identity"
+        );
+
+        // The same target built independently hashes identically, so
+        // the concept identity is a function of the target's URI.
+        let b = conforming(badge_target());
+        assert_eq!(a.hash(), b.hash());
+        assert_eq!(a.this(), b.this());
+    }
+
     /// `From<&ConceptDescriptor> for Schema` lifts a typed
     /// attribute's content_type into the unified `type_system::Type`.
     #[dialog_common::test]
@@ -1708,6 +1913,48 @@ mod tests {
         assert!(
             tag.content_type().expect("tag kind").is_optional(),
             "an untyped optional field widens the full value set"
+        );
+    }
+
+    /// A conforming field's schema slot carries the conformance
+    /// refinement, so consuming rules see which concept the entity
+    /// must satisfy.
+    #[dialog_common::test]
+    fn schema_from_concept_stamps_conformance() {
+        use crate::type_system::ConceptRef;
+
+        let target = badge_target();
+        let descriptor = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "manager".to_string(),
+                ConceptFieldDescriptor::conforming(
+                    manager_attr(Some(Type::Entity)),
+                    target.clone(),
+                )
+                .unwrap(),
+            ),
+        ])
+        .unwrap();
+
+        let schema = Schema::from(&descriptor);
+        let manager = schema.get("manager").expect("manager field present");
+        let kind = manager.content_type().expect("typed slot");
+        assert_eq!(kind.primitive_part().as_singleton(), Some(Type::Entity));
+        assert!(
+            kind.refinement()
+                .expect("refined")
+                .conforms
+                .contains(&ConceptRef(target.this().to_string())),
+            "the slot kind names the target concept"
         );
     }
 

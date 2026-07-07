@@ -249,6 +249,35 @@ where
     }
 }
 
+/// Marker + constructor for *concept-typed* fields: a required,
+/// entity-valued attribute whose target entity must conform to a
+/// concept. `#[dialog(conforms = C)]` in `#[derive(Concept)]`
+/// dispatches through this trait, so both constraints are enforced
+/// at compile time rather than syntactically:
+///
+/// - a non-entity attribute fails the `Attribute<Type = Entity>`
+///   bound of the single blanket impl;
+/// - an `Option<_>` field has no impl at all — optional conformance
+///   is absence over a derived predicate, which stratification has
+///   to own before it can be evaluated soundly.
+pub trait ConformingField: ConceptField {
+    /// The [`ConceptFieldDescriptor`] for this field conforming to
+    /// `target`: the underlying attribute's descriptor tagged with
+    /// the target concept.
+    fn conforming_descriptor(target: ConceptDescriptor) -> ConceptFieldDescriptor {
+        ConceptFieldDescriptor::conforming(
+            <Self::Attribute as Descriptor<AttributeDescriptor>>::descriptor().clone(),
+            target,
+        )
+        .expect("the ConformingField bound guarantees an entity-valued attribute")
+    }
+}
+
+impl<N> ConformingField for N where
+    N: Attribute<Type = Entity> + Descriptor<AttributeDescriptor> + Clone + From<Entity>
+{
+}
+
 // Blanket impl for &T -> Parameters that uses the generated From<T> impl
 impl<T> From<&T> for Parameters
 where
@@ -1227,6 +1256,107 @@ mod tests {
 
         assert_eq!(name_facts.len(), 0);
         assert_eq!(birthday_facts.len(), 0);
+
+        Ok(())
+    }
+
+    // Concept-typed fields: `#[dialog(conforms = C)]`.
+    mod org {
+        use crate::Attribute;
+        use crate::Entity;
+
+        /// Employee badge number.
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Badge(pub String);
+
+        /// The person's manager.
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Manager(pub Entity);
+    }
+
+    /// Someone with a badge.
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct BadgeHolder {
+        pub this: Entity,
+        pub badge: org::Badge,
+    }
+
+    /// Someone reporting to a badge holder.
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct Report {
+        pub this: Entity,
+        pub badge: org::Badge,
+        /// The report's manager, who must hold a badge.
+        #[dialog(conforms = BadgeHolder)]
+        pub manager: org::Manager,
+    }
+
+    #[dialog_common::test]
+    fn it_tags_conforming_field_in_descriptor() {
+        let descriptor = Report::descriptor();
+        let manager = descriptor
+            .with()
+            .iter()
+            .find(|(name, _)| *name == "manager")
+            .map(|(_, field)| field)
+            .expect("manager field present");
+        assert_eq!(
+            manager.conforms().map(|target| target.this()),
+            Some(BadgeHolder::descriptor().this()),
+            "the descriptor names the target concept"
+        );
+        assert_eq!(
+            manager.content_type(),
+            Some(ValueType::Entity),
+            "the conforming field is entity-valued"
+        );
+
+        let badge = descriptor
+            .with()
+            .iter()
+            .find(|(name, _)| *name == "badge")
+            .map(|(_, field)| field)
+            .expect("badge field present");
+        assert!(badge.conforms().is_none(), "plain fields stay untagged");
+    }
+
+    /// End to end: a concept-typed field filters rows whose target
+    /// entity does not satisfy the target concept.
+    #[dialog_common::test]
+    async fn it_enforces_conformance_structurally() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?; // manager WITH a badge
+        let carol = Entity::new()?; // manager WITHOUT a badge
+        let bob = Entity::new()?; // reports to alice: conforms
+        let mallory = Entity::new()?; // reports to carol: does not
+
+        branch
+            .transaction()
+            .assert(org::Badge::of(alice.clone()).is("A-1"))
+            .assert(org::Badge::of(bob.clone()).is("B-2"))
+            .assert(org::Manager::of(bob.clone()).is(alice.clone()))
+            .assert(org::Badge::of(mallory.clone()).is("M-3"))
+            .assert(org::Manager::of(mallory.clone()).is(carol.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let reports: Vec<Report> = Query::<Report>::default()
+            .perform(&source)
+            .try_collect()
+            .await?;
+
+        assert_eq!(
+            reports.len(),
+            1,
+            "only the report whose manager holds a badge conforms, got {reports:?}"
+        );
+        assert_eq!(reports[0].this, bob);
+        assert_eq!(reports[0].manager.value(), &alice);
 
         Ok(())
     }

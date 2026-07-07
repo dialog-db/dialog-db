@@ -197,6 +197,9 @@ impl Display for DeductiveRule {
 
 impl From<&ConceptDescriptor> for DeductiveRule {
     fn from(concept: &ConceptDescriptor) -> Self {
+        use crate::concept::query::ConceptQuery;
+        use crate::type_system::ConceptRef;
+
         let mut premises = Vec::new();
 
         let this = Term::<Entity>::var("this");
@@ -210,8 +213,20 @@ impl From<&ConceptDescriptor> for DeductiveRule {
             // projection: `this` is bound by the required fields, so
             // a miss yields one row with the slot bound to
             // `Binding::Absent`.
-            let value = match field.content_type() {
-                Some(ty) => Term::<Any>::typed_var(name, Kind::from(ty)),
+            //
+            // A concept-typed field's slot additionally carries the
+            // conformance refinement, and the constraint itself is
+            // enforced structurally: the target concept is conjoined
+            // as a premise over the field's variable below.
+            let kind = match (field.content_type().map(Kind::from), field.conforms()) {
+                (Some(kind), Some(target)) => Some(
+                    kind.with_conformance(ConceptRef(target.this().to_string()))
+                        .expect("a conforming field is entity-valued by construction"),
+                ),
+                (kind, _) => kind,
+            };
+            let value = match kind {
+                Some(kind) => Term::<Any>::typed_var(name, kind),
                 None => Term::var(name),
             };
 
@@ -219,7 +234,7 @@ impl From<&ConceptDescriptor> for DeductiveRule {
                 OptionalAttributeQuery::new(
                     Term::Constant(Value::from(field.the().clone())),
                     this.clone(),
-                    value,
+                    value.clone(),
                     Term::blank(),
                     Some(field.cardinality()),
                 )
@@ -228,13 +243,28 @@ impl From<&ConceptDescriptor> for DeductiveRule {
                 AttributeQuery::new(
                     Term::Constant(Value::from(field.the().clone())),
                     this.clone(),
-                    value,
+                    value.clone(),
                     Term::blank(),
                     Some(field.cardinality()),
                 )
                 .into()
             };
             premises.push(premise);
+
+            // Conformance is "facts exist", not a property of the
+            // scalar, so it desugars to the target concept applied
+            // to the field's entity: the row survives only when the
+            // target entity satisfies the concept. Only `this` is
+            // projected; the target's own fields stay internal to
+            // the premise.
+            if let Some(target) = field.conforms() {
+                let mut terms = Parameters::new();
+                terms.insert("this".to_string(), value);
+                premises.push(Premise::Assert(Proposition::Concept(ConceptQuery {
+                    terms,
+                    predicate: target.clone(),
+                })));
+            }
         }
 
         DeductiveRule::new(concept.clone(), premises).expect("Concept should compile")
@@ -788,6 +818,92 @@ mod tests {
         }
         assert_eq!(scans, 1, "expected one scalar scan (name)");
         assert_eq!(maybes, 1, "expected one Maybe left-join (nickname)");
+    }
+
+    /// A concept-typed field conjoins the target concept as a
+    /// premise over the field's variable, and the field's slot kind
+    /// carries the conformance refinement.
+    #[dialog_common::test]
+    fn from_concept_with_conforming_field_conjoins_target_premise() {
+        use crate::type_system::ConceptRef;
+
+        let target = ConceptDescriptor::try_from(vec![(
+            "badge",
+            AttributeDescriptor::new(
+                the!("employee/badge"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "manager".to_string(),
+                ConceptFieldDescriptor::conforming(
+                    AttributeDescriptor::new(
+                        the!("person/manager"),
+                        "",
+                        Cardinality::One,
+                        Some(Type::Entity),
+                    ),
+                    target.clone(),
+                )
+                .expect("entity-valued attribute conforms"),
+            ),
+        ])
+        .unwrap();
+
+        let rule = DeductiveRule::from(&concept);
+
+        let mut scans = Vec::new();
+        let mut concepts = Vec::new();
+        for premise in rule.analysis().premises.iter() {
+            match premise {
+                Premise::Assert(Proposition::Attribute(query)) => scans.push(query),
+                Premise::Assert(Proposition::Concept(query)) => concepts.push(query),
+                other => panic!("unexpected premise {other:?}"),
+            }
+        }
+        assert_eq!(scans.len(), 2, "one scan per attribute");
+        assert_eq!(concepts.len(), 1, "one conjoined target premise");
+
+        let conformance = &concepts[0];
+        assert_eq!(
+            conformance.predicate.this(),
+            target.this(),
+            "the conjoined premise applies the target concept"
+        );
+        assert_eq!(
+            conformance.terms.iter().count(),
+            1,
+            "only `this` is projected into the target"
+        );
+        let this = conformance.terms.get("this").expect("this bound");
+        assert_eq!(this.name(), Some("manager"), "joins on the field variable");
+
+        let manager_scan = scans
+            .iter()
+            .find(|scan| scan.is().name() == Some("manager"))
+            .expect("manager scan present");
+        let kind = manager_scan.is().kind().expect("typed slot");
+        assert!(
+            kind.refinement()
+                .expect("conformance refinement stamped")
+                .conforms
+                .contains(&ConceptRef(target.this().to_string())),
+            "the slot kind names the target concept"
+        );
     }
 
     /// The degenerate "rule body binds only optionals" shape, at the
