@@ -77,7 +77,7 @@ use quote::quote;
 use syn::ext::IdentExt;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
-use super::helpers::{extract_doc_comments, parse_dialog_rename_attribute};
+use super::helpers::{extract_doc_comments, parse_dialog_field_attributes};
 
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -171,11 +171,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
         let field_type = &field.ty;
 
-        // Check for #[dialog(rename = "...")] to override the string key
-        let effective_name_str = match parse_dialog_rename_attribute(&field.attrs) {
-            Ok(rename) => rename.unwrap_or_else(|| field_name_str.clone()),
+        // Field-level #[dialog(...)] parameters: rename overrides
+        // the string key; conforms marks a concept-typed field.
+        let dialog_attrs = match parse_dialog_field_attributes(&field.attrs) {
+            Ok(parsed) => parsed,
             Err(e) => return e.to_compile_error().into(),
         };
+        let effective_name_str = dialog_attrs
+            .rename
+            .unwrap_or_else(|| field_name_str.clone());
         let field_name_lit = syn::LitStr::new(&effective_name_str, proc_macro2::Span::call_site());
 
         // Forward the user's field doc when present, otherwise synthesize a
@@ -234,12 +238,32 @@ pub fn derive(input: TokenStream) -> TokenStream {
         // attribute's descriptor with this field's optionality
         // (tagged from the `OPTIONAL` const, never by syntactic
         // `Option<_>` inspection).
-        descriptor_pair_pushes.push(quote! {
-            __fields.push((
-                #field_name_lit.to_string(),
-                <#field_type as dialog_query::ConceptField>::field_descriptor(),
-            ));
-        });
+        //
+        // A `#[dialog(conforms = C)]` field goes through
+        // `ConformingField::conforming_descriptor` instead, which
+        // tags the descriptor with the target concept. The trait is
+        // implemented only for required, entity-valued attribute
+        // newtypes, so a non-entity or `Option<_>` field fails to
+        // compile rather than producing an invalid descriptor.
+        match &dialog_attrs.conforms {
+            Some(target) => descriptor_pair_pushes.push(quote! {
+                __fields.push((
+                    #field_name_lit.to_string(),
+                    <#field_type as dialog_query::ConformingField>::conforming_descriptor(
+                        <#target as dialog_query::Descriptor<
+                            dialog_query::ConceptDescriptor,
+                        >>::descriptor()
+                        .clone(),
+                    ),
+                ));
+            }),
+            None => descriptor_pair_pushes.push(quote! {
+                __fields.push((
+                    #field_name_lit.to_string(),
+                    <#field_type as dialog_query::ConceptField>::field_descriptor(),
+                ));
+            }),
+        }
 
         // Statement emission via the trait method. The concept's
         // `this` field is an `Entity` (concept structs always have

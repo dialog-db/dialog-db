@@ -68,6 +68,37 @@ pub enum TypeError {
     #[error("Concept declares no required attributes; at least one `with` attribute is required")]
     EmptyConcept,
 
+    /// A concept-typed field's attribute is not entity-valued. Only
+    /// an entity can conform to a concept, so a field that declares
+    /// `conforms` must have `Entity` as its value type.
+    #[error(
+        "Attribute \"{the}\" declares conformance to {concept} but its value type is \
+         {actual:?}; a concept-typed field must be entity-valued"
+    )]
+    NonEntityConformance {
+        /// The offending attribute selector.
+        the: String,
+        /// The target concept's URI.
+        concept: String,
+        /// The attribute's declared value type.
+        actual: Option<Type>,
+    },
+
+    /// A concept-typed field is marked optional. An optional
+    /// concept-typed field is a left-join over "edge exists AND the
+    /// target conforms" — absence over a rule-derived (IDB)
+    /// predicate — which requires stratification to evaluate
+    /// soundly. Not supported yet; make the field required or drop
+    /// the conformance.
+    #[error(
+        "Attribute \"{the}\" is both optional and concept-typed; optional conformance \
+         (absence over a derived predicate) is not supported yet"
+    )]
+    OptionalConformance {
+        /// The offending attribute selector.
+        the: String,
+    },
+
     /// A rule declares a parameter that none of its premises use.
     #[error("Rule {rule} does not use parameter \"{parameter}\"")]
     UnusedParameter {

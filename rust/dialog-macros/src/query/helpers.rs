@@ -154,38 +154,55 @@ pub fn parse_domain_attribute(attrs: &[Attribute]) -> Option<String> {
     None
 }
 
-/// Parse the `#[dialog(rename = "...")]` attribute.
-///
-/// Allows overriding the generated name for an attribute or concept field.
+/// Field-level `#[dialog(...)]` parameters on a `#[derive(Concept)]`
+/// field.
+#[derive(Default)]
+pub struct DialogFieldAttributes {
+    /// `rename = "..."`: overrides the generated field key.
+    pub rename: Option<String>,
+    /// `conforms = SomeConcept`: marks a concept-typed field; the
+    /// path names the target concept type.
+    pub conforms: Option<syn::Path>,
+}
+
+/// Parse the field-level `#[dialog(...)]` attribute.
 ///
 /// Supports:
-/// - `#[dialog(rename = "type")]` - rename to a specific string
+/// - `#[dialog(rename = "type")]` - rename the field key to a
+///   specific string
+/// - `#[dialog(conforms = Employee)]` - concept-typed field whose
+///   target entity must conform to the named concept
 ///
-/// Returns `Ok(Some(name))` if rename is specified, `Ok(None)` to use default.
-pub fn parse_dialog_rename_attribute(attrs: &[Attribute]) -> Result<Option<String>, syn::Error> {
+/// Both parameters may appear together.
+pub fn parse_dialog_field_attributes(
+    attrs: &[Attribute],
+) -> Result<DialogFieldAttributes, syn::Error> {
+    let mut parsed = DialogFieldAttributes::default();
     for attr in attrs {
         if attr.path().is_ident("dialog") {
-            let mut rename_value = None;
-
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("rename") {
                     let value = meta.value()?;
                     let lit: Lit = value.parse()?;
                     if let Lit::Str(lit_str) = lit {
-                        rename_value = Some(lit_str.value());
+                        parsed.rename = Some(lit_str.value());
                         Ok(())
                     } else {
                         Err(meta.error("rename value must be a string literal"))
                     }
+                } else if meta.path.is_ident("conforms") {
+                    let value = meta.value()?;
+                    parsed.conforms = Some(value.parse::<syn::Path>()?);
+                    Ok(())
                 } else {
-                    Err(meta.error("unknown dialog attribute parameter; expected `rename`"))
+                    Err(meta.error(
+                        "unknown dialog attribute parameter; expected `rename` or `conforms`",
+                    ))
                 }
             })?;
-
-            return Ok(rename_value);
         }
     }
-    Ok(None)
+    Ok(parsed)
 }
 
 /// Parse the `#[cardinality(one)]` or `#[cardinality(many)]` attribute.
