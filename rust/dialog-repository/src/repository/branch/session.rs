@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::rules::{
-    assemble, conclusion_selector, hydrate, overlay_rules, rule_entities, source_bytes,
+    assemble, builtin, conclusion_selector, hydrate, overlay_rules, rule_entities, source_bytes,
     source_selector,
 };
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
@@ -542,6 +542,12 @@ where
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let concept = input.this();
         let mut rules: Vec<DeductiveRule> = Vec::new();
+
+        // Built-in projections first: the derived version-control
+        // concepts (schema::Revision / schema::RevisionParent) are
+        // concluded from signed `dialog.db/revision` records by fixed
+        // rules — nothing is stored under `dialog.revision/*`.
+        rules.extend(builtin(&concept));
 
         // Durable layers — one per branch.
         for branch in &self.branches {

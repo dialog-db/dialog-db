@@ -185,6 +185,65 @@ pub mod origin {
     );
 }
 
+/// Attribute newtypes for the [`Revision`] / [`RevisionParent`]
+/// concepts.
+///
+/// All attributes here live under the `dialog.revision` domain — and
+/// none of them is ever stored. A revision describes itself with one
+/// atomic `dialog.db/revision` record fact; these attributes are the
+/// *conclusion shape* of the built-in rules (see
+/// [`rules::revision_rule`](crate::rules)) that project the record's
+/// fields at query time, verification included.
+pub mod revision {
+    use super::{Attribute, Entity};
+
+    /// `dialog.revision/lineage` — the branch lineage entity the
+    /// revision was minted on (a [`Branch`](super::Branch) entity).
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Lineage(
+        /// The lineage (branch) entity.
+        pub Entity,
+    );
+
+    /// `dialog.revision/issuer` — the operator DID (as entity) that
+    /// minted the revision.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Issuer(
+        /// The issuer entity (the operator's DID).
+        pub Entity,
+    );
+
+    /// `dialog.revision/authority` — the profile DID (as entity) that
+    /// authorized the revision.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Authority(
+        /// The authority entity (the profile's DID).
+        pub Entity,
+    );
+
+    /// `dialog.revision/edition` — the revision's causal depth
+    /// (a Lamport timestamp), derived from its parents.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Edition(
+        /// The revision's edition.
+        pub u64,
+    );
+
+    /// `dialog.revision/parent` — a parent revision's entity; one per
+    /// parent (two for a merge), so cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    #[cardinality(many)]
+    pub struct Parent(
+        /// A parent revision's entity.
+        pub Entity,
+    );
+}
+
 /// Attribute newtypes for the [`Session`] concept.
 ///
 /// `Profile` / `Operator` are cardinality-one (one per session); the
@@ -372,6 +431,43 @@ pub struct BranchRevision {
     /// The revision entity — the join key to the revision's recorded
     /// metadata.
     pub revision: branch::Revision,
+}
+
+/// What a revision states about itself, projected from its signed
+/// record.
+///
+/// `this` is the content-derived revision entity (the same entity the
+/// overlay's [`BranchRevision::revision`] points at). The fields are
+/// never stored as facts: built-in rules derive them at query time
+/// from the branch's `dialog.db/revision` record fact via the
+/// `dialog/revision` formula, which refuses records that don't carry
+/// a valid issuer signature — forged attribution never surfaces in a
+/// query result. The DAG edge (one row per parent) is the separate
+/// cardinality-many [`RevisionParent`].
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Revision {
+    /// The revision entity, derivable by any replica from the version.
+    pub this: Entity,
+    /// The branch lineage the revision was minted on.
+    pub lineage: revision::Lineage,
+    /// The operator DID (as entity) that minted the revision.
+    pub issuer: revision::Issuer,
+    /// The profile DID (as entity) that authorized it.
+    pub authority: revision::Authority,
+    /// The revision's causal depth.
+    pub edition: revision::Edition,
+}
+
+/// One edge of the revision DAG: `this` revision was minted on top of
+/// `parent`. Cardinality-many — a merge revision yields two rows; a
+/// genesis revision yields none. Derived at query time from the same
+/// signed record as [`Revision`].
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RevisionParent {
+    /// The revision entity.
+    pub this: Entity,
+    /// A parent revision's entity.
+    pub parent: revision::Parent,
 }
 
 /// What this query session is reading from.

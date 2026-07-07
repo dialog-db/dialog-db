@@ -1176,6 +1176,7 @@ dependencies = [
  "dialog-operator",
  "dialog-repository",
  "dialog-storage",
+ "ed25519-dalek",
  "futures",
  "futures-core",
  "futures-util",

@@ -25,6 +25,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 pub use crate::artifact::{ArtifactsAttribute, Cause, Entity, Type, Value};
+use crate::artifact::ArtifactTypeError;
 use crate::attribute::The;
 
 /// Trait implemented by type descriptors: named ZSTs that
@@ -280,8 +281,38 @@ impl_scalar!(
     ArtifactsAttribute,
     Vec<u8>,
     Cause,
-    The
+    The,
+    RecordBytes
 );
+
+/// The opaque payload of a [`Value::Record`] fact, as a typed term
+/// value.
+///
+/// `Vec<u8>` carries `Value::Bytes`; this wrapper is its record-typed
+/// counterpart, so a term can bind a record-valued fact (e.g. a
+/// version-control revision record — see the `dialog/revision`
+/// formula) and hand its bytes to a formula for projection.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct RecordBytes(pub Vec<u8>);
+
+impl_typed!(RecordBytes, Record);
+
+impl From<RecordBytes> for Value {
+    fn from(value: RecordBytes) -> Self {
+        Value::Record(value.0)
+    }
+}
+
+impl TryFrom<Value> for RecordBytes {
+    type Error = ArtifactTypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Record(bytes) => Ok(RecordBytes(bytes)),
+            _ => Err(Self::Error::TypeMismatch(Type::Record, value.data_type())),
+        }
+    }
+}
 
 impl Scalar for usize {}
 

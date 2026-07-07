@@ -40,6 +40,11 @@ macro_rules! define_formulas {
         ///
         /// Each variant wraps the typed `Query<T>` struct (e.g. `SumQuery`) generated
         /// by the `Formula` derive macro. Serializes as `{"assert": "<name>", "where": <params>}`.
+        // Variant sizes track each formula's term count (the widest,
+        // `dialog/revision`, carries six terms). Instances are transient
+        // planning values, never bulk-stored, so boxing per variant
+        // would cost more indirection than the size skew costs memory.
+        #[allow(clippy::large_enum_variant)]
         #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
         #[serde(tag = "assert", content = "where")]
         pub enum FormulaQuery {
@@ -105,6 +110,9 @@ define_formulas! {
     "unsigned-integer/parse"  => ParseUnsignedInteger(ParseUnsignedInteger, conversions::ParseUnsignedIntegerQuery),
     "signed-integer/parse"    => ParseSignedInteger(ParseSignedInteger, conversions::ParseSignedIntegerQuery),
     "float/parse"             => ParseFloat(ParseFloat, conversions::ParseFloatQuery),
+
+    "dialog/revision"         => Revision(super::revision::Revision, super::revision::RevisionQuery),
+    "dialog/revision-parent"  => RevisionParent(super::revision::RevisionParent, super::revision::RevisionParentQuery),
 }
 
 impl FormulaQuery {
