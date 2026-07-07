@@ -23,11 +23,9 @@
 //! reads from ([`BlobReader`]) or writes into ([`BlobWriter`]).
 
 use async_trait::async_trait;
-use std::error::Error;
 
 use dialog_common::{Blake3Hash, ConditionalSend};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::archive::Archive;
 pub use dialog_capability::{
@@ -173,69 +171,8 @@ impl Effect for Import {
 
 pub mod prelude;
 
-/// Errors that can occur during blob operations.
-#[derive(Debug, Error)]
-pub enum BlobError {
-    /// The blob was not found.
-    #[error("Blob not found: {0}")]
-    NotFound(String),
-
-    /// The written content did not hash to the declared digest.
-    #[error("Blob digest mismatch: expected {expected}, got {actual}")]
-    DigestMismatch {
-        /// The declared digest.
-        expected: String,
-        /// The digest computed from the written bytes.
-        actual: String,
-    },
-
-    /// Authorization failed.
-    #[error("Unauthorized error: {0}")]
-    AuthorizationError(String),
-
-    /// The operation failed during execution.
-    #[error("Execution error: {0}")]
-    ExecutionError(String),
-
-    /// The storage backend failed.
-    #[error("Storage error: {0}")]
-    Storage(String),
-
-    /// An I/O error occurred.
-    #[error("IO error: {0}")]
-    Io(String),
-}
-
-impl From<StorageError> for BlobError {
-    fn from(e: StorageError) -> Self {
-        Self::Storage(e.to_string())
-    }
-}
-
-impl From<DialogCapabilityAuthorizationError> for BlobError {
-    fn from(value: DialogCapabilityAuthorizationError) -> Self {
-        BlobError::AuthorizationError(value.to_string())
-    }
-}
-
-impl From<AuthorizeError> for BlobError {
-    fn from(value: AuthorizeError) -> Self {
-        BlobError::AuthorizationError(value.to_string())
-    }
-}
-
-impl<E: Error> From<DialogCapabilityPerformError<E>> for BlobError {
-    fn from(value: DialogCapabilityPerformError<E>) -> Self {
-        match value {
-            DialogCapabilityPerformError::Authorization(error) => {
-                BlobError::AuthorizationError(error.to_string())
-            }
-            DialogCapabilityPerformError::Execution(error) => {
-                BlobError::ExecutionError(error.to_string())
-            }
-        }
-    }
-}
+mod error;
+pub use error::*;
 
 #[cfg(test)]
 mod tests {
@@ -246,7 +183,7 @@ mod tests {
     use crate::archive::Archive;
     use dialog_capability::{Subject, did};
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_blob_read_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Archive)
@@ -256,7 +193,7 @@ mod tests {
         assert_eq!(claim.ability(), "/archive/blob/read");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_blob_write_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Archive)
@@ -265,7 +202,7 @@ mod tests {
         assert_eq!(claim.ability(), "/archive/blob/write");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_builds_blob_import_path() {
         let claim = Subject::from(did!("key:zSpace"))
             .attenuate(Archive)
