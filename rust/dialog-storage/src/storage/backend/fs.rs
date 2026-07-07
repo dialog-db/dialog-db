@@ -125,39 +125,31 @@ impl PidlockGuard {
     /// the entire transaction, which is the correct behavior since the locked
     /// value will likely change anyway.
     fn new(path: PathBuf) -> Result<Self, DialogStorageError> {
-        let path = path.to_str().ok_or_else(|| {
-            DialogStorageError::StorageBackend("Lock path is not valid UTF-8".to_string())
-        })?;
+        // pidlock 0.2 handles stale-lock cleanup atomically inside acquire(),
+        // so the historical retry loop is no longer needed. new_validated
+        // also rejects unusable paths up front and creates the parent dir.
+        let mut lock = Pidlock::new_validated(&path)
+            .map_err(|e| DialogStorageError::StorageBackend(format!("Invalid lock path: {e:?}")))?;
 
-        let mut lock = Pidlock::new(path);
-
-        // Acquire lock, handling stale locks
-        loop {
-            match lock.acquire() {
-                Ok(()) => return Ok(Self(lock)),
-                Err(pidlock::PidlockError::LockExists) => {
-                    // get_owner() checks if the PID is valid and clears stale locks
-                    match lock.get_owner() {
-                        Some(pid) => {
-                            // Fail immediately rather than wait - the value is being
-                            // modified so the edition will change anyway. Let STM
-                            // retry the transaction with the new edition.
-                            return Err(DialogStorageError::StorageBackend(format!(
-                                "Concurrent write in progress (lock held by pid {})",
-                                pid
-                            )));
-                        }
-                        None => {
-                            // Lock was stale and cleared by get_owner(), retry
-                        }
-                    }
-                }
-                Err(e) => {
-                    return Err(DialogStorageError::StorageBackend(format!(
-                        "Failed to acquire lock: {e:?}"
-                    )));
-                }
+        match lock.acquire() {
+            Ok(()) => Ok(Self(lock)),
+            Err(pidlock::PidlockError::LockExists) => {
+                // Holder is alive. Fail immediately rather than wait — the
+                // value is being modified so the edition will change anyway.
+                // Let STM retry the transaction with the new edition.
+                let holder = lock
+                    .get_owner()
+                    .ok()
+                    .flatten()
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "<unknown>".into());
+                Err(DialogStorageError::StorageBackend(format!(
+                    "Concurrent write in progress (lock held by pid {holder})",
+                )))
             }
+            Err(e) => Err(DialogStorageError::StorageBackend(format!(
+                "Failed to acquire lock: {e:?}"
+            ))),
         }
     }
 }

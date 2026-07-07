@@ -19,6 +19,7 @@
 //! `dialog-capability`.
 
 use dialog_capability::Site;
+use dialog_remote_fs::Fs;
 use dialog_remote_s3::S3;
 use dialog_remote_ucan_s3::UcanSite;
 
@@ -36,6 +37,7 @@ use dialog_remote_ucan_s3::UcanSite;
 pub struct Network {
     s3: S3,
     ucan: UcanSite,
+    fs: Fs,
 }
 
 #[cfg(test)]
@@ -45,6 +47,8 @@ mod tests {
 
     use super::*;
     use dialog_capability::{Site, SiteAddress};
+    use dialog_effects::storage::Location;
+    use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address as S3Address;
     use dialog_remote_ucan_s3::UcanAddress;
 
@@ -60,12 +64,17 @@ mod tests {
         UcanAddress::new("https://access.example.com")
     }
 
+    fn fs_address() -> FsAddress {
+        FsAddress::new(Location::temp("test-vault"))
+    }
+
     /// `NetworkAddress` is a public enum with one variant per field. Variant
     /// names are field names converted to PascalCase.
     #[test]
     fn it_generates_address_enum_with_variant_per_field() {
         let _: NetworkAddress = NetworkAddress::S3(s3_address());
         let _: NetworkAddress = NetworkAddress::Ucan(ucan_address());
+        let _: NetworkAddress = NetworkAddress::Fs(fs_address());
     }
 
     /// `From<VariantAddress> for NetworkAddress` is generated for each
@@ -77,6 +86,9 @@ mod tests {
 
         let net: NetworkAddress = ucan_address().into();
         assert!(matches!(net, NetworkAddress::Ucan(_)));
+
+        let net: NetworkAddress = fs_address().into();
+        assert!(matches!(net, NetworkAddress::Fs(_)));
     }
 
     /// `Network` implements `Site` (with the generated enums as associated
