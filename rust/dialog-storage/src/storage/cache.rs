@@ -65,12 +65,28 @@ where
     }
 
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
-        let mut cache = self.cache.lock().await;
-        if let Some(value) = cache.get(key) {
-            return Ok(Some(value.clone()));
+        // Check the cache under a BRIEF lock, released before any backend I/O.
+        // Holding the lock across `backend.get(...).await` (below) serializes
+        // every block read in the process behind that single round-trip: the
+        // cache is one shared mutex, so on a single-threaded executor a miss's
+        // network fetch stalls all other reads — every other branch's queries
+        // and syncs included — for its full duration.
+        {
+            let mut cache = self.cache.lock().await;
+            if let Some(value) = cache.get(key) {
+                return Ok(Some(value.clone()));
+            }
         }
-        if let Some(value) = self.backend.get(key).await? {
-            cache.insert(key.clone(), value.clone());
+
+        // Fetch from the backend WITHOUT the cache lock held. Two concurrent
+        // misses for the same key may both fetch; that's harmless (blocks are
+        // content-addressed, so the value is identical) and far cheaper than
+        // serializing every reader behind one in-flight fetch. Resolve the
+        // result fully before re-acquiring the lock so the (non-`Send`) error
+        // type never straddles the `lock().await`.
+        let fetched = self.backend.get(key).await?;
+        if let Some(value) = fetched {
+            self.cache.lock().await.insert(key.clone(), value.clone());
             return Ok(Some(value));
         }
 
