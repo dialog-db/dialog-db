@@ -956,6 +956,91 @@ mod history_tests {
         Ok(())
     }
 
+    /// `Branch::log` walks the committed history newest-first across a
+    /// merge: both lineages list, the merge leads with its two parents,
+    /// the limit trims from the newest end, and every entry carries its
+    /// signed attribution.
+    #[dialog_common::test]
+    async fn it_logs_history_across_a_merge() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // A fresh branch has nothing to log.
+        let main = repo.branch("main").open().perform(&operator).await?;
+        assert!(main.log(&operator, usize::MAX).await?.is_empty());
+
+        // Shared base, then divergence: feature replaces the title while
+        // main commits something unrelated, and feature pulls the merge.
+        main.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&operator)
+        .await?;
+        let base = main.revision().expect("main has a revision");
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![Instruction::Replace(Artifact {
+                the: "post/title".parse()?,
+                of: "post:1".parse()?,
+                is: Value::String("Hi".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        let ours = feature.revision().expect("feature has a revision");
+
+        main.commit(stream::iter(vec![assert_one(
+            "user/name",
+            "user:1",
+            "Alice",
+        )]))
+        .perform(&operator)
+        .await?;
+        let theirs = main.revision().expect("main has a revision");
+
+        let merged = feature
+            .pull()
+            .perform(&operator)
+            .await?
+            .expect("pull merges");
+
+        let entries = feature.log(&operator, usize::MAX).await?;
+        let versions: Vec<_> = entries.iter().map(|(version, _)| *version).collect();
+        // Newest first: the merge, then the two concurrent revisions
+        // (deterministic tie-break by origin), then the shared base.
+        let mut concurrent = [ours.version(), theirs.version()];
+        concurrent.sort();
+        assert_eq!(
+            versions,
+            vec![
+                merged.version(),
+                concurrent[1],
+                concurrent[0],
+                base.version(),
+            ]
+        );
+
+        // The merge's record leads with both parents, and every entry
+        // carries the signed attribution of the identity that minted it.
+        assert_eq!(entries[0].1.parents.len(), 2);
+        for (_, record) in &entries {
+            assert_eq!(record.issuer, operator.did().to_string());
+            assert_eq!(record.authority, profile.did().to_string());
+        }
+
+        // The limit trims from the newest end.
+        let top = feature.log(&operator, 1).await?;
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].0, merged.version());
+
+        Ok(())
+    }
+
     /// Pull is the trust boundary: an upstream head that does not carry a
     /// valid signature by its named issuer is rejected before any of its
     /// tree is adopted or merged. Here the "upstream" advertises a forged

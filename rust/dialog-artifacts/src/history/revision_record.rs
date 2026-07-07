@@ -39,9 +39,14 @@ pub struct RevisionRecord {
     pub format: u8,
     /// The branch lineage entity this revision was minted on
     pub lineage: Entity,
-    /// DID of the operator (session key) that minted the revision
+    /// DID of the operator (session key) that minted the revision — the
+    /// key whose signature binds this record
     pub issuer: String,
-    /// DID of the profile (long-lived key) that authorized it
+    /// DID of the profile (long-lived key) the issuer *claims* authorized
+    /// it. Attribution metadata vouched for by the issuer's signature, not
+    /// an authorization proof: binding it cryptographically needs
+    /// delegation proofs plus a time-anchoring story (see
+    /// `notes/version-control.md`).
     pub authority: String,
     /// Parent revision versions — the revision DAG edge. Empty for
     /// genesis; two entries for a merge.
