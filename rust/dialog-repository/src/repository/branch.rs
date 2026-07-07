@@ -17,6 +17,9 @@ use dialog_search_tree::{Buffer, Cache};
 mod blob;
 pub use blob::*;
 
+mod blobs;
+pub use blobs::*;
+
 mod claims;
 pub use claims::*;
 
