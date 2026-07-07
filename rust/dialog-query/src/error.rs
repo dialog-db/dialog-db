@@ -159,6 +159,19 @@ pub enum TypeError {
         rule: Box<Rule>,
     },
 
+    /// A rule negates its own conclusion concept: a negative
+    /// self-loop no stratification can order (the rule would derive
+    /// a row exactly when it doesn't). Cycles through negation that
+    /// span multiple rules are the global stratification pass's
+    /// job; this is the local, always detectable case.
+    #[error("Rule {rule} negates its own conclusion {concept}")]
+    SelfNegation {
+        /// The offending rule.
+        rule: Box<Rule>,
+        /// The conclusion concept's URI.
+        concept: String,
+    },
+
     /// Type inference over a rule's premises produced a
     /// contradiction (a variable appears in slots with conflicting
     /// kinds). The planner cannot proceed because the rule has no
@@ -685,4 +698,14 @@ pub enum AnalysisError {
     /// be vacuously false.
     #[error("negation over an optional (maybe) premise is always false")]
     NegatedOptional,
+    /// A rule negates its own conclusion concept: a negative
+    /// self-loop no stratification can order. The local, always
+    /// detectable case of recursion through negation; cycles
+    /// spanning multiple rules are the global stratification
+    /// pass's job.
+    #[error("rule negates its own conclusion {concept}")]
+    SelfNegation {
+        /// The conclusion concept's URI.
+        concept: String,
+    },
 }

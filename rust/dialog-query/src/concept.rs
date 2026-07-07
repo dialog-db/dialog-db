@@ -1361,6 +1361,100 @@ mod tests {
         Ok(())
     }
 
+    // Ordered variants: first-to-conform via desugared negation.
+    mod contact {
+        use crate::Attribute;
+
+        /// Preferred way to reach the user.
+        #[derive(Attribute, Clone, PartialEq)]
+        pub struct Handle(pub String);
+    }
+
+    /// How to reach a user: their email when they have one,
+    /// otherwise their phone number.
+    #[derive(Concept, Debug, Clone, PartialEq)]
+    pub struct Contact {
+        pub this: Entity,
+        pub handle: contact::Handle,
+    }
+
+    #[dialog_common::test]
+    async fn it_evaluates_ordered_variants_first_to_conform() -> Result<()> {
+        use crate::attribute::{AttributeDescriptor, The};
+        use crate::rule::deductive::DeductiveRule;
+        use crate::{Cardinality, ConceptDescriptor};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let variant = |the: The| {
+            ConceptDescriptor::try_from(vec![(
+                "handle",
+                AttributeDescriptor::new(the, "", Cardinality::One, Some(ValueType::String)),
+            )])
+            .unwrap()
+        };
+        let email = variant(the!("user/email"));
+        let phone = variant(the!("user/phone"));
+
+        let rules = DeductiveRule::variants(Contact::descriptor().clone(), vec![email, phone])
+            .expect("variants compile");
+
+        let mut registry = RuleRegistry::new();
+        for rule in rules {
+            registry.register(rule).expect("rule registers");
+        }
+
+        let alice = Entity::new()?; // email AND phone: email wins
+        let bob = Entity::new()?; // phone only: phone row
+
+        branch
+            .transaction()
+            .assert(
+                the!("user/email")
+                    .of(alice.clone())
+                    .is("alice@mail".to_string()),
+            )
+            .assert(
+                the!("user/phone")
+                    .of(alice.clone())
+                    .is("555-0100".to_string()),
+            )
+            .assert(
+                the!("user/phone")
+                    .of(bob.clone())
+                    .is("555-0199".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, registry);
+        let mut contacts: Vec<Contact> = Query::<Contact>::default()
+            .perform(&source)
+            .try_collect()
+            .await?;
+        contacts.sort_by(|a, b| a.handle.value().cmp(b.handle.value()));
+
+        assert_eq!(
+            contacts,
+            vec![
+                Contact {
+                    this: bob,
+                    handle: contact::Handle("555-0199".into()),
+                },
+                Contact {
+                    this: alice,
+                    handle: contact::Handle("alice@mail".into()),
+                },
+            ],
+            "the first conforming variant wins; later variants fill the rest"
+        );
+
+        Ok(())
+    }
+
     // Tests migrated from tests/concept_query_shortcut_test.rs
     mod shortcut_employee {
         use crate::Attribute;
