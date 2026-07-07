@@ -720,20 +720,17 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
         .await?;
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
-    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+
+    // Set Bob's revision to Alice's without pulling blocks
     bob_branch
-        .set_upstream(remote_branch)
+        .reset(alice_revision)
         .perform(&operator)
         .await?;
 
-    // Set Bob's revision to Alice's without pulling blocks
-    bob_branch.reset(alice_revision).perform(&operator).await?;
-
-    // First, remove upstream so select has no remote to fall back to.
-    // This should fail because tree blocks aren't local.
-    let nowhere = bob_repo.branch("nowhere").open().perform(&operator).await?;
-    bob_branch.set_upstream(&nowhere).perform(&operator).await?;
-
+    // Without any remote upstream tracked there is nothing to fall back
+    // to, so reads of the unreplicated tree fail. (Upstreams accumulate —
+    // `set_upstream` re-points the default but keeps tracking the rest —
+    // so this check must run before the remote is ever tracked.)
     let no_remote_result = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
@@ -744,7 +741,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
         "select should fail without remote when blocks aren't local"
     );
 
-    // Restore upstream so fallback can reach the remote
+    // Track the remote so fallback can reach it
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     bob_branch
         .set_upstream(remote_branch)

@@ -205,7 +205,13 @@ where
             None => Vec::new(),
         };
         let mut revision = match base_revision {
-            Some(base) => base.advance(TreeReference::default(), branch.name(), issuer, profile),
+            Some(base) => base.advance(
+                TreeReference::default(),
+                branch.of().clone(),
+                branch.name(),
+                issuer,
+                profile,
+            ),
             None => Revision::new(
                 TreeReference::default(),
                 branch.of().clone(),
