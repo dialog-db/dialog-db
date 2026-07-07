@@ -65,6 +65,9 @@ pub use query::*;
 mod skip;
 pub use skip::*;
 
+mod log;
+pub use log::*;
+
 mod revision_record;
 pub use revision_record::*;
 

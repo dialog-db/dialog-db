@@ -12,7 +12,7 @@ use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Valu
 
 use super::{
     Authority, Causality, Cause, Claim, Edition, History, MemoryHistory, Origin, Revision,
-    RevisionRecord, TreeHistory, Version, causality, common_ancestor, extend_skips,
+    RevisionRecord, TreeHistory, Version, causality, common_ancestor, extend_skips, log,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -1155,6 +1155,69 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
             Err(DialogArtifactsError::InvalidSignature(_))
         ),
         "an unsigned record planted in the tree is refused"
+    );
+
+    Ok(())
+}
+
+/// `log` lists the revisions reachable from a head, newest first, in
+/// reverse topological order — every revision before any of its
+/// ancestors, concurrent revisions ordered deterministically. The limit
+/// caps the walk from the newest end, and a replication hole truncates
+/// the walk instead of failing it.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_logs_ancestry_newest_first() -> Result<()> {
+    let repo = Entity::new()?;
+    let alice = signing_key(1);
+    let bob = signing_key(2);
+
+    // A diamond with a tip: alice and bob fork from genesis, merge, and
+    // alice commits once more on top.
+    let genesis = revise(&repo, &alice, &[], 0);
+    let a1 = revise(&repo, &alice, &[&genesis], 1);
+    let b1 = revise(&repo, &bob, &[&genesis], 2);
+    let merge = revise(&repo, &alice, &[&a1, &b1], 3);
+    let tip = revise(&repo, &alice, &[&merge], 4);
+
+    let mut history = MemoryHistory::default();
+    for revision in [&genesis, &a1, &b1, &merge, &tip] {
+        history.record_revision(revision)?;
+    }
+
+    let entries = log(&tip.version(), &history, usize::MAX).await?;
+    let versions: Vec<_> = entries.iter().map(|(version, _)| *version).collect();
+    // The concurrent pair shares an edition; the tie breaks by origin.
+    let mut concurrent = [a1.version(), b1.version()];
+    concurrent.sort();
+    assert_eq!(
+        versions,
+        vec![
+            tip.version(),
+            merge.version(),
+            concurrent[1],
+            concurrent[0],
+            genesis.version(),
+        ],
+        "newest first, every revision before its ancestors"
+    );
+
+    // The limit caps the walk from the newest end.
+    let top = log(&tip.version(), &history, 2).await?;
+    let versions: Vec<_> = top.iter().map(|(version, _)| *version).collect();
+    assert_eq!(versions, vec![tip.version(), merge.version()]);
+
+    // A hole where genesis's record should be truncates the walk after
+    // everything still reachable.
+    let mut sparse = MemoryHistory::default();
+    for revision in [&a1, &b1, &merge, &tip] {
+        sparse.record_revision(revision)?;
+    }
+    let entries = log(&tip.version(), &sparse, usize::MAX).await?;
+    assert_eq!(
+        entries.len(),
+        4,
+        "a replication hole truncates the walk instead of failing it"
     );
 
     Ok(())

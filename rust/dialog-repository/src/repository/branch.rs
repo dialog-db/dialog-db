@@ -7,7 +7,8 @@ use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
 use crate::{NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
-use dialog_artifacts::history::TreeHistory;
+use dialog_artifacts::DialogArtifactsError;
+use dialog_artifacts::history::{RevisionRecord, TreeHistory, Version, log};
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::Fork;
 use dialog_capability::{Capability, Did, Subject};
@@ -198,6 +199,30 @@ impl Branch {
             .map(|revision| *revision.tree.hash())
             .unwrap_or(crate::EMPTY_TREE_HASH);
         TreeHistory::from_root_with_cache(&root, store, self.node_cache())
+    }
+
+    /// The branch's committed history, newest first — at most `limit`
+    /// entries of `(version, record)`, every revision before any of its
+    /// ancestors (see [`dialog_artifacts::history::log`]). A branch with
+    /// no commits logs nothing; unreplicated ancestry truncates the walk
+    /// rather than failing it. Each record was verified on read, so the
+    /// attribution it reports is the issuer's own signed claim.
+    pub async fn log<Env>(
+        &self,
+        env: &Env,
+        limit: usize,
+    ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
+    where
+        Env: Provider<ArchiveGet>
+            + Provider<ArchivePut>
+            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + ConditionalSync
+            + 'static,
+    {
+        let Some(head) = self.revision() else {
+            return Ok(Vec::new());
+        };
+        log(&head.version(), &self.history(env), limit).await
     }
 
     /// Export all artifacts from this branch to the given exporter.
