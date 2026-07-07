@@ -489,6 +489,35 @@ pub enum EvaluationError {
         /// Description of the planning error.
         message: String,
     },
+
+    /// The queried concept's dependency closure contains a cycle
+    /// through negation: some rule concluding `concept` negates
+    /// `negated` inside the same dependency cycle, so the negation
+    /// reads a set the cycle itself is still deriving. No
+    /// stratified semantics exists for such a program. Rules are
+    /// installed unconditionally (replicas must converge on the
+    /// merged rule set), so this surfaces at query time, on exactly
+    /// the queries whose closure is ill-stratified.
+    #[error(
+        "Negation through recursion: rules for {concept} negate {negated} \
+         inside the same dependency cycle; no stratified semantics exists"
+    )]
+    NegationThroughRecursion {
+        /// The concluding concept whose rule negates into its cycle.
+        concept: String,
+        /// The negated concept inside the same cycle.
+        negated: String,
+    },
+
+    /// The queried concept's dependency closure is recursive. The
+    /// program is well-stratified, but the fixpoint evaluator is
+    /// not implemented yet, so recursive closures are rejected
+    /// rather than evaluated unboundedly.
+    #[error("Concept {concept} is recursive; recursive evaluation is not supported yet")]
+    UnsupportedRecursion {
+        /// A concept on the dependency cycle.
+        concept: String,
+    },
 }
 
 /// Result type for query operations

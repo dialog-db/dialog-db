@@ -1,3 +1,4 @@
+use super::dependencies::{NegationViolation, ProgramAnalysis};
 use crate::Entity;
 use crate::EvaluationError;
 use crate::concept::descriptor::ConceptDescriptor;
@@ -27,6 +28,10 @@ use std::sync::{Arc, RwLock};
 #[derive(Debug, Clone, Default)]
 pub struct RuleRegistry {
     rules: Arc<RwLock<HashMap<Entity, ConceptRules>>>,
+    /// Lazily computed program-level dependency analysis (recursion
+    /// and stratification), shared across clones and invalidated by
+    /// [`register`](Self::register) / [`extend`](Self::extend).
+    analysis: Arc<RwLock<Option<Arc<ProgramAnalysis>>>>,
 }
 
 impl RuleRegistry {
@@ -37,6 +42,13 @@ impl RuleRegistry {
 
     /// Register a deductive rule, deduplicating by equality.
     /// Invalidates cached plans for the affected concept entity.
+    ///
+    /// Registration is *unconditional* with respect to
+    /// stratification: rules can be installed concurrently on
+    /// multiple replicas and the merged set must converge, so
+    /// whole-set properties (recursion, negation through recursion)
+    /// are checked by [`validate`](Self::validate) and at query
+    /// time, never here. Only lock poisoning errors.
     pub fn register(&mut self, rule: DeductiveRule) -> Result<(), EvaluationError> {
         let entity = rule.conclusion().this();
         self.rules
@@ -45,13 +57,22 @@ impl RuleRegistry {
             .entry(entity)
             .or_insert_with(|| ConceptRules::new(rule.conclusion()))
             .install(rule);
+        self.invalidate_analysis()?;
         Ok(())
     }
 
     /// Acquire rules for the given concept. Creates the default rule from
     /// the predicate's attributes on first access, so this always returns
     /// a ConceptRules regardless of whether any rules were explicitly installed.
+    ///
+    /// Runs the query-time dependency check over the concept's
+    /// closure first: an ill-stratified closure fails with
+    /// [`EvaluationError::NegationThroughRecursion`], a recursive
+    /// one with [`EvaluationError::UnsupportedRecursion`] (until the
+    /// fixpoint evaluator lands). Ill-stratified regions of the
+    /// program fail exactly the queries that touch them.
     pub fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
+        self.analysis()?.check(predicate)?;
         let entity = predicate.this();
         Ok(self
             .rules
@@ -66,6 +87,9 @@ impl RuleRegistry {
     ///
     /// Entries that exist on both sides are folded together via
     /// [`ConceptRules::extend`] so installed rules from both contribute.
+    /// Like [`register`](Self::register), merging is unconditional:
+    /// the merged set may be ill-stratified, which
+    /// [`validate`](Self::validate) reports and queries surface.
     pub fn extend(&mut self, other: &RuleRegistry) -> Result<(), EvaluationError> {
         let other_rules = other
             .rules
@@ -81,6 +105,54 @@ impl RuleRegistry {
                 .and_modify(|existing| existing.extend(rules))
                 .or_insert_with(|| rules.clone());
         }
+        drop(self_rules);
+        self.invalidate_analysis()?;
+        Ok(())
+    }
+
+    /// The current program analysis snapshot, computing it if the
+    /// rule set changed since the last one.
+    pub fn analysis(&self) -> Result<Arc<ProgramAnalysis>, EvaluationError> {
+        if let Some(analysis) = self
+            .analysis
+            .read()
+            .map_err(|e| EvaluationError::Store(e.to_string()))?
+            .as_ref()
+        {
+            return Ok(analysis.clone());
+        }
+        let rules = self
+            .rules
+            .read()
+            .map_err(|e| EvaluationError::Store(e.to_string()))?;
+        let analysis = Arc::new(ProgramAnalysis::analyze(rules.iter()));
+        drop(rules);
+        *self
+            .analysis
+            .write()
+            .map_err(|e| EvaluationError::Store(e.to_string()))? = Some(analysis.clone());
+        Ok(analysis)
+    }
+
+    /// Every stratification violation in the current rule set.
+    /// Callers decide what to do: surface as a warning after an
+    /// install, refuse to proceed after a merge, or ignore and let
+    /// queries fail individually.
+    pub fn validate(&self) -> Result<Vec<NegationViolation>, EvaluationError> {
+        Ok(self.analysis()?.violations().to_vec())
+    }
+
+    /// Whether the concept participates in a dependency cycle in
+    /// the current rule set.
+    pub fn is_recursive(&self, concept: &Entity) -> Result<bool, EvaluationError> {
+        Ok(self.analysis()?.is_recursive(concept))
+    }
+
+    fn invalidate_analysis(&self) -> Result<(), EvaluationError> {
+        *self
+            .analysis
+            .write()
+            .map_err(|e| EvaluationError::Store(e.to_string()))? = None;
         Ok(())
     }
 }

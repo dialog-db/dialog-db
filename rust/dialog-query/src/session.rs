@@ -1,7 +1,10 @@
 //! Rule registry for deductive inference.
 
+/// Program-level dependency analysis: recursion and stratification.
+pub mod dependencies;
 /// Registry for deductive rules, indexed by conclusion entity.
 pub mod rule_registry;
+pub use dependencies::{NegationViolation, Polarity, ProgramAnalysis};
 pub use rule_registry::*;
 
 #[cfg(test)]
