@@ -83,15 +83,23 @@ impl Revision {
     /// Whoever advances a revision has, by construction, seen it, so the new
     /// edition is `self + 1` no matter which issuer commits. The previous
     /// revision's tree root is recorded in `cause`.
+    ///
+    /// The subject is the minting branch's repository, passed explicitly
+    /// rather than inherited from `self`: a branch may have adopted a head
+    /// minted in a *different* repository (a fast-forward pull from a
+    /// foreign subject), and commits on top of it belong to this branch's
+    /// lineage scope, not the foreign one — otherwise the minted version
+    /// would disagree with the version its own data was tagged with.
     pub fn advance(
         &self,
         tree: TreeReference,
+        subject: Did,
         branch: impl Into<String>,
         issuer: Did,
         authority: Did,
     ) -> Self {
         Self {
-            subject: self.subject.clone(),
+            subject,
             issuer,
             authority,
             branch: branch.into(),
@@ -108,16 +116,21 @@ impl Revision {
     /// `max(self, upstream) + 1`. The upstream tree is recorded as the
     /// causal ancestor; the branch's own prior tree is dropped from `cause`
     /// because it is now subsumed by the merged tree.
+    ///
+    /// As with [`Revision::advance`], the subject is the minting branch's
+    /// repository, passed explicitly: either side of the merge may carry a
+    /// foreign subject adopted through an earlier pull.
     pub fn merge(
         &self,
         upstream: &Revision,
         tree: TreeReference,
+        subject: Did,
         branch: impl Into<String>,
         issuer: Did,
         authority: Did,
     ) -> Self {
         Self {
-            subject: self.subject.clone(),
+            subject,
             issuer,
             authority,
             branch: branch.into(),
@@ -273,23 +286,93 @@ mod tests {
 
         // Advancing increments the edition no matter which issuer commits:
         // whoever advances a revision has seen it
-        let second = base.advance(tree(1), "main", did!("test:alice"), did!("test:profile"));
+        let second = base.advance(
+            tree(1),
+            did!("test:repository"),
+            "main",
+            did!("test:alice"),
+            did!("test:profile"),
+        );
         assert_eq!(second.edition, Edition::new(1));
         assert!(second.cause.contains(&base.tree));
 
-        let third = second.advance(tree(2), "main", did!("test:bob"), did!("test:profile"));
+        let third = second.advance(
+            tree(2),
+            did!("test:repository"),
+            "main",
+            did!("test:bob"),
+            did!("test:profile"),
+        );
         assert_eq!(third.edition, Edition::new(2));
 
         // A merge advances past both lineages
-        let concurrent = second.advance(tree(3), "main", did!("test:carol"), did!("test:profile"));
+        let concurrent = second.advance(
+            tree(3),
+            did!("test:repository"),
+            "main",
+            did!("test:carol"),
+            did!("test:profile"),
+        );
         let merged = third.merge(
             &concurrent,
             tree(4),
+            did!("test:repository"),
             "main",
             did!("test:alice"),
             did!("test:profile"),
         );
         assert_eq!(merged.edition, Edition::new(3));
+    }
+
+    /// Adopting a head minted in a foreign repository (a fast-forward
+    /// pull across subjects) must not drag later commits into the
+    /// foreign lineage scope: advancing mints under the branch's own
+    /// subject, so the version agrees with the one the commit path
+    /// derives — and tags data with — up front.
+    #[dialog_common::test]
+    fn it_scopes_advances_to_the_minting_subject() {
+        let foreign = Revision::new(
+            TreeReference::from(EMPTY_TREE_HASH),
+            did!("test:alice-repository"),
+            "main",
+            did!("test:alice"),
+            did!("test:profile"),
+        );
+
+        // Bob's branch adopted the foreign head; his next commit mints
+        // under his own repository subject.
+        let ours = foreign.advance(
+            tree(1),
+            did!("test:bob-repository"),
+            "main",
+            did!("test:bob"),
+            did!("test:profile"),
+        );
+        assert_eq!(ours.subject, did!("test:bob-repository"));
+        assert_ne!(
+            ours.origin(),
+            foreign
+                .advance(
+                    tree(1),
+                    did!("test:alice-repository"),
+                    "main",
+                    did!("test:bob"),
+                    did!("test:profile"),
+                )
+                .origin(),
+            "the subject participates in the lineage scope"
+        );
+
+        // Same for a merge on top of an adopted head.
+        let merged = ours.merge(
+            &foreign,
+            tree(2),
+            did!("test:bob-repository"),
+            "main",
+            did!("test:bob"),
+            did!("test:profile"),
+        );
+        assert_eq!(merged.subject, did!("test:bob-repository"));
     }
 
     #[dialog_common::test]
@@ -298,8 +381,20 @@ mod tests {
 
         // Two issuers advance from the same base without seeing each other:
         // same edition, different origins — concurrent by inspection
-        let left = base.advance(tree(1), "main", did!("test:alice"), did!("test:profile"));
-        let right = base.advance(tree(2), "main", did!("test:bob"), did!("test:profile"));
+        let left = base.advance(
+            tree(1),
+            did!("test:repository"),
+            "main",
+            did!("test:alice"),
+            did!("test:profile"),
+        );
+        let right = base.advance(
+            tree(2),
+            did!("test:repository"),
+            "main",
+            did!("test:bob"),
+            did!("test:profile"),
+        );
         assert_eq!(left.edition, right.edition);
         assert_ne!(left.origin(), right.origin());
         assert_ne!(left.version(), right.version());
@@ -317,7 +412,13 @@ mod tests {
 
         // ... and on two different branches of the same repository: each
         // branch head is an independent sequential actor
-        let branched = base.advance(tree(3), "feature", did!("test:alice"), did!("test:profile"));
+        let branched = base.advance(
+            tree(3),
+            did!("test:repository"),
+            "feature",
+            did!("test:alice"),
+            did!("test:profile"),
+        );
         assert_ne!(left.origin(), branched.origin());
         assert_ne!(left.version(), branched.version());
     }

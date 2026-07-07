@@ -245,6 +245,7 @@ impl<'a> Pull<'a> {
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
+                    branch.of().clone(),
                     branch.name(),
                     authority.did(),
                     authority.profile().clone(),
