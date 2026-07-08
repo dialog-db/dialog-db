@@ -1,0 +1,50 @@
+{
+  "name": "@dialog-db/automerge",
+  "version": "0.0.1",
+  "license": "MPL-2.0",
+  "description": "Automerge CRDT documents as Dialog record values (JavaScript edge)",
+  "type": "module",
+  "scripts": {
+    "build": "npm run compile",
+    "compile": "tsc --build",
+    "check": "tsc --build --noEmit",
+    "test": "npm run test:node",
+    "test:node": "ts-mocha -n loader=ts-node/esm -p ./tsconfig.json ./test/*.spec.ts"
+  },
+  "keywords": [
+    "automerge",
+    "crdt",
+    "dialog",
+    "record",
+    "db"
+  ],
+  "files": [
+    "src",
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/src/lib.d.ts",
+      "import": "./dist/src/lib.js"
+    }
+  },
+  "dependencies": {
+    "@automerge/automerge": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.0.0",
+    "mocha": "^11.2.2",
+    "ts-mocha": "^11.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3"
+  },
+  "prettier": {
+    "trailingComma": "es5",
+    "experimentalTernaries": true,
+    "tabWidth": 2,
+    "semi": false,
+    "singleQuote": true,
+    "filepath": "**/*.(ts|tsx|js)"
+  }
+}
