@@ -47,7 +47,7 @@ use crate::selection::{Binding, Match};
 use crate::session::ProgramAnalysis;
 use crate::source::SelectRules;
 use crate::term::Term;
-use crate::types::Any;
+use crate::types::{Any, Typed};
 use crate::{Entity, Environment, Value};
 use core::fmt;
 use core::{iter, mem};
@@ -149,6 +149,17 @@ impl AnswerTable for InMemoryAnswerTable {
             .get(concept)
             .map(|rows| rows.values().cloned().collect())
             .unwrap_or_default()
+    }
+}
+
+impl InMemoryAnswerTable {
+    /// Remove a row from the total (DRed's over-delete step).
+    /// Between evaluations the delta and staging areas are drained,
+    /// so the total is the only place a retained row lives.
+    fn remove(&mut self, concept: &Entity, row: &Row) {
+        if let Some(rows) = self.total.get_mut(concept) {
+            rows.remove(&row_key(row));
+        }
     }
 }
 
@@ -359,17 +370,16 @@ where
 }
 
 /// Evaluate one rule with the given occurrence-and-source bindings:
-/// join the `rest` premises sideways and stage every projected
+/// join the `rest` premises sideways and return every projected
 /// conclusion row.
-async fn stage_rule_rows<'a, Env>(
+async fn collect_rule_rows<'a, Env>(
     member: &Member,
     split: &SplitRule,
     rest: Vec<Premise>,
     matched: Match,
     scope: &Environment,
-    table: &mut InMemoryAnswerTable,
     env: &'a Env,
-) -> Result<(), EvaluationError>
+) -> Result<Vec<Row>, EvaluationError>
 where
     Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
 {
@@ -383,11 +393,27 @@ where
             })?;
         plan.evaluate(matched.seed(), env).try_collect().await?
     };
-    for result in results {
-        table.insert(
-            &member.descriptor.this(),
-            project(&member.descriptor, &result),
-        );
+    Ok(results
+        .into_iter()
+        .map(|result| project(&member.descriptor, &result))
+        .collect())
+}
+
+/// [`collect_rule_rows`], staging every row into the table.
+async fn stage_rule_rows<'a, Env>(
+    member: &Member,
+    split: &SplitRule,
+    rest: Vec<Premise>,
+    matched: Match,
+    scope: &Environment,
+    table: &mut InMemoryAnswerTable,
+    env: &'a Env,
+) -> Result<(), EvaluationError>
+where
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+{
+    for row in collect_rule_rows(member, split, rest, matched, scope, env).await? {
+        table.insert(&member.descriptor.this(), row);
     }
     Ok(())
 }
@@ -649,6 +675,27 @@ fn bind_source_slot(
     }
 }
 
+/// Fold one term slot of a deleted-fact source into a suspicion
+/// pattern: a mismatching constant rejects the fact, a head-operand
+/// variable contributes a `(operand, value)` constraint, anything
+/// else constrains nothing. Returns `false` on rejection.
+fn pattern_slot<T: Typed>(
+    term: &Term<T>,
+    value: Value,
+    operands: &BTreeSet<&str>,
+    pattern: &mut Vec<(String, Value)>,
+) -> bool {
+    if let Some(expected) = term.as_constant() {
+        return *expected == value;
+    }
+    if let Some(name) = term.name()
+        && operands.contains(name)
+    {
+        pattern.push((name.to_string(), value));
+    }
+    true
+}
+
 /// Extend a previously computed fixpoint with newly added base
 /// facts: semi-naive continuation. For every rule, each new fact is
 /// bound into the base premise it can match (or, for an
@@ -789,6 +836,329 @@ where
     Ok(Some(table.total(&root_entity)))
 }
 
+/// Retract deleted base facts from a retained fixpoint: DRed.
+///
+/// 1. **Over-delete.** Every row forward-reachable from a deleted
+///    fact is suspected: deleted facts bind into the base premises
+///    they matched (occurrences reading the *pre-deletion* totals),
+///    and suspicion cascades through occurrence positions until
+///    closed. All suspects are removed.
+/// 2. **Re-derive.** Each suspect is checked for a surviving
+///    derivation: its head operands bind the rule body, occurrences
+///    read the *post-removal* table, base premises read the current
+///    store. Survivors re-insert; passes repeat until stable, so
+///    chains re-derive bottom-up.
+/// 3. **Insert.** The ordinary delta rounds propagate the
+///    re-insertions.
+///
+/// Sound only when no single rule body could have consumed more
+/// than one deleted thing at once — one body position is the delta,
+/// the rest are read from surviving state. The gate is
+/// conservative: if two or more of a rule's base premises match any
+/// deletion, or a deletion matches a negated or optional premise (a
+/// deletion there can make rows *appear*), `Ok(None)` is returned
+/// and the caller rebuilds.
+pub async fn retract<'a, Env>(
+    root: &ConceptDescriptor,
+    analysis: &ProgramAnalysis,
+    env: &'a Env,
+    table: &mut InMemoryAnswerTable,
+    deletions: &[Artifact],
+) -> Result<Option<()>, EvaluationError>
+where
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+{
+    let root_entity = root.this();
+    let members = discover(root, analysis, env).await?;
+    let subjects: BTreeSet<Entity> = deletions.iter().map(|fact| fact.of.clone()).collect();
+
+    // Suspects per member, keyed like the table.
+    let mut suspects: HashMap<Entity, BTreeMap<Vec<u8>, Row>> = HashMap::new();
+
+    // Phase 1a: seed suspicion from the deleted facts. A deleted
+    // fact cannot be re-joined (it is gone from the store), so the
+    // rows it may have supported are found by *pattern-matching the
+    // retained table*: the head-operand bindings the fact imposes
+    // through the premise it matched select every consistent row.
+    // A source that binds no head operand suspects the member's
+    // whole table — conservative, settled by re-derivation.
+    for member in members.values() {
+        let operands: BTreeSet<&str> = iter::once("this")
+            .chain(member.descriptor.with().keys())
+            .collect();
+        for split in &member.rules {
+            let mut matchable = 0usize;
+            let mut patterns: Vec<Vec<(String, Value)>> = Vec::new();
+            for premise in &split.base {
+                match classify_base(premise, deletions, env).await? {
+                    BaseSource::Unsupported => return Ok(None),
+                    BaseSource::Inert => {}
+                    BaseSource::Attribute(slots) => {
+                        let (the, of, is) = slots.as_ref();
+                        let mut hit = false;
+                        for fact in deletions {
+                            let mut pattern = Vec::new();
+                            let matches =
+                                pattern_slot(
+                                    the,
+                                    Value::from(The::from(fact.the.clone())),
+                                    &operands,
+                                    &mut pattern,
+                                ) && pattern_slot(
+                                    of,
+                                    Value::Entity(fact.of.clone()),
+                                    &operands,
+                                    &mut pattern,
+                                ) && pattern_slot(is, fact.is.clone(), &operands, &mut pattern);
+                            if matches {
+                                hit = true;
+                                patterns.push(pattern);
+                            }
+                        }
+                        if hit {
+                            matchable += 1;
+                        }
+                    }
+                    BaseSource::LocalConcept { this } => {
+                        if !subjects.is_empty() {
+                            matchable += 1;
+                        }
+                        for entity in &subjects {
+                            let value = Value::Entity(entity.clone());
+                            match this.as_constant() {
+                                Some(expected) if *expected != value => {}
+                                Some(_) => patterns.push(Vec::new()),
+                                None => match this.name() {
+                                    Some(name) if operands.contains(name) => {
+                                        patterns.push(vec![(name.to_string(), value)]);
+                                    }
+                                    _ => patterns.push(Vec::new()),
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+            // Two matchable premises in one body: a derivation could
+            // have consumed two deleted things at once, and the
+            // one-position-at-a-time walk would miss it.
+            if matchable >= 2 {
+                return Ok(None);
+            }
+
+            if patterns.is_empty() {
+                continue;
+            }
+            let entity = member.descriptor.this();
+            for row in table.total(&entity) {
+                let suspect = patterns.iter().any(|pattern| {
+                    pattern
+                        .iter()
+                        .all(|(operand, value)| row.get(operand) == Some(value))
+                });
+                if suspect {
+                    suspects
+                        .entry(entity.clone())
+                        .or_default()
+                        .insert(row_key(&row), row);
+                }
+            }
+        }
+    }
+
+    // Phase 1b: cascade suspicion through occurrence positions,
+    // reading pre-removal totals.
+    let mut frontier = suspects.clone();
+    while !frontier.values().all(BTreeMap::is_empty) {
+        let mut next: HashMap<Entity, BTreeMap<Vec<u8>, Row>> = HashMap::new();
+        for member in members.values() {
+            for split in &member.rules {
+                if split.occurrences.is_empty() {
+                    continue;
+                }
+                for delta_index in 0..split.occurrences.len() {
+                    let choices: Vec<Vec<Row>> = split
+                        .occurrences
+                        .iter()
+                        .enumerate()
+                        .map(|(index, occurrence)| {
+                            let target = occurrence.predicate.this();
+                            if index == delta_index {
+                                frontier
+                                    .get(&target)
+                                    .map(|rows| rows.values().cloned().collect())
+                                    .unwrap_or_default()
+                            } else {
+                                table.total(&target)
+                            }
+                        })
+                        .collect();
+                    for combination in Combinations::new(choices.iter().map(Vec::len).collect()) {
+                        let mut matched = Match::new();
+                        let mut scope = Environment::new();
+                        let mut compatible = true;
+                        for (index, (occurrence, row_index)) in
+                            split.occurrences.iter().zip(&combination).enumerate()
+                        {
+                            let row = &choices[index][*row_index];
+                            if !bind_occurrence(&mut matched, occurrence, row) {
+                                compatible = false;
+                                break;
+                            }
+                            for (_, term) in occurrence.terms.iter() {
+                                if let Some(name) = term.name() {
+                                    scope.add(name);
+                                }
+                            }
+                        }
+                        if !compatible {
+                            continue;
+                        }
+                        let rows = collect_rule_rows(
+                            member,
+                            split,
+                            split.base.clone(),
+                            matched,
+                            &scope,
+                            env,
+                        )
+                        .await?;
+                        let entity = member.descriptor.this();
+                        for row in rows {
+                            let key = row_key(&row);
+                            let known = suspects
+                                .get(&entity)
+                                .is_some_and(|rows| rows.contains_key(&key));
+                            if !known {
+                                suspects
+                                    .entry(entity.clone())
+                                    .or_default()
+                                    .insert(key.clone(), row.clone());
+                                next.entry(entity.clone()).or_default().insert(key, row);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    // Over-delete.
+    for (entity, rows) in &suspects {
+        for row in rows.values() {
+            table.remove(entity, row);
+        }
+    }
+
+    // Phase 2: re-derive survivors, bottom-up until stable.
+    loop {
+        let mut rederived = false;
+        for member in members.values() {
+            let entity = member.descriptor.this();
+            let Some(rows) = suspects.get(&entity) else {
+                continue;
+            };
+            let mut survived: Vec<Vec<u8>> = Vec::new();
+            for (key, row) in rows {
+                if derivable(member, row, table, env).await? {
+                    table.insert(&entity, row.clone());
+                    survived.push(key.clone());
+                    rederived = true;
+                }
+            }
+            if !survived.is_empty() {
+                // Promote the survivors immediately so this pass's
+                // later checks (and the next pass) see them.
+                table.advance();
+                let bucket = suspects.get_mut(&entity).expect("bucket exists");
+                for key in survived {
+                    bucket.remove(&key);
+                }
+            }
+        }
+        if !rederived {
+            break;
+        }
+    }
+
+    // Phase 3: propagate anything the re-insertions enable.
+    delta_rounds(&root_entity, &members, table, env).await?;
+    Ok(Some(()))
+}
+
+/// Whether a suspect row still has a derivation: bind its head
+/// operands into each rule body (occurrences read the current
+/// table, base premises the current store) and check whether any
+/// result projects back to the row.
+async fn derivable<'a, Env>(
+    member: &Member,
+    row: &Row,
+    table: &InMemoryAnswerTable,
+    env: &'a Env,
+) -> Result<bool, EvaluationError>
+where
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+{
+    for split in &member.rules {
+        let mut seed = Match::new();
+        let mut seed_scope = Environment::new();
+        let mut consistent = true;
+        for (operand, value) in row {
+            if seed
+                .bind(&Term::<Any>::var(operand), value.clone())
+                .is_err()
+            {
+                consistent = false;
+                break;
+            }
+            seed_scope.add(operand);
+        }
+        if !consistent {
+            continue;
+        }
+
+        let choices: Vec<Vec<Row>> = split
+            .occurrences
+            .iter()
+            .map(|occurrence| table.total(&occurrence.predicate.this()))
+            .collect();
+        let combinations: Vec<Vec<usize>> = if split.occurrences.is_empty() {
+            vec![Vec::new()]
+        } else {
+            Combinations::new(choices.iter().map(Vec::len).collect()).collect()
+        };
+        for combination in combinations {
+            let mut matched = seed.clone();
+            let mut scope = seed_scope.clone();
+            let mut compatible = true;
+            for (index, (occurrence, row_index)) in
+                split.occurrences.iter().zip(&combination).enumerate()
+            {
+                let bound = &choices[index][*row_index];
+                if !bind_occurrence(&mut matched, occurrence, bound) {
+                    compatible = false;
+                    break;
+                }
+                for (_, term) in occurrence.terms.iter() {
+                    if let Some(name) = term.name() {
+                        scope.add(name);
+                    }
+                }
+            }
+            if !compatible {
+                continue;
+            }
+            let rows =
+                collect_rule_rows(member, split, split.base.clone(), matched, &scope, env).await?;
+            if rows.iter().any(|candidate| candidate == row) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// A retained fixpoint carried across evaluations by a standing
 /// subscription: the answer table handle plus, when the poll's
 /// changes were additions only, the new facts to seed a semi-naive
@@ -798,31 +1168,42 @@ where
 #[derive(Clone, Default)]
 pub struct Continuation {
     table: Arc<Mutex<Option<InMemoryAnswerTable>>>,
-    additions: Option<Arc<Vec<Artifact>>>,
+    additions: Arc<Vec<Artifact>>,
+    deletions: Arc<Vec<Artifact>>,
 }
 
 impl fmt::Debug for Continuation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Continuation")
-            .field(
-                "additions",
-                &self.additions.as_ref().map(|facts| facts.len()),
-            )
+            .field("additions", &self.additions.len())
+            .field("deletions", &self.deletions.len())
             .finish_non_exhaustive()
     }
 }
 
 impl Continuation {
-    /// A continuation over the subscription-held `table`. With
-    /// `additions`, evaluation extends the retained fixpoint
-    /// semi-naively (falling back to a rebuild when the rule set
-    /// cannot extend additively); without, it rebuilds into the
-    /// handle (the first evaluation, or after deletions).
-    pub fn new(
-        table: Arc<Mutex<Option<InMemoryAnswerTable>>>,
-        additions: Option<Arc<Vec<Artifact>>>,
+    /// A continuation over the subscription-held `table`. Without
+    /// changes attached, evaluation rebuilds into the handle (the
+    /// first evaluation, or a recompute).
+    pub fn new(table: Arc<Mutex<Option<InMemoryAnswerTable>>>) -> Self {
+        Continuation {
+            table,
+            additions: Arc::new(Vec::new()),
+            deletions: Arc::new(Vec::new()),
+        }
+    }
+
+    /// Attach the poll's changed facts: deletions retract via DRed,
+    /// additions extend semi-naively, in that order. Either phase
+    /// declining (non-additive shapes) falls back to a rebuild.
+    pub fn with_changes(
+        mut self,
+        additions: Arc<Vec<Artifact>>,
+        deletions: Arc<Vec<Artifact>>,
     ) -> Self {
-        Continuation { table, additions }
+        self.additions = additions;
+        self.deletions = deletions;
+        self
     }
 
     /// The queried concept's fixpoint rows, reusing the retained
@@ -839,19 +1220,33 @@ impl Continuation {
         Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         let prior = self.table.lock().expect("fixpoint table lock").take();
-        let (table, rows) = match (prior, &self.additions) {
-            (Some(mut table), Some(additions)) => {
-                match extend(root, analysis, env, &mut table, additions).await? {
-                    Some(rows) => (table, rows),
-                    None => {
-                        // Not additively extendable: rebuild.
-                        let mut table = InMemoryAnswerTable::default();
-                        let rows = evaluate_table(root, analysis, env, &mut table).await?;
-                        (table, rows)
+        let has_changes = !self.additions.is_empty() || !self.deletions.is_empty();
+        let maintained = match prior {
+            Some(mut table) if has_changes => {
+                let retracted = if self.deletions.is_empty() {
+                    Some(())
+                } else {
+                    retract(root, analysis, env, &mut table, &self.deletions).await?
+                };
+                match retracted {
+                    None => None,
+                    Some(()) => {
+                        if self.additions.is_empty() {
+                            let rows = table.total(&root.this());
+                            Some((table, rows))
+                        } else {
+                            extend(root, analysis, env, &mut table, &self.additions)
+                                .await?
+                                .map(|rows| (table, rows))
+                        }
                     }
                 }
             }
-            _ => {
+            _ => None,
+        };
+        let (table, rows) = match maintained {
+            Some(outcome) => outcome,
+            None => {
                 let mut table = InMemoryAnswerTable::default();
                 let rows = evaluate_table(root, analysis, env, &mut table).await?;
                 (table, rows)
