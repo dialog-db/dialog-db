@@ -263,6 +263,37 @@ where
         }
     }
 
+    /// Streams the changes *within `scope`* that transform this tree into
+    /// `other`.
+    ///
+    /// Like [`differentiate`](Self::differentiate), but subtrees whose key
+    /// span cannot intersect any scope range are dropped from the
+    /// comparison without being loaded: reads are proportional to the
+    /// differing regions within the scope, not to the full difference. On
+    /// a partial replica this keeps the diff from fetching subtrees the
+    /// caller never demanded.
+    pub fn differentiate_within<'a, Backend>(
+        &'a self,
+        other: &'a Self,
+        scope: &'a [core::ops::RangeInclusive<Key>],
+        self_storage: &'a ContentAddressedStorage<Backend>,
+        other_storage: &'a ContentAddressedStorage<Backend>,
+    ) -> impl Differential<Key, Value> + 'a
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Value: PartialEq,
+    {
+        async_stream::try_stream! {
+            let difference =
+                TreeDifference::compute_within(self, other, self_storage, other_storage, scope)
+                    .await?;
+            for await change in difference.changes_within(scope) {
+                yield change?;
+            }
+        }
+    }
+
     /// Builds a persistent tree from a sealed root hash and a node cache. Used
     /// by [`TransientTree::persist`] to turn a finished edit batch back into a
     /// [`PersistentTree`] while carrying its cache forward. The batch's new nodes
