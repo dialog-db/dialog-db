@@ -1,0 +1,13 @@
+[package]
+name = "dialog-automerge"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+automerge = { workspace = true }
+dialog-artifacts = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
