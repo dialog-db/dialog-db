@@ -19,7 +19,7 @@
 
 use crate::type_system;
 use crate::type_system::Type as Kind;
-use dialog_common::ConditionalSend;
+use dialog_common::{ConditionalSend, ConditionalSync};
 use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -34,7 +34,7 @@ use crate::attribute::The;
 /// [`Self::kind`] returning `Option<type_system::Type>`. `None`
 /// means "unknown; the unifier decides at rule-compile time."
 pub trait TypeDescriptor:
-    Clone + fmt::Debug + Default + PartialEq + Eq + Hash + Send + Sync + 'static
+    Clone + fmt::Debug + Default + PartialEq + Eq + Hash + ConditionalSend + ConditionalSync + 'static
 {
     /// The legacy storage tag, if statically known. `None` means
     /// "any type."

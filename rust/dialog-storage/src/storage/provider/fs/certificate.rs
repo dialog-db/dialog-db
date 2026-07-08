@@ -7,6 +7,7 @@ use dialog_capability::access::{
     AuthorizeError, Certificate, CertificateStore, Delegation, Protocol, Prove, Retain,
 };
 use dialog_capability::{Capability, Policy, Provider};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_varsig::Did;
 
 use super::{FileSystem, FileSystemError, FileSystemHandle};
@@ -20,10 +21,11 @@ impl FileSystem {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<P: Protocol> CertificateStore<P> for FileSystem
 where
-    P::Certificate: Send + Sync,
+    P::Certificate: ConditionalSend + ConditionalSync,
 {
     /// List certificates where `audience` is the recipient and `subject`
     /// is either the specific subject DID or, when `None`, a
@@ -95,13 +97,14 @@ where
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<P> Provider<Prove<P>> for FileSystem
 where
     P: Protocol,
-    P::Access: Clone + Send + Sync,
-    P::Certificate: Clone + Send + Sync,
-    P::Proof: Send,
+    P::Access: Clone + ConditionalSend + ConditionalSync,
+    P::Certificate: Clone + ConditionalSend + ConditionalSync,
+    P::Proof: ConditionalSend,
 {
     async fn execute(&self, input: Capability<Prove<P>>) -> Result<P::Proof, AuthorizeError> {
         let auth = Prove::<P>::of(&input);
@@ -111,11 +114,12 @@ where
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<P> Provider<Retain<P>> for FileSystem
 where
     P: Protocol,
-    P::Delegation: Send + Sync,
+    P::Delegation: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Retain<P>>) -> Result<(), AuthorizeError> {
         let delegation = &Retain::<P>::of(&input).delegation;

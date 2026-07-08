@@ -221,7 +221,7 @@ where
     /// [`Artifacts::export`]
     pub async fn import<Read>(&mut self, read: &mut Read) -> Result<(), DialogArtifactsError>
     where
-        Read: AsyncRead + Unpin + Send,
+        Read: AsyncRead + Unpin + ConditionalSend,
     {
         let instructions = stream! {
             let mut reader = csv_async::AsyncReaderBuilder::new()

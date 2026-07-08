@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use dialog_artifacts::Exporter;
 use dialog_artifacts::{Artifact, DialogArtifactsError};
+use dialog_common::ConditionalSend;
 use tokio::io::AsyncWrite;
 
 use crate::row::CsvRow;
@@ -29,7 +30,7 @@ impl<W: AsyncWrite + Unpin> From<W> for CsvExporter<W> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<W: AsyncWrite + Unpin + Send> Exporter for CsvExporter<W> {
+impl<W: AsyncWrite + Unpin + ConditionalSend> Exporter for CsvExporter<W> {
     async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogArtifactsError> {
         let row = CsvRow::from(artifact);
         self.writer
