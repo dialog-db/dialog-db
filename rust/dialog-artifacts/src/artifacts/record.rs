@@ -12,17 +12,20 @@
 //! [`Value`]: crate::Value
 
 use std::{
-    any::{Any, TypeId},
+    any::{Any, TypeId, type_name},
     cmp::Ordering,
     collections::HashMap,
     fmt::{Debug, Formatter, Result as FmtResult},
     hash::{Hash, Hasher},
+    marker::PhantomData,
     sync::{Arc, RwLock},
 };
 
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
+
+use crate::{TypeError, Value, ValueDataType};
 
 /// Errors that may occur while encoding, decoding, or realizing a [`Record`].
 #[derive(Debug, Error, PartialEq)]
@@ -226,6 +229,165 @@ impl<'de> Deserialize<'de> for Record {
     }
 }
 
+/// A typed, lazy handle over a [`Record`] whose bytes are known to encode a
+/// particular [`RecordFormat`].
+///
+/// `Recorded<F>` is the bridge between record values and the typed attribute
+/// layer: it is the field type of a record-typed attribute (e.g.
+/// `struct Body(Recorded<TextDocument>)`). Encoding is **eager on write** —
+/// [`Recorded::new`] serializes the form immediately, because the bytes are
+/// what identity, index keys, and replication operate on — while decoding is
+/// **lazy and memoized on read**: hydrating from stored bytes never decodes,
+/// and [`realize`](Recorded::realize) decodes on first access, caching the
+/// result in the underlying record.
+///
+/// Consequently a `Recorded<F>` obtained from a query may hold bytes that do
+/// not actually decode as `F`; the failure surfaces at the accessing call to
+/// `realize`, not while materializing rows.
+pub struct Recorded<F: RecordFormat> {
+    record: Record,
+    form: PhantomData<F>,
+}
+
+impl<F: RecordFormat> Recorded<F> {
+    /// Eagerly encode a format value into a typed record handle.
+    ///
+    /// The encoded value is memoized, so a subsequent
+    /// [`realize`](Recorded::realize) is free.
+    pub fn new(form: F) -> Result<Self, RecordError> {
+        Ok(Self {
+            record: Record::from_format(form)?,
+            form: PhantomData,
+        })
+    }
+
+    /// Decode (or recover from cache) the typed value of this record.
+    ///
+    /// See [`Record::realize`].
+    pub fn realize(&self) -> Result<Arc<F>, RecordError> {
+        self.record.realize::<F>()
+    }
+
+    /// The underlying untyped [`Record`].
+    pub fn record(&self) -> &Record {
+        &self.record
+    }
+
+    /// The canonical byte representation of this record.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.record.as_bytes()
+    }
+
+    /// Unwrap into the underlying untyped [`Record`].
+    pub fn into_record(self) -> Record {
+        self.record
+    }
+}
+
+impl<F: RecordFormat> From<Record> for Recorded<F> {
+    /// Hydrate a typed handle from an untyped record. No decoding happens;
+    /// the bytes are trusted to be `F`-encoded until `realize` says otherwise.
+    fn from(record: Record) -> Self {
+        Self {
+            record,
+            form: PhantomData,
+        }
+    }
+}
+
+impl<F: RecordFormat> From<Recorded<F>> for Record {
+    fn from(recorded: Recorded<F>) -> Self {
+        recorded.record
+    }
+}
+
+impl<F: RecordFormat> From<Recorded<F>> for Value {
+    fn from(recorded: Recorded<F>) -> Self {
+        Value::Record(recorded.record)
+    }
+}
+
+impl<F: RecordFormat> TryFrom<Value> for Recorded<F> {
+    type Error = TypeError;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Record(record) => Ok(Recorded::from(record)),
+            _ => Err(TypeError::TypeMismatch(
+                ValueDataType::Record,
+                value.data_type(),
+            )),
+        }
+    }
+}
+
+// The impls below are written out (rather than derived) so that they hold for
+// every `F: RecordFormat` without demanding `F: Clone`/`Eq`/etc. bounds at
+// use sites: they all delegate to the underlying record, which compares,
+// hashes, and clones by its canonical bytes.
+
+impl<F: RecordFormat> Clone for Recorded<F> {
+    fn clone(&self) -> Self {
+        Self {
+            record: self.record.clone(),
+            form: PhantomData,
+        }
+    }
+}
+
+impl<F: RecordFormat> Debug for Recorded<F> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_tuple("Recorded")
+            .field(&type_name::<F>())
+            .field(&self.record)
+            .finish()
+    }
+}
+
+impl<F: RecordFormat> PartialEq for Recorded<F> {
+    fn eq(&self, other: &Self) -> bool {
+        self.record == other.record
+    }
+}
+
+impl<F: RecordFormat> Eq for Recorded<F> {}
+
+impl<F: RecordFormat> PartialOrd for Recorded<F> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<F: RecordFormat> Ord for Recorded<F> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.record.cmp(&other.record)
+    }
+}
+
+impl<F: RecordFormat> Hash for Recorded<F> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.record.hash(state);
+    }
+}
+
+impl<F: RecordFormat> Serialize for Recorded<F> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.record.serialize(serializer)
+    }
+}
+
+impl<'de, F: RecordFormat> Deserialize<'de> for Recorded<F> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Recorded::from(Record::deserialize(deserializer)?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +468,94 @@ mod tests {
         let a = ByteSet(vec![1, 2]);
         let b = ByteSet(vec![2, 3]);
         assert_eq!(ByteSet::merge(&a, &b), ByteSet(vec![1, 2, 3]));
+    }
+
+    /// A format whose decode always fails, for exercising the lazy-decode
+    /// failure path.
+    #[derive(Debug, Clone)]
+    struct Undecodable;
+
+    impl RecordFormat for Undecodable {
+        fn decode(_: &[u8]) -> Result<Self, RecordError> {
+            Err(RecordError::Decode("always fails".into()))
+        }
+
+        fn encode(&self) -> Result<Vec<u8>, RecordError> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn recorded_encodes_eagerly_and_realizes_from_cache() {
+        let recorded = Recorded::new(ByteSet(vec![1, 2, 3])).unwrap();
+        assert_eq!(recorded.as_bytes(), &[1, 2, 3]);
+
+        // `new` memoized the form, so realize returns the same allocation.
+        let first = recorded.realize().unwrap();
+        let second = recorded.realize().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(*first, ByteSet(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn recorded_round_trips_through_value() {
+        let recorded = Recorded::new(ByteSet(vec![7, 8])).unwrap();
+        let value = Value::from(recorded.clone());
+        assert_eq!(value.data_type(), ValueDataType::Record);
+
+        let restored = Recorded::<ByteSet>::try_from(value).unwrap();
+        assert_eq!(restored, recorded);
+        assert_eq!(*restored.realize().unwrap(), ByteSet(vec![7, 8]));
+    }
+
+    #[test]
+    fn recorded_rejects_non_record_values() {
+        let result = Recorded::<ByteSet>::try_from(Value::Boolean(true));
+        assert_eq!(
+            result.unwrap_err(),
+            TypeError::TypeMismatch(ValueDataType::Record, ValueDataType::Boolean)
+        );
+    }
+
+    #[test]
+    fn recorded_hydration_is_lazy() {
+        // Hydrating from a value never decodes: bytes that cannot decode as
+        // the format are accepted here and fail at `realize` instead.
+        let value = Value::Record(Record::from(vec![1, 2, 3]));
+        let recorded = Recorded::<Undecodable>::try_from(value).unwrap();
+        assert!(matches!(
+            recorded.realize().unwrap_err(),
+            RecordError::Decode(_)
+        ));
+    }
+
+    #[test]
+    fn recorded_clone_shares_the_memo_cache() {
+        let recorded = Recorded::<ByteSet>::from(Record::from(vec![5, 6]));
+        let clone = recorded.clone();
+
+        let first = recorded.realize().unwrap();
+        let second = clone.realize().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn recorded_compares_and_hashes_by_bytes() {
+        use std::collections::hash_map::DefaultHasher;
+
+        let a = Recorded::<ByteSet>::from(Record::from(vec![1, 2]));
+        let b = Recorded::new(ByteSet(vec![1, 2])).unwrap();
+        let c = Recorded::<ByteSet>::from(Record::from(vec![9]));
+
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+
+        fn digest(recorded: &Recorded<ByteSet>) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            recorded.hash(&mut hasher);
+            hasher.finish()
+        }
+        assert_eq!(digest(&a), digest(&b));
     }
 
     #[test]

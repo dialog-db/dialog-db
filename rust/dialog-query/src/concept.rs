@@ -1075,6 +1075,89 @@ mod tests {
         Ok(())
     }
 
+    mod note_concept {
+        use crate::Attribute;
+        use crate::artifact::{RecordError, RecordFormat, Recorded};
+
+        /// A toy record format: a list of lines, encoded newline-joined.
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Journal(pub Vec<String>);
+
+        impl RecordFormat for Journal {
+            fn decode(bytes: &[u8]) -> Result<Self, RecordError> {
+                let text = str::from_utf8(bytes)
+                    .map_err(|error| RecordError::Decode(error.to_string()))?;
+                Ok(Journal(match text {
+                    "" => Vec::new(),
+                    text => text.split('\n').map(String::from).collect(),
+                }))
+            }
+
+            fn encode(&self) -> Result<Vec<u8>, RecordError> {
+                Ok(self.0.join("\n").into_bytes())
+            }
+        }
+
+        /// Title of the note
+        #[derive(Attribute, Clone)]
+        pub struct Title(pub String);
+
+        /// Collaboratively edited body
+        #[derive(Attribute, Clone)]
+        pub struct Body(pub Recorded<Journal>);
+    }
+
+    /// A concept mixing a scalar attribute with a record-typed one.
+    #[derive(Concept, Debug, Clone)]
+    pub struct Note {
+        pub this: Entity,
+        pub title: note_concept::Title,
+        pub body: note_concept::Body,
+    }
+
+    #[dialog_common::test]
+    async fn it_queries_concept_with_record_field() -> Result<()> {
+        use crate::artifact::Recorded;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let note_id = Entity::new()?;
+        let journal = note_concept::Journal(vec!["hello".into(), "world".into()]);
+
+        let note = Note {
+            this: note_id.clone(),
+            title: note_concept::Title("Greetings".to_string()),
+            body: note_concept::Body(Recorded::new(journal.clone())?),
+        };
+
+        branch
+            .transaction()
+            .assert(note)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let query = Query::<Note> {
+            this: Term::var("note"),
+            title: Term::var("title"),
+            body: Term::var("body"),
+        };
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results: Vec<Note> = query.perform(&source).try_collect().await?;
+
+        assert_eq!(results.len(), 1);
+        let restored = &results[0];
+        assert_eq!(restored.this, note_id);
+        assert_eq!(restored.title.value(), "Greetings");
+        // The record field is a lazy handle; realize decodes the stored bytes.
+        assert_eq!(*restored.body.value().realize()?, journal);
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_queries_concept_with_constant_term() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;

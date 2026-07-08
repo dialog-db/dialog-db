@@ -25,6 +25,7 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 pub use crate::artifact::{ArtifactsAttribute, Cause, Entity, Type, Value};
+use crate::artifact::{RecordFormat, Recorded};
 use crate::attribute::The;
 
 /// Trait implemented by type descriptors: named ZSTs that
@@ -243,6 +244,22 @@ impl_typed!(ArtifactsAttribute, Symbol);
 impl_typed!(The, Symbol);
 impl_typed!(Cause, Bytes);
 impl_typed!(Value, Any);
+
+/// `Recorded<F>: Typed` for any [`RecordFormat`] `F`, mapping to the
+/// [`Record`] descriptor. This is what lets a record format be used as an
+/// attribute type (`struct Body(Recorded<TextDocument>)`): the typed lazy
+/// handle is the [`Scalar`] of the attribute, while the format value itself
+/// is only ever materialized through [`Recorded::realize`].
+///
+/// The impl is over the `Recorded<F>` wrapper rather than `F` directly
+/// because a blanket impl over `F: RecordFormat` would conflict with the
+/// concrete scalar impls above — and because hydrating `F` from a [`Value`]
+/// would force the eager decode the wrapper exists to avoid.
+impl<F: RecordFormat> Typed for Recorded<F> {
+    type Descriptor = Record;
+}
+
+impl<F: RecordFormat> Scalar for Recorded<F> {}
 
 /// `Option<U>: Typed` for any [`Scalar`] `U`. Maps to
 /// [`OptionalOf<U::Descriptor>`].
@@ -473,6 +490,42 @@ mod tests {
     fn optional_of_any_passes_through_none() {
         let descriptor: OptionalOf<Any> = OptionalOf::default();
         assert!(descriptor.kind().is_none());
+    }
+
+    /// `Recorded<F>` is a full [`Scalar`] mapped to the [`Record`]
+    /// descriptor, so record formats participate in the typed term
+    /// system exactly like the built-in scalars.
+    #[dialog_common::test]
+    fn recorded_maps_to_the_record_descriptor() {
+        use crate::artifact::{RecordError, RecordFormat, Recorded};
+
+        #[derive(Clone, Debug)]
+        struct Toy;
+
+        impl RecordFormat for Toy {
+            fn decode(_: &[u8]) -> Result<Self, RecordError> {
+                Ok(Toy)
+            }
+
+            fn encode(&self) -> Result<Vec<u8>, RecordError> {
+                Ok(vec![])
+            }
+        }
+
+        fn requires_scalar<T: Scalar>() {}
+        fn requires_optional<T: OptionalType>() {}
+        requires_scalar::<Recorded<Toy>>();
+        // Optional record fields ride the existing `Option<U: Scalar>` path.
+        requires_optional::<Option<Recorded<Toy>>>();
+
+        assert_eq!(
+            <<Recorded<Toy> as Typed>::Descriptor as TypeDescriptor>::TYPE,
+            Some(Type::Record)
+        );
+        let kind = <Recorded<Toy> as Typed>::Descriptor::default()
+            .kind()
+            .expect("Record has a static kind");
+        assert_eq!(kind.as_value_type(), Some(Type::Record));
     }
 
     /// Kind-marker family is consistent: scalar types are

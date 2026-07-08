@@ -183,6 +183,34 @@ mod tests {
         pub struct Name(pub String);
     }
 
+    mod note {
+        use crate::Attribute;
+        use crate::artifact::{RecordError, RecordFormat, Recorded};
+
+        /// A toy record format: a list of lines, encoded newline-joined.
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Journal(pub Vec<String>);
+
+        impl RecordFormat for Journal {
+            fn decode(bytes: &[u8]) -> Result<Self, RecordError> {
+                let text = str::from_utf8(bytes)
+                    .map_err(|error| RecordError::Decode(error.to_string()))?;
+                Ok(Journal(match text {
+                    "" => Vec::new(),
+                    text => text.split('\n').map(String::from).collect(),
+                }))
+            }
+
+            fn encode(&self) -> Result<Vec<u8>, RecordError> {
+                Ok(self.0.join("\n").into_bytes())
+            }
+        }
+
+        /// Collaboratively edited body
+        #[derive(Attribute, Clone)]
+        pub struct Body(pub Recorded<Journal>);
+    }
+
     #[dialog_common::test]
     async fn it_converts_to_dynamic_query() {
         let alice = Entity::new().unwrap();
@@ -237,6 +265,80 @@ mod tests {
         let (of, is, _cause) = results.into_iter().next().unwrap().into_parts();
         assert_eq!(of, alice);
         assert_eq!(is.value(), &"Alice".to_string());
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_roundtrips_record_attribute_through_store() -> anyhow::Result<()> {
+        use crate::artifact::Recorded;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let doc = Entity::new()?;
+        let first = Recorded::new(note::Journal(vec!["hello".into()]))?;
+
+        branch
+            .transaction()
+            .assert(note::Body::of(doc.clone()).is(first.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let query = StaticAttributeQuery::<note::Body> {
+            of: Term::from(doc.clone()),
+            is: Term::var("body"),
+        };
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = Application::perform(query, &source).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        let (of, is, _cause) = results.into_iter().next().unwrap().into_parts();
+        assert_eq!(of, doc);
+        // The handle was hydrated from stored bytes without decoding;
+        // realize decodes on this first access.
+        assert_eq!(is.value(), &first);
+        assert_eq!(*is.value().realize()?, note::Journal(vec!["hello".into()]));
+
+        // A `Cardinality::One` typed assert supersedes the prior value
+        // (`Instruction::Replace`), so a second write leaves one sibling.
+        let second = Recorded::new(note::Journal(vec!["hello".into(), "world".into()]))?;
+
+        branch
+            .transaction()
+            .assert(note::Body::of(doc.clone()).is(second.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let query = StaticAttributeQuery::<note::Body> {
+            of: Term::from(doc.clone()),
+            is: Term::var("body"),
+        };
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = Application::perform(query, &source).try_vec().await?;
+
+        assert_eq!(results.len(), 1);
+        let (_of, is, _cause) = results.into_iter().next().unwrap().into_parts();
+        assert_eq!(is.value(), &second);
+
+        // Value-bound queries: the live value matches; the superseded one
+        // yields no rows.
+        let query = StaticAttributeQuery::<note::Body> {
+            of: Term::var("doc"),
+            is: Term::from(second.clone()),
+        };
+        let results = Application::perform(query, &source).try_vec().await?;
+        assert_eq!(results.len(), 1);
+
+        let query = StaticAttributeQuery::<note::Body> {
+            of: Term::var("doc"),
+            is: Term::from(first),
+        };
+        let results = Application::perform(query, &source).try_vec().await?;
+        assert_eq!(results.len(), 0);
 
         Ok(())
     }
