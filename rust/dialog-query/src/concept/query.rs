@@ -287,7 +287,12 @@ impl ConceptQuery {
                     // component's semi-naive fixpoint is computed once
                     // and the caller's bindings join against the rows.
                     if let Some(analysis) = rules.recursion() {
-                        table = Some(fixpoint::evaluate(&app.predicate, analysis, env).await?);
+                        table = Some(match rules.continuation() {
+                            Some(continuation) => {
+                                continuation.rows(&app.predicate, analysis, env).await?
+                            }
+                            None => fixpoint::evaluate(&app.predicate, analysis, env).await?,
+                        });
                     } else {
                         plan = Some(rules.plan(&app.terms, &input));
                     }
