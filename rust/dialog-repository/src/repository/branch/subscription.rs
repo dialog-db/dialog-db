@@ -36,13 +36,18 @@
 //! simply re-derived, which handles the multi-derivation retraction
 //! case (FBF's concern) exactly, without counting.
 //!
-//! Per-entity re-derivation is sound only when a change to entity
-//! `E` can only affect rows whose subject is `E`. Attribute queries
-//! have this by construction; concept queries are gated on their
-//! resolved rule set — every rule entity-local
-//! ([`AnalyzedRule::is_entity_local`]) and non-recursive — and
-//! anything else falls back to a full recompute, which is always
-//! sound. [`recomputes`](Subscription::recomputes) and
+//! For attribute queries the affected entities are the changed
+//! facts' subjects. For concept queries they are discovered against
+//! the resolved rule set
+//! ([`affected_entities`]): entity-local rules
+//! ([`AnalyzedRule::is_entity_local`]) contribute the changed
+//! subjects, and non-local rules — concept premises reading *other*
+//! entities' facts (a conformance check, a variant's negation) —
+//! contribute delta-join heads: the changed fact bound into the
+//! premise it matches, the remaining premises joined sideways, the
+//! head variable projected. Recursion and shapes the discovery does
+//! not handle fall back to a full recompute, which is always sound.
+//! [`recomputes`](Subscription::recomputes) and
 //! [`maintenances`](Subscription::maintenances) expose which path
 //! each poll took.
 //!
@@ -61,7 +66,7 @@ use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
-use dialog_artifacts::{ArtifactSelector, Entity, KeyBytes, State};
+use dialog_artifacts::{Artifact, ArtifactSelector, Entity, KeyBytes, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -70,9 +75,9 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::Conclusion;
+use dialog_query::concept::query::affected::affected_entities;
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output as _, Restriction};
-use dialog_query::source::SelectRules;
 use dialog_search_tree::{Change, ContentAddressedStorage};
 use dialog_storage::Blake3Hash;
 use futures_util::TryStreamExt as _;
@@ -226,9 +231,14 @@ enum Touched {
     /// A rule-discovery range changed: the rule set may differ, so
     /// any row may be affected.
     Rules,
-    /// Only fact ranges changed; the set of subject entities whose
-    /// facts changed.
-    Facts(BTreeSet<Entity>),
+    /// Only fact ranges changed: the changed facts (deduplicated
+    /// across the three index orders) and their subject entities.
+    Facts {
+        /// Subjects of the changed facts.
+        subjects: BTreeSet<Entity>,
+        /// The changed facts themselves, for delta-join discovery.
+        facts: Vec<Artifact>,
+    },
 }
 
 /// The index root a revision pins, or the empty tree for an
@@ -306,8 +316,8 @@ where
                     self.revision = current;
                     return Ok(None);
                 }
-                Touched::Facts(entities) => {
-                    if let Some(delta) = self.maintain(env, &entities).await? {
+                Touched::Facts { subjects, facts } => {
+                    if let Some(delta) = self.maintain(env, &subjects, &facts).await? {
                         self.maintenances += 1;
                         self.revision = current;
                         return Ok(Some(delta));
@@ -397,7 +407,11 @@ where
 
         let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
         let mut changes = Box::pin(changes);
-        let mut entities = BTreeSet::new();
+        let mut subjects = BTreeSet::new();
+        let mut facts = Vec::new();
+        // A fact change surfaces once per index order; dedup on the
+        // datum triple.
+        let mut seen = BTreeSet::new();
         while let Some(change) = changes
             .try_next()
             .await
@@ -411,17 +425,24 @@ where
                 return Ok(Touched::Rules);
             }
             if let State::Added(datum) = &entry.value {
-                let entity = datum.entity.parse().map_err(|error| {
-                    EvaluationError::Store(format!("changed datum entity: {error:?}"))
-                })?;
-                entities.insert(entity);
+                if !seen.insert((
+                    datum.entity.clone(),
+                    datum.attribute.clone(),
+                    datum.value.clone(),
+                )) {
+                    continue;
+                }
+                let fact = Artifact::try_from(datum.clone())
+                    .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
+                subjects.insert(fact.of.clone());
+                facts.push(fact);
             }
         }
 
-        if entities.is_empty() {
+        if subjects.is_empty() {
             Ok(Touched::Nothing)
         } else {
-            Ok(Touched::Facts(entities))
+            Ok(Touched::Facts { subjects, facts })
         }
     }
 
@@ -434,15 +455,15 @@ where
     /// is what makes multi-derivation retractions exact without
     /// counting).
     ///
-    /// Returns `Ok(None)` when the query or its rule set cannot be
-    /// maintained per-entity — the query is not restrictable, a rule
-    /// reads other entities' facts (not entity-local), or the
-    /// concept is recursive — in which case the caller falls back to
-    /// a full recompute.
+    /// Returns `Ok(None)` when the affected set cannot be bounded —
+    /// the query is not restrictable, the concept is recursive, or
+    /// the delta-join discovery hit a shape it does not handle — in
+    /// which case the caller falls back to a full recompute.
     async fn maintain<Env>(
         &mut self,
         env: &Env,
-        entities: &BTreeSet<Entity>,
+        subjects: &BTreeSet<Entity>,
+        facts: &[Artifact],
     ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
     where
         Env: Provider<Get>
@@ -454,12 +475,19 @@ where
             + ConditionalSync
             + 'static,
     {
-        // Soundness gate for concept queries: every rule must be
-        // entity-local (reads only `?this`'s facts) and
-        // non-recursive, otherwise a change to entity E can affect
-        // other entities' rows and per-entity re-derivation would
-        // miss them.
-        if let Some(concept) = self.query.concept() {
+        // For a concept query the affected heads are discovered
+        // against the resolved rule set: entity-local rules
+        // contribute the changed subjects, non-local rules (concept
+        // premises: conformance checks, variant negations)
+        // contribute delta-join heads — the changed fact bound into
+        // the premise it matches, remaining premises joined
+        // sideways, head projected. `None` (recursion, unhandled
+        // shape) falls back to full recompute. For a plain attribute
+        // query the affected heads are just the changed subjects.
+        //
+        // The discovery evaluates against the demand-recording
+        // environment, so the reads it depends on join the cover.
+        let entities: BTreeSet<Entity> = if let Some(concept) = self.query.concept() {
             let operator = Identify
                 .perform(env)
                 .await
@@ -469,18 +497,17 @@ where
             let tombstones = tombstones_from(&overlay);
             let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
                 .with_demand(self.demand.clone());
-            let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
-            if rules.recursion().is_some() {
-                return Ok(None);
+            match affected_entities(concept, facts, &query_env).await? {
+                Some(entities) => entities,
+                None => return Ok(None),
             }
-            if !rules.rules().all(|rule| rule.analysis().is_entity_local()) {
-                return Ok(None);
-            }
-        }
+        } else {
+            subjects.clone()
+        };
 
         let mut asserted = Vec::new();
         let mut retracted = Vec::new();
-        for entity in entities {
+        for entity in &entities {
             let scoped = match self.query.restrict(entity) {
                 Restriction::Scoped(query) => query,
                 Restriction::Unaffected => continue,
@@ -557,6 +584,7 @@ mod tests {
     use crate::helpers::{test_operator_with_profile, test_repo};
     use dialog_artifacts::{Entity, Value};
     use dialog_query::attribute::The;
+    use dialog_query::types::Any;
     use dialog_query::{AttributeQuery, Claim, Term, the};
 
     /// A standing query over every `person/name` fact.
@@ -970,6 +998,517 @@ mod tests {
         expected.sort();
         assert_eq!(retained, expected);
         assert_eq!(subscription.maintenances(), 1);
+        Ok(())
+    }
+
+    mod concepts {
+        //! Derived concepts + attributes shared by the incremental
+        //! maintenance tests below.
+
+        use dialog_artifacts::Entity;
+        use dialog_query::{Attribute, Concept};
+
+        /// A badge number (`credential/badge`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("credential")]
+        pub struct Badge(pub String);
+
+        /// A report's display name (`report/name`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("report")]
+        pub struct Name(pub String);
+
+        /// The report's manager (`report/manager`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("report")]
+        pub struct Manager(pub Entity);
+
+        /// Someone holding a badge.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct BadgeHolder {
+            /// The badge holder entity.
+            pub this: Entity,
+            /// Their badge number.
+            pub badge: Badge,
+        }
+
+        /// Someone reporting to a badge holder.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Report {
+            /// The report entity.
+            pub this: Entity,
+            /// Their display name.
+            pub name: Name,
+            /// Their manager, who must hold a badge.
+            #[dialog(conforms = BadgeHolder)]
+            pub manager: Manager,
+        }
+
+        /// An email handle (`comm/email`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("comm")]
+        pub struct Email(pub String);
+
+        /// A phone handle (`comm/phone`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("comm")]
+        pub struct Phone(pub String);
+
+        /// A contact handle (`contact/handle`) — the variant
+        /// conclusion.
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("contact")]
+        pub struct Handle(pub String);
+
+        /// A user with an email address.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct WithEmail {
+            /// The user entity.
+            pub this: Entity,
+            /// Their email handle.
+            pub handle: Email,
+        }
+
+        /// A user with a phone number.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct WithPhone {
+            /// The user entity.
+            pub this: Entity,
+            /// Their phone handle.
+            pub handle: Phone,
+        }
+
+        /// The preferred way to reach a user: email if they have
+        /// one, otherwise phone.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Contact {
+            /// The user entity.
+            pub this: Entity,
+            /// The winning handle.
+            pub handle: Handle,
+        }
+
+        /// A parent edge (`family/parent`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("family")]
+        pub struct Parent(pub Entity);
+
+        /// An ancestor edge (`family/ancestor`) — the recursive
+        /// conclusion.
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("family")]
+        pub struct Ancestor(pub Entity);
+
+        /// Direct parenthood.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct HasParent {
+            /// The child entity.
+            pub this: Entity,
+            /// Their parent.
+            pub parent: Parent,
+        }
+
+        /// The transitive closure of parenthood.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct HasAncestor {
+            /// The descendant entity.
+            pub this: Entity,
+            /// One of their ancestors.
+            pub ancestor: Ancestor,
+        }
+    }
+
+    /// Stage the `db.rule/*` facts that persist a deductive rule
+    /// durably (the storage shape from `crate::rules`).
+    fn with_rule<'t>(
+        transaction: crate::Transaction<'t>,
+        rule: &dialog_query::DeductiveRule,
+    ) -> crate::Transaction<'t> {
+        let entity = rule.this();
+        transaction
+            .assert(
+                the!("db.rule/conclusion")
+                    .of(entity.clone())
+                    .is(rule.conclusion().this()),
+            )
+            .assert(the!("db.rule/source").of(entity).is(rule.encode()))
+    }
+
+    /// A rule `conclusion :- Concept(target, terms)` built from
+    /// derived concept descriptors, storable as a durable rule.
+    fn concept_rule(
+        conclusion: &dialog_query::ConceptDescriptor,
+        premises: Vec<dialog_query::Premise>,
+    ) -> dialog_query::DeductiveRule {
+        dialog_query::DeductiveRule::new(conclusion.clone(), premises).expect("rule compiles")
+    }
+
+    fn concept_premise(
+        target: &dialog_query::ConceptDescriptor,
+        bindings: &[(&str, &str)],
+    ) -> dialog_query::Premise {
+        let mut terms = dialog_query::Parameters::new();
+        for (param, variable) in bindings {
+            terms.insert((*param).to_string(), Term::<Any>::var(*variable));
+        }
+        dialog_query::Premise::Assert(dialog_query::Proposition::Concept(
+            dialog_query::ConceptQuery {
+                terms,
+                predicate: target.clone(),
+            },
+        ))
+    }
+
+    fn negated_concept_premise(
+        target: &dialog_query::ConceptDescriptor,
+        bindings: &[(&str, &str)],
+    ) -> dialog_query::Premise {
+        let mut terms = dialog_query::Parameters::new();
+        for (param, variable) in bindings {
+            terms.insert((*param).to_string(), Term::<Any>::var(*variable));
+        }
+        dialog_query::Premise::Unless(dialog_query::Negation(dialog_query::Proposition::Concept(
+            dialog_query::ConceptQuery {
+                terms,
+                predicate: target.clone(),
+            },
+        )))
+    }
+
+    /// Piece 1: a derived `Query<C>` subscription over an
+    /// entity-local concept is maintained incrementally.
+    #[dialog_common::test]
+    async fn it_maintains_derived_concept_subscriptions() -> anyhow::Result<()> {
+        use concepts::{Badge, BadgeHolder};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(Badge::of(alice.clone()).is("A-1"))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<BadgeHolder>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted,
+            vec![BadgeHolder {
+                this: alice.clone(),
+                badge: Badge("A-1".into()),
+            }]
+        );
+        assert_eq!(subscription.recomputes(), 1);
+
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(Badge::of(bob.clone()).is("B-2"))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("covered write");
+        assert_eq!(
+            delta.asserted,
+            vec![BadgeHolder {
+                this: bob.clone(),
+                badge: Badge("B-2".into()),
+            }]
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "the derived query restricted to the touched entity"
+        );
+        assert_eq!(subscription.maintenances(), 1);
+        Ok(())
+    }
+
+    /// Piece 2, conformance: a badge change for a *manager* affects
+    /// the *report* entity's rows (cross-entity), discovered by the
+    /// delta-join and maintained without a recompute.
+    #[dialog_common::test]
+    async fn it_maintains_cross_entity_conformance() -> anyhow::Result<()> {
+        use concepts::{Badge, Manager, Name, Report};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?; // manager WITH a badge
+        let carol = Entity::new()?; // manager WITHOUT a badge (yet)
+        let bob = Entity::new()?; // reports to alice
+        let mallory = Entity::new()?; // reports to carol
+
+        branch
+            .transaction()
+            .assert(Badge::of(alice.clone()).is("A-1"))
+            .assert(Name::of(bob.clone()).is("Bob"))
+            .assert(Manager::of(bob.clone()).is(alice.clone()))
+            .assert(Name::of(mallory.clone()).is("Mallory"))
+            .assert(Manager::of(mallory.clone()).is(carol.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<Report>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted,
+            vec![Report {
+                this: bob.clone(),
+                name: Name("Bob".into()),
+                manager: Manager(alice.clone()),
+            }],
+            "only the report whose manager holds a badge conforms"
+        );
+
+        // Carol gets a badge: mallory's row appears, though the
+        // changed fact's subject is carol, not mallory.
+        branch
+            .transaction()
+            .assert(Badge::of(carol.clone()).is("C-3"))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("cross-entity effect");
+        assert_eq!(
+            delta.asserted,
+            vec![Report {
+                this: mallory.clone(),
+                name: Name("Mallory".into()),
+                manager: Manager(carol.clone()),
+            }]
+        );
+        assert!(delta.retracted.is_empty());
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "the affected report was discovered by the delta-join, not a recompute"
+        );
+        assert_eq!(subscription.maintenances(), 1);
+
+        // And the retraction flows back the same way.
+        branch
+            .transaction()
+            .retract(Badge::of(carol.clone()).is("C-3"))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("retraction");
+        assert_eq!(
+            delta.retracted,
+            vec![Report {
+                this: mallory.clone(),
+                name: Name("Mallory".into()),
+                manager: Manager(carol.clone()),
+            }]
+        );
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 2);
+        Ok(())
+    }
+
+    /// Piece 2, variants: committing a rule re-triggers via the
+    /// rule-discovery range (full recompute — the rule set changed);
+    /// afterwards a fact write that flips a negated variant is
+    /// maintained incrementally through the delta-join.
+    #[dialog_common::test]
+    async fn it_maintains_variant_negation_flips() -> anyhow::Result<()> {
+        use concepts::{Contact, Email, Handle, Phone, WithEmail, WithPhone};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let contact = Contact::descriptor().clone();
+        let email = WithEmail::descriptor().clone();
+        let phone = WithPhone::descriptor().clone();
+
+        let email_rule = concept_rule(
+            &contact,
+            vec![concept_premise(
+                &email,
+                &[("this", "this"), ("handle", "handle")],
+            )],
+        );
+        let phone_rule = concept_rule(
+            &contact,
+            vec![
+                concept_premise(&phone, &[("this", "this"), ("handle", "handle")]),
+                negated_concept_premise(&email, &[("this", "this")]),
+            ],
+        );
+
+        let bob = Entity::new()?;
+        let transaction = branch
+            .transaction()
+            .assert(Phone::of(bob.clone()).is("555-0100"));
+        with_rule(transaction, &email_rule)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<Contact>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(
+            initial.asserted.is_empty(),
+            "only the email rule is installed and bob has no email"
+        );
+
+        // Installing the phone rule lands in the rule-discovery
+        // range: recompute.
+        with_rule(branch.transaction(), &phone_rule)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("rule installed");
+        assert_eq!(
+            delta.asserted,
+            vec![Contact {
+                this: bob.clone(),
+                handle: Handle("555-0100".into()),
+            }]
+        );
+        assert_eq!(subscription.recomputes(), 2, "a rule-set change recomputes");
+
+        // An email for bob flips the negated variant: the phone row
+        // retracts and the email row asserts — maintained, not
+        // recomputed.
+        branch
+            .transaction()
+            .assert(Email::of(bob.clone()).is("bob@mail"))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("variant flip");
+        assert_eq!(
+            delta.asserted,
+            vec![Contact {
+                this: bob.clone(),
+                handle: Handle("bob@mail".into()),
+            }]
+        );
+        assert_eq!(
+            delta.retracted,
+            vec![Contact {
+                this: bob.clone(),
+                handle: Handle("555-0100".into()),
+            }]
+        );
+        assert_eq!(subscription.recomputes(), 2, "the flip was maintained");
+        assert_eq!(subscription.maintenances(), 1);
+        Ok(())
+    }
+
+    /// Piece 3, dynamic demand: a subscription over a recursive
+    /// concept keeps answering as its demand cone grows with the
+    /// data — each edge extending the chain re-triggers and derives
+    /// exactly the new closure pairs. (Recursive closures re-derive
+    /// via the fixpoint; incremental fixpoint continuation is a
+    /// recorded follow-up.)
+    #[dialog_common::test]
+    async fn it_grows_the_demand_cone_with_recursive_rules() -> anyhow::Result<()> {
+        use concepts::{Ancestor, HasAncestor, HasParent, Parent};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let ancestor = HasAncestor::descriptor().clone();
+        let parent = HasParent::descriptor().clone();
+
+        let base = concept_rule(
+            &ancestor,
+            vec![concept_premise(
+                &parent,
+                &[("this", "this"), ("parent", "ancestor")],
+            )],
+        );
+        let step = concept_rule(
+            &ancestor,
+            vec![
+                concept_premise(&parent, &[("this", "this"), ("parent", "p")]),
+                concept_premise(&ancestor, &[("this", "p"), ("ancestor", "ancestor")]),
+            ],
+        );
+
+        let a = Entity::new()?;
+        let b = Entity::new()?;
+        let c = Entity::new()?;
+        let d = Entity::new()?;
+        let transaction = branch
+            .transaction()
+            .assert(Parent::of(b.clone()).is(a.clone()));
+        with_rule(with_rule(transaction, &base), &step)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<HasAncestor>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            initial.asserted,
+            vec![HasAncestor {
+                this: b.clone(),
+                ancestor: Ancestor(a.clone()),
+            }]
+        );
+
+        // Extend the chain: the closure grows by two pairs.
+        branch
+            .transaction()
+            .assert(Parent::of(c.clone()).is(b.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("cone grows");
+        let mut asserted = delta.asserted.clone();
+        asserted.sort_by_key(|row| format!("{row:?}"));
+        let mut expected = vec![
+            HasAncestor {
+                this: c.clone(),
+                ancestor: Ancestor(b.clone()),
+            },
+            HasAncestor {
+                this: c.clone(),
+                ancestor: Ancestor(a.clone()),
+            },
+        ];
+        expected.sort_by_key(|row| format!("{row:?}"));
+        assert_eq!(asserted, expected);
+        assert!(delta.retracted.is_empty());
+
+        // And again: the frontier extended by the previous poll is
+        // itself demanded, so the next extension re-triggers too.
+        branch
+            .transaction()
+            .assert(Parent::of(d.clone()).is(c.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("cone grows again");
+        assert_eq!(delta.asserted.len(), 3, "(d,c), (d,b), (d,a)");
+        assert!(delta.retracted.is_empty());
         Ok(())
     }
 }
