@@ -92,7 +92,7 @@ pub enum DialogAsyncError {
 pub async fn spawn<F>(future: F) -> Result<F::Output, DialogAsyncError>
 where
     F: Future + ConditionalSend + 'static,
-    F::Output: Send + 'static,
+    F::Output: ConditionalSend + 'static,
 {
     #[cfg(target_arch = "wasm32")]
     {

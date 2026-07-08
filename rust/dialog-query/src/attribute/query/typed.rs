@@ -14,7 +14,7 @@ use crate::types::Scalar;
 use crate::{Entity, EvaluationError, Premise, Proposition, Term, Value};
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSend, ConditionalSync};
 
 /// A typed attribute query with named fields for entity and value.
 ///
@@ -77,7 +77,7 @@ where
 
 impl<A> Application for StaticAttributeQuery<A>
 where
-    A: Attribute + Descriptor<AttributeDescriptor> + Clone + Send + 'static,
+    A: Attribute + Descriptor<AttributeDescriptor> + Clone + ConditionalSend + 'static,
     A: From<A::Type>,
     A::Type: Scalar + TryFrom<Value>,
 {
