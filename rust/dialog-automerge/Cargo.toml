@@ -17,6 +17,14 @@ dialog-search-tree = { workspace = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
 
+# automerge depends on the getrandom 0.4 series, whose wasm32-unknown-unknown
+# backend is feature-gated: consuming the renamed workspace entry here turns
+# `wasm_js` on (feature unification) wherever this crate is in the graph. The
+# matching `--cfg getrandom_backend="wasm_js"` rustflag lives in
+# `.cargo/config.toml`.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom_04 = { workspace = true }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("web-integration-tests"))', "cfg(dialog_test_wasm_integration)"] }
 
@@ -25,5 +33,9 @@ anyhow = { workspace = true }
 dialog-operator = { workspace = true }
 dialog-repository = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true }
-proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+
+# proptest's process-fork machinery (rusty-fork, wait-timeout) does not build
+# on wasm32; the property tests are native-only.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+proptest = { workspace = true }

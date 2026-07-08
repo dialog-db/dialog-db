@@ -2,6 +2,14 @@
 //! §4.3): fold at open, mid-session absorption without losing pending edits,
 //! progressive open from the winner sibling, and physical convergence — one
 //! stored sibling — on commit.
+//!
+//! Native-only for now: on wasm32 `Record`'s memo cache erases without
+//! `Send`/`Sync` (the `ConditionalSend` convention), while the typed
+//! attribute read path (`StaticAttributeQuery`'s `Application` impl) carries
+//! a hard `Send` bound — so record-typed attributes do not yet compile for
+//! wasm anywhere in the workspace (dialog-query's own record tests
+//! included). Lift this gate when that convention mismatch is resolved.
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::str::FromStr as _;
 

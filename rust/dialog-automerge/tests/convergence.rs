@@ -2,6 +2,10 @@
 //! (`notes/automerge-integration-spec.md` §3): saved bytes are canonical —
 //! replicas holding the same change-set encode byte-identically regardless of
 //! the order changes were applied — and merge is idempotent and monotone.
+//!
+//! Native-only: proptest's process-fork machinery does not build on wasm32,
+//! and the properties under test are platform-independent byte identities.
+#![cfg(not(target_arch = "wasm32"))]
 
 use dialog_artifacts::{Record, RecordFormat};
 use dialog_automerge::TextDocument;
