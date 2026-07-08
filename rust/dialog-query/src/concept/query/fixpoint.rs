@@ -561,8 +561,9 @@ mod tests {
             let ancestor = matched.lookup(&Term::<Any>::var("relative"))?.content()?;
             pairs.push((who, ancestor));
         }
+        // Deliberately no dedup: the fixpoint must emit exactly one
+        // row per distinct pair, so a duplicate is a test failure.
         pairs.sort_by_key(|pair| format!("{pair:?}"));
-        pairs.dedup();
         Ok(pairs)
     }
 
@@ -708,6 +709,675 @@ mod tests {
             Value::Entity(alice),
             "the caller's binding filtered the fixpoint rows"
         );
+        Ok(())
+    }
+
+    /// Ported from `query/test/loop.spec.js` "test ancestor": a
+    /// six-person linear chain (Eve is the root ancestor) derives
+    /// all fifteen ancestor pairs.
+    #[dialog_common::test]
+    async fn it_derives_all_pairs_over_a_deep_chain() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // alice -> bob -> mallory -> jack -> adam -> eve
+        let chain: Vec<Entity> = (0..6).map(|_| Entity::new()).collect::<Result<_, _>>()?;
+        let mut transaction = branch.transaction();
+        for pair in chain.windows(2) {
+            transaction = transaction.assert(
+                the!("family/parent")
+                    .of(pair[0].clone())
+                    .is(pair[1].clone()),
+            );
+        }
+        transaction.commit().perform(&operator).await?;
+
+        let concept = ancestor_concept();
+        let mut registry = RuleRegistry::new();
+        for rule in ancestor_rules(&concept) {
+            registry.register(rule)?;
+        }
+
+        let source = TestEnv::new(&branch, &operator, registry);
+        let pairs = ancestor_pairs(&source, query_terms()).await?;
+
+        // Every strictly-later chain member is an ancestor of every
+        // earlier one: 5 + 4 + 3 + 2 + 1 = 15 pairs.
+        let mut expected = Vec::new();
+        for (child_index, child) in chain.iter().enumerate() {
+            for ancestor in chain.iter().skip(child_index + 1) {
+                expected.push((
+                    Value::Entity(child.clone()),
+                    Value::Entity(ancestor.clone()),
+                ));
+            }
+        }
+        expected.sort_by_key(|pair| format!("{pair:?}"));
+        assert_eq!(pairs.len(), 15, "fifteen distinct pairs, no duplicates");
+        assert_eq!(pairs, expected);
+        Ok(())
+    }
+
+    /// Ported from `query/test/loop.spec.js` "complex ancestor
+    /// test": a family tree with multiple paths to the same nodes
+    /// derives exactly 29 unique ancestor relationships (10 direct,
+    /// 19 transitive), with every multi-path derivation collapsed
+    /// to one row.
+    #[dialog_common::test]
+    async fn it_derives_the_multi_path_family_tree() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let charlie = Entity::new()?;
+        let david = Entity::new()?;
+        let mallory = Entity::new()?;
+        let jack = Entity::new()?;
+        let adam = Entity::new()?;
+        let eve = Entity::new()?;
+        let dave = Entity::new()?;
+
+        // Three branches from alice converging on jack, then a
+        // common tail jack -> adam -> eve. Both bob and david have
+        // mallory as parent; both mallory and dave have jack.
+        let edges = [
+            (&alice, &bob),
+            (&bob, &mallory),
+            (&mallory, &jack),
+            (&alice, &charlie),
+            (&charlie, &dave),
+            (&dave, &jack),
+            (&alice, &david),
+            (&david, &mallory),
+            (&jack, &adam),
+            (&adam, &eve),
+        ];
+        let mut transaction = branch.transaction();
+        for (child, parent) in edges {
+            transaction = transaction.assert(
+                the!("family/parent")
+                    .of((*child).clone())
+                    .is((*parent).clone()),
+            );
+        }
+        transaction.commit().perform(&operator).await?;
+
+        let concept = ancestor_concept();
+        let mut registry = RuleRegistry::new();
+        for rule in ancestor_rules(&concept) {
+            registry.register(rule)?;
+        }
+
+        let source = TestEnv::new(&branch, &operator, registry);
+        let pairs = ancestor_pairs(&source, query_terms()).await?;
+
+        assert_eq!(
+            pairs.len(),
+            29,
+            "10 direct + 19 transitive unique relationships, multi-path \
+             derivations deduplicated"
+        );
+        let expect = |child: &Entity, ancestor: &Entity| {
+            let pair = (
+                Value::Entity(child.clone()),
+                Value::Entity(ancestor.clone()),
+            );
+            assert!(pairs.contains(&pair), "missing pair {pair:?}");
+        };
+        // The multi-path derivations called out in the original test.
+        expect(&alice, &mallory); // via bob or via david
+        expect(&alice, &jack); // via bob/mallory, david/mallory, or charlie/dave
+        expect(&alice, &adam); // via any path to jack
+        expect(&alice, &eve); // via any path to adam
+        expect(&bob, &eve); // via mallory/jack/adam
+        expect(&charlie, &eve); // via dave/jack/adam
+        Ok(())
+    }
+
+    /// Ported from `query/test/loop.spec.js` "test recursion": a
+    /// non-recursive concept consumes a recursive one. `List` is the
+    /// transitive closure of `list/next`; `Connection` joins each
+    /// derived link with the target's `meta/name`. The outer concept
+    /// evaluates top-down and enters the fixpoint at the `List`
+    /// boundary.
+    #[dialog_common::test]
+    async fn it_consumes_a_recursive_concept_from_a_plain_rule() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let n0 = Entity::new()?;
+        let n1 = Entity::new()?;
+        let n2 = Entity::new()?;
+        let n3 = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("list/next").of(n0.clone()).is(n1.clone()))
+            .assert(the!("list/next").of(n1.clone()).is(n2.clone()))
+            .assert(the!("list/next").of(n2.clone()).is(n3.clone()))
+            .assert(the!("meta/name").of(n1.clone()).is("a".to_string()))
+            .assert(the!("meta/name").of(n2.clone()).is("b".to_string()))
+            .assert(the!("meta/name").of(n3.clone()).is("c".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // List { this, next }: transitive closure of list/next.
+        let list = ConceptDescriptor::try_from(vec![(
+            "next",
+            AttributeDescriptor::new(the!("list/link"), "", Cardinality::Many, Some(Type::Entity)),
+        )])?;
+        let direct = DeductiveRule::new(
+            list.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("list/next")),
+                    Term::<Entity>::var("this"),
+                    Term::var("next"),
+                    Term::blank(),
+                    Some(Cardinality::Many),
+                )
+                .into(),
+            ],
+        )?;
+        let mut step_terms = Parameters::new();
+        step_terms.insert("this".to_string(), Term::<Any>::var("hop"));
+        step_terms.insert("next".to_string(), Term::<Any>::var("next"));
+        let transitive = DeductiveRule::new(
+            list.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("list/next")),
+                    Term::<Entity>::var("this"),
+                    Term::var("hop"),
+                    Term::blank(),
+                    Some(Cardinality::Many),
+                )
+                .into(),
+                Premise::Assert(Proposition::Concept(ConceptQuery {
+                    terms: step_terms,
+                    predicate: list.clone(),
+                })),
+            ],
+        )?;
+
+        // Connection { this, to, name }: every reachable node with
+        // its name. Not itself recursive.
+        let connection = ConceptDescriptor::try_from(vec![
+            (
+                "to",
+                AttributeDescriptor::new(
+                    the!("conn/to"),
+                    "",
+                    Cardinality::Many,
+                    Some(Type::Entity),
+                ),
+            ),
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("conn/name"),
+                    "",
+                    Cardinality::Many,
+                    Some(Type::String),
+                ),
+            ),
+        ])?;
+        let mut link_terms = Parameters::new();
+        link_terms.insert("this".to_string(), Term::<Any>::var("this"));
+        link_terms.insert("next".to_string(), Term::<Any>::var("to"));
+        let connection_rule = DeductiveRule::new(
+            connection.clone(),
+            vec![
+                Premise::Assert(Proposition::Concept(ConceptQuery {
+                    terms: link_terms,
+                    predicate: list.clone(),
+                })),
+                AttributeQuery::new(
+                    Term::from(the!("meta/name")),
+                    Term::<Entity>::var("to"),
+                    Term::var("name"),
+                    Term::blank(),
+                    Some(Cardinality::One),
+                )
+                .into(),
+            ],
+        )?;
+
+        let mut registry = RuleRegistry::new();
+        registry.register(direct)?;
+        registry.register(transitive)?;
+        registry.register(connection_rule)?;
+        assert!(registry.is_recursive(&list.this())?);
+        assert!(
+            !registry.is_recursive(&connection.this())?,
+            "the consuming concept is outside the cycle"
+        );
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("from"));
+        terms.insert("to".to_string(), Term::<Any>::var("to"));
+        terms.insert("name".to_string(), Term::<Any>::var("name"));
+        let source = TestEnv::new(&branch, &operator, registry);
+        let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: connection,
+        }))])
+        .plan(&Environment::new())
+        .expect("plans");
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        let mut connections = Vec::new();
+        for matched in results {
+            connections.push((
+                matched.lookup(&Term::<Any>::var("from"))?.content()?,
+                matched.lookup(&Term::<Any>::var("to"))?.content()?,
+                matched.lookup(&Term::<Any>::var("name"))?.content()?,
+            ));
+        }
+        connections.sort_by_key(|row| format!("{row:?}"));
+        let mut expected = vec![
+            (
+                Value::Entity(n0.clone()),
+                Value::Entity(n1.clone()),
+                Value::String("a".into()),
+            ),
+            (
+                Value::Entity(n1.clone()),
+                Value::Entity(n2.clone()),
+                Value::String("b".into()),
+            ),
+            (
+                Value::Entity(n0.clone()),
+                Value::Entity(n2.clone()),
+                Value::String("b".into()),
+            ),
+            (
+                Value::Entity(n2.clone()),
+                Value::Entity(n3.clone()),
+                Value::String("c".into()),
+            ),
+            (
+                Value::Entity(n1.clone()),
+                Value::Entity(n3.clone()),
+                Value::String("c".into()),
+            ),
+            (
+                Value::Entity(n0.clone()),
+                Value::Entity(n3.clone()),
+                Value::String("c".into()),
+            ),
+        ];
+        expected.sort_by_key(|row| format!("{row:?}"));
+        assert_eq!(connections, expected, "every reachable node, named");
+        Ok(())
+    }
+
+    /// Ported from `query/test/loop.spec.js` "test not really
+    /// recursive": a concept with a base rule plus a rule that
+    /// re-derives the concept from itself. The recursive rule adds
+    /// nothing new, so the fixpoint converges to exactly the base
+    /// rows.
+    #[dialog_common::test]
+    async fn it_converges_when_the_recursive_rule_adds_nothing() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let x = Entity::new()?;
+        let y = Entity::new()?;
+        let z = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("meta/name").of(x.clone()).is("a".to_string()))
+            .assert(the!("meta/name").of(y.clone()).is("b".to_string()))
+            .assert(the!("meta/name").of(z.clone()).is("c".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let person = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(the!("query/name"), "", Cardinality::One, Some(Type::String)),
+        )])?;
+        let base = DeductiveRule::new(
+            person.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("meta/name")),
+                    Term::<Entity>::var("this"),
+                    Term::var("name"),
+                    Term::blank(),
+                    Some(Cardinality::One),
+                )
+                .into(),
+            ],
+        )?;
+        let mut self_terms = Parameters::new();
+        self_terms.insert("this".to_string(), Term::<Any>::var("this"));
+        self_terms.insert("name".to_string(), Term::<Any>::var("name"));
+        let recur = DeductiveRule::new(
+            person.clone(),
+            vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms: self_terms,
+                predicate: person.clone(),
+            }))],
+        )?;
+
+        let mut registry = RuleRegistry::new();
+        registry.register(base)?;
+        registry.register(recur)?;
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("who"));
+        terms.insert("name".to_string(), Term::<Any>::var("name"));
+        let source = TestEnv::new(&branch, &operator, registry);
+        let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: person,
+        }))])
+        .plan(&Environment::new())
+        .expect("plans");
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        let mut names = Vec::new();
+        for matched in &results {
+            names.push(matched.lookup(&Term::<Any>::var("name"))?.content()?);
+        }
+        names.sort_by_key(|name| format!("{name:?}"));
+        assert_eq!(
+            names,
+            vec![
+                Value::String("a".into()),
+                Value::String("b".into()),
+                Value::String("c".into()),
+            ],
+            "exactly the base rows, once each"
+        );
+        Ok(())
+    }
+
+    /// Ported from `query/test/loop.spec.js` "test tautology", with
+    /// least-fixpoint semantics: a single rule that conjoins the
+    /// base scan with the concept itself has no non-recursive rule
+    /// to seed the table, so nothing is ever derivable and the
+    /// fixpoint converges to the empty set. (The legacy JS engine
+    /// returned the base rows here; classical Datalog says empty,
+    /// and that is what this engine implements.) The implicit rule
+    /// scans the conclusion attribute's own facts, of which there
+    /// are none.
+    #[dialog_common::test]
+    async fn it_derives_nothing_for_a_tautology() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let x = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("meta/name").of(x.clone()).is("a".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let tautology = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                the!("tautology/name"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])?;
+        let mut self_terms = Parameters::new();
+        self_terms.insert("this".to_string(), Term::<Any>::var("this"));
+        self_terms.insert("name".to_string(), Term::<Any>::var("name"));
+        let rule = DeductiveRule::new(
+            tautology.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("meta/name")),
+                    Term::<Entity>::var("this"),
+                    Term::var("name"),
+                    Term::blank(),
+                    Some(Cardinality::One),
+                )
+                .into(),
+                Premise::Assert(Proposition::Concept(ConceptQuery {
+                    terms: self_terms,
+                    predicate: tautology.clone(),
+                })),
+            ],
+        )?;
+
+        let mut registry = RuleRegistry::new();
+        registry.register(rule)?;
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("who"));
+        terms.insert("name".to_string(), Term::<Any>::var("name"));
+        let source = TestEnv::new(&branch, &operator, registry);
+        let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: tautology,
+        }))])
+        .plan(&Environment::new())
+        .expect("plans");
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        assert!(
+            results.is_empty(),
+            "no base case, no derivations; and the query terminates"
+        );
+        Ok(())
+    }
+
+    /// The nl-datalog demo program (alexwarth.github.io/projects/
+    /// nl-datalog): Simpsons facts with derived `parent` and
+    /// `grandfather` rules, extended with the recursive `ancestor`.
+    /// "Homer is Bart's father. Homer is Lisa's father. Abe is
+    /// Homer's father." Abe is the grandfather of Bart and Lisa,
+    /// and the ancestor closure has exactly five pairs.
+    #[dialog_common::test]
+    async fn it_derives_the_simpsons_program() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let homer = Entity::new()?;
+        let bart = Entity::new()?;
+        let lisa = Entity::new()?;
+        let abe = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("family/father").of(bart.clone()).is(homer.clone()))
+            .assert(the!("family/father").of(lisa.clone()).is(homer.clone()))
+            .assert(the!("family/father").of(homer.clone()).is(abe.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // parent(this, parent) :- father(this, parent).
+        let parent = ConceptDescriptor::try_from(vec![(
+            "parent",
+            AttributeDescriptor::new(
+                the!("family/derived-parent"),
+                "",
+                Cardinality::Many,
+                Some(Type::Entity),
+            ),
+        )])?;
+        let parent_rule = DeductiveRule::new(
+            parent.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("family/father")),
+                    Term::<Entity>::var("this"),
+                    Term::var("parent"),
+                    Term::blank(),
+                    Some(Cardinality::One),
+                )
+                .into(),
+            ],
+        )?;
+
+        // grandfather(this, g) :- father(z, g), parent(this, z).
+        let grandfather = ConceptDescriptor::try_from(vec![(
+            "grandfather",
+            AttributeDescriptor::new(
+                the!("family/grandfather"),
+                "",
+                Cardinality::Many,
+                Some(Type::Entity),
+            ),
+        )])?;
+        let mut parent_terms = Parameters::new();
+        parent_terms.insert("this".to_string(), Term::<Any>::var("this"));
+        parent_terms.insert("parent".to_string(), Term::<Any>::var("z"));
+        let grandfather_rule = DeductiveRule::new(
+            grandfather.clone(),
+            vec![
+                Premise::Assert(Proposition::Concept(ConceptQuery {
+                    terms: parent_terms,
+                    predicate: parent.clone(),
+                })),
+                AttributeQuery::new(
+                    Term::from(the!("family/father")),
+                    Term::<Entity>::var("z"),
+                    Term::var("grandfather"),
+                    Term::blank(),
+                    Some(Cardinality::One),
+                )
+                .into(),
+            ],
+        )?;
+
+        // ancestor: the recursive extension over the same facts.
+        let ancestor = ConceptDescriptor::try_from(vec![(
+            "ancestor",
+            AttributeDescriptor::new(
+                the!("family/forebear"),
+                "",
+                Cardinality::Many,
+                Some(Type::Entity),
+            ),
+        )])?;
+        let ancestor_base = DeductiveRule::new(
+            ancestor.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("family/father")),
+                    Term::<Entity>::var("this"),
+                    Term::var("ancestor"),
+                    Term::blank(),
+                    Some(Cardinality::One),
+                )
+                .into(),
+            ],
+        )?;
+        let mut step_terms = Parameters::new();
+        step_terms.insert("this".to_string(), Term::<Any>::var("f"));
+        step_terms.insert("ancestor".to_string(), Term::<Any>::var("ancestor"));
+        let ancestor_step = DeductiveRule::new(
+            ancestor.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("family/father")),
+                    Term::<Entity>::var("this"),
+                    Term::var("f"),
+                    Term::blank(),
+                    Some(Cardinality::One),
+                )
+                .into(),
+                Premise::Assert(Proposition::Concept(ConceptQuery {
+                    terms: step_terms,
+                    predicate: ancestor.clone(),
+                })),
+            ],
+        )?;
+
+        let mut registry = RuleRegistry::new();
+        registry.register(parent_rule)?;
+        registry.register(grandfather_rule)?;
+        registry.register(ancestor_base)?;
+        registry.register(ancestor_step)?;
+
+        let source = TestEnv::new(&branch, &operator, registry);
+
+        // Who is whose grandfather?
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("grandchild"));
+        terms.insert("grandfather".to_string(), Term::<Any>::var("grandfather"));
+        let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: grandfather,
+        }))])
+        .plan(&Environment::new())
+        .expect("plans");
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+        let mut grandchildren = Vec::new();
+        for matched in &results {
+            let grandchild = matched.lookup(&Term::<Any>::var("grandchild"))?.content()?;
+            assert_eq!(
+                matched
+                    .lookup(&Term::<Any>::var("grandfather"))?
+                    .content()?,
+                Value::Entity(abe.clone()),
+                "Abe is the only grandfather"
+            );
+            grandchildren.push(grandchild);
+        }
+        grandchildren.sort_by_key(|value| format!("{value:?}"));
+        let mut expected = vec![Value::Entity(bart.clone()), Value::Entity(lisa.clone())];
+        expected.sort_by_key(|value| format!("{value:?}"));
+        assert_eq!(grandchildren, expected, "Abe has two grandchildren");
+
+        // The full ancestor closure: five pairs.
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("who"));
+        terms.insert("ancestor".to_string(), Term::<Any>::var("relative"));
+        let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: ancestor,
+        }))])
+        .plan(&Environment::new())
+        .expect("plans");
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+        let mut pairs = Vec::new();
+        for matched in &results {
+            pairs.push((
+                matched.lookup(&Term::<Any>::var("who"))?.content()?,
+                matched.lookup(&Term::<Any>::var("relative"))?.content()?,
+            ));
+        }
+        pairs.sort_by_key(|pair| format!("{pair:?}"));
+        let mut expected = vec![
+            (Value::Entity(bart.clone()), Value::Entity(homer.clone())),
+            (Value::Entity(lisa.clone()), Value::Entity(homer.clone())),
+            (Value::Entity(homer.clone()), Value::Entity(abe.clone())),
+            (Value::Entity(bart.clone()), Value::Entity(abe.clone())),
+            (Value::Entity(lisa.clone()), Value::Entity(abe.clone())),
+        ];
+        expected.sort_by_key(|pair| format!("{pair:?}"));
+        assert_eq!(pairs, expected);
         Ok(())
     }
 }
