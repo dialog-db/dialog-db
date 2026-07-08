@@ -17,6 +17,7 @@
 //!   Widens the inner descriptor's kind with the `Nothing` atom via
 //!   [`type_system::Type::optional`].
 
+use crate::attribute::query::Resolution;
 use crate::type_system;
 use crate::type_system::Type as Kind;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -259,7 +260,13 @@ impl<F: RecordFormat> Typed for Recorded<F> {
     type Descriptor = Record;
 }
 
-impl<F: RecordFormat> Scalar for Recorded<F> {}
+impl<F: RecordFormat> Scalar for Recorded<F> {
+    /// Fold competing siblings through `F`'s merge: every replica reads
+    /// the same merged document even while storage still holds the forks.
+    fn resolution() -> Resolution {
+        Resolution::fold::<F>()
+    }
+}
 
 /// `Option<U>: Typed` for any [`Scalar`] `U`. Maps to
 /// [`OptionalOf<U::Descriptor>`].
@@ -272,6 +279,20 @@ impl<U: Scalar> Typed for Option<U> {
 pub trait Scalar:
     Typed + Clone + fmt::Debug + Into<Value> + 'static + ConditionalSend + TryFrom<Value>
 {
+    /// How a `Cardinality::One` read of an attribute of this type
+    /// resolves competing siblings into one row.
+    ///
+    /// The default — [`Resolution::Choose`], a deterministic winner —
+    /// is what every scalar attribute uses. A record format overrides
+    /// it to fold siblings through the format's merge, so that readers
+    /// of a diverged record attribute see the *merged* document rather
+    /// than one arbitrary fork. The typed query conversion
+    /// ([`StaticAttributeQuery`](crate::attribute::query::StaticAttributeQuery))
+    /// sources the strategy here — the one place the concrete type,
+    /// and therefore its format, is still statically known.
+    fn resolution() -> Resolution {
+        Resolution::Choose
+    }
 }
 
 macro_rules! impl_scalar {

@@ -72,6 +72,12 @@ where
             Term::blank(),
             Some(descriptor.cardinality()),
         )
+        // Source the sibling-resolution strategy from the attribute type,
+        // the one place the concrete format is still statically known. Every
+        // scalar reports `Choose` (a no-op — the dynamic query already
+        // defaults to it); a record format reports its fold. On a
+        // `Cardinality::Many` attribute this is a no-op regardless.
+        .with_resolution(<A::Type as Scalar>::resolution())
     }
 }
 
