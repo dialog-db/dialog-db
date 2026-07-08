@@ -44,7 +44,7 @@ use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output as _};
-use dialog_search_tree::{Change, ContentAddressedStorage};
+use dialog_search_tree::ContentAddressedStorage;
 use dialog_storage::Blake3Hash;
 use futures_util::TryStreamExt as _;
 
@@ -87,6 +87,12 @@ impl Demand {
             .expect("demand lock")
             .iter()
             .any(|range| range.contains(key))
+    }
+
+    /// A snapshot of the recorded ranges: the scope a cover-gated
+    /// tree diff walks.
+    pub(crate) fn ranges(&self) -> Vec<RangeInclusive<KeyBytes>> {
+        self.ranges.lock().expect("demand lock").clone()
     }
 
     /// Number of distinct recorded ranges.
@@ -235,8 +241,17 @@ where
     }
 
     /// Whether any change between the pinned root and `current`
-    /// falls inside the demand cover. Streams the tree diff and
-    /// stops at the first hit.
+    /// falls inside the demand cover.
+    ///
+    /// The diff itself is *scoped to the cover*
+    /// ([`differentiate_within`]): subtrees whose key span misses
+    /// every demanded range are dropped from the comparison without
+    /// being loaded, so on a partial replica the poll never fetches
+    /// subtrees the subscription didn't demand — the walk is bounded
+    /// by the changes *within the cover*, not the full delta between
+    /// the roots. The first in-scope change decides.
+    ///
+    /// [`differentiate_within`]: dialog_search_tree::PersistentTree::differentiate_within
     async fn intersects<Env>(
         &self,
         env: &Env,
@@ -256,6 +271,10 @@ where
         if pinned == target {
             return Ok(false);
         }
+        let scope = self.demand.ranges();
+        if scope.is_empty() {
+            return Ok(false);
+        }
 
         let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), None);
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
@@ -263,22 +282,13 @@ where
             Index::from_hash_with_cache(NodeHash::from(pinned), self.branch.node_cache());
         let next = Index::from_hash_with_cache(NodeHash::from(target), self.branch.node_cache());
 
-        let changes = previous.differentiate(&next, &storage, &storage);
+        let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
         let mut changes = Box::pin(changes);
-        while let Some(change) = changes
+        Ok(changes
             .try_next()
             .await
             .map_err(|error| EvaluationError::Store(format!("subscription diff: {error}")))?
-        {
-            let entry = match change {
-                Change::Add(entry) => entry,
-                Change::Remove(entry) => entry,
-            };
-            if self.demand.covers(&entry.key) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+            .is_some())
     }
 
     /// Evaluate the query against the branch, recording every
