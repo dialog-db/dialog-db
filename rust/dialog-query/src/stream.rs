@@ -33,6 +33,7 @@ where
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn<F>(future: F)
 where
+    // bare-send-ok: native-only fn feeding tokio::spawn, which requires real Send
     F: Future<Output = ()> + Send + 'static,
 {
     tokio::spawn(future);

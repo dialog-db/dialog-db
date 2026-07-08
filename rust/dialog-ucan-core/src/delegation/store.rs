@@ -139,6 +139,8 @@ impl<S: Signature, H: BuildHasher> DelegationStore<Local, S, Arc<Delegation<S>>>
     }
 }
 
+// bare-send-ok: the Sendable future-kind variant deliberately requires real
+// Send/Sync to produce BoxFuture; the Local variant above is its counterpart
 impl<S: Signature + Send + Sync, H: BuildHasher + Send>
     DelegationStore<Sendable, S, Arc<Delegation<S>>>
     for Arc<Mutex<HashMap<Cid, Arc<Delegation<S>>, H>>>
