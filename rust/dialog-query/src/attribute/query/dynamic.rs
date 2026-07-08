@@ -23,6 +23,7 @@ use std::ops::Not;
 
 use super::all::AttributeQueryAll;
 use super::only::AttributeQueryOnly;
+use super::resolution::Resolution;
 
 /// Type-erased attribute query that dispatches between cardinality variants.
 ///
@@ -60,6 +61,19 @@ impl DynamicAttributeQuery {
                 DynamicAttributeQuery::Only(AttributeQueryOnly::new(the, of, is, cause))
             }
             _ => DynamicAttributeQuery::All(AttributeQueryAll::new(the, of, is, cause)),
+        }
+    }
+
+    /// Replace the sibling-resolution strategy of a `Cardinality::One`
+    /// query. `Cardinality::Many` never resolves siblings — a sibling set
+    /// is the `All` variant's intended semantics — so this is a no-op on
+    /// the `All` variant.
+    pub fn with_resolution(self, resolution: Resolution) -> Self {
+        match self {
+            DynamicAttributeQuery::Only(q) => {
+                DynamicAttributeQuery::Only(q.with_resolution(resolution))
+            }
+            all => all,
         }
     }
 

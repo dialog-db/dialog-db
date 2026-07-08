@@ -83,7 +83,7 @@ pub mod type_system;
 pub mod types;
 
 pub use artifact::*;
-pub use attribute::query::{AttributeQuery, DynamicAttributeQuery};
+pub use attribute::query::{AttributeQuery, DynamicAttributeQuery, Resolution};
 pub use attribute::*;
 pub use claim::Claim;
 pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor, ConceptFieldDescriptor};

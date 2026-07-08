@@ -1,4 +1,5 @@
 use super::all::AttributeQueryAll;
+use super::resolution::{Accumulator, Resolution};
 use crate::Claim;
 use crate::Value;
 use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
@@ -12,42 +13,27 @@ use crate::source::SelectRules;
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
-use dialog_artifacts::{Artifact, Cause, Select};
+use dialog_artifacts::{Cause, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
-
-/// Given two artifacts for the same `(attribute, entity)` pair, return the
-/// winner. The winner is the artifact with the higher cause; when causes are
-/// equal (including both `None`), the fact hash (`Cause::from`) breaks the tie.
-fn choose(current: Artifact, challenger: Artifact) -> Artifact {
-    match (&current.cause, &challenger.cause) {
-        (Some(a), Some(b)) if a > b => current,
-        (Some(a), Some(b)) if a < b => challenger,
-        (Some(_), None) => current,
-        (None, Some(_)) => challenger,
-        _ => {
-            // Causes are equal: use the fact hash as a deterministic tiebreaker.
-            if Cause::from(&current) >= Cause::from(&challenger) {
-                current
-            } else {
-                challenger
-            }
-        }
-    }
-}
+use std::hash::{Hash, Hasher};
 
 /// Winner verification.
 ///
 /// When the entity is unknown, results from the base scan (VAE or AEV) are
 /// not guaranteed to contain all competing values for the same
 /// `(attribute, entity)` pair. Each candidate is verified by a secondary
-/// `(attribute, entity)` lookup to find the true winner. Yields the match
-/// only if the candidate matches the winner.
+/// `(attribute, entity)` lookup resolved with the query's [`Resolution`].
+/// Yields the match only if the candidate matches the resolved product —
+/// under a fold, a diverged group's product byte-matches neither stored
+/// sibling, so value-bound reads of a diverged record yield zero rows until
+/// a write converges storage (spec §6.10).
 fn challenge<'a, Env>(
     env: &'a Env,
     selector: AttributeQueryAll,
+    resolution: Resolution,
     candidate: Match,
 ) -> impl Selection + 'a
 where
@@ -73,15 +59,16 @@ where
             .the(attribute)
             .of(entity)).await?;
 
-        let mut winner: Option<Artifact> = None;
+        let mut group: Option<Accumulator> = None;
         for await each in challengers {
             let challenger = each?;
-            winner = Some(match winner {
-                None => challenger,
-                Some(winner) => choose(winner, challenger),
+            group = Some(match group {
+                None => resolution.begin(challenger),
+                Some(group) => group.absorb(challenger),
             });
         }
 
+        let winner = group.map(|group| resolution.resolve(group));
         if let Some(winner) = winner
             && winner.is == value
         {
@@ -95,12 +82,33 @@ where
 
 /// Winner-selecting attribute query for `Cardinality::One`.
 ///
-/// Wraps an [`AttributeQueryAll`] and applies winner selection logic so that
-/// only one value per `(attribute, entity)` pair is yielded: the one with
-/// the highest cause.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+/// Wraps an [`AttributeQueryAll`] and resolves competing values per
+/// `(attribute, entity)` pair to a single row, using the query's
+/// [`Resolution`]: pick-one by highest cause (the default, and every scalar
+/// attribute's behavior) or a format-aware fold for record attributes.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AttributeQueryOnly {
     query: AttributeQueryAll,
+    /// How competing siblings resolve to one row. Never part of the query's
+    /// identity (equality, hashing, serialization): the strategy is a pure
+    /// function of the attribute and its format, which are already identity.
+    #[serde(skip)]
+    resolution: Resolution,
+}
+
+/// Identity ignores [`Resolution`]: see the field documentation.
+impl PartialEq for AttributeQueryOnly {
+    fn eq(&self, other: &Self) -> bool {
+        self.query == other.query
+    }
+}
+
+impl Eq for AttributeQueryOnly {}
+
+impl Hash for AttributeQueryOnly {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.query.hash(state);
+    }
 }
 
 impl AttributeQueryOnly {
@@ -109,7 +117,13 @@ impl AttributeQueryOnly {
     pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
             query: AttributeQueryAll::new(the, of, is, cause),
+            resolution: Resolution::Choose,
         }
+    }
+
+    /// Replace this query's sibling-resolution strategy.
+    pub fn with_resolution(self, resolution: Resolution) -> Self {
+        Self { resolution, ..self }
     }
 
     /// Get the 'the' (attribute) term.
@@ -132,6 +146,7 @@ impl AttributeQueryOnly {
     pub(crate) fn with_type(self, kind: Kind) -> Self {
         Self {
             query: self.query.with_type(kind),
+            resolution: self.resolution,
         }
     }
 
@@ -139,6 +154,7 @@ impl AttributeQueryOnly {
     pub(crate) fn with_subject_kinds(self, the: Option<Kind>, of: Option<Kind>) -> Self {
         Self {
             query: self.query.with_subject_kinds(the, of),
+            resolution: self.resolution,
         }
     }
 
@@ -188,11 +204,15 @@ impl AttributeQueryOnly {
     ///
     /// - **Sliding window**: entity known (EAV), or attribute known without
     ///   value (AEV). Results are grouped by `(attribute, entity)` so we
-    ///   pick the winner in a single pass.
+    ///   resolve each group in a single pass.
     /// - **Challenge**: value known without entity ({is}, {the, is}, {of, is}
     ///   without entity). Each candidate is verified by a secondary
     ///   `(attribute, entity)` lookup because the scan is not grouped by
     ///   entity or because blanking the value would widen the scan.
+    ///
+    /// Both paths combine a group's siblings through the same
+    /// [`Resolution`], so a format-aware fold substitutes into pick-one
+    /// winner selection at exactly one point.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -201,7 +221,10 @@ impl AttributeQueryOnly {
     where
         Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
-        let selector = self.query;
+        let Self {
+            query: selector,
+            resolution,
+        } = self;
         try_stream! {
             for await each in selection {
                 let base = each?;
@@ -231,17 +254,18 @@ impl AttributeQueryOnly {
                         resolved.cause().clone(),
                     );
 
-                    let mut candidate: Option<Artifact> = None;
+                    let mut candidate: Option<Accumulator> = None;
 
                     let stream = Provider::<Select<'_>>::execute(env, (&scan).try_into()?).await?;
                     for await artifact in stream {
                         let artifact = artifact?;
 
                         candidate = Some(match candidate.take() {
-                            Some(current) if current.the == artifact.the && current.of == artifact.of => {
-                                choose(current, artifact)
+                            Some(group) if group.groups_with(&artifact) => {
+                                group.absorb(artifact)
                             }
-                            Some(winner) => {
+                            Some(group) => {
+                                let winner = resolution.resolve(group);
                                 if (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
                                     && selector.admits(&winner.is)
                                 {
@@ -249,27 +273,29 @@ impl AttributeQueryOnly {
                                     selector.merge(&mut extension, &winner)?;
                                     yield extension;
                                 }
-                                artifact
+                                resolution.begin(artifact)
                             }
-                            None => artifact,
+                            None => resolution.begin(artifact),
                         });
                     }
 
                     // Yield the final group's winner.
-                    if let Some(winner) = candidate.take()
-                        && (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
-                        && selector.admits(&winner.is)
-                    {
-                        let mut extension = base.clone();
-                        selector.merge(&mut extension, &winner)?;
-                        yield extension;
+                    if let Some(group) = candidate.take() {
+                        let winner = resolution.resolve(group);
+                        if (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
+                            && selector.admits(&winner.is)
+                        {
+                            let mut extension = base.clone();
+                            selector.merge(&mut extension, &winner)?;
+                            yield extension;
+                        }
                     }
                 } else {
                     // Secondary lookup path (Box::pin to avoid stack overflow).
                     let candidates = Box::pin(resolved.evaluate(env, base.clone().seed()));
                     for await candidate in candidates {
                         let candidate = candidate?;
-                        let verified = Box::pin(challenge(env, selector.clone(), candidate));
+                        let verified = Box::pin(challenge(env, selector.clone(), resolution.clone(), candidate));
                         for await v in verified {
                             yield v?;
                         }
@@ -328,9 +354,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::{Value, the};
-    use dialog_artifacts::{Artifact, Attribute, Cause};
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-    use std::str::FromStr;
 
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
@@ -721,63 +745,6 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_common::test]
-    async fn choose_prefers_higher_cause() {
-        let attr = Attribute::from_str("person/name").unwrap();
-        let entity = Entity::new().unwrap();
-
-        let older = Artifact {
-            the: attr.clone(),
-            of: entity.clone(),
-            is: Value::String("Alice".into()),
-            cause: Some(Cause([1u8; 32])),
-        };
-
-        let newer = Artifact {
-            the: attr,
-            of: entity,
-            is: Value::String("Alicia".into()),
-            cause: Some(Cause([2u8; 32])),
-        };
-
-        let winner = choose(older.clone(), newer.clone());
-        assert_eq!(winner.cause, newer.cause, "Higher cause should win");
-
-        // Reversed argument order should produce the same winner.
-        let winner2 = choose(newer.clone(), older.clone());
-        assert_eq!(winner2.cause, newer.cause);
-    }
-
-    #[dialog_common::test]
-    async fn choose_uses_fact_hash_for_equal_causes() {
-        let attr = Attribute::from_str("person/name").unwrap();
-        let entity = Entity::new().unwrap();
-
-        let a = Artifact {
-            the: attr.clone(),
-            of: entity.clone(),
-            is: Value::String("Alice".into()),
-            cause: Some(Cause([1u8; 32])),
-        };
-
-        let b = Artifact {
-            the: attr,
-            of: entity,
-            is: Value::String("Alicia".into()),
-            cause: Some(Cause([1u8; 32])),
-        };
-
-        let winner_ab = choose(a.clone(), b.clone());
-        let winner_ba = choose(b.clone(), a.clone());
-
-        // The winner should be deterministic regardless of argument order.
-        assert_eq!(
-            Cause::from(&winner_ab),
-            Cause::from(&winner_ba),
-            "Tiebreaker should be deterministic"
-        );
-    }
-
     /// An *optional* `is` whose variable an earlier premise bound to
     /// a value the entity does NOT have must NOT emit an Absent
     /// fallback. The fact exists (the entity has the attribute with a
@@ -832,6 +799,372 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    mod fold {
+        use super::*;
+        use crate::attribute::AttributeStatement;
+        use crate::attribute::query::resolution::Resolution;
+        use crate::attribute::query::resolution::test::{ByteSet, Picky};
+
+        /// An additive (raw) record assertion: two of these for one
+        /// `(the, of)` coexist as sibling claims, simulating the storage
+        /// state concurrent replicas produce after sync.
+        fn record_fact(the: The, of: &Entity, bytes: Vec<u8>) -> AttributeStatement {
+            AttributeStatement {
+                the,
+                of: of.clone(),
+                is: Value::Record(bytes.into()),
+                cause: None,
+                cardinality: None,
+            }
+        }
+
+        #[dialog_common::test]
+        async fn it_folds_record_siblings_with_entity_known() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let note = Entity::new()?;
+            branch
+                .transaction()
+                .assert(record_fact(the!("note/body"), &note, vec![1, 2]))
+                .commit()
+                .perform(&operator)
+                .await?;
+            branch
+                .transaction()
+                .assert(record_fact(the!("note/body"), &note, vec![2, 3]))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let query = AttributeQueryOnly::new(
+                Term::from(the!("note/body")),
+                Term::from(note.clone()),
+                Term::var("doc"),
+                Term::var("cause"),
+            )
+            .with_resolution(Resolution::fold::<ByteSet>());
+
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let results = query.perform(&source).try_vec().await?;
+
+            assert_eq!(results.len(), 1, "EAV path folds siblings into one row");
+            assert_eq!(
+                results[0].is(),
+                &Value::Record(vec![1, 2, 3].into()),
+                "the row carries the merged document, not either fork"
+            );
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_folds_each_group_separately_via_aev() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let diverged = Entity::new()?;
+            let settled = Entity::new()?;
+            for fact in [
+                record_fact(the!("note/body"), &diverged, vec![1, 2]),
+                record_fact(the!("note/body"), &diverged, vec![2, 3]),
+                record_fact(the!("note/body"), &settled, vec![7]),
+            ] {
+                branch
+                    .transaction()
+                    .assert(fact)
+                    .commit()
+                    .perform(&operator)
+                    .await?;
+            }
+
+            let query = AttributeQueryOnly::new(
+                Term::from(the!("note/body")),
+                Term::var("note"),
+                Term::var("doc"),
+                Term::var("cause"),
+            )
+            .with_resolution(Resolution::fold::<ByteSet>());
+
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let results = query.perform(&source).try_vec().await?;
+
+            assert_eq!(results.len(), 2, "one row per (attribute, entity) group");
+
+            let diverged_row = results.iter().find(|r| r.of() == &diverged).unwrap();
+            let settled_row = results.iter().find(|r| r.of() == &settled).unwrap();
+            assert_eq!(diverged_row.is(), &Value::Record(vec![1, 2, 3].into()));
+            assert_eq!(
+                settled_row.is(),
+                &Value::Record(vec![7].into()),
+                "a singleton group passes through untouched"
+            );
+
+            Ok(())
+        }
+
+        /// A single sibling never decodes (spec §4.4: pass through, zero
+        /// added cost): even bytes the format rejects flow through the
+        /// fold-resolution query unchanged.
+        #[dialog_common::test]
+        async fn it_passes_single_sibling_through_without_decoding() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let note = Entity::new()?;
+            branch
+                .transaction()
+                .assert(record_fact(the!("note/body"), &note, vec![0xFF, 1]))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let query = AttributeQueryOnly::new(
+                Term::from(the!("note/body")),
+                Term::from(note.clone()),
+                Term::var("doc"),
+                Term::var("cause"),
+            )
+            .with_resolution(Resolution::fold::<Picky>());
+
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let results = query.perform(&source).try_vec().await?;
+
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].is(), &Value::Record(vec![0xFF, 1].into()));
+
+            Ok(())
+        }
+
+        /// Value-bound reads of a *diverged* record yield zero rows: the
+        /// fold product byte-matches neither stored sibling, and the
+        /// product itself is not a stored key (spec §6.10). A settled
+        /// (single-sibling) record remains queryable by value.
+        #[dialog_common::test]
+        async fn it_verifies_fold_product_on_challenge_path() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let diverged = Entity::new()?;
+            let settled = Entity::new()?;
+            for fact in [
+                record_fact(the!("note/body"), &diverged, vec![1, 2]),
+                record_fact(the!("note/body"), &diverged, vec![2, 3]),
+                record_fact(the!("note/body"), &settled, vec![7]),
+            ] {
+                branch
+                    .transaction()
+                    .assert(fact)
+                    .commit()
+                    .perform(&operator)
+                    .await?;
+            }
+
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let by_value = |value: Vec<u8>| {
+                AttributeQueryOnly::new(
+                    Term::from(the!("note/body")),
+                    Term::var("note"),
+                    Term::Constant(Value::Record(value.into())),
+                    Term::var("cause"),
+                )
+                .with_resolution(Resolution::fold::<ByteSet>())
+            };
+
+            let sibling = by_value(vec![1, 2]).perform(&source).try_vec().await?;
+            assert_eq!(
+                sibling.len(),
+                0,
+                "a stored fork is not the fold product: filtered by verification"
+            );
+
+            let product = by_value(vec![1, 2, 3]).perform(&source).try_vec().await?;
+            assert_eq!(
+                product.len(),
+                0,
+                "the fold product is not a stored key until a write converges storage"
+            );
+
+            let settled_row = by_value(vec![7]).perform(&source).try_vec().await?;
+            assert_eq!(
+                settled_row.len(),
+                1,
+                "a settled record remains queryable by its value"
+            );
+            assert_eq!(settled_row[0].of(), &settled);
+
+            Ok(())
+        }
+
+        /// The fold product is identical whichever order the forks were
+        /// written in: every replica projects the same merged value.
+        #[dialog_common::test]
+        async fn it_folds_deterministically_across_write_orders() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let note = Entity::new()?;
+
+            let mut products = Vec::new();
+            for order in [[vec![1u8, 2], vec![2u8, 3]], [vec![2u8, 3], vec![1u8, 2]]] {
+                let repo = test_repo(&operator, &profile).await;
+                let branch = repo.branch("main").open().perform(&operator).await?;
+                for bytes in order {
+                    branch
+                        .transaction()
+                        .assert(record_fact(the!("note/body"), &note, bytes))
+                        .commit()
+                        .perform(&operator)
+                        .await?;
+                }
+
+                let query = AttributeQueryOnly::new(
+                    Term::from(the!("note/body")),
+                    Term::from(note.clone()),
+                    Term::var("doc"),
+                    Term::var("cause"),
+                )
+                .with_resolution(Resolution::fold::<ByteSet>());
+
+                let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+                let results = query.perform(&source).try_vec().await?;
+                assert_eq!(results.len(), 1);
+                products.push(results[0].is().clone());
+            }
+
+            assert_eq!(
+                products[0], products[1],
+                "write order must not change the projected value"
+            );
+
+            Ok(())
+        }
+
+        /// `Cardinality::Many` never folds: sibling sets are the `All`
+        /// path's intended semantics, and `with_resolution` is a no-op on
+        /// the `All` variant.
+        #[dialog_common::test]
+        async fn it_never_folds_cardinality_many() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let note = Entity::new()?;
+            for bytes in [vec![1, 2], vec![2, 3]] {
+                branch
+                    .transaction()
+                    .assert(record_fact(the!("note/body"), &note, bytes))
+                    .commit()
+                    .perform(&operator)
+                    .await?;
+            }
+
+            let query = crate::DynamicAttributeQuery::new(
+                Term::from(the!("note/body")),
+                Term::from(note.clone()),
+                Term::var("doc"),
+                Term::var("cause"),
+                Some(Cardinality::Many),
+            )
+            .with_resolution(Resolution::fold::<ByteSet>());
+
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let results = query.perform(&source).try_vec().await?;
+
+            assert_eq!(results.len(), 2, "Many yields every sibling, unfolded");
+
+            Ok(())
+        }
+
+        /// Physical convergence rides the existing `Replace` write path
+        /// (spec §4.4): read the folded document, write it back as a
+        /// `Cardinality::One` assertion, and storage collapses to a single
+        /// sibling — the merged one.
+        #[dialog_common::test]
+        async fn it_converges_storage_via_replace_write() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let note = Entity::new()?;
+            for bytes in [vec![1, 2], vec![2, 3]] {
+                branch
+                    .transaction()
+                    .assert(record_fact(the!("note/body"), &note, bytes))
+                    .commit()
+                    .perform(&operator)
+                    .await?;
+            }
+
+            // Read the folded document.
+            let query = AttributeQueryOnly::new(
+                Term::from(the!("note/body")),
+                Term::from(note.clone()),
+                Term::var("doc"),
+                Term::var("cause"),
+            )
+            .with_resolution(Resolution::fold::<ByteSet>());
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let results = query.clone().perform(&source).try_vec().await?;
+            assert_eq!(results.len(), 1);
+            let merged = results[0].is().clone();
+
+            // Write it back as an ordinary Cardinality::One edit: the
+            // `Replace` supersedes every different-valued sibling.
+            branch
+                .transaction()
+                .assert(AttributeStatement {
+                    the: the!("note/body"),
+                    of: note.clone(),
+                    is: merged.clone(),
+                    cause: None,
+                    cardinality: Some(Cardinality::One),
+                })
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let all = AttributeQueryAll::new(
+                Term::from(the!("note/body")),
+                Term::from(note.clone()),
+                Term::var("doc"),
+                Term::var("cause"),
+            );
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let siblings = all.perform(&source).try_vec().await?;
+
+            assert_eq!(siblings.len(), 1, "storage collapsed to one sibling");
+            assert_eq!(siblings[0].is(), &merged);
+
+            Ok(())
+        }
+
+        /// The resolution strategy never participates in query identity:
+        /// it is a pure function of the attribute and its format, which
+        /// are already part of attribute identity.
+        #[dialog_common::test]
+        fn it_keeps_resolution_out_of_identity() {
+            let plain = AttributeQueryOnly::new(
+                Term::from(the!("note/body")),
+                Term::var("note"),
+                Term::var("doc"),
+                Term::var("cause"),
+            );
+            let folding = plain
+                .clone()
+                .with_resolution(Resolution::fold::<ByteSet>());
+
+            assert_eq!(plain, folding, "equality ignores the strategy");
+            assert_eq!(
+                serde_json::to_string(&plain).unwrap(),
+                serde_json::to_string(&folding).unwrap(),
+                "serialization ignores the strategy"
+            );
+        }
     }
 
     /// When entity is a variable that gets bound by an earlier premise in
