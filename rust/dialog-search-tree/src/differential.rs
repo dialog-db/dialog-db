@@ -224,6 +224,43 @@ where
         }
     }
 
+    /// Removes nodes whose key span cannot intersect any range in
+    /// `scope`, so out-of-scope subtrees are never expanded (and, on
+    /// a partial replica, never fetched).
+    ///
+    /// Links carry only upper bounds, so a node's span is bounded
+    /// conservatively: within the frontier (sorted by upper bound,
+    /// where pruning only ever *removes* nodes), a node's true span
+    /// is contained in `(predecessor's upper bound, own upper bound]`.
+    /// A node is dropped only when that conservative span misses
+    /// every scope range, which can only over-retain, never
+    /// over-drop — in-scope changes are always preserved. Dropping is
+    /// per-side, so the entry walk may surface spurious out-of-scope
+    /// changes where only one side dropped a shared region;
+    /// [`TreeDifference::changes_within`] filters those.
+    fn retain_scope(&mut self, scope: &[core::ops::RangeInclusive<Key>]) {
+        let mut lower: Option<Key> = None;
+        let mut kept = Vec::with_capacity(self.nodes.len());
+        for node in self.nodes.drain(..) {
+            let upper = node.upper_bound().clone();
+            let intersects = scope.iter().any(|range| {
+                // (lower, upper] ∩ [start, end] is non-empty iff
+                // upper >= start and lower < end (with lower = -∞
+                // for the first node).
+                *range.start() <= upper
+                    && match &lower {
+                        Some(lower) => lower < range.end(),
+                        None => true,
+                    }
+            });
+            if intersects {
+                kept.push(node);
+            }
+            lower = Some(upper);
+        }
+        self.nodes = kept;
+    }
+
     /// Removes nodes that are shared between `self` and `other`, keeping
     /// only nodes that differ.
     ///
@@ -397,6 +434,77 @@ where
     where
         D: Distribution,
     {
+        let mut difference = Self::compute_scoped(
+            source_tree,
+            target_tree,
+            source_storage,
+            target_storage,
+            None,
+        )
+        .await?;
+
+        // Expand any remaining target index nodes so novel_nodes() can
+        // enumerate every novel node, not just unexpanded subtree roots.
+        // These reads are not wasted: every remaining target node is novel
+        // by construction and must be visited to be reported.
+        loop {
+            let mut expanded = false;
+            for index in 0..difference.target.nodes.len() {
+                let bound = difference.target.nodes[index].upper_bound().clone();
+                if difference.target.expand_at(&bound).await? {
+                    expanded = true;
+                    break;
+                }
+            }
+            if !expanded {
+                break;
+            }
+        }
+
+        Ok(difference)
+    }
+
+    /// Computes the difference between two trees *restricted to
+    /// `scope`*: subtrees whose key span cannot intersect any scope
+    /// range are dropped from the comparison without being loaded,
+    /// so reads are proportional to the differing regions *within
+    /// the scope* rather than to the full difference. On a partial
+    /// replica this is what keeps a subscription's diff from
+    /// fetching subtrees it never demanded.
+    ///
+    /// Consume via [`changes_within`](Self::changes_within) (which
+    /// filters boundary spillover); [`novel_nodes`](Self::novel_nodes)
+    /// is not meaningful on a scoped difference.
+    pub async fn compute_within<D>(
+        source_tree: &PersistentTree<Key, Value, D>,
+        target_tree: &PersistentTree<Key, Value, D>,
+        source_storage: &'a ContentAddressedStorage<Backend>,
+        target_storage: &'a ContentAddressedStorage<Backend>,
+        scope: &[core::ops::RangeInclusive<Key>],
+    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    where
+        D: Distribution,
+    {
+        Self::compute_scoped(
+            source_tree,
+            target_tree,
+            source_storage,
+            target_storage,
+            Some(scope),
+        )
+        .await
+    }
+
+    async fn compute_scoped<D>(
+        source_tree: &PersistentTree<Key, Value, D>,
+        target_tree: &PersistentTree<Key, Value, D>,
+        source_storage: &'a ContentAddressedStorage<Backend>,
+        target_storage: &'a ContentAddressedStorage<Backend>,
+        scope: Option<&[core::ops::RangeInclusive<Key>]>,
+    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    where
+        D: Distribution,
+    {
         // Identical trees (including two empty trees) share their root
         // hash; nothing needs to be read at all.
         if source_tree.root() == target_tree.root() {
@@ -423,6 +531,10 @@ where
         // fixed point: only differing leaf segments (and unique-range
         // subtrees) remain.
         loop {
+            if let Some(scope) = scope {
+                source.retain_scope(scope);
+                target.retain_scope(scope);
+            }
             source.prune(&mut target);
 
             let mut expanded = false;
@@ -473,25 +585,34 @@ where
             }
         }
 
-        // Expand any remaining target index nodes so novel_nodes() can
-        // enumerate every novel node, not just unexpanded subtree roots.
-        // These reads are not wasted: every remaining target node is novel
-        // by construction and must be visited to be reported.
-        loop {
-            let mut expanded = false;
-            for index in 0..target.nodes.len() {
-                let bound = target.nodes[index].upper_bound().clone();
-                if target.expand_at(&bound).await? {
-                    expanded = true;
-                    break;
+        Ok(TreeDifference { source, target })
+    }
+
+    /// Returns a stream of the changes within `scope` that transform
+    /// the source tree into the target tree. Use on a difference
+    /// built by [`compute_within`](Self::compute_within): scope
+    /// pruning is per-side, so a shared region dropped from only one
+    /// frontier surfaces as spurious out-of-scope changes in the raw
+    /// entry walk — this filter removes them, leaving exactly the
+    /// in-scope changes.
+    pub fn changes_within(
+        &'a self,
+        scope: &'a [core::ops::RangeInclusive<Key>],
+    ) -> impl Differential<Key, Value> + 'a {
+        let changes = self.changes();
+        try_stream! {
+            futures_util::pin_mut!(changes);
+            for await change in changes {
+                let change = change?;
+                let key = match &change {
+                    Change::Add(entry) => &entry.key,
+                    Change::Remove(entry) => &entry.key,
+                };
+                if scope.iter().any(|range| range.contains(key)) {
+                    yield change;
                 }
             }
-            if !expanded {
-                break;
-            }
         }
-
-        Ok(TreeDifference { source, target })
     }
 
     /// Returns a stream of entry-level changes that transform the source
@@ -680,6 +801,127 @@ mod tests {
             }
         }
         Ok(tree)
+    }
+
+    async fn collect_scoped_changes(
+        source: &TestTree,
+        target: &TestTree,
+        scope: &[core::ops::RangeInclusive<[u8; 4]>],
+        storage: &ContentAddressedStorage<CountingBackend>,
+    ) -> Result<Vec<Change<[u8; 4], Vec<u8>>>> {
+        let stream = source.differentiate_within(target, scope, storage, storage);
+        futures_util::pin_mut!(stream);
+        let mut changes = vec![];
+        while let Some(change) = stream.next().await {
+            changes.push(change?);
+        }
+        Ok(changes)
+    }
+
+    /// A scoped diff yields exactly the full diff filtered to the
+    /// scope: in-scope changes are never dropped, boundary spillover
+    /// from one-sided pruning is filtered out.
+    ///
+    /// Keys stay below 256 so little-endian key bytes order the same
+    /// as the numbers they encode.
+    #[dialog_common::test]
+    async fn it_scopes_changes_to_the_given_ranges() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build((0..250u32).map(|i| (i, vec![0])), &mut storage).await?;
+
+        // Two changed regions far apart in key space.
+        let mut target = base.clone();
+        let mut delta = Delta::zero();
+        for i in (10..20u32).chain(200..210u32) {
+            target = target
+                .edit()
+                .insert(i.to_le_bytes(), vec![1], &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        let scope = vec![0u32.to_le_bytes()..=50u32.to_le_bytes()];
+
+        let full = collect_changes(&base, &target, &storage).await?;
+        let scoped = collect_scoped_changes(&base, &target, &scope, &storage).await?;
+
+        let key = |change: &Change<[u8; 4], Vec<u8>>| match change {
+            Change::Add(entry) => entry.key,
+            Change::Remove(entry) => entry.key,
+        };
+        let expected: Vec<[u8; 4]> = full
+            .iter()
+            .filter(|change| scope.iter().any(|range| range.contains(&key(change))))
+            .map(&key)
+            .collect();
+        let actual: Vec<[u8; 4]> = scoped.iter().map(&key).collect();
+
+        assert_eq!(
+            actual, expected,
+            "scoped diff must equal the full diff filtered to scope"
+        );
+        assert_eq!(
+            scoped.len(),
+            20,
+            "ten modified keys in scope, one Remove + one Add each"
+        );
+        assert!(
+            scoped.iter().all(|change| {
+                key(change) >= 10u32.to_le_bytes() && key(change) < 20u32.to_le_bytes()
+            }),
+            "only the in-scope region's keys appear"
+        );
+        Ok(())
+    }
+
+    /// The point of scoping on a partial replica: subtrees whose key
+    /// span misses the scope are never read, so a scoped diff reads
+    /// strictly fewer blocks than the full diff when the
+    /// out-of-scope region changed heavily.
+    #[dialog_common::test]
+    async fn it_avoids_reading_out_of_scope_subtrees() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build((0..250u32).map(|i| (i, vec![0])), &mut storage).await?;
+
+        // A small in-scope change and a heavy out-of-scope change.
+        let mut target = base.clone();
+        let mut delta = Delta::zero();
+        for i in (10..12u32).chain(100..250u32) {
+            target = target
+                .edit()
+                .insert(i.to_le_bytes(), vec![1], &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        let scope = vec![0u32.to_le_bytes()..=20u32.to_le_bytes()];
+
+        let before_full = storage.backend().reads();
+        let full = collect_changes(&base, &target, &storage).await?;
+        let full_reads = storage.backend().reads() - before_full;
+
+        let before_scoped = storage.backend().reads();
+        let scoped = collect_scoped_changes(&base, &target, &scope, &storage).await?;
+        let scoped_reads = storage.backend().reads() - before_scoped;
+
+        assert_eq!(scoped.len(), 4, "two in-scope keys, Remove + Add each");
+        assert!(full.len() > scoped.len());
+        assert!(
+            scoped_reads < full_reads,
+            "scoped diff must skip out-of-scope subtrees: \
+             scoped {scoped_reads} reads vs full {full_reads} reads"
+        );
+        Ok(())
     }
 
     async fn collect_changes(
