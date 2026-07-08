@@ -278,11 +278,20 @@ where
         scope: &'a [core::ops::RangeInclusive<Key>],
         self_storage: &'a ContentAddressedStorage<Backend>,
         other_storage: &'a ContentAddressedStorage<Backend>,
-    ) -> impl Differential<Key, Value> + 'a
+    ) -> impl Differential<Key, Value> + ConditionalSend + 'a
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
-        Value: PartialEq,
+        // `Key`/`Value` bound `ConditionalSync` (not just the trait's
+        // `ConditionalSend`) so that `&PersistentTree` — which the
+        // returned `async_stream` captures — is `Send` on native.
+        // `PersistentTree` holds `PhantomData<Key>`/`PhantomData<Value>`,
+        // so its `Sync` (hence `&_: Send`) needs `Key: Sync`/`Value: Sync`.
+        // Subscriptions poll this diff inside an axum handler future that
+        // must be `Send`; without the bound the whole handler is `!Send`.
+        Key: ConditionalSync,
+        Value: PartialEq + ConditionalSync,
+        D: ConditionalSync,
     {
         async_stream::try_stream! {
             let difference =
