@@ -77,15 +77,40 @@ mod native {
         false
     }
 
+    /// The rust/ workspace directory, resolved at *runtime*: at
+    /// compile time `CARGO_MANIFEST_DIR` names the build sandbox,
+    /// which no longer exists when an archived test runs (the nix
+    /// gate re-runs nextest archives with `--workspace-remap`). The
+    /// runner sets each test's working directory to the (remapped)
+    /// crate root, so ascend from there to the directory holding the
+    /// workspace crates; fall back to the compile-time path for
+    /// plain `cargo` invocations with an unusual working directory.
+    fn workspace_dir() -> PathBuf {
+        if let Ok(mut dir) = std::env::current_dir() {
+            loop {
+                if dir.join("dialog-common").is_dir() && dir.join("dialog-query").is_dir() {
+                    return dir;
+                }
+                if !dir.pop() {
+                    break;
+                }
+            }
+        }
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("dialog-common lives under the rust/ workspace dir")
+            .to_path_buf()
+    }
+
     /// Hand-written `Send` / `Sync` bounds must be `ConditionalSend`
     /// / `ConditionalSync`; see the module doc for the rationale and
     /// the exemptions.
-    #[dialog_common::test]
+    // dialog_macros directly (a dev-dependency): the dialog_common::test
+    // re-export lives behind the `helpers` feature, which the crate's own
+    // integration tests build without.
+    #[dialog_macros::test]
     async fn it_bounds_on_conditional_send_and_sync() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("dialog-common lives under the rust/ workspace dir")
-            .to_path_buf();
+        let workspace = workspace_dir();
         let mut sources = Vec::new();
         rust_sources(&workspace, &mut sources);
         assert!(

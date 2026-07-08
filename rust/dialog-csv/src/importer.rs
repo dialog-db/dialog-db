@@ -1,5 +1,4 @@
 use dialog_artifacts::{Artifact, DialogArtifactsError};
-use dialog_common::ConditionalSend;
 use futures_util::{Stream, StreamExt};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -7,28 +6,23 @@ use tokio::io::AsyncRead;
 
 use crate::row::CsvRow;
 
-/// The imported row stream: boxed `Send` on native so the importer
-/// can cross threads, unboxed of that requirement on wasm.
-#[cfg(not(target_arch = "wasm32"))]
-// bare-send-ok: dyn bounds cannot carry ConditionalSend; this is the cfg'd native alias
-type ArtifactRows = Pin<Box<dyn Stream<Item = Result<Artifact, DialogArtifactsError>> + Send>>;
-
-/// The imported row stream (see the native alias).
-#[cfg(target_arch = "wasm32")]
-type ArtifactRows = Pin<Box<dyn Stream<Item = Result<Artifact, DialogArtifactsError>>>>;
-
 /// Imports artifacts from CSV rows.
 ///
 /// Expects columns: `the`, `of`, `as` (value type), `is`, `cause`.
 ///
 /// Implements [`Stream`] yielding one [`Artifact`] per CSV row.
+///
+/// Readers are bounded on real `Send` (not `ConditionalSend`)
+/// because `csv_async` requires it on every target.
 pub struct CsvImporter {
-    inner: ArtifactRows,
+    // bare-send-ok: dyn bound over a csv_async stream, which is Send on every target
+    inner: Pin<Box<dyn Stream<Item = Result<Artifact, DialogArtifactsError>> + Send>>,
 }
 
 impl CsvImporter {
     /// Create a new CSV importer reading from the given reader.
-    pub fn new<R: AsyncRead + Unpin + ConditionalSend + 'static>(reader: R) -> Self {
+    // bare-send-ok: csv_async bounds its readers on real Send on every target
+    pub fn new<R: AsyncRead + Unpin + Send + 'static>(reader: R) -> Self {
         let deserializer = csv_async::AsyncReaderBuilder::new().create_deserializer(reader);
         let stream = deserializer
             .into_deserialize::<CsvRow>()
@@ -42,7 +36,8 @@ impl CsvImporter {
     }
 }
 
-impl<R: AsyncRead + Unpin + ConditionalSend + 'static> From<R> for CsvImporter {
+// bare-send-ok: csv_async bounds its readers on real Send on every target
+impl<R: AsyncRead + Unpin + Send + 'static> From<R> for CsvImporter {
     fn from(reader: R) -> Self {
         Self::new(reader)
     }
