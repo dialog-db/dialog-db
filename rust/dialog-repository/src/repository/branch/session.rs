@@ -361,8 +361,17 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a, Env> Provider<Select<'a>> for QueryEnv<'a, Env>
+// The `Select` lifetime `'s` is decoupled from the env lifetime `'a`
+// (`'a: 'a` bounds it below `'a`): a `QueryEnv<'a>` provides
+// `Select<'s>` for *any* `'s` outlived by `'a`, not only `'s == 'a`.
+// This is what lets a subscription poll hold `&query_env` across an
+// `await` and stay Send-general — the caller's higher-ranked
+// `for<'s> Provider<Select<'s>>` demand is now satisfiable. The
+// returned stream still borrows `'a` data, which outlives `'s`, so
+// the shorter `ArtifactStream<'s>` is sound.
+impl<'a, 's, Env> Provider<Select<'s>> for QueryEnv<'a, Env>
 where
+    'a: 's,
     Env: Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
@@ -374,20 +383,22 @@ where
     async fn execute(
         &self,
         input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+    ) -> Result<ArtifactStream<'s>, DialogArtifactsError> {
         self.record_demand(&input);
-        let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.branches.len() + 1);
+        let mut streams: Vec<ArtifactStream<'s>> = Vec::with_capacity(self.branches.len() + 1);
 
         // Branch streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
-        // retract in `with(..)`) suppresses matching source facts.
+        // retract in `with(..)`) suppresses matching source facts. Each
+        // borrows `'a` data, which outlives `'s`, so it coerces to
+        // `ArtifactStream<'s>`.
         for branch in &self.branches {
             let raw = select_from_branch(branch, self.env, input.clone()).await?;
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
         // Overlay stream — Changes itself is a Provider<Select>.
-        streams.push(Provider::<Select<'a>>::execute(&self.changes, input).await?);
+        streams.push(Provider::<Select<'s>>::execute(&self.changes, input).await?);
 
         Ok(merge_grouped(streams))
     }

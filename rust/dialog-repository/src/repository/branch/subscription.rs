@@ -61,6 +61,7 @@
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
@@ -316,13 +317,21 @@ where
         &self.demand
     }
 
-    /// Replace the transient overlay folded into evaluations. The
-    /// overlay is off-tree, so this alone changes nothing: the caller
-    /// must follow with a [`poll`](Subscription::poll), which then
-    /// recomputes (the overlay delta can't be derived from the tree
-    /// diff) and reports the result change as a delta.
+    /// Replace the transient overlay folded into evaluations and
+    /// invalidate the pinned revision so the next
+    /// [`poll`](Subscription::poll) recomputes.
+    ///
+    /// The overlay is off-tree, so a change to it never appears in
+    /// the tree diff the poll gates on; without invalidating the pin
+    /// the next poll would short-circuit (`current == revision`) and
+    /// miss the overlay change. Invalidation routes the next poll
+    /// through a full evaluation (the overlay delta cannot be derived
+    /// incrementally from the tree), which reports the result change
+    /// as a delta against the retained results.
     pub fn set_overlay(&mut self, overlay: Changes) {
         self.overlay = overlay;
+        self.revision = None;
+        self.initialized = false;
     }
 
     /// Full evaluations performed so far (the first poll plus every
@@ -352,10 +361,10 @@ where
     /// lands mid-evaluation re-triggers on the next poll (the diff
     /// from the pinned root is a superset), so changes are never
     /// missed, at worst re-checked.
-    pub async fn poll<Env>(
-        &mut self,
-        env: &Env,
-    ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
+    pub fn poll<'a, Env>(
+        &'a mut self,
+        env: &'a Env,
+    ) -> impl Future<Output = Result<Option<Delta<Q::Conclusion>>, EvaluationError>> + 'a
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -366,62 +375,71 @@ where
             + ConditionalSync
             + 'static,
     {
-        let current = self.branch.revision();
-        if self.initialized {
-            if current == self.revision {
-                return Ok(None);
-            }
-            match self.touched(env, &current).await? {
-                Touched::Nothing => {
-                    self.revision = current;
+        // Returned as an explicit `impl Future + 'a` (not an `async
+        // fn`) so the env lifetime is named rather than higher-ranked.
+        // An `async fn poll<Env>(&mut self, env: &Env)` desugars to a
+        // future whose `&Env` capture is `for<'e>`, which defeats
+        // Send-generality inference in a caller that must be `Send`
+        // (an axum handler draining subscription polls) — the same
+        // reason `SelectQuery::perform` is written this way.
+        async move {
+            let current = self.branch.revision();
+            if self.initialized {
+                if current == self.revision {
                     return Ok(None);
                 }
-                Touched::Facts {
-                    subjects,
-                    facts,
-                    asserted,
-                    retracted,
-                } => {
-                    if let Some(delta) = self
-                        .maintain(env, &subjects, &facts, &asserted, &retracted)
-                        .await?
-                    {
-                        self.maintenances += 1;
+                match self.touched(env, &current).await? {
+                    Touched::Nothing => {
                         self.revision = current;
-                        return Ok(Some(delta));
+                        return Ok(None);
                     }
-                    // Not maintainable for this query/rule shape:
-                    // fall through to a full recompute.
+                    Touched::Facts {
+                        subjects,
+                        facts,
+                        asserted,
+                        retracted,
+                    } => {
+                        if let Some(delta) = self
+                            .maintain(env, &subjects, &facts, &asserted, &retracted)
+                            .await?
+                        {
+                            self.maintenances += 1;
+                            self.revision = current;
+                            return Ok(Some(delta));
+                        }
+                        // Not maintainable for this query/rule shape:
+                        // fall through to a full recompute.
+                    }
+                    // A rule-range change can install or change a rule,
+                    // which can affect any row: recompute.
+                    Touched::Rules => {}
                 }
-                // A rule-range change can install or change a rule,
-                // which can affect any row: recompute.
-                Touched::Rules => {}
             }
+
+            let demand = Demand::new();
+            let results = self.evaluate(env, &demand, &self.query).await?;
+            self.recomputes += 1;
+
+            let delta = Delta {
+                asserted: results
+                    .iter()
+                    .filter(|row| !self.results.contains(row))
+                    .cloned()
+                    .collect(),
+                retracted: self
+                    .results
+                    .iter()
+                    .filter(|row| !results.contains(row))
+                    .cloned()
+                    .collect(),
+            };
+
+            self.results = results;
+            self.demand = demand;
+            self.revision = current;
+            self.initialized = true;
+            Ok(Some(delta))
         }
-
-        let demand = Demand::new();
-        let results = self.evaluate(env, &demand, &self.query).await?;
-        self.recomputes += 1;
-
-        let delta = Delta {
-            asserted: results
-                .iter()
-                .filter(|row| !self.results.contains(row))
-                .cloned()
-                .collect(),
-            retracted: self
-                .results
-                .iter()
-                .filter(|row| !results.contains(row))
-                .cloned()
-                .collect(),
-        };
-
-        self.results = results;
-        self.demand = demand;
-        self.revision = current;
-        self.initialized = true;
-        Ok(Some(delta))
     }
 
     /// Classify what the changes between the pinned root and
@@ -443,11 +461,11 @@ where
     /// and are skipped.
     ///
     /// [`differentiate_within`]: dialog_search_tree::PersistentTree::differentiate_within
-    async fn touched<Env>(
-        &self,
-        env: &Env,
-        current: &Option<Revision>,
-    ) -> Result<Touched, EvaluationError>
+    fn touched<'a, Env>(
+        &'a self,
+        env: &'a Env,
+        current: &'a Option<Revision>,
+    ) -> impl Future<Output = Result<Touched, EvaluationError>> + 'a
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -457,78 +475,82 @@ where
             + ConditionalSync
             + 'static,
     {
-        let pinned = tree_hash(&self.revision);
-        let target = tree_hash(current);
-        if pinned == target {
-            return Ok(Touched::Nothing);
-        }
-        let scope = self.demand.ranges();
-        if scope.is_empty() {
-            return Ok(Touched::Nothing);
-        }
-
-        let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), None);
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
-        let previous =
-            Index::from_hash_with_cache(NodeHash::from(pinned), self.branch.node_cache());
-        let next = Index::from_hash_with_cache(NodeHash::from(target), self.branch.node_cache());
-
-        let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
-        let mut changes = Box::pin(changes);
-        let mut subjects = BTreeSet::new();
-        let mut asserted = Vec::new();
-        let mut retracted = Vec::new();
-        // A fact change surfaces once per index order; dedup on the
-        // datum triple, per direction.
-        let mut seen = BTreeSet::new();
-        while let Some(change) = changes
-            .try_next()
-            .await
-            .map_err(|error| EvaluationError::Store(format!("subscription diff: {error}")))?
-        {
-            let entry = match &change {
-                Change::Add(entry) => entry,
-                Change::Remove(entry) => entry,
-            };
-            if self.demand.covers_rules(&entry.key) {
-                return Ok(Touched::Rules);
+        async move {
+            let pinned = tree_hash(&self.revision);
+            let target = tree_hash(current);
+            if pinned == target {
+                return Ok(Touched::Nothing);
             }
-            // An entry arriving with a datum became readable; an
-            // entry leaving with a datum stopped being readable.
-            // Tombstone-valued entries carry no datum: their effect
-            // (if any) surfaces as the paired datum-bearing change
-            // at the same key.
-            let arriving = matches!(&change, Change::Add(_));
-            if let State::Added(datum) = &entry.value {
-                if !seen.insert((
-                    arriving,
-                    datum.entity.clone(),
-                    datum.attribute.clone(),
-                    datum.value.clone(),
-                )) {
-                    continue;
+            let scope = self.demand.ranges();
+            if scope.is_empty() {
+                return Ok(Touched::Nothing);
+            }
+
+            let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), None);
+            let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+            let previous =
+                Index::from_hash_with_cache(NodeHash::from(pinned), self.branch.node_cache());
+            let next =
+                Index::from_hash_with_cache(NodeHash::from(target), self.branch.node_cache());
+
+            let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
+            let mut changes = Box::pin(changes);
+            let mut subjects = BTreeSet::new();
+            let mut asserted = Vec::new();
+            let mut retracted = Vec::new();
+            // A fact change surfaces once per index order; dedup on the
+            // datum triple, per direction.
+            let mut seen = BTreeSet::new();
+            while let Some(change) = changes
+                .try_next()
+                .await
+                .map_err(|error| EvaluationError::Store(format!("subscription diff: {error}")))?
+            {
+                let entry = match &change {
+                    Change::Add(entry) => entry,
+                    Change::Remove(entry) => entry,
+                };
+                if self.demand.covers_rules(&entry.key) {
+                    return Ok(Touched::Rules);
                 }
-                let fact = Artifact::try_from(datum.clone())
-                    .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
-                subjects.insert(fact.of.clone());
-                if arriving {
-                    asserted.push(fact);
-                } else {
-                    retracted.push(fact);
+                // An entry arriving with a datum became readable; an
+                // entry leaving with a datum stopped being readable.
+                // Tombstone-valued entries carry no datum: their effect
+                // (if any) surfaces as the paired datum-bearing change
+                // at the same key.
+                let arriving = matches!(&change, Change::Add(_));
+                if let State::Added(datum) = &entry.value {
+                    if !seen.insert((
+                        arriving,
+                        datum.entity.clone(),
+                        datum.attribute.clone(),
+                        datum.value.clone(),
+                    )) {
+                        continue;
+                    }
+                    let fact = Artifact::try_from(datum.clone()).map_err(|error| {
+                        EvaluationError::Store(format!("changed datum: {error:?}"))
+                    })?;
+                    subjects.insert(fact.of.clone());
+                    if arriving {
+                        asserted.push(fact);
+                    } else {
+                        retracted.push(fact);
+                    }
                 }
             }
-        }
 
-        if subjects.is_empty() {
-            Ok(Touched::Nothing)
-        } else {
-            let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
-            Ok(Touched::Facts {
-                subjects,
-                facts,
-                asserted,
-                retracted,
-            })
+            if subjects.is_empty() {
+                Ok(Touched::Nothing)
+            } else {
+                let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
+                Ok(Touched::Facts {
+                    subjects,
+                    facts,
+                    asserted,
+                    retracted,
+                })
+            }
         }
     }
 
@@ -545,14 +567,14 @@ where
     /// the query is not restrictable, the concept is recursive, or
     /// the delta-join discovery hit a shape it does not handle — in
     /// which case the caller falls back to a full recompute.
-    async fn maintain<Env>(
-        &mut self,
-        env: &Env,
-        subjects: &BTreeSet<Entity>,
-        facts: &[Artifact],
-        asserted: &[Artifact],
-        retracted: &[Artifact],
-    ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
+    fn maintain<'a, Env>(
+        &'a mut self,
+        env: &'a Env,
+        subjects: &'a BTreeSet<Entity>,
+        facts: &'a [Artifact],
+        asserted: &'a [Artifact],
+        retracted: &'a [Artifact],
+    ) -> impl Future<Output = Result<Option<Delta<Q::Conclusion>>, EvaluationError>> + 'a
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -563,19 +585,174 @@ where
             + ConditionalSync
             + 'static,
     {
-        // For a concept query the affected heads are discovered
-        // against the resolved rule set: entity-local rules
-        // contribute the changed subjects, non-local rules (concept
-        // premises: conformance checks, variant negations)
-        // contribute delta-join heads — the changed fact bound into
-        // the premise it matches, remaining premises joined
-        // sideways, head projected. `None` (recursion, unhandled
-        // shape) falls back to full recompute. For a plain attribute
-        // query the affected heads are just the changed subjects.
-        //
-        // The discovery evaluates against the demand-recording
-        // environment, so the reads it depends on join the cover.
-        let entities: BTreeSet<Entity> = if let Some(concept) = self.query.concept() {
+        async move {
+            // For a concept query the affected heads are discovered
+            // against the resolved rule set: entity-local rules
+            // contribute the changed subjects, non-local rules (concept
+            // premises: conformance checks, variant negations)
+            // contribute delta-join heads — the changed fact bound into
+            // the premise it matches, remaining premises joined
+            // sideways, head projected. `None` (recursion, unhandled
+            // shape) falls back to full recompute. For a plain attribute
+            // query the affected heads are just the changed subjects.
+            //
+            // The discovery evaluates against the demand-recording
+            // environment, so the reads it depends on join the cover.
+            let entities: BTreeSet<Entity> = if let Some(concept) = self.query.concept() {
+                let operator = Identify
+                    .perform(env)
+                    .await
+                    .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
+                let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
+                let overlay = layer.overlay(&operator);
+                let tombstones = tombstones_from(&overlay);
+                let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
+                    .with_demand(self.demand.clone());
+                let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
+                if rules.recursion().is_some() {
+                    // Fixpoint continuation: deletions retract via DRed,
+                    // additions extend semi-naively — rebuilding into
+                    // the retained table when either phase declines.
+                    drop(query_env);
+                    let results = self
+                        .evaluate_with_continuation(
+                            env,
+                            Arc::new(asserted.to_vec()),
+                            Arc::new(retracted.to_vec()),
+                        )
+                        .await?;
+                    let delta = Delta {
+                        asserted: results
+                            .iter()
+                            .filter(|row| !self.results.contains(row))
+                            .cloned()
+                            .collect(),
+                        retracted: self
+                            .results
+                            .iter()
+                            .filter(|row| !results.contains(row))
+                            .cloned()
+                            .collect(),
+                    };
+                    self.results = results;
+                    return Ok(Some(delta));
+                }
+                match affected_entities(concept, facts, &query_env).await? {
+                    Some(entities) => entities,
+                    None => return Ok(None),
+                }
+            } else {
+                subjects.clone()
+            };
+
+            let mut asserted = Vec::new();
+            let mut retracted = Vec::new();
+            for entity in &entities {
+                let scoped = match self.query.restrict(entity) {
+                    Restriction::Scoped(query) => query,
+                    Restriction::Unaffected => continue,
+                    Restriction::Unsupported => return Ok(None),
+                };
+                // Over-delete: every retained row for this entity...
+                let before: Vec<Q::Conclusion> = self
+                    .results
+                    .iter()
+                    .filter(|row| row.this() == entity)
+                    .cloned()
+                    .collect();
+                // ...re-derive + insert: goal-directed re-evaluation,
+                // recording into the existing cover (the standing
+                // demand only ever grows between recomputes).
+                let after = self.evaluate(env, &self.demand.clone(), &scoped).await?;
+                for row in &after {
+                    if !before.contains(row) {
+                        asserted.push(row.clone());
+                    }
+                }
+                for row in &before {
+                    if !after.contains(row) {
+                        retracted.push(row.clone());
+                    }
+                }
+                self.results.retain(|row| row.this() != entity);
+                self.results.extend(after);
+            }
+            Ok(Some(Delta {
+                asserted,
+                retracted,
+            }))
+        }
+    }
+
+    /// Evaluate the query against the branch, recording every
+    /// demanded range into `demand`. Mirrors the ordinary
+    /// `branch.select(query).perform(env)` path with a
+    /// demand-recording environment.
+    // `impl Future + 'a` (not `async fn`) so the env lifetime is
+    // named, keeping the enclosing `poll` future Send-general on
+    // native — see the note on `poll`.
+    fn evaluate<'a, Env>(
+        &'a self,
+        env: &'a Env,
+        demand: &'a Demand,
+        query: &'a Q,
+    ) -> impl Future<Output = Result<Vec<Q::Conclusion>, EvaluationError>> + 'a
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        async move {
+            let operator = Identify
+                .perform(env)
+                .await
+                .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
+            let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
+            let overlay = layer.overlay(&operator);
+            let tombstones = tombstones_from(&overlay);
+            let mut query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
+                .with_demand(demand.clone());
+            // Recursive concept subscriptions retain their fixpoint
+            // across polls: a recompute rebuilds into the retained
+            // table so a later additions-only poll can extend it.
+            if let Some(concept) = query.concept() {
+                query_env = query_env
+                    .with_fixpoint(concept.this(), Continuation::new(self.fixpoint.clone()));
+            }
+            query.clone().perform(&query_env).try_vec().await
+        }
+    }
+
+    /// Evaluate the standing query with the retained fixpoint
+    /// attached, seeding a semi-naive continuation from `additions`
+    /// when present. Demand keeps recording into the standing
+    /// cover.
+    fn evaluate_with_continuation<'a, Env>(
+        &'a self,
+        env: &'a Env,
+        additions: Arc<Vec<Artifact>>,
+        deletions: Arc<Vec<Artifact>>,
+    ) -> impl Future<Output = Result<Vec<Q::Conclusion>, EvaluationError>> + 'a
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        async move {
+            let concept = self
+                .query
+                .concept()
+                .expect("continuation evaluation requires a concept query");
             let operator = Identify
                 .perform(env)
                 .await
@@ -584,159 +761,13 @@ where
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
             let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
-                .with_demand(self.demand.clone());
-            let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
-            if rules.recursion().is_some() {
-                // Fixpoint continuation: deletions retract via DRed,
-                // additions extend semi-naively — rebuilding into
-                // the retained table when either phase declines.
-                drop(query_env);
-                let results = self
-                    .evaluate_with_continuation(
-                        env,
-                        Arc::new(asserted.to_vec()),
-                        Arc::new(retracted.to_vec()),
-                    )
-                    .await?;
-                let delta = Delta {
-                    asserted: results
-                        .iter()
-                        .filter(|row| !self.results.contains(row))
-                        .cloned()
-                        .collect(),
-                    retracted: self
-                        .results
-                        .iter()
-                        .filter(|row| !results.contains(row))
-                        .cloned()
-                        .collect(),
-                };
-                self.results = results;
-                return Ok(Some(delta));
-            }
-            match affected_entities(concept, facts, &query_env).await? {
-                Some(entities) => entities,
-                None => return Ok(None),
-            }
-        } else {
-            subjects.clone()
-        };
-
-        let mut asserted = Vec::new();
-        let mut retracted = Vec::new();
-        for entity in &entities {
-            let scoped = match self.query.restrict(entity) {
-                Restriction::Scoped(query) => query,
-                Restriction::Unaffected => continue,
-                Restriction::Unsupported => return Ok(None),
-            };
-            // Over-delete: every retained row for this entity...
-            let before: Vec<Q::Conclusion> = self
-                .results
-                .iter()
-                .filter(|row| row.this() == entity)
-                .cloned()
-                .collect();
-            // ...re-derive + insert: goal-directed re-evaluation,
-            // recording into the existing cover (the standing
-            // demand only ever grows between recomputes).
-            let after = self.evaluate(env, &self.demand.clone(), &scoped).await?;
-            for row in &after {
-                if !before.contains(row) {
-                    asserted.push(row.clone());
-                }
-            }
-            for row in &before {
-                if !after.contains(row) {
-                    retracted.push(row.clone());
-                }
-            }
-            self.results.retain(|row| row.this() != entity);
-            self.results.extend(after);
+                .with_demand(self.demand.clone())
+                .with_fixpoint(
+                    concept.this(),
+                    Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
+                );
+            self.query.clone().perform(&query_env).try_vec().await
         }
-        Ok(Some(Delta {
-            asserted,
-            retracted,
-        }))
-    }
-
-    /// Evaluate the query against the branch, recording every
-    /// demanded range into `demand`. Mirrors the ordinary
-    /// `branch.select(query).perform(env)` path with a
-    /// demand-recording environment.
-    async fn evaluate<Env>(
-        &self,
-        env: &Env,
-        demand: &Demand,
-        query: &Q,
-    ) -> Result<Vec<Q::Conclusion>, EvaluationError>
-    where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + ConditionalSync
-            + 'static,
-    {
-        let operator = Identify
-            .perform(env)
-            .await
-            .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-        let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
-        let overlay = layer.overlay(&operator);
-        let tombstones = tombstones_from(&overlay);
-        let mut query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
-            .with_demand(demand.clone());
-        // Recursive concept subscriptions retain their fixpoint
-        // across polls: a recompute rebuilds into the retained
-        // table so a later additions-only poll can extend it.
-        if let Some(concept) = query.concept() {
-            query_env =
-                query_env.with_fixpoint(concept.this(), Continuation::new(self.fixpoint.clone()));
-        }
-        query.clone().perform(&query_env).try_vec().await
-    }
-
-    /// Evaluate the standing query with the retained fixpoint
-    /// attached, seeding a semi-naive continuation from `additions`
-    /// when present. Demand keeps recording into the standing
-    /// cover.
-    async fn evaluate_with_continuation<Env>(
-        &self,
-        env: &Env,
-        additions: Arc<Vec<Artifact>>,
-        deletions: Arc<Vec<Artifact>>,
-    ) -> Result<Vec<Q::Conclusion>, EvaluationError>
-    where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + ConditionalSync
-            + 'static,
-    {
-        let concept = self
-            .query
-            .concept()
-            .expect("continuation evaluation requires a concept query");
-        let operator = Identify
-            .perform(env)
-            .await
-            .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-        let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
-        let overlay = layer.overlay(&operator);
-        let tombstones = tombstones_from(&overlay);
-        let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
-            .with_demand(self.demand.clone())
-            .with_fixpoint(
-                concept.this(),
-                Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
-            );
-        self.query.clone().perform(&query_env).try_vec().await
     }
 }
 
