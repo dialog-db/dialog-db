@@ -1015,9 +1015,21 @@ dependencies = [
 name = "dialog-automerge"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "automerge",
  "dialog-artifacts",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-effects",
+ "dialog-operator",
+ "dialog-query",
+ "dialog-repository",
+ "dialog-search-tree",
+ "dialog-storage",
+ "futures-util",
  "proptest",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

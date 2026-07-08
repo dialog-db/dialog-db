@@ -8,6 +8,22 @@ license.workspace = true
 [dependencies]
 automerge = { workspace = true }
 dialog-artifacts = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-query = { workspace = true }
+dialog-repository = { workspace = true }
+dialog-search-tree = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("web-integration-tests"))', "cfg(dialog_test_wasm_integration)"] }
 
 [dev-dependencies]
+anyhow = { workspace = true }
+dialog-operator = { workspace = true }
+dialog-repository = { workspace = true, features = ["helpers"] }
+dialog-storage = { workspace = true }
 proptest = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }

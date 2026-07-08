@@ -40,6 +40,16 @@
 //! is visible at the text root. Create a document once, then replicate it by
 //! storing and realizing the record (or by [`TextDocument::fork`]).
 //!
+//! ## Editing sessions
+//!
+//! An open editor is a window during which concurrent writers keep
+//! committing. [`DocumentSession`] — the doc-handle — holds a live in-memory
+//! document through that window: it folds every stored sibling at open,
+//! absorbs siblings that sync lands mid-session (pending local edits
+//! survive), and commits through the typed layer so the write supersedes
+//! every sibling it folded. See the [`session`](DocumentSession) docs for
+//! the discipline and its rationale.
+//!
 //! [`RecordFormat`]: dialog_artifacts::RecordFormat
 
 use std::collections::{BTreeMap, HashMap};
@@ -47,6 +57,9 @@ use std::collections::{BTreeMap, HashMap};
 pub use automerge;
 use automerge::{Automerge, Change, SaveOptions};
 use dialog_artifacts::RecordError;
+
+mod session;
+pub use session::{DocumentSession, SessionError};
 
 mod text;
 pub use text::TextDocument;
