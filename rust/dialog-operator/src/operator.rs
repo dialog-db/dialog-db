@@ -17,7 +17,7 @@ use dialog_credentials::Credential;
 use dialog_effects::authority::{Identify, Operator as AuthOperator};
 use dialog_effects::credential::Secret;
 use dialog_effects::storage as storage_fx;
-use dialog_effects::{archive, credential, memory};
+use dialog_effects::{archive, blob, credential, memory};
 use dialog_network::Network;
 use dialog_storage::provider::storage::Storage;
 use dialog_varsig::{Did, Principal};
@@ -39,6 +39,9 @@ pub struct Operator<S: Clone> {
         archive::Get,
         archive::Put,
         archive::Import,
+        blob::Read,
+        blob::Write,
+        blob::Import,
         credential::Load<Credential>,
         credential::Save<Credential>,
         credential::Load<Secret>,

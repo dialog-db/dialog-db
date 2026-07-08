@@ -26,6 +26,7 @@
 //! [weblocks]: https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API
 
 mod archive;
+mod blob;
 mod error;
 mod memory;
 
@@ -57,7 +58,20 @@ pub use web::FileSystemDirectoryHandleExt;
 
 pub use error::FileSystemError;
 
+pub use backend::FileWriter;
+
 use url::Url;
+
+/// A streamed byte source over a file, yielding owned chunks. Boxed so both
+/// the native and web backends return one type from
+/// [`FileSystemHandle::reader`].
+#[cfg(not(target_arch = "wasm32"))]
+pub type FileReader =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Vec<u8>, FileSystemError>> + Send>>;
+/// A streamed byte source over a file, yielding owned chunks.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub type FileReader =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Vec<u8>, FileSystemError>>>>;
 
 /// Filesystem-based storage provider.
 ///
@@ -259,6 +273,27 @@ impl FileSystemHandle {
         backend::write_atomic(self, contents).await
     }
 
+    /// Open a streaming reader over the whole file.
+    pub async fn reader(&self) -> Result<FileReader, FileSystemError> {
+        backend::open_reader(self, 0, None).await
+    }
+
+    /// Open a streaming reader over a byte range: `len` bytes from `offset`
+    /// (to end-of-file when `len` is `None`).
+    pub async fn reader_range(
+        &self,
+        offset: u64,
+        len: Option<u64>,
+    ) -> Result<FileReader, FileSystemError> {
+        backend::open_reader(self, offset, len).await
+    }
+
+    /// Open a streaming writer that commits atomically on
+    /// [`finish`](FileWriter::finish), so large content is never buffered whole.
+    pub async fn writer(&self) -> Result<FileWriter, FileSystemError> {
+        backend::open_writer(self).await
+    }
+
     /// Atomically rename this location to another.
     pub async fn rename(&self, to: &FileSystemHandle) -> Result<(), FileSystemError> {
         backend::rename(self, to).await
@@ -318,6 +353,36 @@ mod tests {
 
         let cell = memory.resolve("local").unwrap();
         assert!(cell.path().ends_with("/memory/local"));
+    }
+
+    #[dialog_common::test]
+    async fn it_streams_write_then_read() {
+        use futures_util::StreamExt;
+
+        let space = test_space("stream-roundtrip").await;
+        let handle = space.resolve("blob/sample").unwrap();
+
+        // Streamed, atomically-committed write across multiple chunks.
+        let mut writer = handle.writer().await.unwrap();
+        writer.write_all(b"hello ").await.unwrap();
+        writer.write_all(b"streaming world").await.unwrap();
+        writer.finish().await.unwrap();
+
+        // Whole-file streamed read.
+        let mut reader = handle.reader().await.unwrap();
+        let mut whole = Vec::new();
+        while let Some(chunk) = reader.next().await {
+            whole.extend(chunk.unwrap());
+        }
+        assert_eq!(whole, b"hello streaming world");
+
+        // Ranged read: 9 bytes from offset 6 -> "streaming".
+        let mut reader = handle.reader_range(6, Some(9)).await.unwrap();
+        let mut ranged = Vec::new();
+        while let Some(chunk) = reader.next().await {
+            ranged.extend(chunk.unwrap());
+        }
+        assert_eq!(ranged, b"streaming");
     }
 
     #[dialog_common::test]

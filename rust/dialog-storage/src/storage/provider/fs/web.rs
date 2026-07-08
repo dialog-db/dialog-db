@@ -16,7 +16,8 @@
 //!
 //! [fsapi]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API
 
-use super::{FileSystem, FileSystemError, FileSystemHandle};
+use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle};
+use futures_util::StreamExt;
 use js_sys::Uint8Array;
 use std::rc::Rc;
 use url::Url;
@@ -604,6 +605,172 @@ pub(super) async fn write_atomic(
     contents: &[u8],
 ) -> Result<(), FileSystemError> {
     write(handle, contents).await
+}
+
+/// Streaming reader. Slices to the requested range (a `Blob.slice`), then
+/// streams the result incrementally via `Blob.stream()` — nothing buffers the
+/// whole file.
+pub(super) async fn open_reader(
+    handle: &FileSystemHandle,
+    offset: u64,
+    len: Option<u64>,
+) -> Result<FileReader, FileSystemError> {
+    let Some((parent, name)) = handle.navigate_parent(false).await? else {
+        return Err(FileSystemError::Io("file not found".into()));
+    };
+    let Some(file_handle) = get_file_handle(&parent, &name, false).await? else {
+        return Err(FileSystemError::Io("file not found".into()));
+    };
+    let file: web_sys::File = JsFuture::from(file_handle.get_file())
+        .await
+        .map_err(|e| js_io_error("getting file", e))?
+        .dyn_into()
+        .map_err(|_| FileSystemError::Io("expected File".into()))?;
+
+    let readable: web_sys::ReadableStream = if offset > 0 || len.is_some() {
+        let start = offset as f64;
+        let end = match len {
+            Some(len) => (offset + len) as f64,
+            None => file.size(),
+        };
+        let blob = file
+            .slice_with_f64_and_f64(start, end)
+            .map_err(|e| js_io_error("slicing file", e))?;
+        blob.stream()
+    } else {
+        file.stream()
+    };
+
+    let stream = wasm_streams::ReadableStream::from_raw(readable.unchecked_into())
+        .into_stream()
+        .map(|chunk| {
+            chunk
+                .map(|value| Uint8Array::new(&value).to_vec())
+                .map_err(|e| js_io_error("reading stream", e))
+        });
+    Ok(Box::pin(stream))
+}
+
+/// Process-local counter for unique staging file names.
+fn unique_suffix() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// A uniquely-named staging sibling of `handle` in the same directory.
+fn staging_handle(handle: &FileSystemHandle) -> FileSystemHandle {
+    let mut url = handle.url().clone();
+    let path = url.path().trim_end_matches('/').to_string();
+    url.set_path(&format!("{}.{}.tmp", path, unique_suffix()));
+    handle.with_url(url)
+}
+
+/// Streaming writer. Writes each chunk straight to a staging file through the
+/// async `createWritable` stream (no buffering), then commits by closing the
+/// stream and renaming the staging file into place. Safari ≤ 18 has no
+/// streaming writable, so it falls back to buffering + an atomic sync-access
+/// write.
+pub(super) async fn open_writer(handle: &FileSystemHandle) -> Result<FileWriter, FileSystemError> {
+    let staging = staging_handle(handle);
+    let Some((parent, name)) = staging.navigate_parent(true).await? else {
+        return Err(FileSystemError::Io(
+            "parent directory navigation failed".into(),
+        ));
+    };
+    let file_handle = get_file_handle(&parent, &name, true)
+        .await?
+        .ok_or_else(|| FileSystemError::Io(format!("could not create staging '{name}'")))?;
+
+    let inner = if has_method(&file_handle, "createWritable") {
+        let writable: FileSystemWritableFileStream = JsFuture::from(file_handle.create_writable())
+            .await
+            .map_err(|e| js_io_error("creating writable stream", e))?
+            .dyn_into()
+            .map_err(|_| FileSystemError::Io("expected FileSystemWritableFileStream".into()))?;
+        WriterInner::Streaming(writable)
+    } else {
+        // No streaming writable: drop the empty staging file and buffer instead.
+        let _ = remove(&staging).await;
+        WriterInner::Buffered(Vec::new())
+    };
+
+    Ok(FileWriter {
+        target: handle.clone(),
+        staging,
+        inner,
+    })
+}
+
+/// A streaming, atomically-committed file writer (web).
+pub struct FileWriter {
+    /// The handle this writer was opened on; `finish` commits here.
+    target: FileSystemHandle,
+    /// The staging file actually written; renamed into place on commit.
+    staging: FileSystemHandle,
+    inner: WriterInner,
+}
+
+enum WriterInner {
+    /// Chunks streamed straight to the staging file's writable.
+    Streaming(FileSystemWritableFileStream),
+    /// Safari ≤ 18 fallback: accumulate, then one atomic write at commit.
+    Buffered(Vec<u8>),
+}
+
+impl FileWriter {
+    /// Append a chunk, streaming it to the staging file when possible.
+    pub async fn write_all(&mut self, bytes: &[u8]) -> Result<(), FileSystemError> {
+        match &mut self.inner {
+            WriterInner::Streaming(writable) => {
+                let chunk = Uint8Array::from(bytes);
+                let promise = writable
+                    .write_with_buffer_source(&chunk)
+                    .map_err(|e| js_io_error("scheduling write", e))?;
+                JsFuture::from(promise)
+                    .await
+                    .map_err(|e| js_io_error("writing chunk", e))?;
+                Ok(())
+            }
+            WriterInner::Buffered(buffer) => {
+                buffer.extend_from_slice(bytes);
+                Ok(())
+            }
+        }
+    }
+
+    /// Commit to the handle this writer was opened on.
+    pub async fn finish(self) -> Result<(), FileSystemError> {
+        let target = self.target.clone();
+        self.commit_to(&target).await
+    }
+
+    /// Commit to `dest` instead — lets a content-addressed writer pick the
+    /// final path (the hash) only after the content has streamed.
+    pub async fn finish_to(self, dest: &FileSystemHandle) -> Result<(), FileSystemError> {
+        self.commit_to(dest).await
+    }
+
+    async fn commit_to(self, dest: &FileSystemHandle) -> Result<(), FileSystemError> {
+        match self.inner {
+            WriterInner::Streaming(writable) => {
+                JsFuture::from(writable.close())
+                    .await
+                    .map_err(|e| js_io_error("closing writable stream", e))?;
+                rename(&self.staging, dest).await
+            }
+            WriterInner::Buffered(buffer) => write_atomic(dest, &buffer).await,
+        }
+    }
+
+    /// Discard the staged content without committing it.
+    pub async fn discard(self) -> Result<(), FileSystemError> {
+        if let WriterInner::Streaming(writable) = self.inner {
+            let _ = JsFuture::from(writable.close()).await;
+            let _ = remove(&self.staging).await;
+        }
+        Ok(())
+    }
 }
 
 pub(super) async fn write(

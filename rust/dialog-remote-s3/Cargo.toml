@@ -12,7 +12,6 @@ helpers = [
   "dep:tempfile",
   "dep:anyhow",
   "dep:rand",
-  "dep:futures-util",
   "dialog-common/helpers",
   "dep:s3s",
   "dep:hyper",
@@ -47,7 +46,7 @@ serde_ipld_dagcbor = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
-futures-util = { workspace = true, optional = true }
+futures-util = { workspace = true }
 anyhow = { workspace = true, optional = true }
 
 rand = { workspace = true, optional = true }
