@@ -935,6 +935,110 @@ mod tests {
         );
     }
 
+    /// Entity locality: the implicit rule of a plain concept reads
+    /// only `?this`'s facts; concept premises (conforming fields,
+    /// variant negations) make a rule non-local.
+    #[dialog_common::test]
+    fn it_classifies_entity_locality() {
+        let plain = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "nickname".to_string(),
+                ConceptFieldDescriptor::optional(AttributeDescriptor::new(
+                    the!("person/nickname"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+        ])
+        .unwrap();
+        assert!(
+            DeductiveRule::from(&plain).analysis().is_entity_local(),
+            "attribute and optional premises over ?this are local"
+        );
+
+        let target = ConceptDescriptor::try_from(vec![(
+            "badge",
+            AttributeDescriptor::new(
+                the!("employee/badge"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        let conforming = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(AttributeDescriptor::new(
+                    the!("person/name"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                )),
+            ),
+            (
+                "manager".to_string(),
+                ConceptFieldDescriptor::conforming(
+                    AttributeDescriptor::new(
+                        the!("person/manager"),
+                        "",
+                        Cardinality::One,
+                        Some(Type::Entity),
+                    ),
+                    target.clone(),
+                )
+                .unwrap(),
+            ),
+        ])
+        .unwrap();
+        assert!(
+            !DeductiveRule::from(&conforming)
+                .analysis()
+                .is_entity_local(),
+            "a concept premise reads another entity's facts"
+        );
+
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "handle",
+            AttributeDescriptor::new(
+                the!("contact/handle"),
+                "",
+                Cardinality::One,
+                Some(Type::String),
+            ),
+        )])
+        .unwrap();
+        let email = ConceptDescriptor::try_from(vec![(
+            "handle",
+            AttributeDescriptor::new(the!("user/email"), "", Cardinality::One, Some(Type::String)),
+        )])
+        .unwrap();
+        let phone = ConceptDescriptor::try_from(vec![(
+            "handle",
+            AttributeDescriptor::new(the!("user/phone"), "", Cardinality::One, Some(Type::String)),
+        )])
+        .unwrap();
+        let variants = DeductiveRule::variants(conclusion, vec![email, phone]).unwrap();
+        assert!(
+            variants[0].analysis().is_entity_local(),
+            "the first variant is plain attribute premises"
+        );
+        assert!(
+            !variants[1].analysis().is_entity_local(),
+            "a negated concept premise is non-local"
+        );
+    }
+
     /// A rule that negates its own conclusion concept is a negative
     /// self-loop: rejected at analysis.
     #[dialog_common::test]

@@ -36,7 +36,7 @@ use crate::proposition::Proposition;
 use crate::rule::types::TypeEnv;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::Context;
-use crate::{Entity, Environment, Premise};
+use crate::{Entity, Environment, Premise, Term};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -229,6 +229,34 @@ impl AnalyzedRule {
         self.premises.iter().filter_map(|premise| match premise {
             Premise::Unless(Negation(Proposition::Concept(query))) => Some(query.predicate.this()),
             _ => None,
+        })
+    }
+
+    /// Whether every premise reads only the head entity's own facts:
+    /// each attribute premise (positive, optional, or negated) is a
+    /// lookup `of ?this`, and the remaining premises are row-local
+    /// transforms (formulas, constraints) over those bindings.
+    ///
+    /// For an entity-local rule, a base-fact change for entity `E`
+    /// can only affect the rule's rows whose subject is `E` — the
+    /// soundness condition for maintaining a subscription by
+    /// re-deriving just the touched entities instead of
+    /// re-evaluating the whole query. Concept premises are
+    /// cross-entity by construction (the target entity is a field
+    /// value, not the subject), so any rule carrying one is
+    /// non-local.
+    pub fn is_entity_local(&self) -> bool {
+        fn of_is_this(term: &Term<Entity>) -> bool {
+            matches!(term, Term::Variable { name: Some(name), .. } if name == "this")
+        }
+        self.premises.iter().all(|premise| match premise {
+            Premise::Assert(Proposition::Attribute(query)) => of_is_this(query.of()),
+            Premise::Assert(Proposition::OptionalAttribute(query)) => of_is_this(query.of()),
+            Premise::Assert(Proposition::Constraint(_)) => true,
+            Premise::Assert(Proposition::Formula(_)) => true,
+            Premise::Unless(Negation(Proposition::Attribute(query))) => of_is_this(query.of()),
+            Premise::Unless(Negation(Proposition::Constraint(_))) => true,
+            _ => false,
         })
     }
 }

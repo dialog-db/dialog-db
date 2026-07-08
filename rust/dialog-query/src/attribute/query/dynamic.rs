@@ -5,13 +5,13 @@ use crate::attribute::The;
 use crate::environment::Environment;
 use crate::negation::Negation;
 use crate::proposition::Proposition;
-use crate::query::Application;
 use crate::query::Output;
+use crate::query::{Application, Restriction};
 use crate::selection::{Match, Selection};
 use crate::source::SelectRules;
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
-use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term};
+use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term, Value};
 use auto_enums::auto_enum;
 use dialog_artifacts::{Cause, Select};
 use dialog_capability::Provider;
@@ -205,6 +205,33 @@ impl Application for DynamicAttributeQuery {
         match self {
             DynamicAttributeQuery::All(q) => q.realize(input),
             DynamicAttributeQuery::Only(q) => q.realize(input),
+        }
+    }
+
+    fn restrict(&self, entity: &Entity) -> Restriction<Self> {
+        match self.of() {
+            Term::Constant(Value::Entity(this)) if this == entity => {
+                Restriction::Scoped(self.clone())
+            }
+            Term::Constant(_) => Restriction::Unaffected,
+            Term::Variable {
+                name: Some(name), ..
+            } if [self.the().name(), self.is().name(), self.cause().name()]
+                .into_iter()
+                .flatten()
+                .any(|other| other == name) =>
+            {
+                // `of` joins another slot through a shared variable
+                // name; pinning it would sever the join.
+                Restriction::Unsupported
+            }
+            _ => Restriction::Scoped(DynamicAttributeQuery::new(
+                self.the().clone(),
+                Term::Constant(Value::Entity(entity.clone())),
+                self.is().clone(),
+                self.cause().clone(),
+                Some(self.cardinality()),
+            )),
         }
     }
 }
