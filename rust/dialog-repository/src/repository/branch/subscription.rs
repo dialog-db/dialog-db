@@ -63,6 +63,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::ops::RangeInclusive;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
@@ -293,6 +294,23 @@ enum Touched {
     },
 }
 
+/// A boxed evaluation future. The poll chain's inner evaluations are
+/// boxed (rather than returned as `impl Future`) deliberately: an
+/// opaque future carries its defining function's `Env:
+/// Provider<Select<'s>>` where-clauses, and re-proving those during
+/// the *caller's* `Send` check erases every lifetime into
+/// independent placeholders — rustc's #100013 limitation, which
+/// would make the poll future `!Send` on native. Boxing to `dyn
+/// Future + Send` proves `Send` eagerly at the definition site,
+/// where the lifetime relations are still known.
+#[cfg(not(target_arch = "wasm32"))]
+type EvaluationFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, EvaluationError>> + Send + 'a>>;
+
+/// A boxed evaluation future (see the native alias for why).
+#[cfg(target_arch = "wasm32")]
+type EvaluationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EvaluationError>> + 'a>>;
+
 /// The index root a revision pins, or the empty tree for an
 /// unborn branch.
 fn tree_hash(revision: &Option<Revision>) -> Blake3Hash {
@@ -304,8 +322,8 @@ fn tree_hash(revision: &Option<Revision>) -> Blake3Hash {
 
 impl<Q> Subscription<Q>
 where
-    Q: Application + Clone,
-    Q::Conclusion: Conclusion + PartialEq + Clone,
+    Q: Application + Clone + ConditionalSync,
+    Q::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
 {
     /// The retained result of the last evaluation.
     pub fn results(&self) -> &[Q::Conclusion] {
@@ -361,10 +379,14 @@ where
     /// lands mid-evaluation re-triggers on the next poll (the diff
     /// from the pinned root is a superset), so changes are never
     /// missed, at worst re-checked.
-    pub fn poll<'a, Env>(
+    // The `self` and `env` lifetimes are deliberately unified into
+    // one named `'a`: the poll future must stay `Send` on native (an
+    // axum handler drains subscription polls), and its inner
+    // evaluations are boxed `EvaluationFuture`s for the same reason.
+    pub async fn poll<'a, Env>(
         &'a mut self,
         env: &'a Env,
-    ) -> impl Future<Output = Result<Option<Delta<Q::Conclusion>>, EvaluationError>> + 'a
+    ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -375,71 +397,62 @@ where
             + ConditionalSync
             + 'static,
     {
-        // Returned as an explicit `impl Future + 'a` (not an `async
-        // fn`) so the env lifetime is named rather than higher-ranked.
-        // An `async fn poll<Env>(&mut self, env: &Env)` desugars to a
-        // future whose `&Env` capture is `for<'e>`, which defeats
-        // Send-generality inference in a caller that must be `Send`
-        // (an axum handler draining subscription polls) — the same
-        // reason `SelectQuery::perform` is written this way.
-        async move {
-            let current = self.branch.revision();
-            if self.initialized {
-                if current == self.revision {
+        let current = self.branch.revision();
+        if self.initialized {
+            if current == self.revision {
+                return Ok(None);
+            }
+            match self.touched(env, &current).await? {
+                Touched::Nothing => {
+                    self.revision = current;
                     return Ok(None);
                 }
-                match self.touched(env, &current).await? {
-                    Touched::Nothing => {
+                Touched::Facts {
+                    subjects,
+                    facts,
+                    asserted,
+                    retracted,
+                } => {
+                    if let Some(delta) = self
+                        .maintain(env, &subjects, &facts, &asserted, &retracted)
+                        .await?
+                    {
+                        self.maintenances += 1;
                         self.revision = current;
-                        return Ok(None);
+                        return Ok(Some(delta));
                     }
-                    Touched::Facts {
-                        subjects,
-                        facts,
-                        asserted,
-                        retracted,
-                    } => {
-                        if let Some(delta) = self
-                            .maintain(env, &subjects, &facts, &asserted, &retracted)
-                            .await?
-                        {
-                            self.maintenances += 1;
-                            self.revision = current;
-                            return Ok(Some(delta));
-                        }
-                        // Not maintainable for this query/rule shape:
-                        // fall through to a full recompute.
-                    }
-                    // A rule-range change can install or change a rule,
-                    // which can affect any row: recompute.
-                    Touched::Rules => {}
+                    // Not maintainable for this query/rule shape:
+                    // fall through to a full recompute.
                 }
+                // A rule-range change can install or change a rule,
+                // which can affect any row: recompute.
+                Touched::Rules => {}
             }
-
-            let demand = Demand::new();
-            let results = self.evaluate(env, &demand, &self.query).await?;
-            self.recomputes += 1;
-
-            let delta = Delta {
-                asserted: results
-                    .iter()
-                    .filter(|row| !self.results.contains(row))
-                    .cloned()
-                    .collect(),
-                retracted: self
-                    .results
-                    .iter()
-                    .filter(|row| !results.contains(row))
-                    .cloned()
-                    .collect(),
-            };
-
-            self.results = results;
-            self.demand = demand;
-            self.revision = current;
-            self.initialized = true;
-            Ok(Some(delta))
         }
+
+        let demand = Demand::new();
+        let results = self.evaluate(env, &demand, &self.query).await?;
+        self.recomputes += 1;
+
+        let delta = Delta {
+            asserted: results
+                .iter()
+                .filter(|row| !self.results.contains(row))
+                .cloned()
+                .collect(),
+            retracted: self
+                .results
+                .iter()
+                .filter(|row| !results.contains(row))
+                .cloned()
+                .collect(),
+        };
+
+        self.results = results;
+        self.demand = demand;
+        self.revision = current;
+        self.initialized = true;
+        Ok(Some(delta))
     }
 
     /// Classify what the changes between the pinned root and
@@ -461,11 +474,11 @@ where
     /// and are skipped.
     ///
     /// [`differentiate_within`]: dialog_search_tree::PersistentTree::differentiate_within
-    fn touched<'a, Env>(
+    async fn touched<'a, Env>(
         &'a self,
         env: &'a Env,
         current: &'a Option<Revision>,
-    ) -> impl Future<Output = Result<Touched, EvaluationError>> + 'a
+    ) -> Result<Touched, EvaluationError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -475,82 +488,78 @@ where
             + ConditionalSync
             + 'static,
     {
-        async move {
-            let pinned = tree_hash(&self.revision);
-            let target = tree_hash(current);
-            if pinned == target {
-                return Ok(Touched::Nothing);
-            }
-            let scope = self.demand.ranges();
-            if scope.is_empty() {
-                return Ok(Touched::Nothing);
-            }
+        let pinned = tree_hash(&self.revision);
+        let target = tree_hash(current);
+        if pinned == target {
+            return Ok(Touched::Nothing);
+        }
+        let scope = self.demand.ranges();
+        if scope.is_empty() {
+            return Ok(Touched::Nothing);
+        }
 
-            let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), None);
-            let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
-            let previous =
-                Index::from_hash_with_cache(NodeHash::from(pinned), self.branch.node_cache());
-            let next =
-                Index::from_hash_with_cache(NodeHash::from(target), self.branch.node_cache());
+        let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), None);
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        let previous =
+            Index::from_hash_with_cache(NodeHash::from(pinned), self.branch.node_cache());
+        let next = Index::from_hash_with_cache(NodeHash::from(target), self.branch.node_cache());
 
-            let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
-            let mut changes = Box::pin(changes);
-            let mut subjects = BTreeSet::new();
-            let mut asserted = Vec::new();
-            let mut retracted = Vec::new();
-            // A fact change surfaces once per index order; dedup on the
-            // datum triple, per direction.
-            let mut seen = BTreeSet::new();
-            while let Some(change) = changes
-                .try_next()
-                .await
-                .map_err(|error| EvaluationError::Store(format!("subscription diff: {error}")))?
-            {
-                let entry = match &change {
-                    Change::Add(entry) => entry,
-                    Change::Remove(entry) => entry,
-                };
-                if self.demand.covers_rules(&entry.key) {
-                    return Ok(Touched::Rules);
+        let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
+        let mut changes = Box::pin(changes);
+        let mut subjects = BTreeSet::new();
+        let mut asserted = Vec::new();
+        let mut retracted = Vec::new();
+        // A fact change surfaces once per index order; dedup on the
+        // datum triple, per direction.
+        let mut seen = BTreeSet::new();
+        while let Some(change) = changes
+            .try_next()
+            .await
+            .map_err(|error| EvaluationError::Store(format!("subscription diff: {error}")))?
+        {
+            let entry = match &change {
+                Change::Add(entry) => entry,
+                Change::Remove(entry) => entry,
+            };
+            if self.demand.covers_rules(&entry.key) {
+                return Ok(Touched::Rules);
+            }
+            // An entry arriving with a datum became readable; an
+            // entry leaving with a datum stopped being readable.
+            // Tombstone-valued entries carry no datum: their effect
+            // (if any) surfaces as the paired datum-bearing change
+            // at the same key.
+            let arriving = matches!(&change, Change::Add(_));
+            if let State::Added(datum) = &entry.value {
+                if !seen.insert((
+                    arriving,
+                    datum.entity.clone(),
+                    datum.attribute.clone(),
+                    datum.value.clone(),
+                )) {
+                    continue;
                 }
-                // An entry arriving with a datum became readable; an
-                // entry leaving with a datum stopped being readable.
-                // Tombstone-valued entries carry no datum: their effect
-                // (if any) surfaces as the paired datum-bearing change
-                // at the same key.
-                let arriving = matches!(&change, Change::Add(_));
-                if let State::Added(datum) = &entry.value {
-                    if !seen.insert((
-                        arriving,
-                        datum.entity.clone(),
-                        datum.attribute.clone(),
-                        datum.value.clone(),
-                    )) {
-                        continue;
-                    }
-                    let fact = Artifact::try_from(datum.clone()).map_err(|error| {
-                        EvaluationError::Store(format!("changed datum: {error:?}"))
-                    })?;
-                    subjects.insert(fact.of.clone());
-                    if arriving {
-                        asserted.push(fact);
-                    } else {
-                        retracted.push(fact);
-                    }
+                let fact = Artifact::try_from(datum.clone())
+                    .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
+                subjects.insert(fact.of.clone());
+                if arriving {
+                    asserted.push(fact);
+                } else {
+                    retracted.push(fact);
                 }
             }
+        }
 
-            if subjects.is_empty() {
-                Ok(Touched::Nothing)
-            } else {
-                let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
-                Ok(Touched::Facts {
-                    subjects,
-                    facts,
-                    asserted,
-                    retracted,
-                })
-            }
+        if subjects.is_empty() {
+            Ok(Touched::Nothing)
+        } else {
+            let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
+            Ok(Touched::Facts {
+                subjects,
+                facts,
+                asserted,
+                retracted,
+            })
         }
     }
 
@@ -574,7 +583,7 @@ where
         facts: &'a [Artifact],
         asserted: &'a [Artifact],
         retracted: &'a [Artifact],
-    ) -> impl Future<Output = Result<Option<Delta<Q::Conclusion>>, EvaluationError>> + 'a
+    ) -> EvaluationFuture<'a, Option<Delta<Q::Conclusion>>>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -585,7 +594,7 @@ where
             + ConditionalSync
             + 'static,
     {
-        async move {
+        Box::pin(async move {
             // For a concept query the affected heads are discovered
             // against the resolved rule set: entity-local rules
             // contribute the changed subjects, non-local rules (concept
@@ -606,8 +615,13 @@ where
                 let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
                 let overlay = layer.overlay(&operator);
                 let tombstones = tombstones_from(&overlay);
-                let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
-                    .with_demand(self.demand.clone());
+                // Typed with the *named* env lifetime (owned branch
+                // clone, no generator-local borrows) so the poll
+                // future stays Send-general on native — see the note
+                // on `QueryEnv::branches`.
+                let query_env: QueryEnv<'a, Env> =
+                    QueryEnv::new(vec![self.branch.clone()], overlay, tombstones, env)
+                        .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 if rules.recursion().is_some() {
                     // Fixpoint continuation: deletions retract via DRed,
@@ -681,22 +695,19 @@ where
                 asserted,
                 retracted,
             }))
-        }
+        })
     }
 
     /// Evaluate the query against the branch, recording every
     /// demanded range into `demand`. Mirrors the ordinary
     /// `branch.select(query).perform(env)` path with a
     /// demand-recording environment.
-    // `impl Future + 'a` (not `async fn`) so the env lifetime is
-    // named, keeping the enclosing `poll` future Send-general on
-    // native — see the note on `poll`.
     fn evaluate<'a, Env>(
         &'a self,
         env: &'a Env,
         demand: &'a Demand,
         query: &'a Q,
-    ) -> impl Future<Output = Result<Vec<Q::Conclusion>, EvaluationError>> + 'a
+    ) -> EvaluationFuture<'a, Vec<Q::Conclusion>>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -707,7 +718,7 @@ where
             + ConditionalSync
             + 'static,
     {
-        async move {
+        Box::pin(async move {
             let operator = Identify
                 .perform(env)
                 .await
@@ -715,8 +726,11 @@ where
             let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
-            let mut query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
-                .with_demand(demand.clone());
+            // Named env lifetime: keeps the poll future Send-general
+            // on native — see the note on `QueryEnv::branches`.
+            let mut query_env: QueryEnv<'a, Env> =
+                QueryEnv::new(vec![self.branch.clone()], overlay, tombstones, env)
+                    .with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
             // table so a later additions-only poll can extend it.
@@ -725,7 +739,7 @@ where
                     .with_fixpoint(concept.this(), Continuation::new(self.fixpoint.clone()));
             }
             query.clone().perform(&query_env).try_vec().await
-        }
+        })
     }
 
     /// Evaluate the standing query with the retained fixpoint
@@ -737,7 +751,7 @@ where
         env: &'a Env,
         additions: Arc<Vec<Artifact>>,
         deletions: Arc<Vec<Artifact>>,
-    ) -> impl Future<Output = Result<Vec<Q::Conclusion>, EvaluationError>> + 'a
+    ) -> EvaluationFuture<'a, Vec<Q::Conclusion>>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -748,7 +762,7 @@ where
             + ConditionalSync
             + 'static,
     {
-        async move {
+        Box::pin(async move {
             let concept = self
                 .query
                 .concept()
@@ -760,14 +774,17 @@ where
             let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
-            let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
-                .with_demand(self.demand.clone())
-                .with_fixpoint(
-                    concept.this(),
-                    Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
-                );
+            // Named env lifetime: keeps the poll future Send-general
+            // on native — see the note on `QueryEnv::branches`.
+            let query_env: QueryEnv<'a, Env> =
+                QueryEnv::new(vec![self.branch.clone()], overlay, tombstones, env)
+                    .with_demand(self.demand.clone())
+                    .with_fixpoint(
+                        concept.this(),
+                        Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
+                    );
             self.query.clone().perform(&query_env).try_vec().await
-        }
+        })
     }
 }
 
@@ -776,11 +793,75 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::RemoteSite;
     use crate::helpers::{test_operator_with_profile, test_repo};
     use dialog_artifacts::{Entity, Value};
+    use dialog_capability::{Fork, Provider};
+    use dialog_common::{ConditionalSend, ConditionalSync};
+    use dialog_effects::archive::{Get, Put};
+    use dialog_effects::authority::Identify;
+    use dialog_effects::memory::Resolve;
     use dialog_query::attribute::The;
     use dialog_query::types::Any;
     use dialog_query::{AttributeQuery, Claim, Term, the};
+
+    /// Compile-time proof that the poll future is `Send` on native
+    /// (`ConditionalSend` = `Send` there, nothing on wasm): the
+    /// consumer drains subscription polls from axum handlers, whose
+    /// futures must be `Send`. Generic over the env so the guarantee
+    /// holds for any consumer's environment, not just the test
+    /// operator. Exercised by
+    /// [`it_keeps_the_poll_future_send_general`].
+    fn require_send_poll<Env>(subscription: &mut super::Subscription<AttributeQuery>, env: &Env)
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSend
+            + ConditionalSync
+            + 'static,
+    {
+        fn assert_send<T: ConditionalSend>(_: T) {}
+        assert_send(subscription.poll(env));
+    }
+
+    /// The poll future stays `Send`-general: the reactor's native
+    /// build drives polls from axum handlers, so a regression here
+    /// is a compile error in [`require_send_poll`], and the
+    /// subscription still evaluates normally afterwards.
+    #[dialog_common::test]
+    async fn it_keeps_the_poll_future_send_general() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        // Builds (and drops) a poll future through the Send-requiring
+        // bound; the compile is the assertion.
+        require_send_poll(&mut subscription, &operator);
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("first poll evaluates");
+        assert_eq!(names(&delta.asserted), vec![(alice, "Alice".to_string())]);
+        Ok(())
+    }
 
     /// A standing query over every `person/name` fact.
     fn names_query() -> AttributeQuery {

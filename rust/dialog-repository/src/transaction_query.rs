@@ -165,7 +165,7 @@ where
         // retracts. Tombstones touch only the branch source; the
         // overlay's facts (below) pass through unfiltered so a
         // `retract(x).assert(x)` pattern surfaces `x` correctly.
-        let raw = select_from_branch(self.branch, self.env, input.clone()).await?;
+        let raw = select_from_branch(self.branch.clone(), self.env, input.clone());
         let filtered_branch = filter_tombstones(raw, self.tombstones.clone());
 
         // Pending changes overlay — Changes itself is a Provider<Select>.
