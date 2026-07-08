@@ -165,11 +165,16 @@ impl<'a> QueryLayer<'a> {
     }
 }
 
+// Folds the branch's transient session overlay
+// ([`Branch::overlay`]): every read path — `branch.select`,
+// `branch.query`, transaction queries, subscription evaluations —
+// constructs through here, so session facts participate in all of
+// them with no per-path wiring.
 impl<'a> From<&'a Branch> for QueryLayer<'a> {
     fn from(branch: &'a Branch) -> Self {
         Self {
             branches: vec![branch],
-            changes: Changes::new(),
+            changes: branch.overlay().changes(),
         }
     }
 }

@@ -68,7 +68,7 @@ use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
-use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, KeyBytes, State};
+use dialog_artifacts::{Artifact, ArtifactSelector, Entity, KeyBytes, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -209,21 +209,17 @@ impl<T> Delta<T> {
 pub struct Subscription<Q: Application> {
     branch: Branch,
     query: Q,
-    /// A caller-supplied transient overlay folded into every
-    /// evaluation alongside the branch facts — the same role
-    /// [`QueryLayer::with`] plays for a one-shot query. Ephemeral:
-    /// off-tree, never committed, so the tree-diff gate in
-    /// [`touched`](Subscription::touched) can't observe a change to
-    /// it. The owner must therefore call
-    /// [`set_overlay`](Subscription::set_overlay) and force a poll
-    /// when the overlay mutates; a poll then recomputes (the overlay
-    /// delta is not derivable from the tree). Empty by default
-    /// ([`subscribe`](Branch::subscribe)); populated via
-    /// [`subscribe_with`](Branch::subscribe_with).
-    overlay: Changes,
     /// The revision the retained results were evaluated at. `None`
     /// until the first poll.
     revision: Option<Revision>,
+    /// The [`Overlay`](crate::Overlay) epoch the retained results
+    /// were evaluated at. The branch's session overlay is off-tree,
+    /// so a change to it is invisible to the poll's tree-diff gate;
+    /// the epoch is the signal that re-triggers evaluation (the
+    /// overlay delta is not derivable from the tree, so an epoch
+    /// move recomputes, reporting the change as a delta against the
+    /// retained results).
+    overlay_epoch: u64,
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
@@ -244,23 +240,18 @@ impl Branch {
     /// Register a standing query over this branch. The subscription
     /// evaluates on its first [`poll`](Subscription::poll) and is
     /// incrementally gated afterwards.
+    ///
+    /// Reads observe the branch's transient session overlay
+    /// ([`Branch::overlay`]) like every other read path, and a poll
+    /// picks up overlay changes: asserting an ephemeral fact into
+    /// the overlay propagates to the branch's subscriptions as a
+    /// result delta on their next poll.
     pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
-        self.subscribe_with(query, Changes::new())
-    }
-
-    /// Register a standing query with a transient `overlay` folded
-    /// into every evaluation — ephemeral facts (an invite seed, a
-    /// UI status stamp) that participate in reads and in the demand
-    /// cover but are never committed. Because the overlay is
-    /// off-tree, a change to it is invisible to the poll's tree-diff
-    /// gate: after mutating it via [`Subscription::set_overlay`], the
-    /// owner must force a poll to pick the change up.
-    pub fn subscribe_with<Q: Application>(&self, query: Q, overlay: Changes) -> Subscription<Q> {
         Subscription {
             branch: self.clone(),
             query,
-            overlay,
             revision: None,
+            overlay_epoch: 0,
             demand: Demand::new(),
             results: Vec::new(),
             fixpoint: Arc::new(Mutex::new(None)),
@@ -335,23 +326,6 @@ where
         &self.demand
     }
 
-    /// Replace the transient overlay folded into evaluations and
-    /// invalidate the pinned revision so the next
-    /// [`poll`](Subscription::poll) recomputes.
-    ///
-    /// The overlay is off-tree, so a change to it never appears in
-    /// the tree diff the poll gates on; without invalidating the pin
-    /// the next poll would short-circuit (`current == revision`) and
-    /// miss the overlay change. Invalidation routes the next poll
-    /// through a full evaluation (the overlay delta cannot be derived
-    /// incrementally from the tree), which reports the result change
-    /// as a delta against the retained results.
-    pub fn set_overlay(&mut self, overlay: Changes) {
-        self.overlay = overlay;
-        self.revision = None;
-        self.initialized = false;
-    }
-
     /// Full evaluations performed so far (the first poll plus every
     /// fallback from incremental maintenance).
     pub fn recomputes(&self) -> usize {
@@ -369,16 +343,17 @@ where
     /// Poll the subscription against the branch's current state.
     ///
     /// Returns `Ok(None)` when the result is known unchanged: the
-    /// branch is at the pinned revision, or it moved but no change
-    /// intersects the demand cover (the pin advances silently).
-    /// Returns `Ok(Some(delta))` after a (re-)evaluation — the first
-    /// poll always evaluates, reporting the initial result as
-    /// `asserted` rows.
+    /// branch is at the pinned revision with the session overlay at
+    /// the pinned epoch, or the tree moved but no change intersects
+    /// the demand cover (the pin advances silently). Returns
+    /// `Ok(Some(delta))` after a (re-)evaluation — the first poll
+    /// always evaluates, reporting the initial result as `asserted`
+    /// rows.
     ///
-    /// The revision is snapshotted before evaluating; a commit that
-    /// lands mid-evaluation re-triggers on the next poll (the diff
-    /// from the pinned root is a superset), so changes are never
-    /// missed, at worst re-checked.
+    /// The revision and overlay epoch are snapshotted before
+    /// evaluating; a commit or overlay mutation that lands
+    /// mid-evaluation re-triggers on the next poll, so changes are
+    /// never missed, at worst re-checked.
     // The `self` and `env` lifetimes are deliberately unified into
     // one named `'a`: the poll future must stay `Send` on native (an
     // axum handler drains subscription polls), and its inner
@@ -398,7 +373,13 @@ where
             + 'static,
     {
         let current = self.branch.revision();
-        if self.initialized {
+        let epoch = self.branch.overlay().epoch();
+        // The session overlay is off-tree: an epoch move is invisible
+        // to the tree-diff gate below and its delta is not derivable
+        // from the tree, so it routes straight to a re-evaluation
+        // (reported against the retained results). The incremental
+        // path only serves polls where the tree alone moved.
+        if self.initialized && epoch == self.overlay_epoch {
             if current == self.revision {
                 return Ok(None);
             }
@@ -451,6 +432,7 @@ where
         self.results = results;
         self.demand = demand;
         self.revision = current;
+        self.overlay_epoch = epoch;
         self.initialized = true;
         Ok(Some(delta))
     }
@@ -612,7 +594,7 @@ where
                     .perform(env)
                     .await
                     .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-                let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
+                let layer = QueryLayer::from(&self.branch);
                 let overlay = layer.overlay(&operator);
                 let tombstones = tombstones_from(&overlay);
                 // Typed with the *named* env lifetime (owned branch
@@ -723,7 +705,7 @@ where
                 .perform(env)
                 .await
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-            let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
+            let layer = QueryLayer::from(&self.branch);
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
             // Named env lifetime: keeps the poll future Send-general
@@ -771,7 +753,7 @@ where
                 .perform(env)
                 .await
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-            let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
+            let layer = QueryLayer::from(&self.branch);
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
             // Named env lifetime: keeps the poll future Send-general
@@ -885,6 +867,267 @@ mod tests {
                 (claim.of.clone(), name)
             })
             .collect()
+    }
+
+    /// The branch's session overlay participates in subscription
+    /// results: ephemeral facts surface alongside tree facts from
+    /// the first poll, without ever being committed.
+    #[dialog_common::test]
+    async fn it_folds_the_overlay_into_subscription_results() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // An ephemeral fact: participates in reads, never committed.
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+
+        let mut subscription = branch.subscribe(names_query());
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("first poll evaluates");
+        let mut asserted = names(&delta.asserted);
+        asserted.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(
+            asserted, expected,
+            "overlay facts surface alongside tree facts"
+        );
+        Ok(())
+    }
+
+    /// Asserting into the branch overlay propagates to the branch's
+    /// subscriptions: every standing query the ephemeral fact
+    /// affects reports it as a delta on its next poll, with no tree
+    /// movement at all — and clearing the overlay retracts exactly
+    /// the ephemeral rows.
+    #[dialog_common::test]
+    async fn it_propagates_overlay_updates_to_subscriptions() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        let mut sibling = branch.subscribe(names_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            names(&initial.asserted),
+            vec![(alice.clone(), "Alice".to_string())]
+        );
+        sibling.poll(&operator).await?.expect("sibling initial");
+
+        // An ephemeral fact lands in the branch overlay: both
+        // standing queries report it against their retained results.
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("overlay change propagates");
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(bob.clone(), "Bob".to_string())]
+        );
+        assert!(delta.retracted.is_empty());
+        let sibling_delta = sibling
+            .poll(&operator)
+            .await?
+            .expect("every subscription on the branch observes the overlay");
+        assert_eq!(
+            names(&sibling_delta.asserted),
+            vec![(bob.clone(), "Bob".to_string())]
+        );
+
+        let mut retained = names(subscription.results());
+        retained.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(retained, expected);
+
+        // Clearing the overlay retracts exactly the ephemeral rows.
+        branch.overlay().clear();
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("overlay removal propagates");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(
+            names(&delta.retracted),
+            vec![(bob.clone(), "Bob".to_string())]
+        );
+        assert_eq!(
+            names(subscription.results()),
+            vec![(alice.clone(), "Alice".to_string())],
+            "tree facts persist through overlay changes"
+        );
+
+        // With the overlay quiet the gates still hold: polling again
+        // is a revision + epoch no-op.
+        assert!(subscription.poll(&operator).await?.is_none());
+        Ok(())
+    }
+
+    /// Retracting into the branch overlay tombstones matching tree
+    /// facts for readers — the subscription retracts the row on its
+    /// next poll while the tree keeps the fact.
+    #[dialog_common::test]
+    async fn it_tombstones_tree_facts_retracted_in_the_overlay() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+
+        branch.overlay().retract(
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("overlay retract propagates");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(
+            names(&delta.retracted),
+            vec![(alice.clone(), "Alice".to_string())]
+        );
+        assert!(subscription.results().is_empty());
+
+        // The tree is untouched: dropping the session retract brings
+        // the fact back.
+        branch.overlay().clear();
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("clearing the session retract restores the row");
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(alice.clone(), "Alice".to_string())]
+        );
+        Ok(())
+    }
+
+    /// One-shot reads see the session overlay too: `branch.select`
+    /// and a transaction's as-if-committed view both fold it, so
+    /// every read path of the branch agrees on what exists.
+    #[dialog_common::test]
+    async fn it_folds_the_overlay_into_queries_and_transactions() -> anyhow::Result<()> {
+        use dialog_query::query::Output as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+
+        let mut read = names(
+            &branch
+                .select(names_query())
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        );
+        read.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(read, expected, "plain queries fold the session overlay");
+
+        let carol = Entity::new()?;
+        let transaction = branch.transaction().assert(
+            the!("person/name")
+                .of(carol.clone())
+                .is("Carol".to_string()),
+        );
+        let mut staged = names(
+            &transaction
+                .query()
+                .select(names_query())
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        );
+        staged.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+            (carol.clone(), "Carol".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(
+            staged, expected,
+            "a transaction's view folds the session overlay under its pending changes"
+        );
+        Ok(())
     }
 
     /// The first poll evaluates and reports the initial result;
