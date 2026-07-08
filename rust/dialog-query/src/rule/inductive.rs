@@ -23,7 +23,7 @@ use crate::negation::Negation;
 use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::rule::analyzer::AnalyzedRule;
-use crate::rule::{Compile, fmt_rule_schema};
+use crate::rule::{Compile, RuleKind, fmt_rule_schema};
 use crate::{Environment, Parameters, Proposition};
 use descriptor::InductiveRuleDescriptor;
 use serde::de::Error as _;
@@ -41,6 +41,8 @@ pub struct InductiveRule {
 }
 
 impl Compile for InductiveRule {
+    const KIND: RuleKind = RuleKind::Inductive;
+
     fn from_analysis(analysis: AnalyzedRule) -> Self {
         InductiveRule { analysis }
     }
@@ -195,6 +197,43 @@ mod tests {
     fn it_compiles_with_valid_premises() {
         let result = InductiveRule::new(counter_head(), increment_body());
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
+    }
+
+    /// The create-once shape: `assert! P when body unless P`. For an
+    /// inductive rule the `unless` reads the pre-transition state
+    /// while the head asserts into the next one, so negating the
+    /// rule's own conclusion is the standard idempotence guard
+    /// (Dedalus `P@next :- body, not P@now`), not a paradox — it
+    /// must compile, and the negation premise must survive analysis
+    /// so evaluation applies the guard. The same shape on a
+    /// deductive rule stays rejected
+    /// (`deductive::tests::it_rejects_self_negating_rule`).
+    #[dialog_common::test]
+    fn it_permits_negating_its_own_conclusion() {
+        use crate::concept::query::ConceptQuery;
+        use crate::negation::Negation;
+        use crate::proposition::Proposition;
+        use crate::types::Any;
+
+        let head = counter_head();
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("this"));
+        let mut premises = increment_body();
+        premises.push(Premise::Unless(Negation(Proposition::Concept(
+            ConceptQuery {
+                terms,
+                predicate: head.clone(),
+            },
+        ))));
+
+        let rule = InductiveRule::new(head.clone(), premises)
+            .expect("an inductive rule may negate its own conclusion");
+        let negated: Vec<Entity> = rule.analysis().negated_concepts().collect();
+        assert_eq!(
+            negated,
+            vec![head.this()],
+            "the idempotence guard survives analysis"
+        );
     }
 
     #[dialog_common::test]
