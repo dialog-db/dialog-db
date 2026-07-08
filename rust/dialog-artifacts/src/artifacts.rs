@@ -471,7 +471,7 @@ mod tests {
     use crate::helpers::generate_data;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
-        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
+        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Record, Value, make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -683,6 +683,50 @@ mod tests {
             hits.is_empty(),
             "the retracted fact must not be queryable after the tombstone"
         );
+        Ok(())
+    }
+
+    /// A `Value::Record` payload survives a full commit → index → select
+    /// round trip as naked, byte-identical bytes, distinguished only by its
+    /// `Record` type tag. This exercises the real storage decode path
+    /// (`Artifact::try_from(Datum)` → `Value::try_from((ValueDataType, _))`),
+    /// which historically panicked with `unimplemented!()`. It is the native
+    /// mirror of the WS5a JS-boundary round-trip test and pins the naked-bytes
+    /// invariant the automerge integration depends on.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_round_trips_record_values() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+        let note = Entity::new()?;
+
+        // A payload standing in for an opaque, format-native document (e.g.
+        // automerge `save()` bytes): includes a leading zero and a byte equal
+        // to the `Record` tag, so any accidental prefixing would corrupt it.
+        let document = vec![0x00, 0x07, 0x85, 0x6f, 0x4a, 0x83, 0xff];
+
+        facts
+            .commit(std::iter::once(Instruction::Assert(Artifact {
+                the: Attribute::from_str("note/body")?,
+                of: note.clone(),
+                is: Value::Record(Record::from(document.clone())),
+                cause: None,
+            })))
+            .await?;
+
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().the(Attribute::from_str("note/body")?))
+            .try_collect()
+            .await?;
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].of, note);
+        assert_eq!(
+            selected[0].is,
+            Value::Record(Record::from(document)),
+            "record bytes must return byte-identical"
+        );
+
         Ok(())
     }
 

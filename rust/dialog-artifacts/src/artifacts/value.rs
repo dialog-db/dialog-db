@@ -997,4 +997,32 @@ mod tests {
         // Identical bytes hash to the identical value reference.
         assert_eq!(a.to_reference(), b.to_reference());
     }
+
+    /// The on-disk tag for a record must be `7`, held distinct from `Bytes`
+    /// (`0`). The JS boundary (`web.rs`) and the notation `as:` surface both
+    /// key off this exact discriminant; pin it so a reorder of the enum is a
+    /// loud break rather than a silent reinterpretation of stored data.
+    #[test]
+    fn record_tag_is_seven_and_distinct_from_bytes() {
+        assert_eq!(ValueDataType::Record as u8, 7);
+        assert_eq!(ValueDataType::Bytes as u8, 0);
+        assert_ne!(ValueDataType::Record, ValueDataType::Bytes);
+        assert_eq!(
+            Value::Record(Record::from(vec![1, 2, 3])).data_type(),
+            ValueDataType::Record
+        );
+    }
+
+    /// The empty document is a legal record payload and must round-trip as an
+    /// empty byte slice rather than being confused with an absent value.
+    #[test]
+    fn empty_record_round_trips() {
+        let value = Value::Record(Record::from(Vec::new()));
+        let encoded = value.to_bytes();
+        assert!(encoded.is_empty());
+
+        let decoded =
+            Value::try_from((ValueDataType::Record, encoded)).expect("empty record must decode");
+        assert_eq!(decoded, Value::Record(Record::from(Vec::new())));
+    }
 }
