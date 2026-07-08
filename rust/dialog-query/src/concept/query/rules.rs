@@ -11,6 +11,7 @@
 use std::iter;
 
 use super::adornment::Adornment;
+use super::fixpoint::Continuation;
 use super::plan_cache::PlanCache;
 use crate::DeductiveRule;
 use crate::concept::descriptor::ConceptDescriptor;
@@ -43,6 +44,11 @@ pub struct ConceptRules {
     /// [`RuleRegistry::acquire`](crate::session::RuleRegistry) and
     /// read by `ConceptQuery::evaluate`.
     recursion: Option<Arc<ProgramAnalysis>>,
+    /// A standing subscription's retained fixpoint, when one is
+    /// polling this concept: evaluation continues the retained
+    /// answer table (or rebuilds into it) instead of computing a
+    /// throwaway fixpoint.
+    continuation: Option<Continuation>,
 }
 
 impl ConceptRules {
@@ -65,6 +71,7 @@ impl ConceptRules {
             plans: Arc::new(RwLock::new(HashMap::new())),
             plan_cache,
             recursion: None,
+            continuation: None,
         }
     }
 
@@ -79,6 +86,19 @@ impl ConceptRules {
     /// in a dependency cycle; `None` for ordinary concepts.
     pub fn recursion(&self) -> Option<&Arc<ProgramAnalysis>> {
         self.recursion.as_ref()
+    }
+
+    /// Attach a standing subscription's retained fixpoint. Only
+    /// consulted when the concept is recursive.
+    pub fn with_continuation(mut self, continuation: Continuation) -> Self {
+        self.continuation = Some(continuation);
+        self
+    }
+
+    /// The retained fixpoint attached by a polling subscription, if
+    /// any.
+    pub fn continuation(&self) -> Option<&Continuation> {
+        self.continuation.as_ref()
     }
 
     /// Install a deductive rule, deduplicating by equality.

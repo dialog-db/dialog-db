@@ -76,8 +76,10 @@ use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::Conclusion;
 use dialog_query::concept::query::affected::affected_entities;
+use dialog_query::concept::query::fixpoint::{Continuation, InMemoryAnswerTable};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output as _, Restriction};
+use dialog_query::source::SelectRules;
 use dialog_search_tree::{Change, ContentAddressedStorage};
 use dialog_storage::Blake3Hash;
 use futures_util::TryStreamExt as _;
@@ -198,6 +200,10 @@ pub struct Subscription<Q: Application> {
     /// The last evaluation's full result, retained to compute the
     /// next delta.
     results: Vec<Q::Conclusion>,
+    /// The retained fixpoint answer table when the subscribed
+    /// concept is recursive: additions extend it semi-naively;
+    /// recomputes rebuild into it.
+    fixpoint: Arc<Mutex<Option<InMemoryAnswerTable>>>,
     initialized: bool,
     /// Full evaluations performed (first poll + fallbacks).
     recomputes: usize,
@@ -216,6 +222,7 @@ impl Branch {
             revision: None,
             demand: Demand::new(),
             results: Vec::new(),
+            fixpoint: Arc::new(Mutex::new(None)),
             initialized: false,
             recomputes: 0,
             maintenances: 0,
@@ -238,6 +245,10 @@ enum Touched {
         subjects: BTreeSet<Entity>,
         /// The changed facts themselves, for delta-join discovery.
         facts: Vec<Artifact>,
+        /// Whether every change was an addition (no fact left the
+        /// index and no tombstone was written): the precondition
+        /// for semi-naive fixpoint continuation.
+        additions_only: bool,
     },
 }
 
@@ -316,8 +327,15 @@ where
                     self.revision = current;
                     return Ok(None);
                 }
-                Touched::Facts { subjects, facts } => {
-                    if let Some(delta) = self.maintain(env, &subjects, &facts).await? {
+                Touched::Facts {
+                    subjects,
+                    facts,
+                    additions_only,
+                } => {
+                    if let Some(delta) = self
+                        .maintain(env, &subjects, &facts, additions_only)
+                        .await?
+                    {
                         self.maintenances += 1;
                         self.revision = current;
                         return Ok(Some(delta));
@@ -409,6 +427,7 @@ where
         let mut changes = Box::pin(changes);
         let mut subjects = BTreeSet::new();
         let mut facts = Vec::new();
+        let mut additions_only = true;
         // A fact change surfaces once per index order; dedup on the
         // datum triple.
         let mut seen = BTreeSet::new();
@@ -423,6 +442,13 @@ where
             };
             if self.demand.covers_rules(&entry.key) {
                 return Ok(Touched::Rules);
+            }
+            // An entry leaving the index, or a tombstone arriving,
+            // means a fact stopped being readable: not an addition.
+            match (&change, &entry.value) {
+                (Change::Remove(_), State::Added(_)) => additions_only = false,
+                (Change::Add(_), State::Removed) => additions_only = false,
+                _ => {}
             }
             if let State::Added(datum) = &entry.value {
                 if !seen.insert((
@@ -442,7 +468,11 @@ where
         if subjects.is_empty() {
             Ok(Touched::Nothing)
         } else {
-            Ok(Touched::Facts { subjects, facts })
+            Ok(Touched::Facts {
+                subjects,
+                facts,
+                additions_only,
+            })
         }
     }
 
@@ -464,6 +494,7 @@ where
         env: &Env,
         subjects: &BTreeSet<Entity>,
         facts: &[Artifact],
+        additions_only: bool,
     ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
     where
         Env: Provider<Get>
@@ -497,6 +528,36 @@ where
             let tombstones = tombstones_from(&overlay);
             let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
                 .with_demand(self.demand.clone());
+            let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
+            if rules.recursion().is_some() {
+                // Fixpoint continuation: additions extend the
+                // retained answer table semi-naively (rebuilding
+                // when the rule set is not additively extendable);
+                // deletions fall back to a recompute, which rebuilds
+                // the table.
+                if !additions_only {
+                    return Ok(None);
+                }
+                drop(query_env);
+                let results = self
+                    .evaluate_with_continuation(env, Some(Arc::new(facts.to_vec())))
+                    .await?;
+                let delta = Delta {
+                    asserted: results
+                        .iter()
+                        .filter(|row| !self.results.contains(row))
+                        .cloned()
+                        .collect(),
+                    retracted: self
+                        .results
+                        .iter()
+                        .filter(|row| !results.contains(row))
+                        .cloned()
+                        .collect(),
+                };
+                self.results = results;
+                return Ok(Some(delta));
+            }
             match affected_entities(concept, facts, &query_env).await? {
                 Some(entities) => entities,
                 None => return Ok(None),
@@ -570,9 +631,57 @@ where
         let layer = QueryLayer::from(&self.branch);
         let overlay = layer.overlay(&operator);
         let tombstones = tombstones_from(&overlay);
-        let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
+        let mut query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
             .with_demand(demand.clone());
+        // Recursive concept subscriptions retain their fixpoint
+        // across polls: a recompute rebuilds into the retained
+        // table so a later additions-only poll can extend it.
+        if let Some(concept) = query.concept() {
+            query_env = query_env.with_fixpoint(
+                concept.this(),
+                Continuation::new(self.fixpoint.clone(), None),
+            );
+        }
         query.clone().perform(&query_env).try_vec().await
+    }
+
+    /// Evaluate the standing query with the retained fixpoint
+    /// attached, seeding a semi-naive continuation from `additions`
+    /// when present. Demand keeps recording into the standing
+    /// cover.
+    async fn evaluate_with_continuation<Env>(
+        &self,
+        env: &Env,
+        additions: Option<Arc<Vec<Artifact>>>,
+    ) -> Result<Vec<Q::Conclusion>, EvaluationError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let concept = self
+            .query
+            .concept()
+            .expect("continuation evaluation requires a concept query");
+        let operator = Identify
+            .perform(env)
+            .await
+            .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
+        let layer = QueryLayer::from(&self.branch);
+        let overlay = layer.overlay(&operator);
+        let tombstones = tombstones_from(&overlay);
+        let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
+            .with_demand(self.demand.clone())
+            .with_fixpoint(
+                concept.this(),
+                Continuation::new(self.fixpoint.clone(), additions),
+            );
+        self.query.clone().perform(&query_env).try_vec().await
     }
 }
 
@@ -1478,7 +1587,14 @@ mod tests {
             .commit()
             .perform(&operator)
             .await?;
+        assert_eq!(subscription.recomputes(), 1);
         let delta = subscription.poll(&operator).await?.expect("cone grows");
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "the closure extended via fixpoint continuation, not a re-fixpoint"
+        );
+        assert_eq!(subscription.maintenances(), 1);
         let mut asserted = delta.asserted.clone();
         asserted.sort_by_key(|row| format!("{row:?}"));
         let mut expected = vec![
@@ -1509,6 +1625,57 @@ mod tests {
             .expect("cone grows again");
         assert_eq!(delta.asserted.len(), 3, "(d,c), (d,b), (d,a)");
         assert!(delta.retracted.is_empty());
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 2);
+
+        // A deletion shrinks the closure: not additively
+        // extendable, so the poll rebuilds the fixpoint (and the
+        // retained table), retracting everything derived through
+        // the removed edge.
+        branch
+            .transaction()
+            .retract(Parent::of(c.clone()).is(b.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("cone shrinks");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(
+            delta.retracted.len(),
+            4,
+            "everything derived through the removed edge goes: \
+             (c,b), (c,a), (d,b), (d,a); (d,c) survives"
+        );
+        assert_eq!(subscription.recomputes(), 2, "deletions rebuild");
+
+        // And the rebuilt table continues extending afterwards.
+        let e = Entity::new()?;
+        branch
+            .transaction()
+            .assert(Parent::of(e.clone()).is(d.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("extends again");
+        let mut asserted = delta.asserted.clone();
+        asserted.sort_by_key(|row| format!("{row:?}"));
+        let mut expected = vec![
+            HasAncestor {
+                this: e.clone(),
+                ancestor: Ancestor(d.clone()),
+            },
+            HasAncestor {
+                this: e.clone(),
+                ancestor: Ancestor(c.clone()),
+            },
+        ];
+        expected.sort_by_key(|row| format!("{row:?}"));
+        assert_eq!(
+            asserted, expected,
+            "e's ancestors follow the surviving chain"
+        );
+        assert_eq!(subscription.recomputes(), 2);
+        assert_eq!(subscription.maintenances(), 3);
         Ok(())
     }
 }

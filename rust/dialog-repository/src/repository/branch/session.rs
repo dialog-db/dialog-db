@@ -11,6 +11,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptDescriptor;
+use dialog_query::concept::query::fixpoint::Continuation;
 use dialog_query::concept::query::{ConceptRules, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
@@ -255,6 +256,11 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// demanded range here. Subscriptions use the recorded cover to
     /// gate re-evaluation.
     demand: Option<crate::Demand>,
+    /// A polling subscription's retained fixpoint for one concept:
+    /// attached to that concept's resolved rules so a recursive
+    /// evaluation continues (or rebuilds into) the retained answer
+    /// table instead of computing a throwaway one.
+    fixpoint: Option<(Entity, Continuation)>,
     env: &'a Env,
 }
 
@@ -279,6 +285,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
             changes,
             tombstones,
             demand: None,
+            fixpoint: None,
             env,
         }
     }
@@ -288,6 +295,14 @@ impl<'a, Env> QueryEnv<'a, Env> {
     /// demand cover.
     pub(crate) fn with_demand(mut self, demand: crate::Demand) -> Self {
         self.demand = Some(demand);
+        self
+    }
+
+    /// Attach a subscription's retained fixpoint for `concept`:
+    /// when that concept's rules resolve recursive, evaluation
+    /// continues the retained answer table instead of recomputing.
+    pub(crate) fn with_fixpoint(mut self, concept: Entity, continuation: Continuation) -> Self {
+        self.fixpoint = Some((concept, continuation));
         self
     }
 
@@ -306,6 +321,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             changes: self.changes.clone(),
             tombstones: self.tombstones.clone(),
             demand: self.demand.clone(),
+            fixpoint: self.fixpoint.clone(),
             env: self.env,
         }
     }
@@ -512,7 +528,13 @@ where
         let analysis = self.program_analysis(&input, &bundle).await?;
         analysis.check(&input)?;
         Ok(if analysis.is_recursive(&concept) {
-            bundle.with_recursion(analysis)
+            let bundle = bundle.with_recursion(analysis);
+            match &self.fixpoint {
+                Some((entity, continuation)) if *entity == concept => {
+                    bundle.with_continuation(continuation.clone())
+                }
+                _ => bundle,
+            }
         } else {
             bundle
         })
