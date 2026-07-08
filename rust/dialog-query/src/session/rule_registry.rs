@@ -67,20 +67,28 @@ impl RuleRegistry {
     ///
     /// Runs the query-time dependency check over the concept's
     /// closure first: an ill-stratified closure fails with
-    /// [`EvaluationError::NegationThroughRecursion`], a recursive
-    /// one with [`EvaluationError::UnsupportedRecursion`] (until the
-    /// fixpoint evaluator lands). Ill-stratified regions of the
-    /// program fail exactly the queries that touch them.
+    /// [`EvaluationError::NegationThroughRecursion`], so
+    /// ill-stratified regions of the program fail exactly the
+    /// queries that touch them. When the concept itself sits on a
+    /// (stratified) dependency cycle, the returned rules carry the
+    /// program analysis so evaluation switches to the semi-naive
+    /// fixpoint.
     pub fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
-        self.analysis()?.check(predicate)?;
+        let analysis = self.analysis()?;
+        analysis.check(predicate)?;
         let entity = predicate.this();
-        Ok(self
+        let rules = self
             .rules
             .write()
             .map_err(|e| EvaluationError::Store(e.to_string()))?
-            .entry(entity)
+            .entry(entity.clone())
             .or_insert_with(|| ConceptRules::new(predicate))
-            .clone())
+            .clone();
+        Ok(if analysis.is_recursive(&entity) {
+            rules.with_recursion(analysis)
+        } else {
+            rules
+        })
     }
 
     /// Merge every per-concept rule set from `other` into this registry.

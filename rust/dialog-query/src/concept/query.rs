@@ -1,5 +1,7 @@
 /// Adornment types for parameter binding pattern caching.
 pub mod adornment;
+/// Semi-naive fixpoint evaluation for recursive concepts.
+pub mod fixpoint;
 /// Shared, branch-owned plan cache keyed by (rule identity, adornment).
 mod plan_cache;
 /// Per-concept rule management with adornment-keyed plan caching.
@@ -268,6 +270,7 @@ impl ConceptQuery {
 
         try_stream! {
             let mut plan = None;
+            let mut table: Option<Vec<fixpoint::Row>> = None;
 
             for await each in selection {
                 let input = each?;
@@ -275,9 +278,26 @@ impl ConceptQuery {
                 // Derive the binding pattern from the first match and cache the
                 // plan. All matches in the selection share the same binding pattern
                 // (same variables bound), only the values differ.
-                if plan.is_none() {
+                if plan.is_none() && table.is_none() {
                     let rules = Provider::<SelectRules>::execute(env, app.predicate.clone()).await?;
-                    plan = Some(rules.plan(&app.terms, &input));
+                    // A concept on a dependency cycle cannot evaluate
+                    // top-down (it would recurse unboundedly): its
+                    // component's semi-naive fixpoint is computed once
+                    // and the caller's bindings join against the rows.
+                    if let Some(analysis) = rules.recursion() {
+                        table = Some(fixpoint::evaluate(&app.predicate, analysis, env).await?);
+                    } else {
+                        plan = Some(rules.plan(&app.terms, &input));
+                    }
+                }
+
+                if let Some(rows) = table.as_ref() {
+                    for row in rows {
+                        if let Some(merged) = fixpoint::join(&input, &app.terms, row)? {
+                            yield merged;
+                        }
+                    }
+                    continue;
                 }
                 let plan = plan.as_ref().unwrap();
 
