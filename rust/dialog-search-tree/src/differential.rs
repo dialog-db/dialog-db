@@ -155,7 +155,7 @@ where
         let bytes = storage.retrieve(hash).await?.ok_or_else(|| {
             DialogSearchTreeError::Node(format!("Blob not found in storage: {hash}"))
         })?;
-        Ok(PersistentNode::new(Buffer::from(bytes)))
+        PersistentNode::try_new(Buffer::from(bytes))
     }
 
     /// Initializes a sparse tree from a root hash. The root is not loaded;
@@ -168,7 +168,7 @@ where
             vec![]
         } else {
             let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
-            let upper_bound = node.body()?.upper_bound().and_then(into_owned)?;
+            let upper_bound = node.body().upper_bound().and_then(into_owned)?;
             vec![SparseTreeNode::Loaded { node, upper_bound }]
         };
 
@@ -204,7 +204,7 @@ where
             SparseTreeNode::Ref(link) => Self::load(self.storage, &link.node).await?,
         };
 
-        match node.body()? {
+        match node.body() {
             ArchivedNodeBody::Index(index) => {
                 let children = index
                     .links
@@ -217,7 +217,7 @@ where
                 Ok(true)
             }
             ArchivedNodeBody::Segment(_) => {
-                let upper_bound = node.body()?.upper_bound().and_then(into_owned)?;
+                let upper_bound = node.body().upper_bound().and_then(into_owned)?;
                 self.nodes[offset] = SparseTreeNode::Loaded { node, upper_bound };
                 Ok(false)
             }
@@ -297,7 +297,7 @@ where
                 // pops them in key order.
                 let mut stack = vec![node];
                 while let Some(node) = stack.pop() {
-                    match node.body()? {
+                    match node.body() {
                         ArchivedNodeBody::Index(index) => {
                             let mut children = Vec::with_capacity(index.links.len());
                             for link in index.links.iter() {

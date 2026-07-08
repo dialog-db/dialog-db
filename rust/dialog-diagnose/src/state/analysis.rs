@@ -85,7 +85,7 @@ impl ArtifactsTreeAnalysis {
                 for hash in level {
                     let node: PersistentNode<KeyBytes, State<Datum>> =
                         accessor.get_node(&hash).await?;
-                    match node.body()? {
+                    match node.body() {
                         ArchivedNodeBody::Index(index) => {
                             for link in index.links.iter() {
                                 next_level.push(<&NodeHash>::from(&link.node).clone());

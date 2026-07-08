@@ -102,7 +102,7 @@ where
             let mut entered_range = false;
 
             while let Some((node, maybe_index)) = search_path.pop() {
-                match node.body()? {
+                match node.body() {
                     ArchivedNodeBody::Index(index) => {
                         let child_index = if let Some(index) = maybe_index {
                             index + 1
@@ -170,7 +170,7 @@ where
 
             let node = accessor.get_node(&next_node).await?;
 
-            match node.body()? {
+            match node.body() {
                 ArchivedNodeBody::Index(index) => {
                     // Descend into the first child whose `upper_bound >= key`,
                     // falling back to the last child when the key is above every
@@ -248,7 +248,7 @@ where
 {
     // Only prefetch when the caller's key matches the leaf's last entry;
     // boundary-delete overflow can't happen otherwise.
-    let Some(leaf_upper_bound) = leaf.upper_bound()? else {
+    let Some(leaf_upper_bound) = leaf.upper_bound() else {
         return Ok(None);
     };
     if key != leaf_upper_bound {
@@ -271,7 +271,7 @@ where
 
     let right_leaf = loop {
         let node: PersistentNode<Key, Value> = accessor.get_node(&next_hash).await?;
-        match node.body()? {
+        match node.body() {
             ArchivedNodeBody::Index(index) => {
                 let first = index.links.first().ok_or_else(|| {
                     DialogSearchTreeError::Node(

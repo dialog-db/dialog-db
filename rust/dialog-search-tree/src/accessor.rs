@@ -80,6 +80,6 @@ where
             .ok_or_else(|| {
                 DialogSearchTreeError::Node(format!("Blob not found in storage: {}", hash))
             })
-            .map(|buffer| PersistentNode::new(buffer))
+            .and_then(PersistentNode::try_new)
     }
 }

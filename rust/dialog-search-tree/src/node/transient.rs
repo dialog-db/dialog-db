@@ -204,7 +204,7 @@ where
     type Error = DialogSearchTreeError;
 
     fn try_from(node: &PersistentNode<Key, Value>) -> Result<Self, Self::Error> {
-        match node.body()? {
+        match node.body() {
             ArchivedNodeBody::Index(_) => {
                 Ok(TransientNode::Index(TransientNode::open_index(node)?))
             }
@@ -266,7 +266,7 @@ where
             }
         };
 
-        let node = PersistentNode::new(Buffer::from(body.as_bytes()?));
+        let node = PersistentNode::from_serialized(body.as_bytes()?);
         delta.add(node.hash().clone(), node.buffer().clone());
         Ok(node)
     }
