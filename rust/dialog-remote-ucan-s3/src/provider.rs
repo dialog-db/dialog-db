@@ -4,4 +4,5 @@
 //! then delegates to `Provider<Authorized<Fx>>` on `S3` for shared HTTP execution.
 
 pub mod archive;
+pub mod blob;
 pub mod memory;

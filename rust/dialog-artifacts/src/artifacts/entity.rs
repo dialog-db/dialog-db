@@ -10,6 +10,7 @@ use std::{
     str::FromStr,
 };
 
+use base58::{FromBase58, ToBase58};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::{DialogArtifactsError, ENTITY_LENGTH, Uri};
@@ -100,6 +101,9 @@ impl Display for Entity {
     }
 }
 
+/// Scheme prefix for blob-reference entities.
+const BLOB_SCHEME: &str = "blob:";
+
 impl Entity {
     /// Initialize a new [`Entity`] with a randomly generated, globally unique
     /// URI. The URI is formatted as an ed25519 DID Key.
@@ -117,10 +121,52 @@ impl Entity {
     pub fn key_bytes(&self) -> &[u8; ENTITY_LENGTH] {
         &self.1
     }
+
+    /// The canonical entity reference for a stored blob:
+    /// `blob:<base58(hash)>`.
+    pub fn from_blob(hash: &dialog_storage::Blake3Hash) -> Result<Entity, DialogArtifactsError> {
+        format!("{}{}", BLOB_SCHEME, hash.to_base58()).parse()
+    }
+
+    /// The blob hash carried by a `blob:` entity, if this entity
+    /// is one and its payload decodes to 32 base58 bytes.
+    pub fn blob_hash(&self) -> Option<dialog_storage::Blake3Hash> {
+        let payload = self.as_str().strip_prefix(BLOB_SCHEME)?;
+        let bytes = payload.from_base58().ok()?;
+        <[u8; 32]>::try_from(bytes).ok()
+    }
 }
 
 impl Debug for Entity {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(&self.0.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+
+    #[dialog_common::test]
+    fn it_round_trips_a_blob_entity() {
+        let hash: dialog_storage::Blake3Hash = [7u8; 32];
+        let entity = Entity::from_blob(&hash).expect("constructs");
+        assert!(entity.as_str().starts_with("blob:"));
+        assert_eq!(entity.blob_hash(), Some(hash));
+        // String round-trip: parse the display form back.
+        let reparsed: Entity = entity.as_str().parse().expect("parses");
+        assert_eq!(reparsed.blob_hash(), Some(hash));
+    }
+
+    #[dialog_common::test]
+    fn it_returns_none_for_non_blob_entities() {
+        let entity: Entity = "user:alice".parse().expect("parses");
+        assert_eq!(entity.blob_hash(), None);
+        // Garbage after the scheme is not a hash.
+        let bogus: Entity = "blob:notbase58!!!".parse().expect("still a valid uri");
+        assert_eq!(bogus.blob_hash(), None);
     }
 }

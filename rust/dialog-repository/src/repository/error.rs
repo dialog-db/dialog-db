@@ -3,6 +3,7 @@ use dialog_artifacts::DialogArtifactsError;
 use dialog_credentials::Ed25519SignerError;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
+use dialog_effects::blob::BlobError;
 use dialog_effects::memory::{MemoryError, Version};
 use dialog_effects::storage::StorageError;
 use dialog_search_tree::DialogSearchTreeError;
@@ -301,6 +302,10 @@ pub enum CommitError {
     /// Publishing the new revision failed.
     #[error("Failed to publish new revision: {0}")]
     Publish(#[from] PublishError),
+
+    /// Ingesting a blob's bytes into the store failed.
+    #[error("Blob ingest failed during write: {0}")]
+    Blob(#[from] BlobError),
 }
 
 /// Errors specific to a pull operation.
@@ -407,6 +412,14 @@ pub enum PushError {
     /// A search-tree operation during push failed.
     #[error("Tree operation failed during push: {0}")]
     Tree(#[from] DialogSearchTreeError),
+
+    /// Reading the blob differential or a blob record from the index failed.
+    #[error("Artifact operation failed during push: {0}")]
+    Artifact(#[from] DialogArtifactsError),
+
+    /// Shipping a newly-referenced blob to the remote failed.
+    #[error("Blob operation failed during push: {0}")]
+    Blob(#[from] BlobError),
 }
 
 /// Errors returned by cell resolve operations.

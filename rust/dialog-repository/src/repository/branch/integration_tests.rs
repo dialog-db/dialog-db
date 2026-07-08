@@ -7,14 +7,17 @@
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use crate::helpers::{test_operator_with_profile, unique_name};
-use crate::{Branch, Repository, RepositoryExt as _, SiteAddress};
+use crate::{Blob, Branch, Repository, RepositoryExt as _, SiteAddress};
 use anyhow::Result;
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+use dialog_capability::Subject;
 use dialog_credentials::SignerCredential;
+use dialog_effects::blob::BlobError;
+use dialog_network::Network;
 use dialog_operator::{Operator, Profile};
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
-use dialog_storage::provider::storage::VolatileSpace;
+use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use futures_util::{StreamExt, stream};
 
 fn s3_site_address(s3: &S3Address) -> S3SiteAddress {
@@ -129,6 +132,125 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
         branch.upstream().is_some(),
         "should have upstream after push"
     );
+
+    Ok(())
+}
+
+/// Push ships newly-referenced blob bytes to the remote before publishing, so a
+/// second site sharing the remote can pull the revision and read a blob it never
+/// wrote — exercising the push blob-upload hook and Task 4's remote-hydration
+/// path end to end.
+///
+/// Both sites run over their own temp-dir native space (`Storage::temp()`): the
+/// volatile space used elsewhere has no blob provider, and the two sites need
+/// independent local blob stores so site B's read is a genuine local miss.
+#[dialog_common::test]
+async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()> {
+    // --- Site A: write a blob, reference it, push. ---
+    let storage_a = Storage::temp();
+    let profile_a = Profile::open(unique_name("blob-ship-a"))
+        .perform(&storage_a)
+        .await?;
+    let operator_a = profile_a
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_a)
+        .await?;
+
+    let repo_a = profile_a
+        .repository(unique_name("blob-ship"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .credential()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_a)
+        .await?;
+
+    let origin_a = repo_a
+        .remote("origin")
+        .create(site_a)
+        .perform(&operator_a)
+        .await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+
+    let payload: Vec<u8> = (0..50_000u32).map(|i| (i % 199) as u8).collect();
+    let chunks: Vec<Result<Vec<u8>, BlobError>> =
+        payload.chunks(8192).map(|c| Ok(c.to_vec())).collect();
+    let blob = Blob::import(stream::iter(chunks))
+        .write((&branch_a).into())
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // --- Site B: same remote subject, separate local store; pull then read. ---
+    let storage_b = Storage::temp();
+    let profile_b = Profile::open(unique_name("blob-ship-b"))
+        .perform(&storage_b)
+        .await?;
+    let operator_b = profile_b
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_b)
+        .await?;
+
+    let repo_b = profile_b
+        .repository(unique_name("blob-ship-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .credential()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_b)
+        .await?;
+
+    let origin_b = repo_b
+        .remote("origin")
+        .create(site_b)
+        .subject(repo_a.did())
+        .perform(&operator_b)
+        .await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+
+    branch_b.pull().perform(&operator_b).await?;
+
+    assert_eq!(
+        Blob::from(blob.clone())
+            .size((&branch_b).into())
+            .perform(&operator_b)
+            .await?,
+        Some(payload.len() as u64)
+    );
+
+    let mut reader = Blob::from(blob)
+        .read((&branch_b).into())
+        .perform(&operator_b)
+        .await?;
+    let mut out = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        out.extend(chunk);
+    }
+    assert_eq!(out, payload);
 
     Ok(())
 }
