@@ -509,14 +509,17 @@ pub enum EvaluationError {
         negated: String,
     },
 
-    /// The queried concept's dependency closure is recursive. The
-    /// program is well-stratified, but the fixpoint evaluator is
-    /// not implemented yet, so recursive closures are rejected
-    /// rather than evaluated unboundedly.
-    #[error("Concept {concept} is recursive; recursive evaluation is not supported yet")]
-    UnsupportedRecursion {
-        /// A concept on the dependency cycle.
+    /// A recursive concept's semi-naive fixpoint did not converge
+    /// within the round cap. A round derives at least one new row,
+    /// so purely fact-driven recursion terminates well under the
+    /// cap; hitting it means the rule set generates fresh values
+    /// every round (e.g. through a formula) and would spin forever.
+    #[error("Fixpoint for {concept} did not converge after {rounds} rounds")]
+    FixpointDivergence {
+        /// The queried recursive concept.
         concept: String,
+        /// Rounds evaluated before giving up.
+        rounds: usize,
     },
 }
 
