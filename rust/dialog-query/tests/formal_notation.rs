@@ -99,7 +99,7 @@ fn it_treats_record_as_opaque_and_never_folds() {
 
     // Opaque, never folded: resolving a record value returns its bytes
     // verbatim — no transformation, no merge.
-    let value = dialog_query::artifact::Value::Record(vec![1u8, 2, 3, 4, 5]);
+    let value = dialog_query::artifact::Value::Record(vec![1u8, 2, 3, 4, 5].into());
     let attribution = attr
         .resolve(value.clone())
         .expect("record value should resolve against `as: Record`");

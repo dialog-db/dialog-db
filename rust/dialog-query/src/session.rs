@@ -1193,6 +1193,10 @@ mod tests {
         );
     }
 
+    // `Binding` transitively contains `Record`, whose interior form cache
+    // trips clippy's mutable-key lint; `Record`'s Eq/Hash cover only its
+    // source bytes, so the cache cannot perturb a `HashSet`.
+    #[allow(clippy::mutable_key_type)]
     #[dialog_common::test]
     async fn it_produces_correct_results_from_cached_plan() -> anyhow::Result<()> {
         // End-to-end test: verify that evaluating a concept with the plan cache
