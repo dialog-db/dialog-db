@@ -1,6 +1,5 @@
 use futures_util::stream::once;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::Claim;
 use crate::artifact::Value;
@@ -117,10 +116,6 @@ pub struct Match {
     /// this map means "no premise has touched this variable":
     /// distinct from [`Binding::Absent`].
     bindings: HashMap<String, Binding>,
-    // TODO: Once Value::Record supports the RecordFormat trait proposed in
-    // https://github.com/dialog-db/dialog-db/pull/221 claims can be stored
-    // directly as Value::Record in bindings, eliminating this separate map.
-    claims: HashMap<String, Arc<Claim>>,
 }
 
 impl Match {
@@ -135,6 +130,10 @@ impl Match {
     }
 
     /// Provide evidence for the given term: look up the claim it cites.
+    ///
+    /// The claim is realized from the [`Value::Record`] binding stored by
+    /// [`Match::cite`]; the typed form is memoized inside the record, so
+    /// this is a cache hit rather than a decode.
     pub fn prove(&self, term: &Term<Record>) -> Result<Claim, EvaluationError> {
         let key = match term {
             Term::Variable {
@@ -147,23 +146,43 @@ impl Match {
             }
         };
 
-        if let Some(claim) = self.claims.get(key) {
-            Ok(claim.as_ref().clone())
-        } else {
-            Err(EvaluationError::Store(format!(
+        match self.bindings.get(key) {
+            Some(Binding::Present(Value::Record(record))) => record
+                .realize::<Claim>()
+                .map(|claim| claim.as_ref().clone())
+                .map_err(|error| {
+                    EvaluationError::Store(format!(
+                        "Failed to decode claim for term {key:?}: {error}"
+                    ))
+                }),
+            Some(_) => Err(EvaluationError::Store(format!(
+                "Binding for term {:?} does not hold a claim record",
+                key
+            ))),
+            None => Err(EvaluationError::Store(format!(
                 "No claim found for term {:?}",
                 key
-            )))
+            ))),
         }
     }
 
-    /// Cite a claim as evidence for the given term.
+    /// Cite a claim as evidence for the given term: store it as an ordinary
+    /// [`Value::Record`] binding.
+    ///
+    /// Citing a term that already holds a claim replaces it, bypassing
+    /// [`Match::bind`]'s conflict check: the source term is an internal,
+    /// uniquely-named handle, and winner selection may cite successive
+    /// candidates for the same row.
     pub fn cite(&mut self, term: &Term<Record>, claim: &Claim) -> Result<(), EvaluationError> {
         if let Term::Variable {
             name: Some(name), ..
         } = term
         {
-            self.claims.insert(name.clone(), Arc::new(claim.to_owned()));
+            let record = dialog_artifacts::Record::from_format(claim.clone()).map_err(|error| {
+                EvaluationError::Store(format!("Failed to encode claim: {error}"))
+            })?;
+            self.bindings
+                .insert(name.clone(), Binding::Present(Value::Record(record)));
         }
 
         Ok(())
@@ -433,5 +452,78 @@ mod tests {
         assert!(!m.is_present(&nname));
         assert!(m.contains(&pname));
         assert!(m.contains(&nname));
+    }
+
+    fn test_claim(name: &str) -> Claim {
+        use crate::artifact::{Cause, Entity};
+        Claim {
+            the: "person/name".parse().unwrap(),
+            of: Entity::new().unwrap(),
+            is: Value::String(name.into()),
+            cause: Cause([7; 32]),
+        }
+    }
+
+    #[dialog_common::test]
+    fn match_cite_then_prove_round_trips_the_claim() {
+        let mut m = Match::new();
+        let term = Term::<Record>::var("claim");
+        let claim = test_claim("Alice");
+
+        m.cite(&term, &claim).unwrap();
+        assert_eq!(m.prove(&term).unwrap(), claim);
+    }
+
+    /// The cited claim is an ordinary binding, not a side channel: it is
+    /// visible through `lookup` as a `Value::Record` that realizes back
+    /// into the claim.
+    #[dialog_common::test]
+    fn match_cite_stores_claim_as_record_binding() {
+        let mut m = Match::new();
+        let term = Term::<Record>::var("claim");
+        let claim = test_claim("Alice");
+
+        m.cite(&term, &claim).unwrap();
+
+        let binding = m.lookup(&Term::var("claim")).unwrap();
+        let Binding::Present(Value::Record(record)) = binding else {
+            panic!("expected a Record binding, got {binding:?}");
+        };
+        assert_eq!(*record.realize::<Claim>().unwrap(), claim);
+    }
+
+    #[dialog_common::test]
+    fn match_cite_replaces_an_earlier_claim() {
+        let mut m = Match::new();
+        let term = Term::<Record>::var("claim");
+        let first = test_claim("Alice");
+        let second = test_claim("Alicia");
+
+        m.cite(&term, &first).unwrap();
+        m.cite(&term, &second).unwrap();
+        assert_eq!(m.prove(&term).unwrap(), second);
+    }
+
+    #[dialog_common::test]
+    fn match_prove_errors_when_nothing_was_cited() {
+        let m = Match::new();
+        let result = m.prove(&Term::<Record>::var("claim"));
+        assert!(matches!(result, Err(EvaluationError::Store(_))));
+    }
+
+    #[dialog_common::test]
+    fn match_prove_errors_on_a_non_record_binding() {
+        let mut m = Match::new();
+        m.bind(&Term::var("claim"), Value::String("Alice".into()))
+            .unwrap();
+        let result = m.prove(&Term::<Record>::var("claim"));
+        assert!(matches!(result, Err(EvaluationError::Store(_))));
+    }
+
+    #[dialog_common::test]
+    fn match_prove_errors_on_a_blank_term() {
+        let m = Match::new();
+        let result = m.prove(&Term::<Record>::blank());
+        assert!(matches!(result, Err(EvaluationError::Store(_))));
     }
 }
