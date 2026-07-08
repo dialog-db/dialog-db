@@ -165,8 +165,15 @@ impl Provider<Import> for FileSystem {
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests {
+    // On wasm these run in a worker against OPFS, exercising the true-streaming
+    // web writer (createWritable + staging + rename) and the Blob.stream reader
+    // — the ranged-read and import-verify paths the WebSpace round-trip test
+    // doesn't cover.
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
     use crate::resource::Resource;
     use dialog_capability::Subject;
