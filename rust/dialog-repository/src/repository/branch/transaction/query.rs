@@ -152,7 +152,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let query_env = QueryEnv::new(vec![branch], overlay, tombstones, env);
+            let query_env = QueryEnv::new(vec![branch.clone()], overlay, tombstones, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
