@@ -27,7 +27,7 @@ impl ToString {
             Value::Entity(e) => e.to_string(),
             Value::Symbol(s) => s.to_string(),
             Value::Bytes(bytes) => format!("Bytes({} bytes)", bytes.len()),
-            Value::Record(record) => format!("Record({} bytes)", record.len()),
+            Value::Record(record) => format!("Record({} bytes)", record.as_bytes().len()),
         };
 
         vec![ToString {

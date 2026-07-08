@@ -31,6 +31,9 @@ pub use entity::*;
 mod value;
 pub use value::*;
 
+mod record;
+pub use record::*;
+
 mod cause;
 pub use cause::*;
 

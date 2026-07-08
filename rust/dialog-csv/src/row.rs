@@ -1,5 +1,5 @@
 use base58::{FromBase58, ToBase58};
-use dialog_artifacts::{Artifact, Attribute, Cause, Entity, Value};
+use dialog_artifacts::{Artifact, Attribute, Cause, Entity, Record, Value};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -29,7 +29,7 @@ fn value_to_parts(value: &Value) -> (&'static str, String) {
         Value::UnsignedInt(n) => ("natural", n.to_string()),
         Value::SignedInt(n) => ("integer", n.to_string()),
         Value::Float(n) => ("float", n.to_string()),
-        Value::Record(record) => ("record", record.to_base58()),
+        Value::Record(record) => ("record", record.as_bytes().to_base58()),
         Value::Symbol(attr) => ("attribute", attr.to_string()),
     }
 }
@@ -63,7 +63,9 @@ fn parts_to_value(value_type: &str, is: &str) -> Result<Value, DialogArtifactsEr
                 DialogArtifactsError::InvalidValue(format!("{e}"))
             })?))
         }
-        "record" => Ok(Value::Record(is.from_base58().map_err(parse_err)?)),
+        "record" => Ok(Value::Record(Record::from(
+            is.from_base58().map_err(parse_err)?,
+        ))),
         "attribute" => Ok(Value::Symbol(Attribute::from_str(is)?)),
         _ => Err(DialogArtifactsError::InvalidValue(format!(
             "unknown value type: {value_type}"
