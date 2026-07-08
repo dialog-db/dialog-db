@@ -1,5 +1,7 @@
 /// Adornment types for parameter binding pattern caching.
 pub mod adornment;
+/// Affected-entity discovery for incremental maintenance.
+pub mod affected;
 /// Semi-naive fixpoint evaluation for recursive concepts.
 pub mod fixpoint;
 /// Shared, branch-owned plan cache keyed by (rule identity, adornment).
