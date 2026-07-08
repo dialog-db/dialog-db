@@ -1,9 +1,7 @@
-use std::collections::HashSet;
-
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Entity, Select,
-    SortKey, Statement,
+    Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -19,9 +17,10 @@ use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
 use futures_util::TryStreamExt as _;
+use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
+use crate::layer::{Tombstones, filter_tombstones, merge_grouped, tombstones_from};
 use crate::rules::{
     assemble, conclusion_selector, hydrate, overlay_rules, rule_entities, source_bytes,
     source_selector,
@@ -259,10 +258,11 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// All overlay facts — caller-asserted + auto-injected metadata —
     /// merged into one batch. Queried via `Provider<Select> for Changes`.
     changes: Changes,
-    /// `sort_key`s of every retracted fact in `changes`. Each branch
-    /// stream is filtered against these before the merge so retracts
-    /// in the overlay suppress matching facts in the source.
-    tombstones: HashSet<SortKey>,
+    /// The shadowing set lifted from `changes` — exact tombstones from
+    /// retracts plus per-`(the, of)` group shadows from pending
+    /// replaces. Each branch stream is filtered against these before the
+    /// merge so the overlay suppresses superseded facts in the source.
+    tombstones: Tombstones,
     /// When present, every selector this environment executes —
     /// fact scans and rule-discovery reads alike — records its
     /// demanded range here. Subscriptions use the recorded cover to
@@ -289,7 +289,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
     pub(crate) fn new(
         branches: Vec<Branch>,
         changes: Changes,
-        tombstones: HashSet<SortKey>,
+        tombstones: Tombstones,
         env: &'a Env,
     ) -> Self {
         Self {
@@ -411,10 +411,12 @@ where
         self.record_demand(&input);
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.branches.len() + 1);
 
-        // Branch streams — each filtered by tombstones from the
-        // overlay's retracts so a `tx.retract(x)` (or any user-asserted
-        // retract in `with(..)`) suppresses matching source facts. Each
-        // owns its branch clone and borrows only `self.env`.
+        // Branch streams — each filtered by the overlay's shadowing set
+        // so a `tx.retract(x)` suppresses `x`, and a pending `Replace`
+        // (a cardinality-one assert) shadows the superseded priors it
+        // will overwrite on commit, giving mid-transaction reads
+        // read-your-writes agreement with post-commit state. Each owns
+        // its branch clone and borrows only `self.env`.
         for branch in &self.branches {
             let raw = select_from_branch(branch.clone(), self.env, input.clone());
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
