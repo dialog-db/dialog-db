@@ -106,8 +106,24 @@ pub struct ProgramAnalysis {
     /// Concepts whose strongly connected component is non-trivial
     /// (more than one member, or a self-edge).
     recursive: HashSet<Entity>,
+    /// Strongly connected component id per concept. Two recursive
+    /// concepts with the same id are on the same cycle.
+    component: HashMap<Entity, usize>,
     /// Every negative edge that lands inside its own component.
     violations: Vec<NegationViolation>,
+}
+
+/// The shape of a queried concept's dependency closure, as
+/// classified by [`ProgramAnalysis::check`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Closure {
+    /// No dependency cycle anywhere in the closure: ordinary
+    /// top-down evaluation applies.
+    Acyclic,
+    /// The closure contains at least one cycle (all of them
+    /// stratified): recursive concepts in it evaluate via the
+    /// semi-naive fixpoint.
+    Recursive,
 }
 
 impl ProgramAnalysis {
@@ -201,9 +217,16 @@ impl ProgramAnalysis {
             }
         }
 
+        let component = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (node.clone(), component[i]))
+            .collect();
+
         ProgramAnalysis {
             edges,
             recursive,
+            component,
             violations,
         }
     }
@@ -219,18 +242,31 @@ impl ProgramAnalysis {
         self.recursive.contains(concept)
     }
 
+    /// Whether the two concepts sit on the *same* dependency cycle:
+    /// both recursive and in the same strongly connected component.
+    /// This is the membership test the fixpoint evaluator uses to
+    /// tell recursive occurrences (evaluated from the answer table)
+    /// from base premises (evaluated top-down).
+    pub fn in_same_cycle(&self, a: &Entity, b: &Entity) -> bool {
+        self.recursive.contains(a)
+            && self.recursive.contains(b)
+            && match (self.component.get(a), self.component.get(b)) {
+                (Some(x), Some(y)) => x == y,
+                _ => false,
+            }
+    }
+
     /// Check the queried concept's dependency closure: an
     /// ill-stratified closure fails with
-    /// [`EvaluationError::NegationThroughRecursion`], and a
-    /// recursive (but stratified) closure fails with
-    /// [`EvaluationError::UnsupportedRecursion`] until the fixpoint
-    /// evaluator lands. Well-stratified, non-recursive closures (the
-    /// vast majority) pass.
+    /// [`EvaluationError::NegationThroughRecursion`]; otherwise the
+    /// closure is classified [`Closure::Recursive`] when it contains
+    /// a cycle (the fixpoint evaluator's cue) or [`Closure::Acyclic`]
+    /// for ordinary top-down evaluation.
     ///
     /// Takes the descriptor rather than the entity because the
     /// queried concept may be unknown to the analysis (never
     /// registered); its embedded `conforms` targets seed the walk.
-    pub fn check(&self, descriptor: &ConceptDescriptor) -> Result<(), EvaluationError> {
+    pub fn check(&self, descriptor: &ConceptDescriptor) -> Result<Closure, EvaluationError> {
         // Closure over the analysis edges, seeded with the queried
         // concept's structural closure for the unregistered case.
         let mut order = Vec::new();
@@ -266,12 +302,11 @@ impl ProgramAnalysis {
                 });
             }
         }
-        if let Some(concept) = order.iter().find(|entity| self.recursive.contains(*entity)) {
-            return Err(EvaluationError::UnsupportedRecursion {
-                concept: concept.to_string(),
-            });
+        if order.iter().any(|entity| self.recursive.contains(entity)) {
+            Ok(Closure::Recursive)
+        } else {
+            Ok(Closure::Acyclic)
         }
-        Ok(())
     }
 }
 
@@ -457,23 +492,23 @@ mod tests {
     /// structured error until the fixpoint evaluator lands, rather
     /// than evaluated unboundedly.
     #[dialog_common::test]
-    fn it_rejects_recursive_closures_until_fixpoint() {
+    fn it_marks_recursive_closures_for_fixpoint_evaluation() {
         let same = concept("same");
         let mut registry = RuleRegistry::new();
         registry.register(rule(&same, &[&same], &[])).unwrap();
 
         assert!(registry.validate().unwrap().is_empty(), "stratified");
         assert!(registry.is_recursive(&same.this()).unwrap());
-        match registry.acquire(&same) {
-            Err(EvaluationError::UnsupportedRecursion { concept }) => {
-                assert_eq!(concept, same.this().to_string());
-            }
-            other => panic!("expected UnsupportedRecursion, got {other:?}"),
-        }
+        let rules = registry.acquire(&same).expect("recursive concepts answer");
+        assert!(
+            rules.recursion().is_some(),
+            "the rules carry the analysis so evaluation runs the fixpoint"
+        );
     }
 
     /// Mutual recursion across two concepts and a transitive
-    /// three-concept cycle are both detected.
+    /// three-concept cycle are both detected, and each member's
+    /// rules carry the recursion context.
     #[dialog_common::test]
     fn it_detects_mutual_and_transitive_recursion() {
         let a = concept("aaa");
@@ -485,10 +520,9 @@ mod tests {
         mutual.register(rule(&b, &[&a], &[])).unwrap();
         assert!(mutual.is_recursive(&a.this()).unwrap());
         assert!(mutual.is_recursive(&b.this()).unwrap());
-        assert!(matches!(
-            mutual.acquire(&a),
-            Err(EvaluationError::UnsupportedRecursion { .. })
-        ));
+        assert!(mutual.acquire(&a).unwrap().recursion().is_some());
+        let analysis = mutual.analysis().unwrap();
+        assert!(analysis.in_same_cycle(&a.this(), &b.this()));
 
         let mut transitive = RuleRegistry::new();
         transitive.register(rule(&a, &[&b], &[])).unwrap();
@@ -496,11 +530,14 @@ mod tests {
         transitive.register(rule(&c, &[&a], &[])).unwrap();
         for concept in [&a, &b, &c] {
             assert!(transitive.is_recursive(&concept.this()).unwrap());
-            assert!(matches!(
-                transitive.acquire(concept),
-                Err(EvaluationError::UnsupportedRecursion { .. })
-            ));
+            assert!(transitive.acquire(concept).unwrap().recursion().is_some());
         }
+        let analysis = transitive.analysis().unwrap();
+        assert!(analysis.in_same_cycle(&a.this(), &c.this()));
+        assert!(
+            !analysis.in_same_cycle(&a.this(), &concept("ddd").this()),
+            "concepts outside the cycle are not members"
+        );
     }
 
     /// Ordered-variant style negation over acyclic concepts is
@@ -591,12 +628,20 @@ mod tests {
         let mut registry = RuleRegistry::new();
         registry.register(rule(&inner, &[&outer], &[])).unwrap();
 
-        assert!(matches!(
-            registry.acquire(&outer),
-            Err(EvaluationError::UnsupportedRecursion { .. })
-        ));
         assert!(
-            registry.acquire(&inner).is_err(),
+            registry
+                .acquire(&outer)
+                .expect("recursive concepts answer")
+                .recursion()
+                .is_some(),
+            "the conformance cycle is visible from the unregistered end"
+        );
+        assert!(
+            registry
+                .acquire(&inner)
+                .expect("recursive concepts answer")
+                .recursion()
+                .is_some(),
             "the cycle is visible from both ends"
         );
     }
