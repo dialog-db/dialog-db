@@ -66,7 +66,7 @@ use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, KeyBytes, State};
+use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, KeyBytes, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -207,6 +207,18 @@ impl<T> Delta<T> {
 pub struct Subscription<Q: Application> {
     branch: Branch,
     query: Q,
+    /// A caller-supplied transient overlay folded into every
+    /// evaluation alongside the branch facts — the same role
+    /// [`QueryLayer::with`] plays for a one-shot query. Ephemeral:
+    /// off-tree, never committed, so the tree-diff gate in
+    /// [`touched`](Subscription::touched) can't observe a change to
+    /// it. The owner must therefore call
+    /// [`set_overlay`](Subscription::set_overlay) and force a poll
+    /// when the overlay mutates; a poll then recomputes (the overlay
+    /// delta is not derivable from the tree). Empty by default
+    /// ([`subscribe`](Branch::subscribe)); populated via
+    /// [`subscribe_with`](Branch::subscribe_with).
+    overlay: Changes,
     /// The revision the retained results were evaluated at. `None`
     /// until the first poll.
     revision: Option<Revision>,
@@ -231,9 +243,21 @@ impl Branch {
     /// evaluates on its first [`poll`](Subscription::poll) and is
     /// incrementally gated afterwards.
     pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
+        self.subscribe_with(query, Changes::new())
+    }
+
+    /// Register a standing query with a transient `overlay` folded
+    /// into every evaluation — ephemeral facts (an invite seed, a
+    /// UI status stamp) that participate in reads and in the demand
+    /// cover but are never committed. Because the overlay is
+    /// off-tree, a change to it is invisible to the poll's tree-diff
+    /// gate: after mutating it via [`Subscription::set_overlay`], the
+    /// owner must force a poll to pick the change up.
+    pub fn subscribe_with<Q: Application>(&self, query: Q, overlay: Changes) -> Subscription<Q> {
         Subscription {
             branch: self.clone(),
             query,
+            overlay,
             revision: None,
             demand: Demand::new(),
             results: Vec::new(),
@@ -290,6 +314,15 @@ where
     /// The demand cover recorded by the last evaluation.
     pub fn demand(&self) -> &Demand {
         &self.demand
+    }
+
+    /// Replace the transient overlay folded into evaluations. The
+    /// overlay is off-tree, so this alone changes nothing: the caller
+    /// must follow with a [`poll`](Subscription::poll), which then
+    /// recomputes (the overlay delta can't be derived from the tree
+    /// diff) and reports the result change as a delta.
+    pub fn set_overlay(&mut self, overlay: Changes) {
+        self.overlay = overlay;
     }
 
     /// Full evaluations performed so far (the first poll plus every
@@ -547,7 +580,7 @@ where
                 .perform(env)
                 .await
                 .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-            let layer = QueryLayer::from(&self.branch);
+            let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
             let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
@@ -651,7 +684,7 @@ where
             .perform(env)
             .await
             .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-        let layer = QueryLayer::from(&self.branch);
+        let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
         let overlay = layer.overlay(&operator);
         let tombstones = tombstones_from(&overlay);
         let mut query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
@@ -694,7 +727,7 @@ where
             .perform(env)
             .await
             .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-        let layer = QueryLayer::from(&self.branch);
+        let layer = QueryLayer::from(&self.branch).with(self.overlay.clone());
         let overlay = layer.overlay(&operator);
         let tombstones = tombstones_from(&overlay);
         let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
