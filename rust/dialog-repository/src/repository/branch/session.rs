@@ -248,6 +248,11 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// stream is filtered against these before the merge so retracts
     /// in the overlay suppress matching facts in the source.
     tombstones: HashSet<SortKey>,
+    /// When present, every selector this environment executes —
+    /// fact scans and rule-discovery reads alike — records its
+    /// demanded range here. Subscriptions use the recorded cover to
+    /// gate re-evaluation.
+    demand: Option<crate::Demand>,
     env: &'a Env,
 }
 
@@ -271,7 +276,23 @@ impl<'a, Env> QueryEnv<'a, Env> {
             branches,
             changes,
             tombstones,
+            demand: None,
             env,
+        }
+    }
+
+    /// Record every selector this environment executes into
+    /// `demand`. Used by subscriptions to capture the evaluation's
+    /// demand cover.
+    pub(crate) fn with_demand(mut self, demand: crate::Demand) -> Self {
+        self.demand = Some(demand);
+        self
+    }
+
+    /// Record a selector's demanded range, when recording is on.
+    fn record_demand(&self, selector: &ArtifactSelector<Constrained>) {
+        if let Some(demand) = &self.demand {
+            demand.record(selector);
         }
     }
 }
@@ -282,6 +303,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             branches: self.branches.clone(),
             changes: self.changes.clone(),
             tombstones: self.tombstones.clone(),
+            demand: self.demand.clone(),
             env: self.env,
         }
     }
@@ -335,6 +357,7 @@ where
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+        self.record_demand(&input);
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.branches.len() + 1);
 
         // Branch streams — each filtered by tombstones from the
@@ -372,6 +395,10 @@ where
         branch: &'a Branch,
         selector: ArtifactSelector<Constrained>,
     ) -> Result<Vec<Artifact>, DialogArtifactsError> {
+        // Rule-discovery reads are demand too: a rule committed
+        // later for a subscribed concept lands in this range and
+        // must re-trigger the subscription.
+        self.record_demand(&selector);
         let stream = select_from_branch(branch, self.env, selector).await?;
         stream.try_collect().await
     }

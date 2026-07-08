@@ -55,6 +55,9 @@ pub use select::*;
 mod session;
 pub use session::*;
 
+mod subscription;
+pub use subscription::*;
+
 mod set_upstream;
 pub use set_upstream::*;
 
