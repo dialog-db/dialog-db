@@ -2,6 +2,7 @@
 
 pub use crate::artifact::{Artifact, ArtifactsAttribute, Cause, Entity, Value};
 use crate::attribute::The;
+use crate::concept::Conclusion;
 use serde::{Deserialize, Serialize};
 
 /// A claim represents a stored EAV datum with full metadata.
@@ -49,6 +50,15 @@ impl Claim {
     /// Get the cause (provenance hash) of this claim
     pub fn cause(&self) -> &Cause {
         &self.cause
+    }
+}
+
+impl Conclusion for Claim {
+    /// The claim's subject entity. Lets claim-valued query results
+    /// participate in subject-keyed machinery (e.g. per-entity
+    /// incremental maintenance) uniformly with concept conclusions.
+    fn this(&self) -> &Entity {
+        &self.of
     }
 }
 
