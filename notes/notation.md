@@ -125,7 +125,7 @@ as: Text
       "as": {
         "description": "Value type of the attribute. If omitted, any type is allowed.",
         "type": "string",
-        "enum": ["Bytes", "Entity", "Boolean", "Text", "UnsignedInteger", "SignedInteger", "Float", "Symbol"]
+        "enum": ["Bytes", "Entity", "Boolean", "Text", "UnsignedInteger", "SignedInteger", "Float", "Record", "Symbol"]
       }
     },
     "required": ["the"]
@@ -147,7 +147,23 @@ The `as` field declares what kind of value the attribute admits. Scalar types fr
 | `UnsignedInteger` | Unsigned integer            |
 | `SignedInteger`   | Signed integer              |
 | `Float`           | IEEE 754 floating point     |
+| `Record`          | Opaque structured record    |
 | `Symbol`          | Symbolic identifier         |
+
+A `Record` value is stored, replicated, and content-addressed as an opaque
+byte payload — the query layer never inspects or transforms it. A schema may
+declare `as: Record` today to reserve an attribute for such values:
+
+```yaml
+description: Collaboratively edited body
+the: note/body
+cardinality: one
+as: Record
+```
+
+The bytes pass through untouched on read and write; nothing merges or folds
+them. Attaching a concrete record format (e.g. a CRDT document that converges
+concurrent edits) is a planned refinement layered on top of this opaque type.
 
 #### Future Attribute Extensions
 

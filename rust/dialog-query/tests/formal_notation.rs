@@ -52,6 +52,7 @@ fn it_parses_attribute_value_types() {
         ("UnsignedInteger", dialog_query::artifact::Type::UnsignedInt),
         ("SignedInteger", dialog_query::artifact::Type::SignedInt),
         ("Float", dialog_query::artifact::Type::Float),
+        ("Record", dialog_query::artifact::Type::Record),
         ("Symbol", dialog_query::artifact::Type::Symbol),
     ];
 
@@ -68,6 +69,53 @@ fn it_parses_attribute_value_types() {
             "Type mismatch for {type_str}"
         );
     }
+}
+
+#[dialog_common::test]
+fn it_treats_record_as_opaque_and_never_folds() {
+    // `as: Record` documents an opaque structured value. The runtime already
+    // parses it (ValueDataType::Record, tag 7); this test pins that contract
+    // together with the opacity guarantee: record bytes pass through `resolve`
+    // untouched, and the query layer never inspects, merges, or folds them.
+    let json = json!({
+        "description": "Collaboratively edited body",
+        "the": "note/body",
+        "cardinality": "one",
+        "as": "Record"
+    });
+
+    let attr: dialog_query::AttributeDescriptor =
+        serde_json::from_value(json).expect("`as: Record` should parse");
+
+    assert_eq!(
+        attr.content_type(),
+        Some(dialog_query::artifact::Type::Record)
+    );
+    assert_eq!(attr.cardinality(), dialog_query::Cardinality::One);
+
+    // Round-trips back to the notation string "Record".
+    let reserialized = serde_json::to_value(&attr).unwrap();
+    assert_eq!(reserialized["as"], "Record");
+
+    // Opaque, never folded: resolving a record value returns its bytes
+    // verbatim — no transformation, no merge.
+    let value = dialog_query::artifact::Value::Record(vec![1u8, 2, 3, 4, 5]);
+    let attribution = attr
+        .resolve(value.clone())
+        .expect("record value should resolve against `as: Record`");
+    assert_eq!(
+        attribution.is, value,
+        "record bytes must pass through untouched"
+    );
+    assert_eq!(attribution.cardinality, dialog_query::Cardinality::One);
+
+    // Type enforcement still applies for schema-respecting tools: a non-record
+    // value is rejected against a Record attribute.
+    let mismatch = attr.resolve(dialog_query::artifact::Value::String("nope".into()));
+    assert!(
+        mismatch.is_err(),
+        "a non-record value must not satisfy `as: Record`"
+    );
 }
 
 #[dialog_common::test]

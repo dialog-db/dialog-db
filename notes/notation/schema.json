@@ -57,9 +57,10 @@
         "UnsignedInteger",
         "SignedInteger",
         "Float",
+        "Record",
         "Symbol"
       ],
-      "description": "Built-in scalar types from the dialog domain. 'Text' is shorthand for 'dialog/Text', etc."
+      "description": "Built-in scalar types from the dialog domain. 'Text' is shorthand for 'dialog/Text', etc. 'Record' is an opaque structured value, stored and replicated verbatim and never inspected or folded by the query layer."
     },
 
     "ConceptRef": {

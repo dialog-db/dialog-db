@@ -332,6 +332,7 @@ mod tests {
             (Type::UnsignedInt, "UnsignedInteger"),
             (Type::SignedInt, "SignedInteger"),
             (Type::Float, "Float"),
+            (Type::Record, "Record"),
             (Type::Symbol, "Symbol"),
         ];
         for (ty, expected_name) in cases {
