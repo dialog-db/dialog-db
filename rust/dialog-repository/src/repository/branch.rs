@@ -40,6 +40,9 @@ mod metadata;
 mod open;
 pub use open::*;
 
+mod overlay;
+pub use overlay::*;
+
 mod pull;
 pub use pull::*;
 
@@ -95,6 +98,11 @@ pub struct Branch {
     /// every query's durable rule resolution, so the `db.rule/*` scan is
     /// paid once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
+    /// Transient session overlay: ephemeral facts folded into every
+    /// read of this branch, never committed. Shared across clones
+    /// like the caches; mutations bump an epoch subscriptions gate
+    /// on. See [`Overlay`].
+    overlay: Overlay,
     /// Shared plan cache for the deductive rules resolved on this branch,
     /// keyed by content-addressed `(rule, adornment)`. Handed to each
     /// per-query `ConceptRules` assembly so a re-assembled rule set reuses
