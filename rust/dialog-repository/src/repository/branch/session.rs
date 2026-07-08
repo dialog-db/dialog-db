@@ -397,8 +397,12 @@ where
     ) -> Result<Vec<Artifact>, DialogArtifactsError> {
         // Rule-discovery reads are demand too: a rule committed
         // later for a subscribed concept lands in this range and
-        // must re-trigger the subscription.
-        self.record_demand(&selector);
+        // must re-trigger the subscription. Recorded as *rule*
+        // demand: a hit here invalidates the whole result, not one
+        // entity's slice.
+        if let Some(demand) = &self.demand {
+            demand.record_rules(&selector);
+        }
         let stream = select_from_branch(branch, self.env, selector).await?;
         stream.try_collect().await
     }

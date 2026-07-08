@@ -12,29 +12,56 @@
 //! - root changed but no diff entry falls inside the cover → the
 //!   result cannot have changed; the pin advances without
 //!   re-evaluating (this is the point: unrelated writes are free);
-//! - a diff entry falls inside the cover → re-evaluate, emit the
-//!   result [`Delta`], re-record the cover, advance the pin.
+//! - a diff entry falls inside a *fact* range → maintain
+//!   incrementally when the query supports it (see below), emit the
+//!   result [`Delta`], advance the pin;
+//! - a diff entry falls inside a *rule-discovery* range → the rule
+//!   set may have changed, which can affect any row: full
+//!   re-evaluation, cover re-recorded.
 //!
 //! The cover is the *demanded* range, not the touched data: a scan
 //! that came back empty still recorded its range, so absence reads
 //! (a fact that wasn't there yet, a rule that wasn't installed yet)
-//! are invalidated by later writes into the demanded range. Rule
-//! discovery reads (`db.rule/*` scans) record the same way, so
-//! committing a new rule for a subscribed concept re-triggers too.
+//! are invalidated by later writes into the demanded range.
+//!
+//! # Incremental maintenance (DRed / FBF)
+//!
+//! For fact changes, the delta is derived without re-evaluating the
+//! whole query: the changed datums name their subject entities, and
+//! for each touched entity the retained rows are over-deleted and
+//! re-derived by evaluating the query *restricted to that entity*
+//! ([`Application::restrict`]) — DRed's delete / re-derive / insert,
+//! with the goal-directed re-evaluation playing both the re-derive
+//! and insert steps. A row with surviving alternate derivations is
+//! simply re-derived, which handles the multi-derivation retraction
+//! case (FBF's concern) exactly, without counting.
+//!
+//! Per-entity re-derivation is sound only when a change to entity
+//! `E` can only affect rows whose subject is `E`. Attribute queries
+//! have this by construction; concept queries are gated on their
+//! resolved rule set — every rule entity-local
+//! ([`AnalyzedRule::is_entity_local`]) and non-recursive — and
+//! anything else falls back to a full recompute, which is always
+//! sound. [`recomputes`](Subscription::recomputes) and
+//! [`maintenances`](Subscription::maintenances) expose which path
+//! each poll took.
 //!
 //! Deliberately pull-driven: nothing here retains operator state or
 //! integrated inputs. Demand transformation over the existing
 //! top-down engine is the architecture; the diff is the signal, the
-//! cover is the gate, and re-evaluation is the (current) recompute
-//! step. Per-delta DRed/FBF maintenance and dynamically maintained
-//! demand (cones that grow with data) build on this same surface.
+//! cover is the gate, and per-entity re-derivation is the
+//! maintenance step. Dynamically maintained demand (cones that grow
+//! with data) builds on this same surface.
+//!
+//! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
+use std::collections::BTreeSet;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
-use dialog_artifacts::{ArtifactSelector, KeyBytes};
+use dialog_artifacts::{ArtifactSelector, Entity, KeyBytes, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -42,9 +69,11 @@ use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
+use dialog_query::Conclusion;
 use dialog_query::error::EvaluationError;
-use dialog_query::query::{Application, Output as _};
-use dialog_search_tree::ContentAddressedStorage;
+use dialog_query::query::{Application, Output as _, Restriction};
+use dialog_query::source::SelectRules;
+use dialog_search_tree::{Change, ContentAddressedStorage};
 use dialog_storage::Blake3Hash;
 use futures_util::TryStreamExt as _;
 
@@ -60,7 +89,20 @@ use crate::{
 /// while the evaluation streams.
 #[derive(Clone, Debug, Default)]
 pub struct Demand {
-    ranges: Arc<Mutex<Vec<RangeInclusive<KeyBytes>>>>,
+    /// Ranges read by fact scans: the query's data demand.
+    facts: Arc<Mutex<Vec<RangeInclusive<KeyBytes>>>>,
+    /// Ranges read by rule-discovery scans (`db.rule/*`). Kept
+    /// apart because a change here can install a rule, which can
+    /// affect any row — it invalidates the whole result, not one
+    /// entity's slice.
+    rules: Arc<Mutex<Vec<RangeInclusive<KeyBytes>>>>,
+}
+
+fn record_range(ranges: &Mutex<Vec<RangeInclusive<KeyBytes>>>, range: RangeInclusive<KeyBytes>) {
+    let mut ranges = ranges.lock().expect("demand lock");
+    if !ranges.contains(&range) {
+        ranges.push(range);
+    }
 }
 
 impl Demand {
@@ -69,35 +111,51 @@ impl Demand {
         Self::default()
     }
 
-    /// Record a selector's demanded range. The range covers
+    /// Record a fact scan's demanded range. The range covers
     /// everything the selector's scan would touch — including where
     /// no entries exist, so misses are demanded too.
     pub(crate) fn record(&self, selector: &ArtifactSelector<Constrained>) {
-        let range = selector_range(selector);
-        let mut ranges = self.ranges.lock().expect("demand lock");
-        if !ranges.contains(&range) {
-            ranges.push(range);
-        }
+        record_range(&self.facts, selector_range(selector));
+    }
+
+    /// Record a rule-discovery scan's demanded range.
+    pub(crate) fn record_rules(&self, selector: &ArtifactSelector<Constrained>) {
+        record_range(&self.rules, selector_range(selector));
     }
 
     /// Whether the key falls inside any recorded range.
     pub fn covers(&self, key: &KeyBytes) -> bool {
-        self.ranges
+        self.covers_facts(key) || self.covers_rules(key)
+    }
+
+    fn covers_facts(&self, key: &KeyBytes) -> bool {
+        self.facts
             .lock()
             .expect("demand lock")
             .iter()
             .any(|range| range.contains(key))
     }
 
-    /// A snapshot of the recorded ranges: the scope a cover-gated
-    /// tree diff walks.
+    fn covers_rules(&self, key: &KeyBytes) -> bool {
+        self.rules
+            .lock()
+            .expect("demand lock")
+            .iter()
+            .any(|range| range.contains(key))
+    }
+
+    /// A snapshot of every recorded range (facts and rules): the
+    /// scope a cover-gated tree diff walks.
     pub(crate) fn ranges(&self) -> Vec<RangeInclusive<KeyBytes>> {
-        self.ranges.lock().expect("demand lock").clone()
+        let mut ranges = self.facts.lock().expect("demand lock").clone();
+        ranges.extend(self.rules.lock().expect("demand lock").iter().cloned());
+        ranges
     }
 
     /// Number of distinct recorded ranges.
     pub fn len(&self) -> usize {
-        self.ranges.lock().expect("demand lock").len()
+        self.facts.lock().expect("demand lock").len()
+            + self.rules.lock().expect("demand lock").len()
     }
 
     /// Whether nothing was demanded.
@@ -136,6 +194,10 @@ pub struct Subscription<Q: Application> {
     /// next delta.
     results: Vec<Q::Conclusion>,
     initialized: bool,
+    /// Full evaluations performed (first poll + fallbacks).
+    recomputes: usize,
+    /// Polls maintained incrementally (per-entity re-derivation).
+    maintenances: usize,
 }
 
 impl Branch {
@@ -150,8 +212,23 @@ impl Branch {
             demand: Demand::new(),
             results: Vec::new(),
             initialized: false,
+            recomputes: 0,
+            maintenances: 0,
         }
     }
+}
+
+/// What the in-cover changes between two roots touched.
+enum Touched {
+    /// Nothing inside the cover changed (or the changes cannot
+    /// alter any read: tombstones over never-asserted keys).
+    Nothing,
+    /// A rule-discovery range changed: the rule set may differ, so
+    /// any row may be affected.
+    Rules,
+    /// Only fact ranges changed; the set of subject entities whose
+    /// facts changed.
+    Facts(BTreeSet<Entity>),
 }
 
 /// The index root a revision pins, or the empty tree for an
@@ -166,7 +243,7 @@ fn tree_hash(revision: &Option<Revision>) -> Blake3Hash {
 impl<Q> Subscription<Q>
 where
     Q: Application + Clone,
-    Q::Conclusion: PartialEq + Clone,
+    Q::Conclusion: Conclusion + PartialEq + Clone,
 {
     /// The retained result of the last evaluation.
     pub fn results(&self) -> &[Q::Conclusion] {
@@ -176,6 +253,20 @@ where
     /// The demand cover recorded by the last evaluation.
     pub fn demand(&self) -> &Demand {
         &self.demand
+    }
+
+    /// Full evaluations performed so far (the first poll plus every
+    /// fallback from incremental maintenance).
+    pub fn recomputes(&self) -> usize {
+        self.recomputes
+    }
+
+    /// Polls that were maintained incrementally: the delta was
+    /// derived by re-evaluating only the touched entities (DRed's
+    /// delete/re-derive, goal-directed per subject) instead of the
+    /// whole query.
+    pub fn maintenances(&self) -> usize {
+        self.maintenances
     }
 
     /// Poll the subscription against the branch's current state.
@@ -210,14 +301,29 @@ where
             if current == self.revision {
                 return Ok(None);
             }
-            if !self.intersects(env, &current).await? {
-                self.revision = current;
-                return Ok(None);
+            match self.touched(env, &current).await? {
+                Touched::Nothing => {
+                    self.revision = current;
+                    return Ok(None);
+                }
+                Touched::Facts(entities) => {
+                    if let Some(delta) = self.maintain(env, &entities).await? {
+                        self.maintenances += 1;
+                        self.revision = current;
+                        return Ok(Some(delta));
+                    }
+                    // Not maintainable for this query/rule shape:
+                    // fall through to a full recompute.
+                }
+                // A rule-range change can install or change a rule,
+                // which can affect any row: recompute.
+                Touched::Rules => {}
             }
         }
 
         let demand = Demand::new();
-        let results = self.evaluate(env, &demand).await?;
+        let results = self.evaluate(env, &demand, &self.query).await?;
+        self.recomputes += 1;
 
         let delta = Delta {
             asserted: results
@@ -240,23 +346,30 @@ where
         Ok(Some(delta))
     }
 
-    /// Whether any change between the pinned root and `current`
-    /// falls inside the demand cover.
+    /// Classify what the changes between the pinned root and
+    /// `current` touched within the demand cover.
     ///
-    /// The diff itself is *scoped to the cover*
+    /// The diff is *scoped to the cover*
     /// ([`differentiate_within`]): subtrees whose key span misses
     /// every demanded range are dropped from the comparison without
     /// being loaded, so on a partial replica the poll never fetches
     /// subtrees the subscription didn't demand — the walk is bounded
     /// by the changes *within the cover*, not the full delta between
-    /// the roots. The first in-scope change decides.
+    /// the roots.
+    ///
+    /// A change inside a rule-discovery range short-circuits to
+    /// [`Touched::Rules`]. Fact changes collect the subject entities
+    /// of the changed datums; changes with no datum on either side
+    /// (a tombstone written where nothing was asserted, or a
+    /// tombstone entry disappearing) never alter what a scan reads
+    /// and are skipped.
     ///
     /// [`differentiate_within`]: dialog_search_tree::PersistentTree::differentiate_within
-    async fn intersects<Env>(
+    async fn touched<Env>(
         &self,
         env: &Env,
         current: &Option<Revision>,
-    ) -> Result<bool, EvaluationError>
+    ) -> Result<Touched, EvaluationError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -269,11 +382,11 @@ where
         let pinned = tree_hash(&self.revision);
         let target = tree_hash(current);
         if pinned == target {
-            return Ok(false);
+            return Ok(Touched::Nothing);
         }
         let scope = self.demand.ranges();
         if scope.is_empty() {
-            return Ok(false);
+            return Ok(Touched::Nothing);
         }
 
         let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), None);
@@ -284,11 +397,123 @@ where
 
         let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
         let mut changes = Box::pin(changes);
-        Ok(changes
+        let mut entities = BTreeSet::new();
+        while let Some(change) = changes
             .try_next()
             .await
             .map_err(|error| EvaluationError::Store(format!("subscription diff: {error}")))?
-            .is_some())
+        {
+            let entry = match &change {
+                Change::Add(entry) => entry,
+                Change::Remove(entry) => entry,
+            };
+            if self.demand.covers_rules(&entry.key) {
+                return Ok(Touched::Rules);
+            }
+            if let State::Added(datum) = &entry.value {
+                let entity = datum.entity.parse().map_err(|error| {
+                    EvaluationError::Store(format!("changed datum entity: {error:?}"))
+                })?;
+                entities.insert(entity);
+            }
+        }
+
+        if entities.is_empty() {
+            Ok(Touched::Nothing)
+        } else {
+            Ok(Touched::Facts(entities))
+        }
+    }
+
+    /// Maintain the retained result incrementally: for each touched
+    /// entity, over-delete its retained rows and re-derive them with
+    /// the query restricted to that entity (DRed's delete /
+    /// re-derive / insert, with the goal-directed re-evaluation
+    /// playing both the re-derive and insert steps — a row with
+    /// surviving alternate derivations is simply re-derived, which
+    /// is what makes multi-derivation retractions exact without
+    /// counting).
+    ///
+    /// Returns `Ok(None)` when the query or its rule set cannot be
+    /// maintained per-entity — the query is not restrictable, a rule
+    /// reads other entities' facts (not entity-local), or the
+    /// concept is recursive — in which case the caller falls back to
+    /// a full recompute.
+    async fn maintain<Env>(
+        &mut self,
+        env: &Env,
+        entities: &BTreeSet<Entity>,
+    ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        // Soundness gate for concept queries: every rule must be
+        // entity-local (reads only `?this`'s facts) and
+        // non-recursive, otherwise a change to entity E can affect
+        // other entities' rows and per-entity re-derivation would
+        // miss them.
+        if let Some(concept) = self.query.concept() {
+            let operator = Identify
+                .perform(env)
+                .await
+                .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
+            let layer = QueryLayer::from(&self.branch);
+            let overlay = layer.overlay(&operator);
+            let tombstones = tombstones_from(&overlay);
+            let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
+                .with_demand(self.demand.clone());
+            let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
+            if rules.recursion().is_some() {
+                return Ok(None);
+            }
+            if !rules.rules().all(|rule| rule.analysis().is_entity_local()) {
+                return Ok(None);
+            }
+        }
+
+        let mut asserted = Vec::new();
+        let mut retracted = Vec::new();
+        for entity in entities {
+            let scoped = match self.query.restrict(entity) {
+                Restriction::Scoped(query) => query,
+                Restriction::Unaffected => continue,
+                Restriction::Unsupported => return Ok(None),
+            };
+            // Over-delete: every retained row for this entity...
+            let before: Vec<Q::Conclusion> = self
+                .results
+                .iter()
+                .filter(|row| row.this() == entity)
+                .cloned()
+                .collect();
+            // ...re-derive + insert: goal-directed re-evaluation,
+            // recording into the existing cover (the standing
+            // demand only ever grows between recomputes).
+            let after = self.evaluate(env, &self.demand.clone(), &scoped).await?;
+            for row in &after {
+                if !before.contains(row) {
+                    asserted.push(row.clone());
+                }
+            }
+            for row in &before {
+                if !after.contains(row) {
+                    retracted.push(row.clone());
+                }
+            }
+            self.results.retain(|row| row.this() != entity);
+            self.results.extend(after);
+        }
+        Ok(Some(Delta {
+            asserted,
+            retracted,
+        }))
     }
 
     /// Evaluate the query against the branch, recording every
@@ -299,6 +524,7 @@ where
         &self,
         env: &Env,
         demand: &Demand,
+        query: &Q,
     ) -> Result<Vec<Q::Conclusion>, EvaluationError>
     where
         Env: Provider<Get>
@@ -319,7 +545,7 @@ where
         let tombstones = tombstones_from(&overlay);
         let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
             .with_demand(demand.clone());
-        self.query.clone().perform(&query_env).try_vec().await
+        query.clone().perform(&query_env).try_vec().await
     }
 }
 
@@ -563,6 +789,187 @@ mod tests {
             names(&delta.asserted),
             vec![(alice.clone(), "Alice".to_string())]
         );
+        Ok(())
+    }
+
+    /// Covered writes are maintained incrementally: after the first
+    /// full evaluation, deltas come from per-entity re-derivation,
+    /// never a whole-query recompute.
+    #[dialog_common::test]
+    async fn it_maintains_covered_writes_without_recompute() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 0);
+
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("covered write");
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(bob.clone(), "Bob".to_string())]
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "the delta came from per-entity re-derivation, not a recompute"
+        );
+        assert_eq!(subscription.maintenances(), 1);
+
+        branch
+            .transaction()
+            .retract(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("retraction");
+        assert_eq!(
+            names(&delta.retracted),
+            vec![(alice.clone(), "Alice".to_string())]
+        );
+        assert!(delta.asserted.is_empty());
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 2);
+        assert_eq!(
+            names(subscription.results()),
+            vec![(bob, "Bob".to_string())],
+            "retained results track the maintained state"
+        );
+        Ok(())
+    }
+
+    /// The multi-derivation retraction case (what FBF solves without
+    /// counting): an entity carries two values for the same
+    /// attribute; retracting one must retract exactly that row and
+    /// keep the other, because the survivor re-derives during the
+    /// per-entity re-evaluation.
+    #[dialog_common::test]
+    async fn it_rederives_surviving_rows_on_partial_retraction() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("person/name").of(alice.clone()).is("Ali".to_string()))
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted.len(), 2, "both values surface");
+
+        branch
+            .transaction()
+            .retract(the!("person/name").of(alice.clone()).is("Ali".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("retraction");
+        assert_eq!(
+            names(&delta.retracted),
+            vec![(alice.clone(), "Ali".to_string())],
+            "only the retracted value goes"
+        );
+        assert!(delta.asserted.is_empty());
+        assert_eq!(
+            names(subscription.results()),
+            vec![(alice.clone(), "Alice".to_string())],
+            "the surviving value re-derived"
+        );
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 1);
+        Ok(())
+    }
+
+    /// A write touching only *other* entities' facts inside the
+    /// cover maintains just those entities: the untouched entity's
+    /// rows are never re-derived, and the delta is scoped to what
+    /// changed.
+    #[dialog_common::test]
+    async fn it_scopes_maintenance_to_touched_entities() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+
+        branch
+            .transaction()
+            .assert(the!("person/name").of(bob.clone()).is("Bobby".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription.poll(&operator).await?.expect("covered write");
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(bob.clone(), "Bobby".to_string())]
+        );
+        assert!(
+            delta.retracted.is_empty(),
+            "cardinality-many: the prior value stays"
+        );
+        let mut retained = names(subscription.results());
+        retained.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+            (bob.clone(), "Bobby".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(retained, expected);
+        assert_eq!(subscription.maintenances(), 1);
         Ok(())
     }
 }
