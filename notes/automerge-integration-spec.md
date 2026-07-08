@@ -209,16 +209,67 @@ Assumptions: one engineer fluent in this codebase; focused engineering days incl
 | # | Workstream | Deliverable | Complexity | Estimate |
 |---|---|---|---|---|
 | WS0 | Engine pre-fix | `tombstones_from` shadows same-`(the, of)` different-value branch facts for pending `Replace`; the missing read-your-writes test; correct the `instruction.rs` cause-population doc (or implement it under `version-control.md`, not here) | **Low** — one choke point, standalone, benefits scalars today | 0.5–1 d |
-| WS1 | `Record` + `RecordFormat` core | New module per the note; retype `Value::Record`; fix the `unimplemented!()`; ~12 match sites; serde/Hash/Eq surfaces (no rkyv exposure — §2); claims side-channel removal | **Medium** — mechanical but touches identity/serialization invariants | 4–7 d |
+| WS1 | `Record` + `RecordFormat` core | New module per the note; retype `Value::Record`; fix the `unimplemented!()`; ~12 match sites; serde/Hash/Eq surfaces (no rkyv exposure — §2); claims side-channel removal. Splits **WS1a** (the stem: trait + `Record` + retype + panic fix + match sites + serde) / **WS1b** (claims side-channel removal — hygiene; nothing downstream waits on it, §5.1) | **Medium** — mechanical but touches identity/serialization invariants | 4–7 d |
 | WS2 | Typed bridging | `Recorded<F>` lazy handle (eager encode on write, memoized `realize()` on read, §4.2); `Typed`/`Into<Value>`/`TryFrom<Value>` generation for `RecordFormat` types; attribute-derive integration | **Low–Medium** — macro glue over existing descriptors | 2–3 d |
 | WS3 | `dialog-automerge` crate | `TextDocument`, canonicalization (`save_nocompress`, decided §6.7), merge, doc-handle (mid-session absorption + progressive open), convergence + byte-equality property tests (incl. cross-order build → identical bytes) | **Medium** — APIs fit well; the doc-handle carries the session complexity | 4–7 d |
 | WS4 | Format-aware resolution | Extract `choose` into a descriptor-sourced strategy; fold substitution in sliding-window + challenge paths; decode-failure policy (§6.9 gate); determinism tests; multi-replica integration test (diverge → fold → edit → converge) | **Medium** — the skeleton exists; the §6.9 gate and wiring choice carry the risk; coordinate with `feat/incremental-maintenance` (touches `dynamic.rs`/`all.rs`, not `only.rs`) | 2–3 d |
 | WS5 | wasm/TS + notation surface | Record round-trip test over the JS boundary (none exists); **worker-side** `foldRecords` + doc-handle helper (main thread never sees unfolded siblings); JS interop test round-tripping stored bytes through `@automerge/automerge`; notation: document + test `as: Record`; `format:` sibling-key decision jointly with the composite-types work | **Low–Medium** | 2–3 d |
 | WS6 | Blob-backed records *(later, optional)* | Size threshold, blob-ref hydration via the landed blob layer (#372: `BlobArchive` ranged reads; `BlobRecord` already carries size); rides or contributes the delivery plan's `blob/size`/`blob/slice` item | **Medium–High** | 5–8 d |
 
-**Critical path**: WS0 → WS1 → WS2 → (WS3 ∥ WS4) → WS5.
+### 5.1 Dependency graph — what actually blocks what
 
-**Totals**: headline feature — automerge attributes stored, replicated, and converging across replicas, with the §4.3 threading/latency guarantees — **WS0–WS5 ≈ 15–24 days (≈ 3–4.5 weeks)**; wall-clock on the critical path ≈ 13–20 days. v2 estimated 16–28 days for the same scope *plus* machinery main turned out to already have (the fold adapter, the Replace write path); the delta is banked, not reinvested. Remaining tail risk lives in WS4's §6.9 gate and the WS3 doc-handle.
+The table's ordering is a solo-engineer serialization; the true graph is much wider. **WS1a is the only stem** — everything record-typed compiles against it — and the plan has exactly one convergence point, the WS4 integration test. Solid arrows are hard dependencies (compiles-against); dotted are soft (a convention or test hygiene).
+
+```mermaid
+graph TD
+    WS0["WS0 engine pre-fix — independent, PRs to main"]
+    WS1a["WS1a Record core — the stem"]
+    WS1b["WS1b claims side-channel — hygiene"]
+    WS2["WS2 typed bridging"]
+    WS3c["WS3-core automerge format + canonicalization"]
+    WS3s["WS3-sessions doc-handle"]
+    WS4m["WS4-machinery fold substitution (toy format)"]
+    WS4i["WS4-integration multi-replica test"]
+    WS5a["WS5a JS round-trip test — independent"]
+    WS5b["WS5b notation as: Record — independent"]
+    WS5c["WS5c foldRecords JS helper"]
+    WS6["WS6 blob-backed records — later"]
+
+    WS1a --> WS1b
+    WS1a --> WS2
+    WS1a --> WS3c
+    WS1a --> WS4m
+    WS2 --> WS3s
+    WS2 --> WS4i
+    WS3c --> WS4i
+    WS4m --> WS4i
+    WS2 --> WS6
+    WS3c -.->|canonicalization convention| WS5c
+    WS0 -.->|test hygiene| WS4i
+```
+
+Why each hard edge exists:
+
+- **WS1a → WS2**: `Recorded<F>` wraps `Record`; the generated impls target `RecordFormat`.
+- **WS1a → WS3-core**: the crate implements the trait — and *only* the trait. Its property tests exercise `TextDocument` and canonical bytes directly, no derive, so WS3-core does **not** wait for WS2.
+- **WS1a → WS4-machinery**: the fold is `realize` → `F::merge` → `TryFrom<F>`. A toy format (e.g. CBOR set-union) makes it fully testable **without automerge**, so WS4-machinery does not wait for WS3.
+- **WS2 → WS3-sessions**: the doc-handle subscribes to a *typed* attribute (`Body(TextDocument)`).
+- **{WS2, WS3-core, WS4-machinery} → WS4-integration**: the multi-replica test (diverge → fold → edit → converge) declares a real typed automerge attribute and drives the shipped path end-to-end, including the typed `Replace` on the edit leg — the plan's single convergence point.
+- **WS3-core ⇢ WS5c** (soft): the JS helper must emit byte-identical canonical output, so it consumes WS3-core's `SaveOptions` *decision*, not the crate.
+- **WS0 ⇢ WS4-integration** (soft): without the overlay fix, mid-transaction assertions on default-merge records are hash-order flaky (true-CRDT formats survive via merge monotonicity). Land WS0 first so fold tests measure the fold, not the quirk.
+
+The schedule in waves:
+
+- **Wave 0 — five parallel tracks, startable now**: WS0 (PRs to `main`, not the feature branch — it's a standalone scalar fix) ∥ WS1a ∥ WS5a (pins the naked-bytes/tag-7 JS invariant *through* the WS1a retype) ∥ WS5b (documents behavior the runtime already has) ∥ the `format:` sibling-key coordination with the `feat/composite-types` owners (a conversation; the sooner it starts, the less WS5 waits).
+- **Wave 1 — after WS1a merges**: WS2 ∥ WS3-core ∥ WS4-machinery, with the §7 wiring checkpoint at this boundary. WS1b whenever.
+- **Wave 2 — the joins**: WS3-sessions (after WS2); WS4-integration (after WS2 + WS3-core + WS4-machinery); WS5c (after WS3-core's convention).
+- **Later**: WS6 (needs WS2's `Recorded<F>` shape; rides #372's landed blob layer).
+
+**Critical path** (team): WS1a → WS2 → (WS3-sessions ∥ WS4-integration) → WS5c; everything else runs beside it. Solo, the table's row order stands.
+
+**Landing topology**: WS0 targets `main` directly. Everything else lands on `feat/automerge-records` (cut from `main @ d2af7b7a`; spec committed as `83f0a0b8`), with per-workstream branches or worktrees hanging off it.
+
+**Totals**: headline feature — automerge attributes stored, replicated, and converging across replicas, with the §4.3 threading/latency guarantees — **WS0–WS5 ≈ 15–24 days (≈ 3–4.5 weeks)**; solo wall-clock ≈ 13–20 days, and the §5.1 wave schedule compresses team wall-clock to ≈ 9–15 days. v2 estimated 16–28 days for the same scope *plus* machinery main turned out to already have (the fold adapter, the Replace write path); the delta is banked, not reinvested. Remaining tail risk lives in WS4's §6.9 gate and the WS3 doc-handle.
 
 ## 6. Tradeoffs, risks, and open questions
 
@@ -254,8 +305,9 @@ The design's costs cluster around one theme: **zero storage/sync changes were bo
 
 ## 7. Suggested landing order
 
-1. PR: WS0 (engine pre-fix — standalone, fixes a live scalar quirk, no record dependency).
-2. PR: WS1 (pure refactor + panic fix; no behavior change).
-3. PR: WS2 + WS3 (typed bridging; new edge crate, native-first).
-4. Design-review checkpoint on the resolution-strategy wiring (serde-skipped slot vs. typed fold evaluator, §4.4), then PR: WS4.
-5. PR: WS5 (TS surface + interop test; notation `as: Record`). WS6 when document sizes demand it.
+Per the §5.1 waves:
+
+1. **Wave 0, in parallel**: PR WS0 to `main` (standalone scalar fix, no record dependency); PR WS1a to the feature branch (pure refactor + panic fix; no behavior change); land WS5a + WS5b anytime; open the `format:` conversation with the composite-types owners.
+2. **Wave 1, after WS1a**: design-review checkpoint on the resolution-strategy wiring (serde-skipped slot vs. typed fold evaluator, §4.4), then WS2 ∥ WS3-core ∥ WS4-machinery. WS1b whenever.
+3. **Wave 2, the joins**: WS3-sessions; WS4-integration — the multi-replica diverge → fold → edit → converge test is the plan's convergence point; WS5c.
+4. WS6 when document sizes demand it.
