@@ -67,9 +67,6 @@ pub use transaction::*;
 mod upstream;
 pub use upstream::*;
 
-mod write_blob;
-pub use write_blob::*;
-
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
 

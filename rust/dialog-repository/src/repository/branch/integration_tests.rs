@@ -7,11 +7,12 @@
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use crate::helpers::{test_operator_with_profile, unique_name};
-use crate::{Branch, Repository, RepositoryExt as _, SiteAddress};
+use crate::{Blob, Branch, Repository, RepositoryExt as _, SiteAddress};
 use anyhow::Result;
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
 use dialog_capability::Subject;
 use dialog_credentials::SignerCredential;
+use dialog_effects::blob::BlobError;
 use dialog_network::Network;
 use dialog_operator::{Operator, Profile};
 use dialog_remote_s3::helpers::S3Address;
@@ -184,13 +185,10 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
         .await?;
 
     let payload: Vec<u8> = (0..50_000u32).map(|i| (i % 199) as u8).collect();
-    let hash = branch_a
-        .write_blob(stream::iter(
-            payload
-                .chunks(8192)
-                .map(|c| Ok(c.to_vec()))
-                .collect::<Vec<_>>(),
-        ))
+    let chunks: Vec<Result<Vec<u8>, BlobError>> =
+        payload.chunks(8192).map(|c| Ok(c.to_vec())).collect();
+    let blob = Blob::import(stream::iter(chunks))
+        .write((&branch_a).into())
         .perform(&operator_a)
         .await?;
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
@@ -237,11 +235,17 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
     branch_b.pull().perform(&operator_b).await?;
 
     assert_eq!(
-        branch_b.blob_size(&hash).perform(&operator_b).await?,
+        Blob::from(blob.clone())
+            .size((&branch_b).into())
+            .perform(&operator_b)
+            .await?,
         Some(payload.len() as u64)
     );
 
-    let mut reader = branch_b.read_blob(&hash, None).perform(&operator_b).await?;
+    let mut reader = Blob::from(blob)
+        .read((&branch_b).into())
+        .perform(&operator_b)
+        .await?;
     let mut out = Vec::new();
     while let Some(chunk) = reader.next().await? {
         out.extend(chunk);
