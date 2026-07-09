@@ -200,6 +200,14 @@ impl ArtifactTreeExt for ArtifactTree {
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
 
+        // Snapshot the committed tree before editing. A retract consults it to
+        // tell a fact that existed *before this batch* (tombstone it, so the
+        // removal propagates on merge) from one that only appears within the
+        // batch or not at all (drop it, leaving no tombstone). `edit()` borrows
+        // `self`, so this cheap Arc-backed clone stays readable alongside the
+        // in-flight `transient`.
+        let base = self.clone();
+
         // Open one transient edit batch over this tree's spine and apply every
         // instruction's writes to it in flight, so the whole instruction stream
         // costs a single persist instead of one full tree rebuild per key.
@@ -304,16 +312,46 @@ impl ArtifactTreeExt for ArtifactTree {
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
 
-                    let removed: State<Datum> = State::Removed;
-                    transient = transient
-                        .insert(entity_key.into_key().into(), removed.clone(), &storage)
-                        .await?;
-                    transient = transient
-                        .insert(attribute_key.into_key().into(), removed.clone(), &storage)
-                        .await?;
-                    transient = transient
-                        .insert(value_key.into_key().into(), removed, &storage)
-                        .await?;
+                    // Was this exact fact committed *before* this batch? Read the
+                    // value key (the fact identity) from the base snapshot, not
+                    // the transient tree — so an assert earlier in this same
+                    // batch doesn't count as a prior.
+                    let committed = matches!(
+                        base.get(&value_key.clone().into_key().into(), &storage)
+                            .await?,
+                        Some(State::Added(_))
+                    );
+
+                    if committed {
+                        // Retracting a durable fact: replace it with a `Removed`
+                        // tombstone across all three orderings so the removal
+                        // survives a merge and beats a stale remote assert.
+                        let removed: State<Datum> = State::Removed;
+                        transient = transient
+                            .insert(entity_key.into_key().into(), removed.clone(), &storage)
+                            .await?;
+                        transient = transient
+                            .insert(attribute_key.into_key().into(), removed.clone(), &storage)
+                            .await?;
+                        transient = transient
+                            .insert(value_key.into_key().into(), removed, &storage)
+                            .await?;
+                    } else {
+                        // No committed prior: the fact only exists (if at all) as
+                        // an assert earlier in this batch. Delete the keys so the
+                        // assert and retract cancel to nothing — no tombstone,
+                        // no tree churn. Deleting an absent key is a no-op, so a
+                        // retract of a fact that never existed changes nothing.
+                        transient = transient
+                            .delete(&entity_key.into_key().into(), &storage)
+                            .await?;
+                        transient = transient
+                            .delete(&attribute_key.into_key().into(), &storage)
+                            .await?;
+                        transient = transient
+                            .delete(&value_key.into_key().into(), &storage)
+                            .await?;
+                    }
                 }
             }
         }
