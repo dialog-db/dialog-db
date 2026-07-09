@@ -74,6 +74,16 @@ impl Push<'_> {
         };
         let base = upstream_state.tree().clone();
 
+        // Nothing new to push: the local head already equals the recorded
+        // upstream sync point. Without this guard every sync tick re-publishes
+        // the revision pointer to the remote (an ongoing `branch/*/revision`
+        // PUT) and re-fetches + diffs the upstream for an empty novelty set,
+        // even when no commit has landed since the last push. Short-circuit so
+        // an idle branch does no push I/O.
+        if revision.tree == base {
+            return Ok(Some(revision));
+        }
+
         match &upstream_state {
             Upstream::Local {
                 branch: upstream_name,
@@ -206,6 +216,51 @@ mod tests {
             .revision()
             .expect("main should have a revision after push");
         assert_eq!(main_rev.tree, feature_revision.tree);
+
+        Ok(())
+    }
+
+    /// A second push with no intervening commit is a no-op: the local head
+    /// already equals the recorded upstream sync point, so it returns the
+    /// current revision without re-publishing. Guards the ongoing-`revision`-PUT
+    /// regression where an idle sync tick re-pushed on every drain.
+    #[dialog_common::test]
+    async fn it_is_a_noop_when_nothing_new_to_push() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        feature
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:123".parse()?,
+                is: Value::String("Alice".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let revision = feature.revision().expect("feature should have a revision");
+
+        // First push lands the commit.
+        let first = feature.push().perform(&operator).await?;
+        assert_eq!(
+            first.map(|r| r.tree),
+            Some(revision.tree.clone()),
+            "first push lands the local head"
+        );
+
+        // Second push, with no new commit, is a no-op that still reports the
+        // current revision.
+        let second = feature.push().perform(&operator).await?;
+        assert_eq!(
+            second.map(|r| r.tree),
+            Some(revision.tree),
+            "second push with nothing new returns the current revision as a no-op"
+        );
 
         Ok(())
     }
