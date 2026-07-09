@@ -454,7 +454,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, str::FromStr, sync::Arc};
+    use std::{collections::BTreeSet, iter::once, str::FromStr, sync::Arc};
     use tokio::io::{BufReader, BufWriter};
 
     use anyhow::Result;
@@ -546,6 +546,139 @@ mod tests {
 
         assert_eq!(data, facts);
 
+        Ok(())
+    }
+
+    /// Retracting a fact that was never asserted is a no-op: no tombstone is
+    /// written, so the tree root (and therefore the branch revision) is
+    /// unchanged. Otherwise an idle synced branch would push a revision whose
+    /// only content is a tombstone for a fact that never existed.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_treats_retracting_a_missing_fact_as_a_noop() -> Result<()> {
+        let (storage_backend, _temp) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        // Seed an unrelated fact so the tree is non-empty.
+        let base_root = facts
+            .commit(once(Instruction::Assert(Artifact {
+                the: Attribute::from_str("user/name")?,
+                of: Entity::new()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            })))
+            .await?;
+
+        // Retract a fact that was never asserted.
+        let after_root = facts
+            .commit(once(Instruction::Retract(Artifact {
+                the: Attribute::from_str("user/session")?,
+                of: Entity::new()?,
+                is: Value::String("ephemeral".into()),
+                cause: None,
+            })))
+            .await?;
+
+        assert_eq!(
+            base_root, after_root,
+            "retracting a fact that was never present must not change the tree"
+        );
+        Ok(())
+    }
+
+    /// Assert + retract of a fact in the same batch, when that fact had **no
+    /// prior committed value**, leaves nothing behind: the assert and retract
+    /// cancel at the tree, no tombstone is written, and the root is unchanged.
+    /// This is the transient-command shape (a concept asserted then retracted
+    /// in one commit) that used to churn the branch head on every occurrence.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_leaves_no_key_when_assert_and_retract_a_novel_fact_in_one_batch() -> Result<()> {
+        let (storage_backend, _temp) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        let base_root = facts
+            .commit(once(Instruction::Assert(Artifact {
+                the: Attribute::from_str("user/name")?,
+                of: Entity::new()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            })))
+            .await?;
+
+        let session = Attribute::from_str("user/session")?;
+        let transient = Artifact {
+            the: session.clone(),
+            of: Entity::new()?,
+            is: Value::String("ephemeral".into()),
+            cause: None,
+        };
+        let after_root = facts
+            .commit(
+                vec![
+                    Instruction::Assert(transient.clone()),
+                    Instruction::Retract(transient.clone()),
+                ]
+                .into_iter(),
+            )
+            .await?;
+
+        // No tree churn: the novel fact left no key at all.
+        assert_eq!(
+            base_root, after_root,
+            "assert+retract of a novel fact must leave the tree unchanged"
+        );
+        // And the fact is not queryable.
+        let hits: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().the(session))
+            .try_collect()
+            .await?;
+        assert!(hits.is_empty(), "the transient fact must not be queryable");
+        Ok(())
+    }
+
+    /// Assert + retract of a fact whose value was **already committed** ends in
+    /// a retraction: a `Removed` tombstone replaces the live value, so the tree
+    /// changes (the removal must propagate on merge and beat a stale remote
+    /// assert) and the fact is no longer queryable.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_tombstones_when_retracting_a_fact_that_had_a_committed_value() -> Result<()> {
+        let (storage_backend, _temp) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        let name = Attribute::from_str("user/name")?;
+        let alice = Artifact {
+            the: name.clone(),
+            of: Entity::new()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        };
+
+        // Commit the fact so it has a durable prior.
+        let committed_root = facts
+            .commit(once(Instruction::Assert(alice.clone())))
+            .await?;
+
+        // Retract it in a later commit.
+        let after_root = facts
+            .commit(once(Instruction::Retract(alice.clone())))
+            .await?;
+
+        // The retraction changed the tree (a tombstone replaced the value).
+        assert_ne!(
+            committed_root, after_root,
+            "retracting a committed fact must write a tombstone (tree changes)"
+        );
+        // The fact is gone from queries.
+        let hits: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().the(name))
+            .try_collect()
+            .await?;
+        assert!(
+            hits.is_empty(),
+            "the retracted fact must not be queryable after the tombstone"
+        );
         Ok(())
     }
 
