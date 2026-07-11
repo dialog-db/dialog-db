@@ -792,6 +792,53 @@ mod history_tests {
         })
     }
 
+    /// Convergence: the same fact asserted concurrently on two branches
+    /// (with different editions, so the stored datums differ in version
+    /// metadata) must quiesce under mutual pulls — bounded rounds until
+    /// both pulls are no-ops — and land both replicas on the same tree.
+    /// `integrate` resolves the contended slot by a deterministic,
+    /// antisymmetric rule (hash race for Added vs Added), so whichever
+    /// side integrates first, both converge on the same bytes instead of
+    /// re-imposing their own copy forever.
+    #[dialog_common::test]
+    async fn it_quiesces_after_concurrent_identical_asserts() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let a = repo.branch("a").open().perform(&operator).await?;
+        let b = repo.branch("b").open().perform(&operator).await?;
+
+        // A filler commit on `a` skews the editions, so the two copies
+        // of X carry different version metadata — a genuinely contended
+        // slot, not byte-identical data.
+        a.commit(stream::iter(vec![assert_one("filler/x", "f:1", "pad")]))
+            .perform(&operator)
+            .await?;
+        a.commit(stream::iter(vec![assert_one("post/title", "post:1", "Hej")]))
+            .perform(&operator)
+            .await?;
+        b.commit(stream::iter(vec![assert_one("post/title", "post:1", "Hej")]))
+            .perform(&operator)
+            .await?;
+
+        let mut quiesced = false;
+        for _ in 0..4 {
+            let pulled_a = a.pull().from(&b).perform(&operator).await?;
+            let pulled_b = b.pull().from(&a).perform(&operator).await?;
+            if pulled_a.is_none() && pulled_b.is_none() {
+                quiesced = true;
+                break;
+            }
+        }
+        assert!(quiesced, "mutual pulls must reach a fixed point");
+        assert_eq!(
+            a.revision().map(|r| r.tree),
+            b.revision().map(|r| r.tree),
+            "both replicas converge on the same tree"
+        );
+        Ok(())
+    }
+
     /// A retraction must survive reconciliation with a replica that still
     /// holds the fact — including a replica we have NEVER synced with,
     /// where the merge runs from the empty base and the differential
@@ -887,6 +934,17 @@ mod history_tests {
             titles(&feature).await?,
             0,
             "an empty-base merge with a stale peer must not resurrect the deleted fact"
+        );
+
+        // Leg 3 — confluence: the peer pulls the deleter and reaches the
+        // same verdict. Deletion wins the concurrent contest in *both*
+        // integration directions, so the replicas agree instead of each
+        // re-imposing its own copy.
+        peer.pull().from(&feature).perform(&operator).await?;
+        assert_eq!(
+            titles(&peer).await?,
+            0,
+            "the deletion also propagates to the replica that held the fact"
         );
 
         Ok(())
