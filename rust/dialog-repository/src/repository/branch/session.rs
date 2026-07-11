@@ -543,10 +543,12 @@ where
         let concept = input.this();
         let mut rules: Vec<DeductiveRule> = Vec::new();
 
-        // Built-in projections first: the derived version-control
-        // concepts (schema::Revision / schema::RevisionParent) are
-        // concluded from signed `dialog.db/revision` records by fixed
-        // rules — nothing is stored under `dialog.revision/*`.
+        // Built-in rules first: the derived version-control concepts
+        // (schema::Revision / schema::RevisionParent, plus the
+        // recursive schema::RevisionAncestor closure over the parent
+        // edges) are concluded from signed `dialog.db/revision`
+        // records by fixed rules — nothing is stored under
+        // `dialog.revision/*`.
         rules.extend(builtin(&concept));
 
         // Durable layers — one per branch.
@@ -633,7 +635,7 @@ where
             if !seen.insert(entity.clone()) {
                 continue;
             }
-            let mut rules: Vec<DeductiveRule> = Vec::new();
+            let mut rules: Vec<DeductiveRule> = builtin(&entity);
             for branch in &self.branches {
                 rules.extend(self.durable_rules(branch, &entity).await?);
             }

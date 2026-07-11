@@ -2176,3 +2176,159 @@ mod tests {
         Ok(())
     }
 }
+
+/// Recursion whose base facts come from another *derived* concept
+/// rather than raw attributes: the seed round and the sideways joins
+/// of the delta rounds both evaluate the edge concept through its own
+/// rule.
+#[cfg(test)]
+mod derived_edge_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::attribute::query::AttributeQuery;
+    use crate::attribute::{AttributeDescriptor, Cardinality, Type};
+    use crate::session::RuleRegistry;
+    use crate::source::test::TestEnv;
+    use crate::the;
+    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use futures_util::TryStreamExt;
+
+    /// A derived edge concept: concluded by a rule over the raw
+    /// `family/parent` attribute rather than stored directly.
+    fn edge_concept() -> ConceptDescriptor {
+        ConceptDescriptor::try_from(vec![(
+            "parent",
+            AttributeDescriptor::new(
+                the!("family.derived/parent"),
+                "",
+                Cardinality::Many,
+                Some(Type::Entity),
+            ),
+        )])
+        .unwrap()
+    }
+
+    fn edge_rule(concept: &ConceptDescriptor) -> DeductiveRule {
+        DeductiveRule::new(
+            concept.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("family/parent")),
+                    Term::<Entity>::var("this"),
+                    Term::var("parent"),
+                    Term::blank(),
+                    Some(Cardinality::Many),
+                )
+                .into(),
+            ],
+        )
+        .expect("edge rule compiles")
+    }
+
+    fn ancestor_concept() -> ConceptDescriptor {
+        ConceptDescriptor::try_from(vec![(
+            "ancestor",
+            AttributeDescriptor::new(
+                the!("family.derived/ancestor"),
+                "",
+                Cardinality::Many,
+                Some(Type::Entity),
+            ),
+        )])
+        .unwrap()
+    }
+
+    fn edge_premise(edge: &ConceptDescriptor, this: &str, parent: &str) -> Premise {
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var(this));
+        terms.insert("parent".to_string(), Term::<Any>::var(parent));
+        Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: edge.clone(),
+        }))
+    }
+
+    fn ancestor_rules(
+        concept: &ConceptDescriptor,
+        edge: &ConceptDescriptor,
+    ) -> Vec<DeductiveRule> {
+        let base = DeductiveRule::new(concept.clone(), vec![edge_premise(edge, "this", "ancestor")])
+            .expect("base rule compiles");
+
+        let mut step_terms = Parameters::new();
+        step_terms.insert("this".to_string(), Term::<Any>::var("p"));
+        step_terms.insert("ancestor".to_string(), Term::<Any>::var("ancestor"));
+        let step = DeductiveRule::new(
+            concept.clone(),
+            vec![
+                edge_premise(edge, "this", "p"),
+                Premise::Assert(Proposition::Concept(ConceptQuery {
+                    terms: step_terms,
+                    predicate: concept.clone(),
+                })),
+            ],
+        )
+        .expect("step rule compiles");
+        vec![base, step]
+    }
+
+    #[dialog_common::test]
+    async fn it_derives_transitive_closure_over_a_derived_edge_concept() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let carol = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("family/parent").of(carol.clone()).is(bob.clone()))
+            .assert(the!("family/parent").of(bob.clone()).is(alice.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let edge = edge_concept();
+        let concept = ancestor_concept();
+        let mut registry = RuleRegistry::new();
+        registry.register(edge_rule(&edge))?;
+        for rule in ancestor_rules(&concept, &edge) {
+            registry.register(rule)?;
+        }
+        assert!(registry.is_recursive(&concept.this())?);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("who"));
+        terms.insert("ancestor".to_string(), Term::<Any>::var("relative"));
+        let source = TestEnv::new(&branch, &operator, registry);
+        let premise = Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept,
+        }));
+        let plan = Planner::from(vec![premise])
+            .plan(&Environment::new())
+            .expect("plans");
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+        let mut pairs = Vec::new();
+        for matched in results {
+            let who = matched.lookup(&Term::<Any>::var("who"))?.content()?;
+            let relative = matched.lookup(&Term::<Any>::var("relative"))?.content()?;
+            pairs.push((who, relative));
+        }
+        pairs.sort_by_key(|pair| format!("{pair:?}"));
+        let mut expected = vec![
+            (Value::Entity(carol.clone()), Value::Entity(bob.clone())),
+            (Value::Entity(bob.clone()), Value::Entity(alice.clone())),
+            (Value::Entity(carol.clone()), Value::Entity(alice.clone())),
+        ];
+        expected.sort_by_key(|pair| format!("{pair:?}"));
+        assert_eq!(pairs, expected, "closure includes the transitive pair");
+        Ok(())
+    }
+}
