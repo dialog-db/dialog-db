@@ -230,6 +230,62 @@ mod tests {
         );
     }
 
+    mod record_derive {
+        use crate::Attribute;
+        use crate::artifact::{RecordError, RecordFormat, Recorded};
+
+        /// A toy record format: a list of lines, encoded newline-joined.
+        #[derive(Clone, Debug, PartialEq)]
+        pub struct Journal(pub Vec<String>);
+
+        impl RecordFormat for Journal {
+            fn decode(bytes: &[u8]) -> Result<Self, RecordError> {
+                let text = str::from_utf8(bytes)
+                    .map_err(|error| RecordError::Decode(error.to_string()))?;
+                Ok(Journal(match text {
+                    "" => Vec::new(),
+                    text => text.split('\n').map(String::from).collect(),
+                }))
+            }
+
+            fn encode(&self) -> Result<Vec<u8>, RecordError> {
+                Ok(self.0.join("\n").into_bytes())
+            }
+        }
+
+        /// Collaboratively edited body
+        #[derive(Attribute, Clone)]
+        pub struct Body(pub Recorded<Journal>);
+    }
+
+    #[dialog_common::test]
+    fn it_derives_record_attribute() {
+        use crate::artifact::Recorded;
+
+        let descriptor = record_derive::Body::descriptor();
+        assert_eq!(descriptor.domain(), "record-derive");
+        assert_eq!(descriptor.name(), "body");
+        assert_eq!(descriptor.description(), "Collaboratively edited body");
+        assert_eq!(descriptor.cardinality(), Cardinality::One);
+        assert_eq!(descriptor.content_type(), Some(Type::Record));
+
+        let journal = record_derive::Journal(vec!["hello".into(), "world".into()]);
+        let body = record_derive::Body(Recorded::new(journal.clone()).unwrap());
+        assert_eq!(*body.value().realize().unwrap(), journal);
+    }
+
+    #[dialog_common::test]
+    fn it_converts_record_attribute_into_term() {
+        use crate::artifact::{Recorded, Value};
+
+        let recorded = Recorded::new(record_derive::Journal(vec!["entry".into()])).unwrap();
+        let body = record_derive::Body(recorded.clone());
+
+        let term: Term<Recorded<record_derive::Journal>> = body.into();
+        assert!(term.is_constant());
+        assert_eq!(term, Term::Constant(Value::from(recorded)));
+    }
+
     mod custom_ns_derive {
         use crate::Attribute;
 

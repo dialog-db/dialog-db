@@ -17,6 +17,7 @@ strip = "debuginfo"
 [workspace]
 members = [
     "rust/dialog-artifacts",
+    "rust/dialog-automerge",
     "rust/dialog-capability",
     "rust/dialog-credentials",
     "rust/dialog-common",
@@ -55,6 +56,11 @@ async-signature = "0.5"
 async-stream = "0.3"
 async-trait = "0.1"
 auto_enums = { version = "0.8", features = ["futures03"] }
+# The record payload of an automerge-typed attribute is exactly automerge's
+# canonical `save()` output, which is stable per automerge version but not
+# across majors: the whole workspace must agree on one version (§6.7 of
+# notes/automerge-integration-spec.md).
+automerge = "0.10"
 base58 = "0.2"
 base64 = "0.22"
 blake3 = "1"
@@ -82,6 +88,9 @@ ipld-core = { version = "0.4", features = ["serde"] }
 # getrandom = "0.3"
 getrandom = "0.2"
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# automerge pulls the 0.4 series (via rand 0.10); the renamed entry exists so
+# wasm consumers can turn on its `wasm_js` backend feature (see dialog-automerge).
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 itertools = "0.14"
 js-sys = "0.3"
 k256 = "0.13"
@@ -119,7 +128,9 @@ reqwest = { version = "0.12", default-features = false, features = [
 rexie = "0.6"
 rkyv = "0.8"
 rsa = "0.9"
-s3s = "0.13"
+# 0.14 drops the `sha2 = "=0.11.0-rc.5"` exact pin that 0.13 carried, which
+# conflicted with automerge's `sha2 = "0.11.0"` (same 0.11 semver range).
+s3s = "0.14"
 serde = "1"
 serde-value = "0.7"
 serde-big-array = "0.5"
@@ -167,6 +178,9 @@ zerocopy-derive = "0.8"
 
 [workspace.dependencies.dialog-artifacts]
 path = "./rust/dialog-artifacts"
+
+[workspace.dependencies.dialog-automerge]
+path = "./rust/dialog-automerge"
 
 [workspace.dependencies.dialog-capability]
 path = "./rust/dialog-capability"

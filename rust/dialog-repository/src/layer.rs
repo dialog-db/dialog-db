@@ -10,13 +10,15 @@
 //!   single physical tree" order via [`sort_key`](dialog_artifacts::sort_key)
 //!   and dedupes identical `(the, of, is, cause)` artifacts within
 //!   each `(the, of)` run.
-//! - [`tombstones_from`] + [`filter_tombstones`] lift retract
-//!   instructions out of a [`Changes`] overlay and apply them to a
+//! - [`tombstones_from`] + [`filter_tombstones`] lift the shadowing set
+//!   ([`Tombstones`]) out of a [`Changes`] overlay and apply it to a
 //!   source stream as a filter — the mechanism that lets a
 //!   [`Transaction::retract`](crate::repository::branch::Transaction::retract)
-//!   suppress facts in the underlying branch view.
+//!   suppress a fact in the underlying branch view, and a pending
+//!   cardinality-one `Replace` shadow the priors it supersedes so
+//!   mid-transaction reads see their own writes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use dialog_artifacts::{Artifact, ArtifactStream, Cause, Changes, SortKey, sort_key};
 use futures_util::{StreamExt, stream};
@@ -135,33 +137,102 @@ pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStr
     })
 }
 
-/// Extract a tombstone set from a [`Changes`] overlay — one
-/// [`SortKey`] per retracted artifact.
+/// The set of branch facts an overlay's pending changes shadow at
+/// query time, so a mid-transaction read agrees with post-commit state.
 ///
-/// Asserts and Replaces are ignored; only Retracts contribute. Used
-/// at query time to filter matching source facts out of branch
-/// streams before they reach the merge.
-pub(crate) fn tombstones_from(changes: &Changes) -> HashSet<SortKey> {
-    let mut tombstones = HashSet::new();
+/// Two kinds of shadow, lifted from a [`Changes`] overlay by
+/// [`tombstones_from`] and applied to a source stream by
+/// [`filter_tombstones`]:
+///
+/// - **Retracts** remove one exact artifact — a `tx.retract(x)`
+///   suppresses `x` in the branch view.
+/// - **Replaces** shadow a whole `(the, of)` group *except* the
+///   replacement value itself. A `Cardinality::One` typed assert emits
+///   `Change::Replace`, which on commit supersedes **all**
+///   different-valued priors at that `(the, of)`
+///   (`tree.rs`'s supersession scan). Mid-transaction reads must match:
+///   the committed prior is a different-value sibling and would
+///   otherwise stream alongside the pending replacement, letting
+///   [`choose`](dialog_query::attribute::query) pick the stale value by
+///   content order. Shadowing the priors leaves exactly the replacement
+///   value (surfaced by `Provider<Select> for Changes`) — read-your-writes.
+///
+/// Asserts (`Cardinality::Many`) contribute nothing: sibling
+/// accumulation is their intended semantics.
+#[derive(Default, Clone)]
+pub(crate) struct Tombstones {
+    /// Exact-artifact removals lifted from `Retract` changes — one
+    /// [`SortKey`] each.
+    retracts: HashSet<SortKey>,
+    /// `(the, of)` groups carrying a pending `Replace`, each mapped to
+    /// the [`SortKey`]s of its replacement value(s). A branch fact in
+    /// one of these groups is shadowed unless its own `SortKey` is in
+    /// the set — i.e. only different-value priors are suppressed; a
+    /// branch fact already holding the replacement value survives (a
+    /// same-value `Replace` is a no-op on commit).
+    replaced_groups: HashMap<(Vec<u8>, Vec<u8>), HashSet<SortKey>>,
+}
+
+impl Tombstones {
+    /// No pending change shadows anything — the filter is a pass-through.
+    fn is_empty(&self) -> bool {
+        self.retracts.is_empty() && self.replaced_groups.is_empty()
+    }
+
+    /// Whether an overlay change suppresses `artifact` when it appears
+    /// in a branch source stream.
+    fn shadows(&self, artifact: &Artifact) -> bool {
+        let key = sort_key(artifact);
+        if self.retracts.contains(&key) {
+            return true;
+        }
+        // A pending `Replace` shadows every prior in its `(the, of)`
+        // group except one carrying the replacement value itself.
+        if let Some(replacement_keys) = self.replaced_groups.get(&(key.0.clone(), key.1.clone())) {
+            return !replacement_keys.contains(&key);
+        }
+        false
+    }
+}
+
+/// Lift the shadowing set out of a [`Changes`] overlay: an exact
+/// [`SortKey`] per `Retract`, and a `(the, of)` group shadow per
+/// `Replace`. Asserts contribute nothing. See [`Tombstones`] for the
+/// read-your-writes rationale.
+pub(crate) fn tombstones_from(changes: &Changes) -> Tombstones {
+    let mut tombstones = Tombstones::default();
     for (entity, attribute, change) in changes.iter() {
-        if let dialog_artifacts::Change::Retract(value) = change {
-            let artifact = Artifact {
-                the: attribute.clone(),
-                of: entity.clone(),
-                is: value.clone(),
-                cause: None,
-            };
-            tombstones.insert(sort_key(&artifact));
+        let (value, is_replace) = match change {
+            dialog_artifacts::Change::Retract(value) => (value, false),
+            dialog_artifacts::Change::Replace(value) => (value, true),
+            // Asserts (cardinality-many) accumulate as siblings — no shadow.
+            dialog_artifacts::Change::Assert(_) => continue,
+        };
+        let artifact = Artifact {
+            the: attribute.clone(),
+            of: entity.clone(),
+            is: value.clone(),
+            cause: None,
+        };
+        let key = sort_key(&artifact);
+        if is_replace {
+            tombstones
+                .replaced_groups
+                .entry(group_key(&artifact))
+                .or_default()
+                .insert(key);
+        } else {
+            tombstones.retracts.insert(key);
         }
     }
     tombstones
 }
 
-/// Wrap an artifact stream in a filter that drops any item whose
-/// [`sort_key`] is in `tombstones`. No-op when the set is empty.
+/// Wrap an artifact stream in a filter that drops any item shadowed by
+/// `tombstones`. No-op when nothing is shadowed.
 pub(crate) fn filter_tombstones<'a>(
     inner: ArtifactStream<'a>,
-    tombstones: HashSet<SortKey>,
+    tombstones: Tombstones,
 ) -> ArtifactStream<'a> {
     if tombstones.is_empty() {
         return inner;
@@ -174,7 +245,7 @@ pub(crate) fn filter_tombstones<'a>(
                     None => return None,
                     Some(Err(e)) => return Some((Err::<Artifact, _>(e), (inner, tombstones))),
                     Some(Ok(artifact)) => {
-                        if tombstones.contains(&sort_key(&artifact)) {
+                        if tombstones.shadows(&artifact) {
                             continue;
                         }
                         return Some((Ok(artifact), (inner, tombstones)));
@@ -263,10 +334,41 @@ mod tests {
         );
 
         let tombstones = tombstones_from(&changes);
-        assert_eq!(tombstones.len(), 1, "only the retract contributes");
+        assert_eq!(tombstones.retracts.len(), 1, "only the retract contributes");
+        assert!(
+            tombstones.replaced_groups.is_empty(),
+            "an assert is not a replace"
+        );
         // The lone tombstone matches the retracted artifact.
         let retracted = artifact("id:bob", "test/name", "Bob");
-        assert!(tombstones.contains(&sort_key(&retracted)));
+        assert!(tombstones.retracts.contains(&sort_key(&retracted)));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    fn it_lifts_a_group_shadow_from_a_replace() -> anyhow::Result<()> {
+        let mut changes = Changes::new();
+        let alice: Entity = "id:alice".parse()?;
+        // `associate_unique` is the cardinality-one write — a `Replace`.
+        changes.associate_unique(
+            "test/name".parse()?,
+            alice.clone(),
+            Value::String("Alicia".into()),
+        );
+
+        let tombstones = tombstones_from(&changes);
+        assert!(tombstones.retracts.is_empty(), "a replace is not a retract");
+        // The group is shadowed, and only the replacement value survives it.
+        let replacement = artifact("id:alice", "test/name", "Alicia");
+        let superseded = artifact("id:alice", "test/name", "Alice");
+        assert!(
+            !tombstones.shadows(&replacement),
+            "the replacement value itself is not shadowed"
+        );
+        assert!(
+            tombstones.shadows(&superseded),
+            "a different-value prior at the same (the, of) is shadowed"
+        );
         Ok(())
     }
 
@@ -274,8 +376,8 @@ mod tests {
     async fn it_filters_matching_artifacts_via_tombstones() -> anyhow::Result<()> {
         let keep = artifact("id:a", "test/name", "Keep");
         let drop = artifact("id:b", "test/name", "Drop");
-        let mut tombstones = HashSet::new();
-        tombstones.insert(sort_key(&drop));
+        let mut tombstones = Tombstones::default();
+        tombstones.retracts.insert(sort_key(&drop));
 
         let filtered = filter_tombstones(stream_of(vec![keep.clone(), drop]), tombstones);
         let items = collect(filtered).await?;
@@ -284,10 +386,34 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn it_shadows_superseded_priors_but_keeps_the_replacement() -> anyhow::Result<()> {
+        // A pending `Replace("Alicia")` at (test/name, id:a) shadows the
+        // committed prior "Alice" streaming from the branch, but leaves a
+        // same-value "Alicia" branch fact untouched — and an unrelated
+        // (the, of) is never touched.
+        let mut changes = Changes::new();
+        let alice: Entity = "id:a".parse()?;
+        changes.associate_unique("test/name".parse()?, alice, Value::String("Alicia".into()));
+        let tombstones = tombstones_from(&changes);
+
+        let superseded = artifact("id:a", "test/name", "Alice");
+        let same_value = artifact("id:a", "test/name", "Alicia");
+        let other_entity = artifact("id:b", "test/name", "Alice");
+        let filtered = filter_tombstones(
+            stream_of(vec![superseded, same_value.clone(), other_entity.clone()]),
+            tombstones,
+        );
+        let items = collect(filtered).await?;
+        assert_eq!(items, vec![same_value, other_entity]);
+        Ok(())
+    }
+
+    #[dialog_common::test]
     async fn it_passes_stream_through_when_tombstones_are_empty() -> anyhow::Result<()> {
         let a = artifact("id:a", "test/name", "Alice");
         let b = artifact("id:b", "test/name", "Bob");
-        let filtered = filter_tombstones(stream_of(vec![a.clone(), b.clone()]), HashSet::new());
+        let filtered =
+            filter_tombstones(stream_of(vec![a.clone(), b.clone()]), Tombstones::default());
         let items = collect(filtered).await?;
         assert_eq!(items, vec![a, b]);
         Ok(())

@@ -298,6 +298,80 @@ mod tests {
         Ok(())
     }
 
+    /// Read-your-writes across a pending cardinality-one replace: with
+    /// `X` committed, a mid-transaction assert of `Y` (which emits
+    /// `Instruction::Replace` for a `Cardinality::One` attribute) must
+    /// read back as `Y`, not the superseded `X`.
+    ///
+    /// Without the overlay's group-shadow, `X` streams from the branch
+    /// alongside the pending `Y` and `choose()` picks a winner by
+    /// content order (fact-hash tiebreak, since production causes are
+    /// all `None`) — able to surface the stale `X`, disagreeing with the
+    /// post-commit state a `Replace` would produce. The `"Alice"` →
+    /// `"Bob"` pair is chosen so the stale value *wins* that tiebreak:
+    /// the assertion below fails without the fix, not merely flakes.
+    #[dialog_common::test]
+    async fn it_reads_own_replace_mid_transaction() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        // Commit X.
+        branch
+            .transaction()
+            .assert(Person {
+                this: alice.clone(),
+                name: people::Name("Alice".into()),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // Mid-transaction, replace X with Y via a typed (cardinality-one)
+        // assert — this lowers to `Instruction::Replace`.
+        let tx = branch.transaction().assert(Person {
+            this: alice.clone(),
+            name: people::Name("Bob".into()),
+        });
+
+        let names: Vec<String> = tx
+            .query()
+            .select(Query::<Person> {
+                this: alice.clone().into(),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|p| p.name.0)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Bob".to_string()],
+            "mid-transaction read must reflect the pending replace, not the committed prior"
+        );
+
+        // And after commit the branch agrees — the pending read matched
+        // the eventual persisted state.
+        tx.commit().perform(&operator).await?;
+        let after: Vec<String> = branch
+            .query()
+            .select(Query::<Person> {
+                this: alice.clone().into(),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|p| p.name.0)
+            .collect();
+        assert_eq!(after, vec!["Bob".to_string()]);
+        Ok(())
+    }
+
     /// `Transaction::query()` must surface the same auto-injected
     /// session metadata that `Branch::query()` does. The txn view is
     /// "branch + pending changes" — schema-shaped facts the branch

@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Environment;
 use crate::Premise;
-use crate::artifact::{ArtifactsAttribute, Entity, Type, Value};
+use crate::artifact::{ArtifactsAttribute, Entity, RecordFormat, Recorded, Type, Value};
 use crate::attribute::The;
 use crate::constraint::{Coalesce, Constraint, Equality};
 use crate::error::{FieldTypeError, TypeError};
@@ -391,6 +391,16 @@ impl From<f64> for Term<f64> {
 
 impl From<Vec<u8>> for Term<Vec<u8>> {
     fn from(value: Vec<u8>) -> Self {
+        Term::Constant(Value::from(value))
+    }
+}
+
+/// A typed record handle becomes a constant term of itself, mirroring the
+/// per-scalar impls above. This is what lets a record value be passed to the
+/// expression builder (`Body::of(entity).is(recorded)`), whose `is` requires
+/// `Into<Term<A::Type>>`.
+impl<F: RecordFormat> From<Recorded<F>> for Term<Recorded<F>> {
+    fn from(value: Recorded<F>) -> Self {
         Term::Constant(Value::from(value))
     }
 }

@@ -42,7 +42,7 @@ use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
     Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
-    DialogArtifactsError, Entity, HASH_SIZE, Instruction, Value, ValueDataType,
+    DialogArtifactsError, Entity, HASH_SIZE, Instruction, Record, Value, ValueDataType,
     artifacts::selector::Constrained,
 };
 
@@ -408,9 +408,10 @@ impl TryFrom<Value> for JsValue {
             Value::UnsignedInt(uint) => JsValue::from_f64(uint as f64),
             Value::SignedInt(int) => JsValue::from_f64(int as f64),
             Value::Float(float) => JsValue::from_f64(float),
-            Value::Record(bytes) => {
+            Value::Record(record) => {
+                let bytes = record.as_bytes();
                 let result = Uint8Array::new_with_length(bytes.len() as u32);
-                result.copy_from(bytes.as_ref());
+                result.copy_from(bytes);
                 JsValue::from(result)
             }
             Value::Symbol(attribute) => JsValue::from(attribute),
@@ -597,7 +598,7 @@ impl TryFrom<(ValueDataType, JsValue)> for Value {
             }
             ValueDataType::Record => {
                 let byte_array: Uint8Array = value.dyn_into().map_err(js_value_to_error)?;
-                Value::Record(byte_array.to_vec())
+                Value::Record(Record::from(byte_array.to_vec()))
             }
             ValueDataType::Symbol => Value::Symbol(Attribute::try_from(
                 value.as_string().ok_or_else(|| {

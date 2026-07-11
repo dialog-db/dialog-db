@@ -12,7 +12,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::{Attribute, Cause, DialogArtifactsError, Entity, TypeError, make_reference};
+use crate::{Attribute, Cause, DialogArtifactsError, Entity, Record, TypeError, make_reference};
 use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -36,8 +36,9 @@ pub enum Value {
     SignedInt(i128),
     /// A floating point number
     Float(f64),
-    /// TBD structured data (flatbuffers?)
-    Record(Vec<u8>),
+    /// An opaque, atomic value carried as bytes and interpreted by its
+    /// [`RecordFormat`]
+    Record(Record),
     /// A symbol type, used to distinguish attributes from other strings
     Symbol(Attribute),
 }
@@ -68,7 +69,7 @@ impl Value {
             Value::UnsignedInt(value) => value.to_le_bytes().to_vec(),
             Value::SignedInt(value) => value.to_le_bytes().to_vec(),
             Value::Float(value) => value.to_le_bytes().to_vec(),
-            Value::Record(value) => value.to_owned(),
+            Value::Record(record) => record.as_bytes().to_owned(),
             // TODO: Change this to bytes of string representation
             Value::Symbol(value) => value.key_bytes().to_vec(),
         }
@@ -84,7 +85,7 @@ impl Value {
             Value::UnsignedInt(number) => format!("uint:{}", number),
             Value::SignedInt(number) => format!("sint:{}", number),
             Value::Float(number) => format!("float:{}", number),
-            Value::Record(record) => format!("record:{}", record.to_base58()),
+            Value::Record(record) => format!("record:{}", record.as_bytes().to_base58()),
             Value::Symbol(attribute) => format!("attribute:{}", attribute),
         }
     }
@@ -180,7 +181,9 @@ impl FromStr for Value {
             "uint" => Value::UnsignedInt(value.parse().map_err(to_dialog_error)?),
             "sint" => Value::SignedInt(value.parse().map_err(to_dialog_error)?),
             "float" => Value::Float(value.parse().map_err(to_dialog_error)?),
-            "record" => Value::Record(value.from_base58().map_err(to_dialog_error_debug)?),
+            "record" => Value::Record(Record::from(
+                value.from_base58().map_err(to_dialog_error_debug)?,
+            )),
             "attribute" => Value::Symbol(Attribute::from_str(value)?),
             _ => {
                 return Err(DialogArtifactsError::InvalidValue(
@@ -242,7 +245,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
                     ))
                 },
             )?)),
-            ValueDataType::Record => unimplemented!("TBD but probably flatbuffers?"),
+            ValueDataType::Record => Value::Record(Record::from(value)),
             ValueDataType::Symbol => match String::from_utf8(value) {
                 Ok(value) => Value::Symbol(Attribute::try_from(
                     value.split('\u{0000}').take(1).collect::<String>(),
@@ -944,5 +947,82 @@ impl From<bool> for ValueDataType {
 impl From<ValueDataType> for PhantomData<ValueDataType> {
     fn from(_value: ValueDataType) -> Self {
         PhantomData
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_reports_the_record_data_type() {
+        let value = Value::Record(Record::from(vec![1, 2, 3]));
+        assert_eq!(value.data_type(), ValueDataType::Record);
+    }
+
+    #[test]
+    fn record_round_trips_through_the_storage_boundary() {
+        // Storage persists a `Value` as `(data_type, to_bytes())` and rebuilds
+        // it via `TryFrom`. This is the path that used to `unimplemented!()`.
+        let payload = vec![0u8, 1, 2, 3, 250, 251, 252];
+        let value = Value::Record(Record::from(payload.clone()));
+
+        let bytes = value.to_bytes();
+        assert_eq!(bytes, payload);
+
+        let restored = Value::try_from((value.data_type(), bytes)).unwrap();
+        assert_eq!(restored, value);
+        assert!(matches!(restored, Value::Record(_)));
+    }
+
+    #[test]
+    fn record_round_trips_through_the_utf8_encoding() {
+        // The `to_utf8`/`FromStr` pair backs the human-readable serde surface.
+        let value = Value::Record(Record::from(vec![9, 8, 7, 6]));
+        let encoded = value.to_utf8();
+        assert!(encoded.starts_with("record:"));
+
+        let decoded: Value = encoded.parse().unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn record_equality_and_reference_follow_bytes() {
+        let a = Value::Record(Record::from(vec![1, 2, 3]));
+        let b = Value::Record(Record::from(vec![1, 2, 3]));
+        let c = Value::Record(Record::from(vec![4, 5, 6]));
+
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        // Identical bytes hash to the identical value reference.
+        assert_eq!(a.to_reference(), b.to_reference());
+    }
+
+    /// The on-disk tag for a record must be `7`, held distinct from `Bytes`
+    /// (`0`). The JS boundary (`web.rs`) and the notation `as:` surface both
+    /// key off this exact discriminant; pin it so a reorder of the enum is a
+    /// loud break rather than a silent reinterpretation of stored data.
+    #[test]
+    fn record_tag_is_seven_and_distinct_from_bytes() {
+        assert_eq!(ValueDataType::Record as u8, 7);
+        assert_eq!(ValueDataType::Bytes as u8, 0);
+        assert_ne!(ValueDataType::Record, ValueDataType::Bytes);
+        assert_eq!(
+            Value::Record(Record::from(vec![1, 2, 3])).data_type(),
+            ValueDataType::Record
+        );
+    }
+
+    /// The empty document is a legal record payload and must round-trip as an
+    /// empty byte slice rather than being confused with an absent value.
+    #[test]
+    fn empty_record_round_trips() {
+        let value = Value::Record(Record::from(Vec::new()));
+        let encoded = value.to_bytes();
+        assert!(encoded.is_empty());
+
+        let decoded =
+            Value::try_from((ValueDataType::Record, encoded)).expect("empty record must decode");
+        assert_eq!(decoded, Value::Record(Record::from(Vec::new())));
     }
 }

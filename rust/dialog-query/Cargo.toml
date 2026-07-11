@@ -52,6 +52,11 @@ wasm-bindgen-futures = { workspace = true }
 [dev-dependencies]
 tokio-test = { workspace = true }
 dialog-artifacts = { workspace = true }
+# The WS4 record-fold integration test drives a real automerge-typed
+# attribute end to end. This is a dev-only edge: the crate takes no
+# automerge dependency, and dialog-automerge does not depend on dialog-query,
+# so the graph stays acyclic.
+dialog-automerge = { workspace = true }
 dialog-operator = { workspace = true }
 dialog-repository = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
