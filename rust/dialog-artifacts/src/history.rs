@@ -48,6 +48,9 @@ pub use key::*;
 mod causality;
 pub use causality::*;
 
+mod memo;
+pub use memo::*;
+
 // An in-memory `History` used by the unit tests in this module. The durable
 // implementation is [`TreeHistory`], which reads the history region of the
 // artifact tree itself (see [`crate::history_key`] for the key layout).

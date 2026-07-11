@@ -8,7 +8,7 @@ use dialog_query::concept::query::PlanCache;
 
 use crate::{NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
 use dialog_artifacts::DialogArtifactsError;
-use dialog_artifacts::history::{RevisionRecord, TreeHistory, Version, log};
+use dialog_artifacts::history::{CausalityCache, RevisionRecord, TreeHistory, Version, log};
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::Fork;
 use dialog_capability::{Capability, Did, Subject};
@@ -114,6 +114,14 @@ pub struct Branch {
     /// plans an earlier query computed. Content-addressed keys make it
     /// safe across revisions, like `node_cache`.
     plan_cache: PlanCache,
+    /// Shared memo of causal verdicts — claim causality and common
+    /// ancestors — resolved against this branch's history. A verdict
+    /// between fixed claims or revisions is immutable (append-only
+    /// history can only extend the DAG above them), so entries never
+    /// invalidate and one DAG walk serves every later query,
+    /// transaction, or pull that asks the same question. See
+    /// [`CausalityCache`].
+    causality_cache: CausalityCache,
 }
 
 impl Branch {
@@ -255,5 +263,13 @@ impl Branch {
     /// A shared handle to this branch's deductive-rule plan cache.
     pub(crate) fn plan_cache(&self) -> PlanCache {
         self.plan_cache.clone()
+    }
+
+    /// A shared handle to this branch's causal-verdict memo. Resolve
+    /// conflicts through it — `branch.causality().causality(a, b,
+    /// &branch.history(env))` — and the DAG walk behind a verdict is
+    /// paid once per distinct question rather than once per caller.
+    pub fn causality(&self) -> CausalityCache {
+        self.causality_cache.clone()
     }
 }
