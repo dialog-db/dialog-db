@@ -47,7 +47,29 @@ use crate::{
 /// payloads stored in the tree's native (rkyv) encoding.
 pub type ArtifactTree = PersistentTree<KeyBytes, State<Datum>>;
 
-impl TreeValue for State<Datum> {}
+impl TreeValue for State<Datum> {
+    /// Deletion dominates: when a `Removed` tombstone and an `Added`
+    /// datum contend for the same key during a merge's `integrate`,
+    /// the tombstone wins in either integration direction. The two can
+    /// only meet as *concurrent* claims on the same fact (the key
+    /// embeds the value hash, so both sides speak about the same
+    /// value), and the system's documented policy is that a deletion
+    /// beats a stale or concurrent assertion of the fact it withdrew.
+    /// Without this override the pair would fall to the byte-hash
+    /// race, where the tombstone's constant encoding wins only by
+    /// coin flip against the datum's metadata-dependent bytes —
+    /// resurrecting deleted facts on roughly half of empty-base
+    /// merges. `Added` vs `Added` (same fact, differing version
+    /// metadata) stays on the default race: either winner asserts the
+    /// same value, so the choice only has to be deterministic.
+    fn prevails_over(&self, existing: &Self) -> Option<bool> {
+        match (self, existing) {
+            (State::Removed, State::Added(_)) => Some(true),
+            (State::Added(_), State::Removed) => Some(false),
+            _ => None,
+        }
+    }
+}
 
 /// Adapts a [`StorageBackend`] keyed by raw `[u8; 32]` hashes (the
 /// [`dialog_storage::Blake3Hash`] alias used throughout the artifact
@@ -725,5 +747,45 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
     } else {
         // `Constrained` guarantees at least one field is set.
         unreachable!("ArtifactSelector will always have at least one field specified")
+    }
+}
+
+#[cfg(test)]
+mod state_conflict_tests {
+    use super::*;
+    use crate::{Artifact, Value};
+    use dialog_search_tree::Value as TreeValue;
+    use std::str::FromStr;
+
+    fn datum(value: &str) -> State<Datum> {
+        State::Added(Datum::from(Artifact {
+            the: crate::Attribute::from_str("user/name").unwrap(),
+            of: crate::Entity::from_str("id:alice").unwrap(),
+            is: Value::String(value.into()),
+            cause: None,
+        }))
+    }
+
+    /// The tombstone must win the integrate contest against an `Added`
+    /// datum in BOTH orientations — that antisymmetry is what makes two
+    /// replicas integrating the same contended pair in opposite
+    /// directions converge on the deletion, instead of falling to the
+    /// byte-hash race the tombstone's constant encoding wins only by
+    /// coin flip.
+    #[test]
+    fn tombstone_prevails_over_added_in_both_directions() {
+        let added = datum("Alice");
+        assert_eq!(
+            State::<Datum>::Removed.prevails_over(&added),
+            Some(true),
+            "an incoming tombstone replaces a standing datum"
+        );
+        assert_eq!(
+            added.prevails_over(&State::Removed),
+            Some(false),
+            "an incoming datum never displaces a standing tombstone"
+        );
+        // Added vs Added stays on the default deterministic hash race.
+        assert_eq!(datum("Alice").prevails_over(&datum("Alicia")), None);
     }
 }

@@ -381,9 +381,23 @@ where
                     }
                     Some(existing) => {
                         if existing != entry.value {
-                            let existing_hash = value_identity(&existing)?;
-                            let new_hash = value_identity(&entry.value)?;
-                            if new_hash.as_bytes() > existing_hash.as_bytes() {
+                            // Two different values contending for one key:
+                            // ask the value type first (it can encode
+                            // semantics the bytes cannot — a tombstone
+                            // beating any concurrent assertion), and fall
+                            // back to the deterministic last-write-wins
+                            // hash race. Both paths are antisymmetric, so
+                            // replicas integrating in opposite directions
+                            // pick the same winner and converge.
+                            let replaces = match entry.value.prevails_over(&existing) {
+                                Some(verdict) => verdict,
+                                None => {
+                                    let existing_hash = value_identity(&existing)?;
+                                    let new_hash = value_identity(&entry.value)?;
+                                    new_hash.as_bytes() > existing_hash.as_bytes()
+                                }
+                            };
+                            if replaces {
                                 self = self.insert(entry.key, entry.value, storage).await?;
                             }
                         }
