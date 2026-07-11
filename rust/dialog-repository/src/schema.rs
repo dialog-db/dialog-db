@@ -242,6 +242,17 @@ pub mod revision {
         /// A parent revision's entity.
         pub Entity,
     );
+
+    /// `dialog.revision/ancestor` — a revision reachable from this one
+    /// through any chain of `parent` edges; one per reachable revision,
+    /// so cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    #[cardinality(many)]
+    pub struct Ancestor(
+        /// An ancestor revision's entity.
+        pub Entity,
+    );
 }
 
 /// Attribute newtypes for the [`Session`] concept.
@@ -468,6 +479,30 @@ pub struct RevisionParent {
     pub this: Entity,
     /// A parent revision's entity.
     pub parent: revision::Parent,
+}
+
+/// The transitive closure of [`RevisionParent`]: `ancestor` is
+/// reachable from `this` through one or more `parent` edges. One row
+/// per reachable revision — a merge's ancestry unions both parents'
+/// histories, with converging paths collapsed to a single row.
+///
+/// Derived by a built-in recursive rule (see
+/// [`rules::builtin`](crate::rules)), so it inherits
+/// [`RevisionParent`]'s trust boundary: every edge the closure walks
+/// comes from a signature-verified revision record. Ancestry only
+/// reaches as far as the replicated records — an unreplicated parent
+/// simply contributes no rows, it does not error.
+///
+/// Answers "is X an ancestor of Y?" (bind both), "everything
+/// reachable from Y" (bind `this`), or "everything that leads to X"
+/// (bind `ancestor`). For an ordered walk with editions, use
+/// [`Branch::log`](crate::Branch::log) instead.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RevisionAncestor {
+    /// The descendant revision entity.
+    pub this: Entity,
+    /// An ancestor revision's entity.
+    pub ancestor: revision::Ancestor,
 }
 
 /// What this query session is reading from.

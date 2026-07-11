@@ -1546,6 +1546,89 @@ mod tests {
         }
 
         #[dialog_common::test]
+        async fn it_derives_transitive_revision_ancestry() -> anyhow::Result<()> {
+            // schema::RevisionAncestor closes RevisionParent
+            // transitively: a recursive built-in rule, evaluated by the
+            // semi-naive fixpoint, walks the signature-verified DAG
+            // edges however far back they reach.
+            use crate::schema;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let mut revisions = Vec::new();
+            for name in ["Alice", "Bob", "Carol"] {
+                branch
+                    .transaction()
+                    .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
+                    .commit()
+                    .perform(&operator)
+                    .await?;
+                revisions.push(branch.revision().expect("branch has a revision"));
+            }
+            let [first, second, third] = &revisions[..] else {
+                unreachable!("three commits were made");
+            };
+
+            // Everything reachable from the head: both prior revisions,
+            // exactly once each.
+            let mut reachable: Vec<Entity> = branch
+                .query()
+                .select(Query::<schema::RevisionAncestor> {
+                    this: third.entity().into(),
+                    ancestor: Term::var("ancestor"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?
+                .into_iter()
+                .map(|row| row.ancestor.0)
+                .collect();
+            reachable.sort();
+            let mut expected = vec![first.entity(), second.entity()];
+            expected.sort();
+            assert_eq!(reachable, expected, "the head reaches both priors");
+
+            // Membership: binding both ends asks "is X an ancestor of Y?".
+            let is_ancestor: Vec<schema::RevisionAncestor> = branch
+                .query()
+                .select(Query::<schema::RevisionAncestor> {
+                    this: third.entity().into(),
+                    ancestor: first.entity().into(),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(is_ancestor.len(), 1, "genesis is an ancestor of the head");
+
+            // ... and ancestry is directed: the head is not an ancestor
+            // of genesis, and genesis has no ancestors at all.
+            let inverted: Vec<schema::RevisionAncestor> = branch
+                .query()
+                .select(Query::<schema::RevisionAncestor> {
+                    this: first.entity().into(),
+                    ancestor: third.entity().into(),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert!(inverted.is_empty(), "ancestry does not run forward");
+            let genesis: Vec<schema::RevisionAncestor> = branch
+                .query()
+                .select(Query::<schema::RevisionAncestor> {
+                    this: first.entity().into(),
+                    ancestor: Term::var("ancestor"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert!(genesis.is_empty(), "a genesis revision has no ancestors");
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
         async fn it_auto_includes_session_facts() -> anyhow::Result<()> {
             // The metadata overlay also asserts a `Session` fact on
             // `db:session` carrying the profile + operator DIDs.

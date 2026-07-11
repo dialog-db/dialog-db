@@ -1042,6 +1042,77 @@ mod history_tests {
         Ok(())
     }
 
+    /// A merge revision's transitive ancestry unions both parents'
+    /// histories: the derived RevisionAncestor concept reaches ours,
+    /// theirs, and the shared base — the base exactly once, even
+    /// though both paths converge on it.
+    #[dialog_common::test]
+    async fn it_derives_merge_ancestry_across_both_parents() -> Result<()> {
+        use crate::schema;
+        use dialog_query::query::Output as _;
+        use dialog_query::{Query, Term};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // Same shape as the log test: shared base, divergence, merge.
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&operator)
+        .await?;
+        let base = main.revision().expect("main has a revision");
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![assert_one("post/body", "post:1", "...")]))
+            .perform(&operator)
+            .await?;
+        let ours = feature.revision().expect("feature has a revision");
+
+        main.commit(stream::iter(vec![assert_one(
+            "user/name",
+            "user:1",
+            "Alice",
+        )]))
+        .perform(&operator)
+        .await?;
+        let theirs = main.revision().expect("main has a revision");
+
+        let merged = feature
+            .pull()
+            .perform(&operator)
+            .await?
+            .expect("pull merges");
+
+        let mut reachable: Vec<_> = feature
+            .query()
+            .select(Query::<schema::RevisionAncestor> {
+                this: merged.entity().into(),
+                ancestor: Term::var("ancestor"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|row| row.ancestor.0)
+            .collect();
+        reachable.sort();
+        let mut expected = vec![base.entity(), ours.entity(), theirs.entity()];
+        expected.sort();
+        assert_eq!(
+            reachable, expected,
+            "the merge reaches both parents and the base once"
+        );
+
+        Ok(())
+    }
+
     /// Pull is the trust boundary: an upstream head that does not carry a
     /// valid signature by its named issuer is rejected before any of its
     /// tree is adopted or merged. Here the "upstream" advertises a forged
