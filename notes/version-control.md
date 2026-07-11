@@ -152,6 +152,16 @@ A `cause` entry is a `Version` — it identifies the *revision* that produced th
 
 This enables conflict detection scoped to individual attribute lineages rather than requiring full revision DAG traversal.
 
+### Retractions in the active indexes: tombstones, not eviction
+
+A retraction leaves two durable traces. In the **history index** it is an ordinary claim with `cause` naming the withdrawn assertion, as above. In the **active indexes** (EAV/AEV/VAE) the retracted fact's keys are overwritten with a `Removed` tombstone — the fact is *not* evicted. (A retract that cancels an assert made in the same batch leaves neither trace in the active indexes; a retract of a fact that never existed is a no-op.)
+
+The tombstone is load-bearing for reconciliation, and the reason is the merge's shape. A pull replays the local differential — `differentiate(sync base → local)` — onto the upstream tree. A deletion expressed as *absence* is visible to that differential only when the sync base covers the deleted key: the delta then contains the key's removal and the replay carries it. But when the base does **not** cover the key, absence is indistinguishable from never-having-had — and bases legitimately lack coverage: a pull from a not-yet-tracked upstream runs from the *empty* base; per-upstream sync bases go stale relative to facts that arrived through other upstreams; a third replica can hold a copy that predates every base we track. In each of those cases an evicted deletion would be silently un-deleted by merging a peer's stale copy — resurrection. The tombstone makes the deletion a first-class *write* at the fact's own keys, so the replay propagates it regardless of base coverage and it overwrites the peer's stale copy on integration. (Regression test: `it_does_not_resurrect_a_deleted_fact_on_pull`.)
+
+The asymmetry with replacement is instructive. `Replace` *does* physically delete the superseded value's keys — no tombstone — because it leaves a successor claim behind: if a peer's stale copy of the old value survives a merge at the tree level, cardinality-one winner selection resolves the race at query time in the successor's favor (the successor's recorded `cause` supersedes it). A retraction has no successor — its "value" is absence, and absence cannot win a race in a value-keyed index. The tombstone is the marker that lets nothing beat something.
+
+Retiring tombstones would therefore require moving the burden elsewhere, and each alternative costs more than it saves: consulting the history index for a superseding retraction per incoming key during merge (a per-key history lookup on every pull), or per result row at query time (defeats the purpose of the active indexes). What *is* sound is garbage collection: a tombstone may be physically evicted once every tracked peer's sync base is known to cover it — at that point every future differential carries the deletion by base coverage alone. That is a delivery-horizon computation over the tracked upstreams (and unsound for peers that may appear later with pre-deletion state), left as future work; until then tombstones accumulate, which is the standard price of deletion in replicas that merge without coordination.
+
 ## History Index
 
 Revisions and claims share a unified history index:
