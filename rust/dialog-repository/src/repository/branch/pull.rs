@@ -792,6 +792,106 @@ mod history_tests {
         })
     }
 
+    /// A retraction must survive reconciliation with a replica that still
+    /// holds the fact — including a replica we have NEVER synced with,
+    /// where the merge runs from the empty base and the differential
+    /// carries no memory of the deletion. Only the `State::Removed`
+    /// tombstone in the active index makes the deletion a first-class
+    /// write that replays over the peer's stale copy; if tombstones were
+    /// retired in favor of evicting retracted keys (retaining them in
+    /// history only), the empty-base leg of this test would resurrect
+    /// the fact.
+    #[dialog_common::test]
+    async fn it_does_not_resurrect_a_deleted_fact_on_pull() -> Result<()> {
+        use dialog_query::attribute::The;
+        use dialog_query::query::Output as _;
+        use dialog_query::{AttributeQuery, Claim, Term, the};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // The fact everyone starts from.
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&operator)
+        .await?;
+
+        // Two downstreams sync it: `feature` (the deleter) and `peer`
+        // (a replica that keeps holding the fact and that `feature`
+        // never tracks).
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+
+        let peer = repo.branch("peer").open().perform(&operator).await?;
+        peer.set_upstream(&main).perform(&operator).await?;
+        peer.pull().perform(&operator).await?;
+
+        let titles = |branch: &crate::Branch| {
+            let branch = branch.clone();
+            let operator = &operator;
+            async move {
+                let rows: Vec<Claim> = branch
+                    .query()
+                    .select(AttributeQuery::from(
+                        Term::<The>::from(the!("post/title"))
+                            .of(Term::<dialog_artifacts::Entity>::var("of"))
+                            .is(Term::<String>::var("is")),
+                    ))
+                    .perform(operator)
+                    .try_vec()
+                    .await?;
+                anyhow::Ok(rows.len())
+            }
+        };
+        assert_eq!(titles(&feature).await?, 1, "the fact syncs to feature");
+
+        // Feature deletes the fact.
+        feature
+            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+                the: "post/title".parse()?,
+                of: "post:1".parse()?,
+                is: Value::String("Hej".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        assert_eq!(titles(&feature).await?, 0, "the retraction takes locally");
+
+        // Leg 1 — tracked pull. Main moves (unrelated commit) so a real
+        // merge runs; the sync base covers the deleted fact.
+        main.commit(stream::iter(vec![assert_one(
+            "user/name",
+            "user:1",
+            "Alice",
+        )]))
+        .perform(&operator)
+        .await?;
+        feature.pull().perform(&operator).await?;
+        assert_eq!(
+            titles(&feature).await?,
+            0,
+            "a tracked merge must not resurrect the deleted fact"
+        );
+
+        // Leg 2 — untracked pull: `peer` still holds the fact and
+        // `feature` has no sync base for it, so the local replay is the
+        // only carrier of the deletion.
+        assert_eq!(titles(&peer).await?, 1, "peer still holds the fact");
+        feature.pull().from(&peer).perform(&operator).await?;
+        assert_eq!(
+            titles(&feature).await?,
+            0,
+            "an empty-base merge with a stale peer must not resurrect the deleted fact"
+        );
+
+        Ok(())
+    }
+
     /// Pulling merges recorded claim lineage across the sync boundary: the
     /// upstream's history records are adopted, the merge's DAG edge lists
     /// both parents, and supersession established on one branch against
