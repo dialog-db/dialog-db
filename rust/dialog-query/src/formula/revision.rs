@@ -169,6 +169,52 @@ mod tests {
         assert_eq!(edges[0].parent, parent.entity());
     }
 
+    /// A multi-row formula evaluated with an output already bound is a
+    /// membership test: the row whose output agrees must survive even
+    /// when sibling rows conflict. Regression for the default
+    /// `Formula::resolve`, which used to abort the whole batch on the
+    /// first conflicting write — a merge record (two parents) queried
+    /// with `parent` bound projected nothing instead of the matching
+    /// edge, which broke the recursive ancestor closure at every merge.
+    #[test]
+    fn it_keeps_the_matching_row_when_a_sibling_conflicts() {
+        use crate::formula::query::FormulaQuery;
+        use crate::selection::Match;
+        use crate::term::Term;
+        use crate::types::Any;
+        use crate::Value;
+
+        let first = Version::new(Origin::from([3u8; 32]), Edition::new(4));
+        let second = Version::new(Origin::from([5u8; 32]), Edition::new(4));
+        let (record, _) = signed_record(vec![first, second]);
+        let of = RecordBytes(record.to_bytes().expect("record encodes"));
+
+        let query: FormulaQuery = RevisionParentQuery {
+            of: Term::var("record"),
+            this: Term::var("this"),
+            parent: Term::var("parent"),
+        }
+        .into();
+
+        let mut matched = Match::new();
+        matched
+            .bind(&Term::<Any>::var("record"), Value::Record(of.0.clone()))
+            .expect("record binds");
+        matched
+            .bind(
+                &Term::<Any>::var("parent"),
+                Value::Entity(first.entity()),
+            )
+            .expect("parent binds");
+
+        let rows = query.expand(matched).expect("expansion succeeds");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the row agreeing with the bound parent survives its conflicting sibling"
+        );
+    }
+
     #[test]
     fn it_projects_nothing_for_a_forged_record() {
         let (record, _) = signed_record(Vec::new());
