@@ -11,8 +11,8 @@ use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
 use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value};
 
 use super::{
-    Authority, Causality, Cause, Claim, Edition, History, MemoryHistory, Origin, Revision,
-    RevisionRecord, TreeHistory, Version, causality, common_ancestor, extend_skips, log,
+    Authority, Causality, CausalityCache, Cause, Claim, Edition, History, MemoryHistory, Origin,
+    Revision, RevisionRecord, TreeHistory, Version, causality, common_ancestor, extend_skips, log,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -654,6 +654,7 @@ impl History for CountingHistory<'_> {
         of: &Entity,
         the: &Attribute,
     ) -> Result<Vec<Claim>, DialogArtifactsError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         self.inner.claims_at(version, of, the).await
     }
 
@@ -1218,6 +1219,197 @@ async fn it_logs_ancestry_newest_first() -> Result<()> {
         entries.len(),
         4,
         "a replication hole truncates the walk instead of failing it"
+    );
+
+    Ok(())
+}
+
+/// A causal verdict between two fixed claims is immutable, so the memo
+/// answers repeat questions — in either argument order — without touching
+/// the history index again.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_memoizes_causality_verdicts() -> Result<()> {
+    let repo = Entity::new()?;
+    let entity = Entity::new()?;
+    let alice = signing_key(1);
+    let bob = signing_key(2);
+
+    // The conflict-detection scenario: Bob resolves Alice's and his own
+    // concurrent writes with a merge claim.
+    let genesis = revise(&repo, &bob, &[], 0);
+    let a1 = revise(&repo, &alice, &[&genesis], 1);
+    let a2 = revise(&repo, &alice, &[&a1], 2);
+    let b1 = revise(&repo, &bob, &[&genesis], 3);
+    let b3 = revise(&repo, &bob, &[&a2, &b1], 4);
+
+    let alice_first = name_claim(&entity, "Alicia", Cause::genesis());
+    let alice_second = name_claim(&entity, "Alice", Cause::from(a1.version()));
+    let bob_resolution = name_claim(&entity, "Bob", Cause::new(vec![a2.version(), b1.version()]));
+
+    let mut history = MemoryHistory::default();
+    history.record(&a1.version(), alice_first.clone());
+    history.record(&a2.version(), alice_second.clone());
+    history.record(&b3.version(), bob_resolution.clone());
+
+    // Resolving b3's claim against a1's needs a tier-2 walk: a1 is not in
+    // b3's direct cause, so the traversal reads the index.
+    let counting = CountingHistory::new(&history);
+    let memo = CausalityCache::new();
+    assert_eq!(
+        memo.causality(
+            (&bob_resolution, &b3.version()),
+            (&alice_first, &a1.version()),
+            &counting
+        )
+        .await?,
+        Causality::Supersedes
+    );
+    let walked = counting.reads();
+    assert!(walked > 0, "the first resolution walks the DAG");
+
+    // Same question again: answered from memory.
+    assert_eq!(
+        memo.causality(
+            (&bob_resolution, &b3.version()),
+            (&alice_first, &a1.version()),
+            &counting
+        )
+        .await?,
+        Causality::Supersedes
+    );
+    assert_eq!(counting.reads(), walked, "the memo answers without reads");
+
+    // The mirrored question shares the entry, reoriented.
+    assert_eq!(
+        memo.causality(
+            (&alice_first, &a1.version()),
+            (&bob_resolution, &b3.version()),
+            &counting
+        )
+        .await?,
+        Causality::Superseded
+    );
+    assert_eq!(counting.reads(), walked, "the inverse also comes from memory");
+
+    Ok(())
+}
+
+/// Common ancestry between two fixed revisions is likewise immutable —
+/// including the "no shared history" outcome — so both memoize.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_memoizes_common_ancestors() -> Result<()> {
+    let repo = Entity::new()?;
+    let alice = signing_key(1);
+    let bob = signing_key(2);
+
+    let genesis = revise(&repo, &bob, &[], 0);
+    let a1 = revise(&repo, &alice, &[&genesis], 1);
+    let a2 = revise(&repo, &alice, &[&a1], 2);
+    let b1 = revise(&repo, &bob, &[&genesis], 3);
+
+    let mut history = MemoryHistory::default();
+    for revision in [&genesis, &a1, &a2, &b1] {
+        history.record_revision(revision)?;
+    }
+
+    let counting = CountingHistory::new(&history);
+    let memo = CausalityCache::new();
+
+    let ancestor = memo
+        .common_ancestor(&a2.version(), &b1.version(), &counting)
+        .await?;
+    assert_eq!(ancestor, Some(genesis.version()));
+    let walked = counting.reads();
+    assert!(walked > 0, "the first resolution walks the DAG");
+
+    // Repeat and mirrored questions come from memory.
+    assert_eq!(
+        memo.common_ancestor(&a2.version(), &b1.version(), &counting)
+            .await?,
+        Some(genesis.version())
+    );
+    assert_eq!(
+        memo.common_ancestor(&b1.version(), &a2.version(), &counting)
+            .await?,
+        Some(genesis.version())
+    );
+    assert_eq!(counting.reads(), walked, "the memo answers without reads");
+
+    // Disjoint lineages: `None` is a definitive verdict and memoizes too.
+    let elsewhere = Entity::new()?;
+    let foreign = revise(&elsewhere, &alice, &[], 0);
+    history.record_revision(&foreign)?;
+    let counting = CountingHistory::new(&history);
+
+    assert_eq!(
+        memo.common_ancestor(&genesis.version(), &foreign.version(), &counting)
+            .await?,
+        None
+    );
+    let walked = counting.reads();
+    assert_eq!(
+        memo.common_ancestor(&foreign.version(), &genesis.version(), &counting)
+            .await?,
+        None
+    );
+    assert_eq!(counting.reads(), walked, "no shared history never re-walks");
+
+    Ok(())
+}
+
+/// `IncompleteHistory` is the one revisable outcome — replication can
+/// complete the chain — so it must never be memoized: after the missing
+/// claims arrive, the same cache resolves the definitive verdict.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_does_not_memoize_incomplete_history() -> Result<()> {
+    let repo = Entity::new()?;
+    let entity = Entity::new()?;
+    let alice = signing_key(1);
+    let bob = signing_key(2);
+    let carol = signing_key(3);
+
+    let genesis = revise(&repo, &bob, &[], 0);
+    let a1 = revise(&repo, &alice, &[&genesis], 1);
+    let a2 = revise(&repo, &alice, &[&a1], 2);
+    let b1 = revise(&repo, &bob, &[&genesis], 3);
+    let b3 = revise(&repo, &bob, &[&a2, &b1], 4);
+    let c1 = revise(&repo, &carol, &[&genesis], 5);
+
+    let alice_second = name_claim(&entity, "Alice", Cause::from(a1.version()));
+    let bob_resolution = name_claim(&entity, "Bob", Cause::new(vec![a2.version(), b1.version()]));
+    let carol_first = name_claim(&entity, "Caroline", Cause::genesis());
+
+    // Alice's claim at a2 has not replicated yet: the walk from b3 toward
+    // c1 dead-ends there.
+    let mut history = MemoryHistory::default();
+    history.record(&b3.version(), bob_resolution.clone());
+    history.record(&c1.version(), carol_first.clone());
+
+    let memo = CausalityCache::new();
+    assert!(matches!(
+        memo.causality(
+            (&bob_resolution, &b3.version()),
+            (&carol_first, &c1.version()),
+            &history
+        )
+        .await,
+        Err(DialogArtifactsError::IncompleteHistory(_))
+    ));
+
+    // The missing claim replicates; the same cache now resolves — the
+    // error was not remembered as an answer.
+    history.record(&a2.version(), alice_second.clone());
+    assert_eq!(
+        memo.causality(
+            (&bob_resolution, &b3.version()),
+            (&carol_first, &c1.version()),
+            &history
+        )
+        .await?,
+        Causality::Concurrent
     );
 
     Ok(())

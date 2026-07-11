@@ -199,6 +199,8 @@ Traverse the higher-edition claim's causal history backward through the history 
 
 The traversal is bounded by k, the number of writes to that specific `(entity, attribute)` between the two editions, not the total revision history. In practice k is small since most attributes are written infrequently.
 
+Verdicts also memoize soundly: between two *fixed* claims the relationship is immutable — appending revisions can only extend the DAG above them, never insert causality between them — so even `Concurrent` is a permanent answer, and a resolution computed for one query can be reused by every later query or assertion without invalidation (`CausalityCache`, keyed by claim content since cardinality-many siblings from one revision can carry different causes). The single revisable outcome is the incomplete-replication error below, which is therefore never cached.
+
 **Incomplete replication:**
 
 If the cause chain is incomplete due to missing claims, causal ordering cannot be determined locally. Resolution blocks until the missing claims have been replicated. This is expected behavior: a partial replica does not have enough information to resolve conflicts it has not fully received yet.
