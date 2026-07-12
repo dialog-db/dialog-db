@@ -1,7 +1,75 @@
-use crate::TreeReference;
-use dialog_capability::Did;
-use serde::{Deserialize, Serialize};
+//! Repository revision types: a logical clock plus the search-tree
+//! root that together name a repository's state at a point in time.
+//!
+//! These are plain serde data types with no dependency on the datalog
+//! query engine or any storage/transport backend. They live in this
+//! light crate (which already owns [`Did`]) so a client that only needs
+//! to name or (de)serialize a revision — e.g. a wire DTO decoded by a
+//! web page — can do so without linking `dialog-query` or the storage
+//! stack. `dialog-repository` re-exports both at their historical paths.
+
 use std::collections::HashSet;
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+
+use base58::ToBase58;
+use serde::{Deserialize, Serialize};
+
+use crate::Did;
+
+/// The raw 32-byte Blake3 hash a [`TreeReference`] wraps. Kept as a
+/// bare array (not a wrapper type) so the wire form is a plain byte
+/// array, matching `dialog_storage::Blake3Hash`.
+type TreeHash = [u8; 32];
+
+/// A hash representing an empty (usually newly created) search tree.
+///
+/// Matches the search tree's null root sentinel
+/// (`dialog_common::NULL_BLAKE3_HASH`) byte for byte.
+pub const EMPTY_TREE_HASH: TreeHash = [0; 32];
+
+/// Reference to a search tree by its root hash.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TreeReference(TreeHash);
+
+impl TreeReference {
+    /// Returns a reference to the underlying hash.
+    pub fn hash(&self) -> &TreeHash {
+        &self.0
+    }
+}
+
+impl Default for TreeReference {
+    /// By default, a [`TreeReference`] points at the empty search tree.
+    fn default() -> Self {
+        Self(EMPTY_TREE_HASH)
+    }
+}
+
+impl Display for TreeReference {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let bytes: &[u8] = self.hash();
+        write!(f, "#{}", ToBase58::to_base58(bytes))
+    }
+}
+
+impl Debug for TreeReference {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        Display::fmt(&self, f)
+    }
+}
+
+impl From<TreeHash> for TreeReference {
+    fn from(hash: TreeHash) -> Self {
+        Self(hash)
+    }
+}
+
+impl From<TreeReference> for TreeHash {
+    fn from(value: TreeReference) -> Self {
+        let TreeReference(hash) = value;
+        hash
+    }
+}
 
 /// A revision represents a concrete state of the repository at a point in time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
