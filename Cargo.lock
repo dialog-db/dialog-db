@@ -947,6 +947,7 @@ name = "dialog-capability"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base58",
  "convert_case",
  "dialog-common",
  "dialog-credentials",
