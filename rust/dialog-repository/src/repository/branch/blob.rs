@@ -25,14 +25,14 @@ use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, TreeReference, Upstream,
 };
+use dialog_artifacts::history::{TreeHistory, extend_skips};
+use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_effects::archive::prelude::{ArchiveSubjectExt as _, CatalogExt as _};
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_artifacts::history::{TreeHistory, extend_skips};
-use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{
@@ -428,7 +428,8 @@ where
         };
         let mut record = revision.record(parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
-        tree.record(&mut store, &mut delta, record.entries()?).await?;
+        tree.record(&mut store, &mut delta, record.entries()?)
+            .await?;
 
         // Persist the tree's pending nodes before referencing the root in a
         // revision; a revision must only point at durable blocks.

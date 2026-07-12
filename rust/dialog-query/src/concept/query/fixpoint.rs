@@ -2250,12 +2250,12 @@ mod derived_edge_tests {
         }))
     }
 
-    fn ancestor_rules(
-        concept: &ConceptDescriptor,
-        edge: &ConceptDescriptor,
-    ) -> Vec<DeductiveRule> {
-        let base = DeductiveRule::new(concept.clone(), vec![edge_premise(edge, "this", "ancestor")])
-            .expect("base rule compiles");
+    fn ancestor_rules(concept: &ConceptDescriptor, edge: &ConceptDescriptor) -> Vec<DeductiveRule> {
+        let base = DeductiveRule::new(
+            concept.clone(),
+            vec![edge_premise(edge, "this", "ancestor")],
+        )
+        .expect("base rule compiles");
 
         let mut step_terms = Parameters::new();
         step_terms.insert("this".to_string(), Term::<Any>::var("p"));

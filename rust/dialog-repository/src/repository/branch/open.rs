@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use crate::rules::RuleCache;
 use crate::{Branch, BranchReference, Overlay, ResolveError};
+use dialog_artifacts::history::CausalityCache;
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::query::PlanCache;
-use dialog_artifacts::history::CausalityCache;
 
 /// Command to open a branch. Resolves the branch's revision and upstream
 /// cells without ever erroring on a missing revision — a freshly-opened

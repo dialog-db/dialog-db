@@ -722,10 +722,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
 
     // Set Bob's revision to Alice's without pulling blocks
-    bob_branch
-        .reset(alice_revision)
-        .perform(&operator)
-        .await?;
+    bob_branch.reset(alice_revision).perform(&operator).await?;
 
     // Without any remote upstream tracked there is nothing to fall back
     // to, so reads of the unreplicated tree fail. (Upstreams accumulate —

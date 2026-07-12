@@ -46,8 +46,8 @@ use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
 use dialog_query::type_system::Type as Kind;
 use dialog_query::types::Any;
 use dialog_query::{
-    AttributeQuery, Cardinality, ConceptQuery, DeductiveRule, Descriptor, FormulaQuery,
-    Parameters, Premise, Proposition, Term, the,
+    AttributeQuery, Cardinality, ConceptQuery, DeductiveRule, Descriptor, FormulaQuery, Parameters,
+    Premise, Proposition, Term, the,
 };
 use parking_lot::RwLock;
 
@@ -176,10 +176,7 @@ pub(crate) fn builtin(concept: &Entity) -> Vec<DeductiveRule> {
 /// ancestor(this, a) :- parent(this, a).
 /// ancestor(this, a) :- parent(this, p), ancestor(p, a).
 /// ```
-fn ancestor_rules(
-    conclusion: ConceptDescriptor,
-    parent: ConceptDescriptor,
-) -> Vec<DeductiveRule> {
+fn ancestor_rules(conclusion: ConceptDescriptor, parent: ConceptDescriptor) -> Vec<DeductiveRule> {
     fn edge(parent: &ConceptDescriptor, this: &str, parent_var: &str) -> Premise {
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var(this));

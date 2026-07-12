@@ -24,8 +24,8 @@ use std::fmt;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-pub use crate::artifact::{ArtifactsAttribute, Cause, Entity, Type, Value};
 use crate::artifact::ArtifactTypeError;
+pub use crate::artifact::{ArtifactsAttribute, Cause, Entity, Type, Value};
 use crate::attribute::The;
 
 /// Trait implemented by type descriptors: named ZSTs that

@@ -178,11 +178,11 @@ mod tests {
     /// edge, which broke the recursive ancestor closure at every merge.
     #[test]
     fn it_keeps_the_matching_row_when_a_sibling_conflicts() {
+        use crate::Value;
         use crate::formula::query::FormulaQuery;
         use crate::selection::Match;
         use crate::term::Term;
         use crate::types::Any;
-        use crate::Value;
 
         let first = Version::new(Origin::from([3u8; 32]), Edition::new(4));
         let second = Version::new(Origin::from([5u8; 32]), Edition::new(4));
@@ -201,10 +201,7 @@ mod tests {
             .bind(&Term::<Any>::var("record"), Value::Record(of.0.clone()))
             .expect("record binds");
         matched
-            .bind(
-                &Term::<Any>::var("parent"),
-                Value::Entity(first.entity()),
-            )
+            .bind(&Term::<Any>::var("parent"), Value::Entity(first.entity()))
             .expect("parent binds");
 
         let rows = query.expand(matched).expect("expansion succeeds");

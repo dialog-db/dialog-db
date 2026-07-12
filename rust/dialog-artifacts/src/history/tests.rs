@@ -1290,7 +1290,11 @@ async fn it_memoizes_causality_verdicts() -> Result<()> {
         .await?,
         Causality::Superseded
     );
-    assert_eq!(counting.reads(), walked, "the inverse also comes from memory");
+    assert_eq!(
+        counting.reads(),
+        walked,
+        "the inverse also comes from memory"
+    );
 
     Ok(())
 }

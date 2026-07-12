@@ -228,7 +228,8 @@ where
         let mut record = revision.record(parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
         debug_assert_eq!(record.version(), version);
-        tree.record(&mut store, &mut delta, record.entries()?).await?;
+        tree.record(&mut store, &mut delta, record.entries()?)
+            .await?;
 
         // Persist the tree's pending nodes before referencing the root in
         // a revision; a revision must only point at durable blocks. The
