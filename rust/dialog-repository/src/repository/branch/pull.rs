@@ -1,4 +1,6 @@
 use dialog_artifacts::DialogArtifactsError;
+use dialog_artifacts::history::{Context, context_of};
+use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_capability::{Fork, Provider};
@@ -203,20 +205,60 @@ impl<'a> Pull<'a> {
         // `remote: None` it degrades to a plain local index.
         let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
-        // The three trees: last-sync base, local current, and the
-        // upstream revision we're merging in. Hydration is lazy; blocks
-        // load on demand as the differential walks them.
+        // The three trees: last-sync base, the upstream revision we're
+        // merging in, and the local tree the merge integrates onto.
+        // Hydration is lazy; blocks load on demand as the differential
+        // walks them.
         let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
-        let local = Index::from_hash(NodeHash::from(local_tree_hash));
-        let mut merged = Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
+        let upstream_tree = Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
+        let mut merged = Index::from_hash(NodeHash::from(local_tree_hash));
 
-        // Replay local changes (base → local) on top of the upstream
-        // tree to produce the merged tree. The differential only reads
-        // blocks on paths where base and local actually differ.
+        // The receiver's causal context: the per-origin watermark of the
+        // local head's ancestry. This is the merge's memory of every
+        // claim it has ever incorporated — the observed-remove screen
+        // rejects incoming stale copies of claims the context has seen
+        // but the cache no longer holds (deleted facts carry no
+        // tombstone; see `notes/observed-remove-merge.md`).
+        let local_context = match &local_revision {
+            Some(revision) => {
+                let history = branch.history(env);
+                context_of(&revision.version(), &history).await?
+            }
+            None => Context::new(),
+        };
+
+        // Integrate the *upstream's* changes since the sync base onto
+        // the local tree in two screened passes — history first, so
+        // incoming coverage records retire the claims they supersede
+        // (R3) before any data change can contest those slots; then the
+        // data regions under the context screen (R1), with the tree's
+        // byte-guarded removes as R2 throughout. Local novelty is
+        // preserved by construction — the merge starts from the local
+        // tree — and each differential only reads blocks on paths where
+        // base and upstream actually differ within its region.
         let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-        let local_changes = base_tree.differentiate(&local, &tree_store, &tree_store);
+        let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+        let local_snapshot = Index::from_hash(NodeHash::from(local_tree_hash));
+
+        // History changes are screened + emitted first, data changes
+        // second; chaining them into one stream integrated in a single
+        // pass keeps that order (so R3's coverage removes precede the
+        // R1 data adds that would otherwise contest the same slots)
+        // without an intermediate persist. `integrate` applies changes
+        // in stream order.
+        let history_scope = merge::history_scope();
+        let data_scope = merge::data_scope();
+        let history_changes =
+            base_tree.differentiate_within(&upstream_tree, &history_scope, &tree_store, &tree_store);
+        let data_changes =
+            base_tree.differentiate_within(&upstream_tree, &data_scope, &tree_store, &tree_store);
+        let screened_history =
+            merge::screen_history(history_changes, local_snapshot, screen_store);
+        let screened_data = merge::screen_data(data_changes, local_context);
+        let screened = futures_util::StreamExt::chain(screened_history, screened_data);
+
         let mut delta = Delta::zero();
-        merged = Box::pin(merged.edit().integrate(local_changes, &tree_store))
+        merged = Box::pin(merged.edit().integrate(screened, &tree_store))
             .await?
             .persist(&mut delta)?;
 
@@ -232,6 +274,12 @@ impl<'a> Pull<'a> {
             // Branch has no prior revision; adopt the upstream
             // revision directly (its identity still applies).
             None => upstream_revision.clone(),
+            // The upstream had nothing we lack (its novelty was already
+            // in our ancestry, or was screened out as covered): the
+            // local head stands. No revision is minted — only the sync
+            // base advances, so the next pull from this upstream is
+            // incremental.
+            Some(current) if merged_tree == current.tree => current.clone(),
             // Real three-way merge: mint a revision attributed to the
             // current authority combining both sides. The merged tree
             // already unions the two sides' recorded history (the local
@@ -1483,6 +1531,182 @@ mod history_tests {
         assert!(
             titles.is_empty(),
             "a causal retraction must not resurrect in a merge: {titles:?}"
+        );
+
+        Ok(())
+    }
+
+    /// Observed-remove semantics over a cardinality-many attribute, the
+    /// full Alice / Bob / Mallory / Jordan scenario from
+    /// `notes/observed-remove-merge.md`. Bob's assertion is retracted by
+    /// Alice; Mallory concurrently asserts the *same value*; because the
+    /// retraction never observed Mallory's claim, the value stays visible
+    /// after their merge. Only once Jordan — who has seen both — retracts
+    /// is it gone everywhere.
+    #[dialog_common::test]
+    async fn it_keeps_a_concurrent_assertion_the_retraction_never_observed() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let count_labels = |branch: crate::Branch| {
+            let operator = &operator;
+            async move {
+                let rows: Vec<_> = branch
+                    .claims()
+                    .select(ArtifactSelector::new().the("task/label".parse().unwrap()))
+                    .perform(operator)
+                    .await
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                rows.len()
+            }
+        };
+        let label = |value: &str| {
+            Instruction::Assert(Artifact {
+                the: "task/label".parse().unwrap(),
+                of: "task:7".parse().unwrap(),
+                is: Value::String(value.to_string()),
+                cause: None,
+            })
+        };
+
+        // Bob labels the task; everyone syncs it.
+        let bob = repo.branch("bob").open().perform(&operator).await?;
+        bob.commit(stream::iter(vec![label("urgent")]))
+            .perform(&operator)
+            .await?;
+        for name in ["alice", "mallory", "jordan"] {
+            let b = repo.branch(name).open().perform(&operator).await?;
+            b.set_upstream(&bob).perform(&operator).await?;
+            b.pull().perform(&operator).await?;
+        }
+        let alice = repo.branch("alice").load().perform(&operator).await?;
+        let mallory = repo.branch("mallory").load().perform(&operator).await?;
+        let jordan = repo.branch("jordan").load().perform(&operator).await?;
+
+        // Concurrently: Alice retracts (observing only Bob's claim);
+        // Mallory re-asserts the same value under her own claim.
+        alice
+            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+                the: "task/label".parse()?,
+                of: "task:7".parse()?,
+                is: Value::String("urgent".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        mallory
+            .commit(stream::iter(vec![label("urgent")]))
+            .perform(&operator)
+            .await?;
+
+        // Jordan pulls Alice's deletion, then Mallory's assertion.
+        jordan.pull().from(&alice).perform(&operator).await?;
+        assert_eq!(count_labels(jordan.clone()).await, 0, "Alice's retraction lands");
+        jordan.pull().from(&mallory).perform(&operator).await?;
+        assert_eq!(
+            count_labels(jordan.clone()).await,
+            1,
+            "Mallory's claim was never observed by the retraction, so the label survives"
+        );
+
+        // Jordan, having now seen both, retracts — and it clears everywhere.
+        jordan
+            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+                the: "task/label".parse()?,
+                of: "task:7".parse()?,
+                is: Value::String("urgent".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        mallory.pull().from(&jordan).perform(&operator).await?;
+        assert_eq!(
+            count_labels(mallory.clone()).await,
+            0,
+            "Jordan observed Mallory's claim, so his retraction covers it"
+        );
+
+        Ok(())
+    }
+
+    /// Deletion is not forever: a re-assertion brings a fact back, and
+    /// the resurrection survives an empty-base pull from a peer still
+    /// holding the pre-deletion copy — the stale copy is rejected, the
+    /// fresh claim stands. Scenario 3 from `notes/observed-remove-merge.md`.
+    #[dialog_common::test]
+    async fn it_resurrects_a_deleted_fact_and_the_resurrection_survives() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let titles = |branch: crate::Branch| {
+            let operator = &operator;
+            async move {
+                let rows: Vec<_> = branch
+                    .claims()
+                    .select(ArtifactSelector::new().the("post/title".parse().unwrap()))
+                    .perform(operator)
+                    .await
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                rows.len()
+            }
+        };
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![assert_one("post/title", "post:1", "Hej")]))
+            .perform(&operator)
+            .await?;
+
+        // Laptop and the (soon-stale) tablet both take the fact.
+        let laptop = repo.branch("laptop").open().perform(&operator).await?;
+        laptop.set_upstream(&main).perform(&operator).await?;
+        laptop.pull().perform(&operator).await?;
+        let tablet = repo.branch("tablet").open().perform(&operator).await?;
+        tablet.set_upstream(&main).perform(&operator).await?;
+        tablet.pull().perform(&operator).await?;
+
+        // Laptop deletes, then brings it back — the tablet never learns
+        // of either.
+        laptop
+            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+                the: "post/title".parse()?,
+                of: "post:1".parse()?,
+                is: Value::String("Hej".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        assert_eq!(titles(laptop.clone()).await, 0, "deleted");
+        laptop
+            .commit(stream::iter(vec![assert_one("post/title", "post:1", "Hej")]))
+            .perform(&operator)
+            .await?;
+        assert_eq!(titles(laptop.clone()).await, 1, "resurrected");
+
+        // Empty-base pull from the stale tablet, still holding the old
+        // copy: the resurrection must stand.
+        laptop.pull().from(&tablet).perform(&operator).await?;
+        assert_eq!(
+            titles(laptop.clone()).await,
+            1,
+            "a stale peer's copy must not un-resurrect the fact"
+        );
+
+        // And the tablet converges onto the resurrected fact.
+        tablet.pull().from(&laptop).perform(&operator).await?;
+        assert_eq!(
+            titles(tablet.clone()).await,
+            1,
+            "the tablet converges on the resurrected fact"
         );
 
         Ok(())

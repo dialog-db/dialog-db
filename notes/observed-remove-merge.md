@@ -1,11 +1,26 @@
 # Observed-Remove Merge — the First-Principles Design
 
-Status: **design, not implemented**. This is the answer to "forget what
-we have — what is the *right* solution?", written after the convergence
-audit and the retraction-semantics thread. It replaces tombstones,
-covered sets, and slot-level conflict rules with a single reframe. The
-shipped interim (tombstones + deletion-wins `prevails_over`) remains
-correct-but-cruder and can be retired by this design.
+Status: **implemented** on `claude/version-control-review-ukvjrc`
+(`history::Context` + `history::context_of`, `crate::merge` screening,
+observed-remove retract path, two-pass screened pull). This is the
+answer to "forget what we have — what is the *right* solution?", written
+after the convergence audit and the retraction-semantics thread. It
+replaces tombstones, covered sets, and slot-level conflict rules with a
+single reframe.
+
+What landed, mapped to the design below: `Context` is the per-origin
+watermark (derived by `context_of`; not yet persisted in the tree — the
+pull recomputes it from the local head's ancestry, an O(ancestry) walk
+that is the documented optimization target). `merge::screen_history` +
+`merge::screen_data` implement R1/R2/R3, run as one chained pass with
+history changes ordered before data changes. Retract deletes the fact's
+active-index keys and appends its signed history record — no tombstone.
+The interim `State<Datum>: prevails_over` deletion-override is removed;
+`State::Removed` survives only as a legacy-tree variant the screen drops
+on ingest. Deferred: persisting the watermark vector, and folding
+`Replace`'s hard-delete into the same coverage machinery (its
+`supersedes` records already flow through R3, but the local hard-delete
+is unchanged).
 
 ## Requirements (accumulated from the thread)
 
