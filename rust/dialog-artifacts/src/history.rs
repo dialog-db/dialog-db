@@ -48,6 +48,9 @@ pub use key::*;
 mod causality;
 pub use causality::*;
 
+mod context;
+pub use context::*;
+
 mod memo;
 pub use memo::*;
 
