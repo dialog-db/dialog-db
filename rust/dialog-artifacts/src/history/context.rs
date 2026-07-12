@@ -23,7 +23,7 @@ use super::{Edition, History, Origin, Version};
 /// covered by some record in the log (a retraction or a superseding
 /// replace) — which is what lets the merge reject a stale peer's copy
 /// of a deleted fact without any tombstone in the active index. See
-/// `notes/observed-remove-merge.md`.
+/// `notes/version-control.md`.
 ///
 /// In CRDT terms this is the causal context of an optimized OR-set,
 /// with `(Origin, Edition)` versions as its dots.

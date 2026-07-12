@@ -4,7 +4,7 @@
 //! base onto the *local* tree. Raw tree integration alone cannot express
 //! deletion semantics — the active indexes carry no tombstones — so the
 //! incoming differential is screened before integration (see
-//! `notes/observed-remove-merge.md`):
+//! `notes/version-control.md`):
 //!
 //! - **R1** — an incoming live claim the receiver has *observed* (its
 //!   producing revision is in the local head's ancestry) is never

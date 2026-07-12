@@ -1,234 +1,391 @@
 # Version Control
 
-## Context
+The spec for Dialog's version control: how repository state is named,
+signed, merged, and how deletion works without tombstones. This
+consolidates the earlier design notes (the divergence-clock successor
+design, the convergence audit, and the observed-remove merge design)
+into one document describing what is implemented on this branch.
 
-The [divergence clock] design encodes causal position as `{ since, at, drift }` where `since` increments at synchronization points, enabling cheap concurrency detection: two changes with the same `since` and different `at` values are concurrent by inspection, no traversal required.
+## Overview
 
-This works well for a single collaborative repository. The limitation surfaces when two repositories with independent histories need to interact. The `since` counter is local to a repo's synchronization history. There is no meaningful way to compare `since: 3` from repo A with `since: 3` from repo B. They count different sync events. A cross-repo merge would require either renumbering one history (losing provenance) or accepting that the clock values are simply incommensurable.
+A repository is a search tree of facts plus a revision DAG describing
+how that tree evolved. Both live in the same tree: the EAV/AEV/VAE
+regions hold the live facts (the active indexes), and the history
+region holds an append-only log of claims and revision records. One
+root covers data and its history, so a revision's tree reference is the
+atomic unit of sync.
 
-A desired property of Dialog's collaboration model is that forks and follows work as first-class operations across independent repositories. This document describes a causal encoding grounded in the revision DAG that aims to preserve the divergence clock's fast concurrency detection while composing correctly across repo boundaries.
+The log is the truth; the active index is a cache of the live fold. A
+claim is live iff no record in the log covers it (a retraction naming
+it in its cause, or a replace naming it in its supersedes set). There
+is no tombstone variant in the active indexes: deletion travels as
+history, and merges keep the cache consistent with the growing log.
 
-## Idea
+In CRDT terms the system is an optimized observed-remove set: the
+`(Origin, Edition)` versions are its dots, and the revision DAG is its
+causal context.
 
-Instead of deriving causal position from a logical counter, derive it from the structure of the revision DAG directly. Every revision has a natural position: the count of revisions in the causal chain leading to it. This is its `Edition`. An author increments their edition with each local revision and advances it to `max(seen) + 1` on sync. This is isomorphic to a Lamport timestamp, which gives it a useful property: a higher edition has seen at least as much causal history as any lower one, regardless of which repository it came from.
+## Versions
 
-`Edition` alone is not enough to identify a revision globally, because two authors could independently reach the same edition count. It is therefore paired with `Origin`, a repository-scoped identity derived as `Blake3(issuer + subject)`. Because `issuer` is a fixed-width (32 byte) key, the concatenation is unambiguous. Deriving origin from both the signing key and the repository DID ensures that the same principal acting on two different repositories produces two distinct origins. Without this, a principal whose histories in two separate repositories later merge could produce colliding identifiers.
+Causal position is derived from the revision DAG itself rather than
+from a synchronization counter (see [divergence clock] for the design
+this replaces; its `since` counter was local to one repository's sync
+history and incommensurable across repositories).
 
-Together, `Origin` and `Edition` form a `Version`: a compact revision identifier that sorts naturally by causal depth and uniquely addresses any revision across all repositories.
+- **Edition** is a Lamport timestamp: `edition = max(edition of every
+  version in cause) + 1`, with `0` for a genesis revision (empty
+  cause). A local commit on top of the previous head yields
+  `previous + 1`; a merge yields `max(local, upstream) + 1`. A higher
+  edition has seen at least as much causal history as any lower one,
+  regardless of which repository produced it.
 
-**Origin invariant:** version uniqueness holds only if each origin is a single sequential actor. An origin is derived from `(issuer, subject)`, so the same signing key used concurrently on two devices shares one origin and can mint the same edition for two distinct revisions, producing colliding versions. Each replica MUST therefore act under its own issuer key (e.g. a per-device or per-agent key acting on behalf of a common authority). Replicas MUST treat two distinct revisions claiming the same version as a protocol violation; to preserve convergence they order the offending revisions deterministically by their content hash, but such histories are considered corrupt and should surface an error.
+- **Origin** is the lineage-scoped identity of the issuer. The lineage
+  is the schema `Branch` entity, content-derived from the `(profile,
+  subject)` origin and the branch name; the origin is derived from the
+  lineage entity and the issuer DID, with both identifiers
+  length-prefixed to keep the derivation injective
+  (`Revision::origin_of(lineage, issuer)`). Folding in profile,
+  subject, branch name, and the per-session operator key means: the
+  same issuer on two repositories, or on two branches of one
+  repository, produces distinct origins. A branch head is an
+  independent sequential actor.
 
-## Core Types
+- **Version** is the pair `(origin, edition)`. Versions sort naturally
+  by causal depth via edition (ties broken by origin so the order is
+  total and deterministic). Two versions with the same edition but
+  different origins are concurrent by inspection: neither can have
+  seen the other, since seeing it would have forced a higher edition.
 
-```rust
-/// Root of the search tree at a given revision
-#[derive(Attribute, Debug, Clone)]
-#[domain("dialog.revision")]
-pub struct Tree(Blake3Hash);
+**Origin invariant (safety-critical).** Version uniqueness and the
+exactness of the causal context below hold only if each origin is a
+single sequential actor. Within a session, CAS on the branch head cell
+serializes commits from concurrent handles; across sessions, each
+session acts under its own operator key and therefore its own origin.
+Two distinct revisions claiming the same version are protocol
+corruption: replicas order the offenders deterministically by content
+hash to preserve convergence, but such histories are corrupt and should
+surface an error.
 
-/// Count of revisions in the causal chain leading to this one.
-/// Increments locally on each revision; advances to max(seen) + 1 on sync.
-/// Isomorphic to a Lamport timestamp.
-#[derive(Attribute, Debug, Clone)]
-#[domain("dialog.revision")]
-pub struct Edition(u64);
+## Revisions
 
-/// Repository membership identifier derived as Blake3(issuer + subject).
-/// Deriving from both signing key and repository DID ensures that the same
-/// principal acting on two different repositories produces two distinct origins,
-/// preventing collisions when independent repositories later merge.
-#[derive(Attribute, Debug, Clone)]
-#[domain("dialog.revision")]
-pub struct Origin(Blake3Hash);
+A revision names a concrete repository state and is stored in two
+complementary shapes.
 
-/// Ed25519 authority on whose behalf the revision is committed.
-/// Authorization of the issuer to act for the authority is established
-/// out of band (e.g. via UCAN delegation) and is not part of this design.
-#[derive(Attribute, Debug, Clone)]
-#[domain("dialog.revision")]
-pub struct Authority([u8; 32]);
+**The head** is the value published to the branch's revision cell:
 
-/// Ed25519 principal committing (and signing) the revision
-#[derive(Attribute, Debug, Clone)]
-#[domain("dialog.revision")]
-pub struct Issuer([u8; 32]);
-
-/// Ed25519 signature by the issuer over the revision payload
-#[derive(Attribute, Debug, Clone)]
-#[domain("dialog.revision")]
-pub struct Signature([u8; 64]);
-
-/// Uniquely identifies a specific revision by a specific origin.
-/// Sorts naturally by causal depth via edition.
-/// Two versions with the same edition but different origins are concurrent.
-pub struct Version {
-    pub origin:  Origin,
-    pub edition: Edition,
-}
-
-/// A set of versions identifying prior claims superseded by this one.
-pub struct Cause(Vec<Version>);
-```
-
-## Revision
-
-A revision is a Dialog concept stored as a claim in the EAV index under the repository DID as the entity, making revision history queryable via Datalog like any other data.
-
-```rust
-#[derive(Concept, Debug, Clone)]
-pub struct Revision {
-    pub this:      Entity,     // content-addressed hash of this Revision object
-    pub tree:      Tree,
-    pub edition:   Edition,
-    pub subject:   Did,        // DID of the repository
-    pub issuer:    Issuer,
-    pub authority: Authority,
-    pub signature: Signature,
-    pub cause:     Cause,      // parent revision versions (one normally, multiple on merge)
-}
-
-impl Revision {
-    /// Derives the origin from issuer and repository DID.
-    /// Stored nowhere; always computed on demand.
-    pub fn origin(&self) -> Origin {
-        Origin(blake3::hash(&[self.issuer.0.as_ref(), self.subject.as_bytes()].concat()))
-    }
-
-    /// Returns the Version identifying this revision.
-    pub fn version(&self) -> Version {
-        Version {
-            origin:  self.origin(),
-            edition: self.edition.clone(),
-        }
-    }
+```text
+Revision {
+    subject,    // DID of the repository
+    issuer,     // DID of the operator (per-session key) that minted it
+    authority,  // DID of the profile on whose behalf it was minted
+    branch,     // name of the minting branch (part of the origin scope)
+    tree,       // root of the search tree at this revision
+    cause,      // parent tree roots (one on advance, upstream's on merge)
+    edition,    // Lamport timestamp derived from the DAG
+    signature,  // issuer's Ed25519 signature over the payload
 }
 ```
 
-**Signing and content addressing:** the revision *payload* is the deterministic encoding of `{tree, edition, subject, issuer, authority, cause}`. The `signature` is the issuer's Ed25519 signature over `Blake3(payload)`. The revision's entity identifier `this` is `Blake3(payload + signature)`. Ordering matters: the signature covers the payload (not `this`), and `this` covers both, so verification recomputes the payload encoding, checks the signature against the issuer key, and checks the hash. The issuer signs; the authority is the principal on whose behalf the revision is made, with the issuer's right to act for the authority validated out of band.
+The signing payload is a deterministic encoding of every field except
+the signature: length-prefixed UTF-8 for subject, issuer, authority,
+and branch; the 32-byte tree root; the sorted cause roots with a count
+prefix; the big-endian edition. The signature binds the tree root to
+the issuer, which matters because the in-tree record (below) cannot
+contain the root of the tree it lives in. A replica verifies this
+signature before adopting or merging any head it did not mint: pull is
+the trust boundary, and a forged or tampered head (wrong root,
+reattributed issuer, adjusted edition) is rejected before any of its
+blocks are walked.
 
-A revision is stored in two complementary shapes:
+Advancing mints under the branch's own subject and name, passed
+explicitly rather than inherited: a branch may have adopted a head
+minted in a foreign repository (a fast-forward pull across subjects),
+and commits on top of it belong to this branch's lineage scope, not the
+foreign one.
 
-1. **As a concept:** per the usual concept decomposition, the Revision's attribute claims (`dialog.revision/tree`, `dialog.revision/edition`, ...) are stored with `of = this` (the revision's content-addressed entity). This makes every field of every revision queryable via Datalog.
+**The record** (`RevisionRecord`) is the revision's durable metadata,
+written into the history region as one atomic dag-cbor fact
+(`dialog.db/revision`) on the content-derived revision entity, which
+any replica derives from the version alone. It carries the format tag,
+the lineage entity, issuer, authority, the parent versions (the DAG
+edge), the skip links, and its own issuer signature over everything
+else. One record per revision keeps the metadata all-or-nothing under
+partial replication and makes each ancestor-traversal step a single
+exact lookup.
 
-2. **As a lineage claim:** a single claim links the repository to the revision, recording the revision DAG edge:
+Records vouch for themselves twice over: the signature covers every
+other field, and the version a record was stored under is derivable
+from its own contents (origin from lineage and issuer, edition from the
+parents), so both a tampered record and a valid record replayed at
+another revision entity fail the read-side check the history reader
+enforces on every lookup.
 
-```
-Claim {
-    the:   "dialog.db/revision",
-    of:    repository_did,
-    is:    this,                  // the revision's content-addressed entity
-    cause: Cause(vec![...]),      // parent revision version(s)
-}
-```
+Queries see revisions through verify-before-project formulas over the
+record (`dialog/revision`, `dialog/revision-parent`), with built-in
+derived concepts `Revision` and `RevisionParent`, and a recursive
+`RevisionAncestor` concept closing the parent relation transitively via
+the engine's semi-naive fixpoint. Forged records project nothing.
+Causal verdicts between fixed claims are immutable and memoized
+(`CausalityCache`).
 
-Each revision's metadata — its parents, skip links, issuer, authority, and lineage — is stored as **one atomic record**: a single `dialog.db/revision` fact on the content-derived revision entity (derivable by any replica from the version alone), valued with a dag-cbor record, living in the ordinary EAV/AEV/VAE indexes. One record per revision keeps the metadata all-or-nothing under partial replication, makes each ancestor-traversal step a single exact lookup, and is the unit the issuer signs; individual fields are exposed to queries through formulas over the record (`dialog/revision`, `dialog/revision-parent`) rather than as separate facts — built-in rules conclude derived `Revision` / `RevisionParent` concepts from them, so "who committed this?" and the DAG edge are ordinary concept queries, and since the formulas verify before projecting, forged records project nothing. A third built-in concept, `RevisionAncestor`, closes `RevisionParent` transitively via a recursive rule pair (a parent is an ancestor; a parent's ancestor is an ancestor) evaluated by the engine's semi-naive fixpoint — "is X an ancestor of Y?" and "everything reachable from this head" are likewise ordinary concept queries, inheriting the same verify-before-project trust boundary edge by edge. The `dialog.` attribute namespace is reserved — user instructions cannot write it — so lineage cannot be corrupted through the ordinary write path. Against wire-level forgery the record vouches for itself twice over: it carries the issuer's Ed25519 signature (resolved from the issuer's `did:key`) over every other field, and the version it was recorded under is derivable from its own contents — origin from `(lineage, issuer)`, edition from the parents — so a tampered record *and* a valid record replayed at another revision entity both fail the read-side check the durable history reader enforces on every lookup. What the record cannot bind is the one thing it cannot contain: the root of the tree it lives in. That binding belongs to the head revision published to the branch cell, which carries its own issuer signature over `{subject, issuer, authority, branch, tree, cause, edition}`; a replica verifies that signature before adopting or merging a head it did not mint (pull is the trust boundary). The current revision is reachable from the query overlay: the branch's `dialog.branch/revision` fact carries the revision entity as the join key. Note that `is` carries the revision's entity hash — not a hash of the `Version`. The `Version` is never hashed: it is stored structurally (in `cause` fields and history index keys) precisely because hashing it would destroy its natural sort order by edition. Multiple repositories each maintain their own independent lineage under their respective DIDs.
+The `dialog.` attribute namespace is reserved: user instructions cannot
+write it, so lineage cannot be corrupted through the ordinary write
+path.
 
-**What the signature does *not* prove — the authority binding.** The record's `authority` field is the issuer's *claim* that a profile authorized the revision; only the issuer's key backs it, so a session key can name any authority it likes. The system already mints the artifact that could close this gap — operator bootstrap creates UCAN delegations from the profile to the session key — but embedding delegation proofs in revision records is blocked on a semantic problem, not a plumbing one: delegations expire, revisions are forever, and records deliberately carry no wall-clock timestamps (nothing in the DAG can attest one). Verifying "the delegation was valid *when the revision was minted*" therefore has no sound offline answer yet. Resolving it needs a time-anchoring story — e.g. an epoch entity in the tree that delegations reference by content rather than by clock, or accepting revocation-list semantics instead of expiry. Until then, treat `authority` as attribution metadata vouched for by the issuer, not as an authorization proof; `issuer` is the cryptographically bound identity.
+**Skip links.** A revision advanced from a single parent also records
+skip links: entries whose targets leap `2^k` first-parent steps back,
+built by binary lifting from the parent's own table. Ancestor search
+follows the longest recorded leap that stays at or above the sought
+edition, descending long linear runs in logarithmically many reads. Two
+rules preserve exactness: a leap never crosses a merge (merge revisions
+record no skip table, since leaping one would lose the ancestry
+entering through the other parent), and no leap descends past the lower
+head's edition.
 
-**Edition rule:** a revision's edition is derived from the revision DAG: `edition = max(edition of every version in cause) + 1`, and a genesis revision (empty `cause`) has `edition = 0`. This single rule subsumes both the sequential and the sync case: a local revision on top of the previous one yields `previous + 1`, and a merge revision on top of local and received heads yields `max(local, received) + 1`. Implementations typically cache the result as a per-replica counter that advances when remote revisions are observed, but the counter is an optimization — the DAG-derived value is authoritative. A higher edition has seen at least as much causal history regardless of which repository it came from.
+**The authority binding (known gap).** The record's `authority` field
+is the issuer's claim that a profile authorized the revision; only the
+issuer's key backs it. Embedding delegation proofs is blocked on a
+semantic problem, not plumbing: delegations expire, revisions are
+forever, and records deliberately carry no wall-clock timestamps.
+Until a time-anchoring story exists (an epoch entity referenced by
+content, or revocation-list semantics), treat `authority` as
+attribution metadata; `issuer` is the cryptographically bound identity.
 
-**Offline construction:** a new revision requires only the previous revision. No fetches needed. The new version is derived from the previous revision's edition and origin, and `cause` points to the previous revision's version.
+## One tree: data and history
 
-**Merge revisions:** when incorporating changes from another revision lineage, `cause` lists the versions of all parent revisions. This is the only case where `cause` contains more than one entry.
+History records live in the same search tree as the data, under their
+own key tag. The logical history key is
 
-## Claim Structure
-
-Claims carry a `cause` field identifying the prior claims on the same `(entity, attribute)` that this claim supersedes. This is analogous to how a git commit records which commits it builds on, but scoped to individual fact lineages rather than the full repository state.
-
-```rust
-pub struct Claim {
-    pub the:   The,
-    pub of:    Entity,
-    pub is:    Value,
-    pub cause: Cause,
-}
-```
-
-`cause` is empty on first write to an attribute. It contains one entry in the normal sequential case. It contains multiple entries when explicitly resolving concurrent claims from different authors, recording that the author saw and deliberately superseded all of them.
-
-Retractions are claims like any other and participate in the same lineage: a retraction's `cause` identifies the claim(s) whose assertion it withdraws, so a retraction supersedes an assertion (and can itself be superseded by a later assertion) through exactly the same machinery.
-
-A `cause` entry is a `Version` — it identifies the *revision* that produced the superseded claim, and combined with the claim's own `(entity, attribute)` it locates that claim in the history index. For cardinality-many attributes a single revision may write several values for the same `(entity, attribute)`; a `Version` then identifies the set of claims written at that position. This is harmless: the lineage that conflict detection traverses is scoped per `(entity, attribute)`, so traversal follows the union of the causes of all claims found at each position.
-
-This enables conflict detection scoped to individual attribute lineages rather than requiring full revision DAG traversal.
-
-### Retractions in the active indexes: tombstones, not eviction
-
-A retraction leaves two durable traces. In the **history index** it is an ordinary claim with `cause` naming the withdrawn assertion, as above. In the **active indexes** (EAV/AEV/VAE) the retracted fact's keys are overwritten with a `Removed` tombstone — the fact is *not* evicted. (A retract that cancels an assert made in the same batch leaves neither trace in the active indexes; a retract of a fact that never existed is a no-op.)
-
-The tombstone is load-bearing for reconciliation, and the reason is the merge's shape. A pull replays the local differential — `differentiate(sync base → local)` — onto the upstream tree. A deletion expressed as *absence* is visible to that differential only when the sync base covers the deleted key: the delta then contains the key's removal and the replay carries it. But when the base does **not** cover the key, absence is indistinguishable from never-having-had — and bases legitimately lack coverage: a pull from a not-yet-tracked upstream runs from the *empty* base; per-upstream sync bases go stale relative to facts that arrived through other upstreams; a third replica can hold a copy that predates every base we track. In each of those cases an evicted deletion would be silently un-deleted by merging a peer's stale copy — resurrection. The tombstone makes the deletion a first-class *write* at the fact's own keys, so the replay propagates it regardless of base coverage and it overwrites the peer's stale copy on integration. (Regression test: `it_does_not_resurrect_a_deleted_fact_on_pull`.)
-
-The asymmetry with replacement is instructive. `Replace` *does* physically delete the superseded value's keys — no tombstone — because it leaves a successor claim behind: if a peer's stale copy of the old value survives a merge at the tree level, cardinality-one winner selection resolves the race at query time in the successor's favor (the successor's recorded `cause` supersedes it). A retraction has no successor — its "value" is absence, and absence cannot win a race in a value-keyed index. The tombstone is the marker that lets nothing beat something.
-
-**Decision: tombstones stay.** Two alternatives were considered and set aside; recording them so the trade-off survives.
-
-*Lineage-screened merge* — evict retracted facts from the active indexes and let the history index carry deletion: add a second, entity-first ordering to the history region (`/entity/attribute/edition/…`, mirroring how the data region keeps three orderings), have pull also compute the incoming differential (`base → upstream`), and screen each incoming key against the tail of its `(entity, attribute)` lineage — the existing tiered causality machinery renders the verdict (superseded by our retraction → drop; otherwise keep or resolve). This is sound, and it is the causally *complete* merge. Its costs: history storage roughly doubles, every pull pays a bounded history seek plus a causality check per incoming key, and — decisively — correctness moves out of the data representation into the merge procedure: any implementation that merges trees without running the screen resurrects deletions. With tombstones, a bare tree replay is safe by construction. The permanent per-deletion record is not eliminated either way — it is only relocated from the active index into history; no replica that merges with arbitrarily stale peers can distinguish "deleted" from "never had" without retaining something, somewhere.
-
-*Delivery-horizon GC* — the sanctioned relief for tombstone accumulation, composable with the representation as it stands: a tombstone may be physically evicted once every tracked peer's sync base is known to cover it, since from then on every differential carries the deletion by base coverage alone. Sound against tracked peers; unsound against peers that appear later holding pre-deletion state, so a deployed version needs a published floor (a checkpoint below which fresh replicas bootstrap by adopting state rather than merging old trees). Future work; until then tombstones accumulate — the standard price of deletion in replicas that merge without coordination.
-
-**Contested slots and confluence.** A merge's `integrate` can find two different values contending for the same key (the key embeds the value hash, so both sides are speaking about the same fact — the entries differ in state or version metadata). Resolution must be deterministic and antisymmetric or replicas that integrate in opposite directions diverge. The rules, in order:
-
-- **A `Removed` tombstone beats an `Added` datum in either direction** (`State::prevails_over`, consulted by `integrate` before its default). This is a load-bearing special case: the default resolution is a last-write-wins race on the blake3 hash of the stored bytes, and a tombstone's encoding is a *constant* — racing it against a datum whose bytes vary with version metadata resurrected deleted facts on roughly half of all empty-base merges (found by running the resurrection regression test twenty times: eight failures). Deletion winning deterministically matches the tombstone's documented purpose and makes retract-vs-assert contests confluent: both replicas converge on the deletion (`it_does_not_resurrect_a_deleted_fact_on_pull`, leg 3).
-- **`Added` vs `Added` falls to the deterministic hash race.** Both sides assert the same value (same key ⇒ same value bytes), differing only in version metadata, so either winner is semantically identical; the race only has to pick the *same* winner on both sides, which it does — mutual pulls quiesce in bounded rounds onto identical trees (`it_quiesces_after_concurrent_identical_asserts`). Caveat: the surviving datum's `version` is the race winner's, not necessarily the causally later claim's, so cause bookkeeping derived from the standing datum (a later retract's `withdrawn`, a replace's `superseded`) may cite the loser's sibling. History retains both claims either way; the lineage stays traversable.
-
-**Known limitation (accepted):** a retraction and a subsequent re-assertion of the same value are *concurrent* in the lineage — a plain assert always records a genesis cause, and `Replace` skips tombstones when collecting priors, so "assert that supersedes a retraction" is not currently expressible; under deletion-wins resolution such a re-assert loses to the tombstone (deterministically, on every replica). Expressing intentional resurrection needs either the lineage-screened merge above or re-asserts that record the retraction they supersede as their cause; both are deferred with it.
-
-## History Index
-
-Revisions and claims share a unified history index:
-
-```
-/edition/origin/entity/attribute/value_hash -> Claim
+```text
+/edition/origin/entity/attribute/value_hash -> record
 ```
 
-The index is not a separate tree: history records live in the same search tree as the EAV/AEV/VAE indexes, under their own key tag. The logical key exceeds the tree's fixed key width, so it is stored head-plus-hash — an order-preserving raw prefix (edition, origin, the entity key form's raw head, and up to 57 raw attribute bytes) with the final 32 bytes a Blake3 hash of the entire untruncated key. The hash covers the trimmed tails, so distinct logical keys always store distinctly, while the raw prefix keeps the region range-scannable by `(edition, origin, entity, attribute)`; readers re-check truncated components against the stored record. This is the same rule the entity key form already applies internally, promoted to the whole key — and the raw prefix is exactly what a variable-length key redesign would carry, so range logic survives that migration. One root therefore covers both data and its history:
+stored head-plus-hash: an order-preserving raw prefix (edition, origin,
+the entity key form's raw head, up to 57 raw attribute bytes) with the
+final 32 bytes a Blake3 hash of the entire untruncated key. Distinct
+logical keys always store distinctly, the region stays range-scannable
+by `(edition, origin, entity, attribute)`, and readers re-check
+truncated components against the stored record.
 
-- A revision's tree reference is the atomic unit of sync — history can never be replicated separately from the data it describes, or vice versa.
-- Pulling merges history automatically: records ride the same tree differential as data, and since every record's key is unique to its version, the union is conflict-free.
-- Two identical trees necessarily carry identical histories, so fast-forward detection is a root comparison.
+Consequences of the single root:
 
-This key structure serves two purposes.
+- History can never be replicated separately from the data it
+  describes, or vice versa.
+- Pulling merges history automatically: records ride the same tree
+  differential as data, and since every record's key is unique to its
+  version, the union is conflict-free.
+- Two identical trees necessarily carry identical histories, so
+  fast-forward detection is a root comparison.
 
-**Revision DAG traversal:** revision claims are stored under `entity = repository_did`. Because edition leads the key, scanning the index and filtering on `entity = repository_did` yields revision history in a total order consistent with causality (concurrent revisions interleave, but no revision ever appears before one of its ancestors). Finding a common ancestor between two revision lineages is done by following `cause` pointers backward from each head.
+Because edition leads the key, scanning the history region yields
+revisions in a total order consistent with causality: concurrent
+revisions interleave, but no revision appears before one of its
+ancestors.
 
-To keep that walk from costing one read per revision when one head is far ahead of the other, a revision advanced from a single parent also records *skip links* — claims whose causes leap 2^k first-parent steps back, built by binary lifting from the parent's own table. Ancestor search follows the longest recorded leap that stays at or above the lower head's edition, descending long linear runs in logarithmically many reads. Exactness is preserved by two rules: a leap never crosses a merge (merges record no skip table, and chains built after one cannot lift across it — so every leapt region is strictly linear), and no leap descends past the lower head's edition, below which all of that head's ancestors live.
+## Claims and lineage
 
-**Claim conflict resolution:** when two conflicting claims on the same `(entity, attribute)` are encountered, the index allows efficient traversal of the attribute's causal lineage. Given a conflicting claim's `Version`, the key `/edition/origin/entity/attribute` locates it directly and its `cause` chain can be followed backward.
+Every version-tagged write appends a claim record to the history region
+alongside its effect on the active indexes. A claim's `cause`
+identifies the prior claims on the same `(entity, attribute)` that it
+supersedes, scoping lineage to individual fact histories rather than
+the whole repository state. In the stored datum form, the cause
+versions land in the `supersedes` field and the polarity in the
+`retraction` flag.
 
-## Conflict Detection
+- **Assert** is purely additive: it records a genesis cause and inserts
+  the datum (tagged with the producing revision's version) at all three
+  data orderings.
+- **Replace** scans the `(entity, attribute)` slot for priors, deletes
+  the different-valued ones from the indexes, and records their
+  versions as its cause. A same-valued prior stands untouched at its
+  original version (re-recording it would fork its lineage), and an
+  identical no-op batch writes nothing.
+- **Retract** deletes the fact's three index keys outright and records
+  the withdrawn claim's version as its cause. No tombstone. A retract
+  of an assert made in the same batch must not claim its own version as
+  cause and degenerates to a genesis retraction; the pair cancels to
+  nothing in the indexes. Retracting a fact that never existed is a
+  no-op.
 
-When two claims A and B conflict on the same `(entity, attribute)`, resolution proceeds in tiers.
+A `cause` entry is a `Version`: it identifies the revision that
+produced the superseded claim, and combined with the claim's own
+`(entity, attribute)` it locates that claim in the history index. For
+cardinality-many attributes one revision may write several values at
+the same `(entity, attribute)`; traversal follows the union of the
+causes of all claims found at each position.
 
-**Tier 0: Version comparison, O(1), no reads:**
-- Same version: same revision produced both — the claims are causally equal
-- Same edition, different origin: concurrent — neither can have seen the other, since seeing it would have forced a higher edition
-- Same origin, different edition: causally ordered — an origin is a single sequential actor, so its claims are totally ordered by edition
-- Different origin, different edition: proceed to tier 1
+## Deletion: the causal context
 
-**Tier 1: Direct cause check, O(1):**
-- If B's version is in A's `cause`, A supersedes B
-- If A's version is in B's `cause`, B supersedes A
-- If neither, proceed to tier 2
+Deletion is not state in the active index; it is a fact about the log.
+What stops a stale peer from resurrecting a deleted fact is the
+receiver's **causal context**: the per-origin watermark of its head's
+ancestry.
 
-**Tier 2: Cause traversal, O(k):**
+```text
+context(head) = { origin -> max edition of that origin in head's ancestry }
+observes(v)  <=>  v.edition <= context[v.origin]
+```
 
-Traverse the higher-edition claim's causal history backward through the history index, looking for the lower-edition claim's version. Because `cause` may contain multiple entries (concurrent-resolution claims), the history is a DAG rather than a chain: traversal maintains a frontier of unvisited versions rather than following a single pointer. Editions strictly decrease along every causal path (a cause is in the causal past of its effect), which bounds and guides the traversal:
+This summary is exact, not approximate. Because an origin is a
+sequential actor, its revisions are totally ordered by ancestry and
+strictly increasing in edition, so the set of one origin's versions in
+any head's ancestry is a prefix; the watermark loses nothing. (Edition
+gaps from merges are harmless: gap editions were never minted by that
+origin, so `observes` is never asked about them.)
 
-- Frontier version equals the other claim's version: superseded
-- Frontier version's edition is less than or equal to the other claim's edition (without matching it): prune that branch — everything deeper has a strictly lower edition and cannot match
-- Frontier exhausted: concurrent
+The context is a pure function of the head, derived by walking the
+revision records in the head's ancestry (`history::context_of`), and
+cacheable by head hash. Its size is one entry per origin (devices,
+authors, branches), never growing with writes. Persisting it in the
+tree as a `dialog.`-reserved record, maintained incrementally
+(`context(commit) = context(parent) + own version`, `context(merge) =
+union(parents) + own version`), is the main deferred optimization: pull
+currently recomputes it per merge, an O(ancestry) walk.
 
-The traversal is bounded by k, the number of writes to that specific `(entity, attribute)` between the two editions, not the total revision history. In practice k is small since most attributes are written infrequently.
+A claim that is observed but not live in the active index was covered
+by some record in the log. That is the whole deletion story: "have I
+seen this incoming claim before" is answered by the watermark, and
+"was it deleted" follows from it not being live.
 
-Verdicts also memoize soundly: between two *fixed* claims the relationship is immutable — appending revisions can only extend the DAG above them, never insert causality between them — so even `Concurrent` is a permanent answer, and a resolution computed for one query can be reused by every later query or assertion without invalidation (`CausalityCache`, keyed by claim content since cardinality-many siblings from one revision can carry different causes). The single revisable outcome is the incomplete-replication error below, which is therefore never cached.
+## Merge
 
-**Incomplete replication:**
+Pull integrates the **upstream's delta since the sync base onto the
+local tree**, so the receiver's own context guards its own cache. The
+delta is computed as two region-scoped differentials of
+`base -> upstream` (history region; data regions), screened, and
+chained into a **single** integrate pass with history changes ordered
+before data changes. `integrate` applies changes in stream order
+against the in-flight batch, so no intermediate persist is needed, and
+none must be inserted: the first pass's new nodes live only in the
+in-memory delta, and splitting the persist breaks block resolution.
 
-If the cause chain is incomplete due to missing claims, causal ordering cannot be determined locally. Resolution blocks until the missing claims have been replicated. This is expected behavior: a partial replica does not have enough information to resolve conflicts it has not fully received yet.
+Three rules, each O(1) per changed key, reading only the receiver's own
+snapshot and context plus the differential itself:
 
-### Conflict Detection Illustrated
+- **R1 (data adds).** An incoming live claim whose version the receiver
+  observes is never re-applied: if it is still live locally there is
+  nothing to do, and if it is not, some local record covered it, and
+  re-applying would resurrect a deletion. Unobserved claims are news
+  and pass through. Claims without version tags (unversioned legacy
+  writes) cannot be reasoned about and pass through. Legacy `Removed`
+  tombstones from pre-observed-remove trees never propagate: the screen
+  drops them on ingest.
 
-Two authors work independently from the same revision then sync. Alice makes two revisions, Bob makes one, then Bob pulls Alice's work before committing again:
+- **R2 (removes).** Incoming removes pass through and stay
+  byte-guarded: the tree deletes a key only when the local entry
+  matches the incoming one exactly. This is already the correct
+  observed-remove rule: if the local slot holds something the remover
+  never observed (a later re-assert), the remove misses it.
+
+- **R3 (coverage).** Each incoming covering record (a retraction, or a
+  replace with a non-empty supersedes set) retires the covered claims
+  still live locally: the screen scans the record's `(entity,
+  attribute)` slot in the receiver's pre-merge snapshot and emits
+  guarded removes (all three orderings) for every standing claim whose
+  version appears in the record's supersedes set. Coverage matches by
+  **version, not value**: a replace supersedes claims of other values,
+  which live at other keys (data keys embed the value hash), so probing
+  the record's own keys would silently miss them. This is how a
+  deletion or replacement reaches a replica whose sync base never
+  covered the fact (an empty-base pull from a newly tracked upstream, a
+  stale third party). A genesis retraction covers nothing and skips the
+  scan.
+
+R1 handles coverage that happened in the receiver's past; R3 handles
+coverage arriving in this delta; R2 is the fast path both directions
+share. The ordering matters: an incoming re-assert and the retraction
+it follows can arrive in one delta, and coverage must retire the old
+claim before the data pass contests the slot.
+
+**Head selection** after integration, with `merged` the resulting root:
+
+- `merged == upstream.tree`: fast-forward, adopt the upstream head.
+  Sound because history lives in the same tree: identical roots imply
+  identical histories, so any novel local record would have made the
+  roots differ.
+- No local head: adopt the upstream head.
+- `merged == local.tree`: the upstream had nothing the receiver lacks
+  (its novelty was already in the ancestry, or screened as covered).
+  The local head stands; only the sync base advances.
+- Otherwise: mint a merge revision. Its record lists both parents (and
+  no skip table), is signed before entering the tree, and the head is
+  signed once the final root (including the record) is known. Its
+  cause carries the upstream tree root; its edition is
+  `max(local, upstream) + 1`.
+
+**Contested slots.** The only remaining integrate contest in the data
+regions is `Added` vs `Added`: the key embeds the value hash, so both
+sides assert the same value and differ only in version metadata. The
+deterministic last-write-wins hash race picks the same winner on both
+sides, so mutual pulls quiesce onto identical trees. Caveat: the
+surviving datum's version is the race winner's, so cause bookkeeping
+derived from the standing datum may cite the loser's sibling; history
+retains both claims and the lineage stays traversable.
+
+**Convergence argument.** The log merges as a set union: order-free,
+idempotent. Liveness of a claim is a monotone predicate of the log
+(coverage records are immutable; once covered, always covered).
+R1/R2/R3 maintain `cache = live(log)` across every merge, so two
+replicas holding the same log hold the same cache, regardless of
+exchange order or direction. No slot algebra, no tie-breaks beyond the
+byte-variant race among copies of the same fact.
+
+**Observed-remove semantics** follow: a retraction removes exactly the
+assertions its author had observed. If Alice retracts Bob's assertion
+of a value while Mallory concurrently asserts the same value, Mallory's
+claim was never covered and survives everywhere; once Jordan, who has
+seen both, retracts, his record covers both versions and the value is
+gone everywhere. Deletion is not forever: a re-assert mints a fresh
+version above every watermark, so R1 treats it as news, R2 cannot touch
+it, and no existing record covers it; the resurrection propagates and
+survives pulls from stale peers.
+
+Acceptance tests pinning these properties live in
+`dialog-repository/src/repository/branch/pull.rs` (`history_tests`):
+deterministic non-resurrection across tracked, empty-base, and reverse
+pulls; quiescence under mutual pulls; the Alice/Bob/Mallory/Jordan
+OR-set scenario; resurrection surviving a stale-peer pull; and the
+replaced-value stale-peer case.
+
+## Conflict detection
+
+When two claims on the same `(entity, attribute)` meet, resolution
+proceeds in tiers:
+
+**Tier 0, version comparison, O(1), no reads.** Same version: causally
+equal. Same edition, different origin: concurrent. Same origin,
+different edition: causally ordered (an origin is sequential).
+Otherwise proceed.
+
+**Tier 1, direct cause check, O(1).** If B's version is in A's cause, A
+supersedes B, and vice versa. Otherwise proceed.
+
+**Tier 2, cause traversal, O(k).** Walk the higher-edition claim's
+causal history backward through the history index, maintaining a
+frontier of unvisited versions (cause sets make it a DAG, not a chain).
+Editions strictly decrease along every causal path, which bounds and
+guides the walk: a frontier version matching the other claim means
+superseded; a frontier version at or below the other claim's edition
+without matching prunes that branch; an exhausted frontier means
+concurrent. The bound k is the number of writes to that specific
+`(entity, attribute)` between the two editions, not the total history.
+
+Verdicts memoize soundly: between two fixed claims the relationship is
+immutable (appending revisions extends the DAG above them, never
+between them), so even `Concurrent` is a permanent answer
+(`CausalityCache`, keyed by claim content). The one revisable outcome
+is incomplete replication: if the cause chain has gaps, ordering cannot
+be determined locally and resolution blocks until the missing records
+replicate; that outcome is never cached.
+
+Genuinely concurrent claims are both valid; a last-write-wins query
+resolves deterministically by claim hash, and applications that want to
+surface the conflict can request all concurrent values.
+
+### Illustration
+
+Alice makes two revisions, Bob one, from a shared base; Bob then pulls
+and commits again:
 
 ```mermaid
 %%{init: { 'gitGraph': {'showBranches': true, 'showCommitLabel':true,'mainBranchName': 'shared', 'parallelCommits': true}} }%%
@@ -250,110 +407,102 @@ gitGraph TB:
    merge bob tag: "edition:3"
 ```
 
-| Author | Action | Edition |
-|--------|--------|---------|
-| Alice | commit | 1 |
-| Alice | commit | 2 |
-| Bob | commit | 1 |
-| Alice | push | 2 |
-| Bob | pull | counter advances so next commit lands at max(2, 1) + 1 = 3 |
-| Bob | commit | 3, cause references both A:2 and B:1 |
-| Bob | push | 3 |
+When `A:2` and `B:1` meet, neither version appears in the other's
+cause. Tier 2 walks `A:2`'s history backward: the frontier holds `A:1`
+at edition 1, which matches `B:1`'s edition but not its version, so the
+branch prunes; the frontier exhausts: concurrent. After Bob pulls and
+commits `B:3` with `A:2` in its cause, any later claim of his
+supersedes Alice's via the tier 1 direct check.
 
-When Alice's `A:2` and Bob's `B:1` meet during sync, neither version appears in the other's `cause`. Following Tier 2, we traverse `A:2`'s causal history backward. We check the higher edition because it may have seen the lower one, while the lower edition cannot have seen something with a higher edition. The frontier contains only `A:1` at edition 1, which matches `B:1`'s edition but not its version — the branch is pruned, since everything deeper has a strictly lower edition. The frontier is exhausted: concurrent.
+## Branches and sync
 
-After Bob pulls and commits `B:3`, his `cause` contains `A:2`'s version. Any subsequent claim from Bob on an attribute Alice also wrote supersedes hers via Tier 1 direct check, O(1).
+A branch is a pair of transactional cells under the repository subject:
+the head revision and the upstream tracking state. Cells are cached,
+versioned, and published with compare-and-swap semantics; read-compute-
+write flows checkpoint the cell first and publish through the
+checkpoint, so a concurrent write makes the publish fail loudly
+(`VersionMismatch`) instead of being silently overwritten. Recovery is
+refresh and retry.
 
-```mermaid
-stateDiagram-v2
-    shared: edition 0 shared base
-    alice: A edition 2 writes name
-    bob: B edition 1 writes name
-    concurrent: concurrent neither in others cause
-    bobafter: B edition 3 after pulling A
-    resolved: B edition 3 supersedes both
+- **Commit** applies a version-tagged instruction stream to the head's
+  tree (data writes plus claim records plus the revision record),
+  imports the resulting blocks, and publishes the new head through the
+  checkpoint taken before applying.
+- **Fetch** reads the upstream's current head without modifying local
+  state.
+- **Pull** is the merge above. It supports multiple tracked upstreams,
+  each with its own sync base (the upstream tree at last sync, the
+  divergence marker); `pull().from(target)` pulls an arbitrary local or
+  remote branch, running from the empty base if untracked and tracking
+  it on success. Pull is two-phase: `prepare` does all network and CPU
+  work (fetch, verify, screen, integrate, import) with no cell writes,
+  and `commit` performs the two instant cell publishes, so a caller can
+  hold an exclusive lock over only the latter. Racing writes surface as
+  CAS failures; the sync-base advance reconciles entry-wise when other
+  upstreams' tracking state moved concurrently.
+- **Push** is fast-forward only: if the upstream moved past the
+  recorded sync base, it fails and the caller pulls first. For remote
+  upstreams the novel tree nodes (computed by the same region
+  differential) and newly referenced blobs are uploaded before the head
+  is published, so a published revision never references bytes the
+  remote lacks. A push with nothing new is a no-op.
 
-    shared --> alice
-    shared --> bob
-    alice --> concurrent
-    bob --> concurrent
-    alice --> bobafter
-    bob --> bobafter
-    bobafter --> resolved
-```
+**Partial replication is unaffected** by any of the above: "observed"
+means "in my head's ancestry", not "bytes on my disk". A replica that
+adopts head H holds H's fold regardless of which blocks it has fetched.
+R1 is an in-memory watermark lookup; R2/R3 read only the differential,
+which walks only divergent paths with lazy remote fallback. The one
+thing a partial replica must not do is prune history-region entries;
+horizon GC is a future story and needs a published floor below which
+fresh replicas bootstrap by adopting state rather than merging.
 
-## Cross-Repo Merges and Forks
+## Invariants
 
-Each repository maintains its own revision lineage identified by its DID. Because `Edition` is a Lamport timestamp, editions from different repositories are directly comparable: a higher edition has seen more causal history regardless of which repository produced it.
+Safety-critical properties every change to this machinery must
+preserve:
 
-**Forking:** Alice creates her own repository DID and writes her first revision with `cause` pointing to Bob's current head version. Her edition takes `max(Bob's edition) + 1`. All subsequent edition comparisons are meaningful relative to Bob's history.
+1. **Origin-sequential.** One origin is one sequential actor: a branch
+   lineage advanced by one session key, serialized by head-cell CAS.
+   `observes()` is exact only because of this. Duplicate versions are
+   protocol corruption with a deterministic fallback ordering and a
+   surfaced error. Note that `branch.reset()` to an ancestor followed
+   by a commit would re-mint an already-used version; reset is for
+   fast-forward advancement (push), not rewind.
+2. **A tree's history records are a subset of its head's ancestry.**
+   Minting writes the record at the head that carries it; every pull
+   arm preserves the inclusion (fast-forward adopts the superset,
+   merges union both sides, the no-op arm changes nothing). This is
+   what makes the context derivable from local state and lets the
+   fast-forward arm reason from root equality.
+3. **History before data, one integrate pass.** R3's coverage must
+   retire slots before R1's data adds contest them, and the chained
+   stream must persist once (intermediate persists lose the in-memory
+   delta's nodes).
+4. **The merge reads only the receiver's state** (snapshot + context)
+   plus the incoming differential, never the sender's context.
+5. **`dialog.` is reserved.** Lineage is written only through the
+   record path, never through user instructions.
 
-**Merging upstream:** Alice finds the common ancestor by traversing both revision lineages via `cause` pointers. Conflicting claims are resolved using the tiered conflict detection above.
+## Deferred work
 
-**Collaborator joining with no prior history:** Carol initializes a fresh repository (edition 0, no claims), accepts Bob's invite, and pulls his history. Her counter advances to `max(Bob's edition) + 1` on pull. She then makes her first commit at that edition.
+1. **Persist the causal context in the tree** as a `dialog.`-reserved
+   record maintained incrementally, replacing the per-pull O(ancestry)
+   `context_of` walk; fresh partial replicas would obtain it in one
+   lazy fetch, verified opportunistically against the signed head's
+   ancestry.
+2. **Fold `Replace`'s local hard-delete into R3** so local and remote
+   supersession run through one code path (remote coverage already
+   flows through R3).
+3. **`State::Removed`** survives only as a legacy variant for reading
+   pre-observed-remove trees; the screen drops it on ingest. Removing
+   the enum variant is a serialization-format change, deliberately not
+   done yet.
+4. **Authority binding**: a time-anchoring story for delegation proofs
+   in revision records (see the known gap above).
+5. **History horizon GC** with a published bootstrap floor.
+6. **Re-assert cause records**: an assert over a deletion could record
+   the covered versions as its claim cause, making resurrection
+   first-class in the lineage for `causality()`. Adopt when convenient;
+   nothing depends on it.
 
-```mermaid
-%%{init: { 'gitGraph': {'showBranches': true, 'showCommitLabel':true,'mainBranchName': 'bob', 'parallelCommits': true}} }%%
-gitGraph TB:
-   commit id: "B:1"
-   commit id: "B:2"
-   branch carol
-   checkout carol
-   commit id: "C:3"
-```
-
-Carol has no prior claims. She pulls Bob's history, her counter advances to 3 (max(2, 0) + 1), and her first commit lands at edition 3. No reconciliation needed.
-
-**Collaborator joining with prior history:** Carol has been working independently and has reached edition 2 with her own claims. She accepts Bob's invite and pulls his history. Her editions were incommensurable with Bob's since both reached edition 2 via independent histories. On pulling, her counter advances to `max(Bob's edition, Carol's edition) + 1`. Her prior claims are preserved in the revision DAG and her cause chain re-anchors from the merge point.
-
-```mermaid
-%%{init: { 'gitGraph': {'showBranches': true, 'showCommitLabel':true,'mainBranchName': 'bob', 'parallelCommits': true}} }%%
-gitGraph TB:
-   branch carol
-   checkout carol
-   commit id: "C:1"
-   commit id: "C:2"
-   checkout bob
-   commit id: "B:1"
-   commit id: "B:2"
-   checkout carol
-   merge bob
-   commit id: "C:3"
-```
-
-Carol's pre-join claims at C:1 and C:2 are preserved with their original editions. Her first new revision after joining is edition 3 (max(2, 2) + 1).
-
-### Fork and Merge Illustrated
-
-Alice forks Bob's repository at edition 2. Both continue writing independently, then Alice merges Bob's updates:
-
-```mermaid
-%%{init: { 'gitGraph': {'showBranches': true, 'showCommitLabel':true,'mainBranchName': 'bob', 'parallelCommits': true}} }%%
-gitGraph TB:
-   commit id: "genesis" tag: "edition:0"
-   commit id: "B:1"
-   commit id: "B:2"
-   branch alice
-   checkout alice
-   commit id: "A:3"
-   commit id: "A:4"
-   checkout bob
-   commit id: "B:3"
-   commit id: "B:4"
-   checkout alice
-   merge bob id: "A:5"
-```
-
-Alice forks at Bob's `edition: 2`. Her first revision is `edition: 3` (max(2) + 1). When she merges Bob's `B:3` and `B:4`, the common ancestor at `edition: 2` is found by traversing the revision DAG via `cause` pointers. Conflicting claims are resolved using the tiered conflict detection. The merge itself is the revision `A:5`: its `cause` references both lineages (`A:4` and `B:4`) and its edition is `max(4, 4) + 1 = 5`.
-
-## Concurrent Claim Resolution
-
-When two claims on the same `(entity, attribute)` are genuinely concurrent (neither appears in the other's cause chain), both are valid. A last-write-wins query resolves this deterministically by sorting on claim hash, producing a stable winner without requiring user intervention. Applications that need to surface the conflict explicitly can do so by requesting all concurrent values.
-
-## Cross-Repository Collaboration
-
-The [divergence clock] `since` counter is local to a repository's synchronization history. Two independent repositories that later merge have incommensurable counters: `since: 3` from repo A and `since: 3` from repo B count different sync events. Reconciling them requires either renumbering one history, losing provenance, or treating the merge as a special case outside the normal conflict detection machinery.
-
-This design addresses that limitation directly. Because `Edition` is a Lamport timestamp and `Origin` is derived from `Blake3(issuer + subject)`, both are meaningful across repository boundaries without coordination. Two revisions from independent repositories can be compared, their common ancestor can be found by following `cause` pointers, and conflicting claims can be resolved using the same tiered detection that works within a single repository. Forks, merges, and collaborators joining with prior history all follow naturally from the same primitives.
-
-[divergence clock]:./divergence-clock.md
+[divergence clock]: ./divergence-clock.md

@@ -49,7 +49,7 @@ pub type ArtifactTree = PersistentTree<KeyBytes, State<Datum>>;
 
 // Deletion is no longer resolved at the slot: it travels as a history
 // record and is applied to the active indexes by the observed-remove
-// merge screen (see `crate::merge` and `notes/observed-remove-merge.md`),
+// merge screen (see `crate::merge` and `notes/version-control.md`),
 // so no `Removed` tombstone ever reaches a data-region `integrate`
 // contest. The only remaining contest is `Added` vs `Added` — two
 // byte-variants of the *same* value — which the default deterministic
@@ -530,7 +530,7 @@ impl ArtifactTreeExt for ArtifactTree {
                     // deletion (it replicates as history), and a replica's
                     // causal context is what stops a stale peer's copy from
                     // resurrecting the fact at merge time (see
-                    // `notes/observed-remove-merge.md`). Deleting an absent
+                    // `notes/version-control.md`). Deleting an absent
                     // key is a no-op, so a same-batch assert+retract cancels
                     // to nothing and a retract of a fact that never existed
                     // changes nothing in the indexes.

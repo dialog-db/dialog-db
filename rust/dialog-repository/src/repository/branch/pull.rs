@@ -218,7 +218,7 @@ impl<'a> Pull<'a> {
         // claim it has ever incorporated — the observed-remove screen
         // rejects incoming stale copies of claims the context has seen
         // but the cache no longer holds (deleted facts carry no
-        // tombstone; see `notes/observed-remove-merge.md`).
+        // tombstone; see `notes/version-control.md`).
         let local_context = match &local_revision {
             Some(revision) => {
                 let history = branch.history(env);
@@ -1549,7 +1549,7 @@ mod history_tests {
 
     /// Observed-remove semantics over a cardinality-many attribute, the
     /// full Alice / Bob / Mallory / Jordan scenario from
-    /// `notes/observed-remove-merge.md`. Bob's assertion is retracted by
+    /// `notes/version-control.md`. Bob's assertion is retracted by
     /// Alice; Mallory concurrently asserts the *same value*; because the
     /// retraction never observed Mallory's claim, the value stays visible
     /// after their merge. Only once Jordan — who has seen both — retracts
@@ -1652,7 +1652,8 @@ mod history_tests {
     /// Deletion is not forever: a re-assertion brings a fact back, and
     /// the resurrection survives an empty-base pull from a peer still
     /// holding the pre-deletion copy — the stale copy is rejected, the
-    /// fresh claim stands. Scenario 3 from `notes/observed-remove-merge.md`.
+    /// fresh claim stands. See the observed-remove semantics in
+    /// `notes/version-control.md`.
     #[dialog_common::test]
     async fn it_resurrects_a_deleted_fact_and_the_resurrection_survives() -> Result<()> {
         use dialog_artifacts::ArtifactSelector;
@@ -1735,8 +1736,8 @@ mod history_tests {
         Ok(())
     }
 
-    /// A replaced value must not survive via a stale peer (scenario 5 from
-    /// `notes/observed-remove-merge.md`): the replace record's `supersedes`
+    /// A replaced value must not survive via a stale peer (R3 coverage in
+    /// `notes/version-control.md`): the replace record's `supersedes`
     /// coverage (R3) retires the superseded claim on a replica that still
     /// holds it live — including across an empty-base pull, where the data
     /// differential carries no remove for the old value (the base never
