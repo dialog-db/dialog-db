@@ -139,19 +139,32 @@ the *same* fact), no races.
   exact only if each origin is sequential. That is already a documented
   protocol requirement with a corruption-detection story; this design
   raises its stakes and its tests should say so.
-- **Watermark maintenance**: derive per-origin maxima from head
-  ancestry once, cache by head hash, maintain incrementally at
-  commit/pull (my vector ∪ theirs ∪ the new revision). `O(#origins)`
-  memory; no durable format change — it is a pure cache of the DAG.
+- **Watermark maintenance**: the vector is a pure function of head
+  ancestry, maintained incrementally at commit/pull (my vector ∪
+  theirs ∪ the new revision), `O(#origins)` in size. **Persist it in
+  the tree** as a small `dialog.`-reserved record rather than deriving
+  it by ancestry walk: it then replicates with the tree, fast-forward
+  adopters inherit it, and a *fresh partial replica* obtains it with
+  one lazy block fetch instead of O(depth) record reads. (Verify it
+  against the signed head's ancestry opportunistically; a mismatch is
+  the same corruption class as an origin-invariant violation.)
 - **Merge direction flip**: integrate their-delta-onto-mine instead of
   mine-onto-theirs. Fast-forward checks become symmetric: merged ==
   upstream → adopt their head; merged == local → keep local head and
   advance only the sync base (new case worth adding; today's
   formulation cannot see it).
-- **Partial replication**: observation is *logical* (ancestry), not
-  "blocks on disk" — a lazily-replicated replica still observes
-  everything its head dominates. R3 needs the incoming delta's history
-  records, which the differential already carries.
+- **Partial replication is unaffected.** The load-bearing distinction:
+  *observed* means "in my head's ancestry", not "bytes on my disk". A
+  replica that adopts head H holds H's fold regardless of which blocks
+  it has fetched; laziness changes what is materialized, never what
+  the state contains. Concretely: R1 is an in-memory vector lookup (no
+  fetches); R2/R3 read only the differential, which walks only
+  divergent paths with lazy remote fallback — byte-for-byte today's
+  pull access pattern, and the retract record arrives precisely
+  because it lies on a divergent path. No rule ever requires holding
+  full history bytes. The one thing a partial replica must not do is
+  prune history-region entries — already true today; horizon GC
+  remains the (unchanged) future story for that.
 - **What gets deleted from the current code**: `State::Removed`, the
   `prevails_over` deletion override, and the tombstone branches of the
   retract path (retract then truly deletes keys, exactly as `Replace`
