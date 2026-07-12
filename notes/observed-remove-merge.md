@@ -112,14 +112,15 @@ context guards its own cache). Three rules, all O(1) per changed key:
 
 - **R3 — incoming coverage records:** the upstream delta necessarily
   carries the history records of its novel revisions. For each incoming
-  retract record (and each replace record with non-empty `supersedes`),
-  derive the covered keys — the history key layout
-  (`/edition/origin/entity/attribute/value_hash`) names entity,
-  attribute, and value hash directly — and drop any local live claim
-  whose version appears in the record's coverage. This is how *their*
-  deletion reaches *my* copy even across an empty base: deletion
-  travels as history (it already does), and the merge keeps the cache
-  consistent with the growing log.
+  covering record (a retraction, or a replace with non-empty
+  `supersedes`), scan the record's `(entity, attribute)` slot in the
+  local snapshot and drop any live claim whose version appears in the
+  record's coverage. The scan is by version, not by the record's own
+  value: a replace supersedes claims of *other* values, which live at
+  other keys (keys embed the value hash), so probing the record's own
+  keys would miss them. This is how *their* deletion reaches *my* copy
+  even across an empty base: deletion travels as history (it already
+  does), and the merge keeps the cache consistent with the growing log.
 
 R1 handles coverage that happened in my past; R3 handles coverage
 arriving in this delta; R2 is the cheap fast-path both directions

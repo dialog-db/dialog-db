@@ -69,6 +69,13 @@ versions are its dots, the revision DAG is its causal context.
   `cause`, or replace `supersedes`) emits guarded removes for the
   covered versions still live locally. This is how a deletion reaches a
   replica whose sync base never covered the fact (empty-base pull).
+  Coverage matches by **version, not value**: a replace supersedes
+  claims of *other* values, which live at other keys (keys embed the
+  value hash), so the screen scans the record's `(entity, attribute)`
+  slot in the receiver's snapshot rather than probing the record's own
+  keys. (The original landing probed the record's keys, which silently
+  made replace coverage a no-op; fixed with the stale-peer replace
+  acceptance test `it_retires_a_replaced_value_on_an_empty_base_pull`.)
 
 ## Convergence evidence (tests to keep green)
 
@@ -95,10 +102,10 @@ In `rust/dialog-repository/src/repository/branch/pull.rs`
    union(parents) + own`), so fresh partial replicas read it in one
    fetch. This is the main perf follow-up.
 2. **Fold `Replace` into R3.** `Replace` still hard-deletes the
-   superseded value locally. Its `supersedes` records already flow
-   through R3 for *remote* coverage, but the local hard-delete is
-   unchanged — folding it in closes a stale-copy edge (a replaced value
-   surviving via a stale peer) with the same machinery.
+   superseded value locally. Its `supersedes` records flow through R3
+   for *remote* coverage (the slot-scan fix above is what actually made
+   this true), but the local hard-delete is unchanged — folding it in
+   would route local and remote supersession through one code path.
 3. **`State::Removed` variant** still exists for reading legacy trees;
    the screen drops it on ingest. Fully removing the enum variant is a
    serialization-format change, deliberately not done.
@@ -127,7 +134,6 @@ In `rust/dialog-repository/src/repository/branch/pull.rs`
 - **No PR opened** for this branch (or the base). Open one only if asked;
   if you do, it should target `feat/inductive-self-negation` (the graft
   base), and check for a PR template first.
-- Commits are unsigned (no signing key in this environment) → GitHub
-  shows "Unverified." Committer email is already `noreply@anthropic.com`;
-  **do not rewrite history to fix this** — it's not fixable without a
-  key and the base/upstream commits must not be touched.
+- History has been rewritten once already (authorship reset and GPG
+  signing); commits from the graft base onward are authored and signed
+  by Irakli.
