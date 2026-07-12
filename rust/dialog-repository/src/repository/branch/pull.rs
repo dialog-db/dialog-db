@@ -248,12 +248,15 @@ impl<'a> Pull<'a> {
         // in stream order.
         let history_scope = merge::history_scope();
         let data_scope = merge::data_scope();
-        let history_changes =
-            base_tree.differentiate_within(&upstream_tree, &history_scope, &tree_store, &tree_store);
+        let history_changes = base_tree.differentiate_within(
+            &upstream_tree,
+            &history_scope,
+            &tree_store,
+            &tree_store,
+        );
         let data_changes =
             base_tree.differentiate_within(&upstream_tree, &data_scope, &tree_store, &tree_store);
-        let screened_history =
-            merge::screen_history(history_changes, local_snapshot, screen_store);
+        let screened_history = merge::screen_history(history_changes, local_snapshot, screen_store);
         let screened_data = merge::screen_data(data_changes, local_context);
         let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
@@ -862,12 +865,20 @@ mod history_tests {
         a.commit(stream::iter(vec![assert_one("filler/x", "f:1", "pad")]))
             .perform(&operator)
             .await?;
-        a.commit(stream::iter(vec![assert_one("post/title", "post:1", "Hej")]))
-            .perform(&operator)
-            .await?;
-        b.commit(stream::iter(vec![assert_one("post/title", "post:1", "Hej")]))
-            .perform(&operator)
-            .await?;
+        a.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&operator)
+        .await?;
 
         let mut quiesced = false;
         for _ in 0..4 {
@@ -889,13 +900,13 @@ mod history_tests {
 
     /// A retraction must survive reconciliation with a replica that still
     /// holds the fact — including a replica we have NEVER synced with,
-    /// where the merge runs from the empty base and the differential
-    /// carries no memory of the deletion. Only the `State::Removed`
-    /// tombstone in the active index makes the deletion a first-class
-    /// write that replays over the peer's stale copy; if tombstones were
-    /// retired in favor of evicting retracted keys (retaining them in
-    /// history only), the empty-base leg of this test would resurrect
-    /// the fact.
+    /// where the merge runs from the empty base and the data differential
+    /// carries no remove for the fact. There is no tombstone: the peer's
+    /// stale copy is rejected by the causal-context screen (R1 — the
+    /// claim is in our ancestry but no longer live, so re-applying it
+    /// would resurrect a deletion), and our own retract record's coverage
+    /// (R3) is what carries the deletion to the peer in the reverse
+    /// direction.
     #[dialog_common::test]
     async fn it_does_not_resurrect_a_deleted_fact_on_pull() -> Result<()> {
         use dialog_query::attribute::The;
@@ -1606,7 +1617,11 @@ mod history_tests {
 
         // Jordan pulls Alice's deletion, then Mallory's assertion.
         jordan.pull().from(&alice).perform(&operator).await?;
-        assert_eq!(count_labels(jordan.clone()).await, 0, "Alice's retraction lands");
+        assert_eq!(
+            count_labels(jordan.clone()).await,
+            0,
+            "Alice's retraction lands"
+        );
         jordan.pull().from(&mallory).perform(&operator).await?;
         assert_eq!(
             count_labels(jordan.clone()).await,
@@ -1662,9 +1677,13 @@ mod history_tests {
         };
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![assert_one("post/title", "post:1", "Hej")]))
-            .perform(&operator)
-            .await?;
+        main.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&operator)
+        .await?;
 
         // Laptop and the (soon-stale) tablet both take the fact.
         let laptop = repo.branch("laptop").open().perform(&operator).await?;
@@ -1687,7 +1706,11 @@ mod history_tests {
             .await?;
         assert_eq!(titles(laptop.clone()).await, 0, "deleted");
         laptop
-            .commit(stream::iter(vec![assert_one("post/title", "post:1", "Hej")]))
+            .commit(stream::iter(vec![assert_one(
+                "post/title",
+                "post:1",
+                "Hej",
+            )]))
             .perform(&operator)
             .await?;
         assert_eq!(titles(laptop.clone()).await, 1, "resurrected");
@@ -1707,6 +1730,79 @@ mod history_tests {
             titles(tablet.clone()).await,
             1,
             "the tablet converges on the resurrected fact"
+        );
+
+        Ok(())
+    }
+
+    /// A replaced value must not survive via a stale peer (scenario 5 from
+    /// `notes/observed-remove-merge.md`): the replace record's `supersedes`
+    /// coverage (R3) retires the superseded claim on a replica that still
+    /// holds it live — including across an empty-base pull, where the data
+    /// differential carries no remove for the old value (the base never
+    /// covered it). The superseded claim lives at *different* keys than the
+    /// record's own value (keys embed the value hash), so coverage must scan
+    /// the record's (entity, attribute) slot, not probe the record's keys.
+    #[dialog_common::test]
+    async fn it_retires_a_replaced_value_on_an_empty_base_pull() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // `feature` authors the original value.
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![assert_one(
+                "user/name",
+                "user:1",
+                "Alice",
+            )]))
+            .perform(&operator)
+            .await?;
+
+        // `main` adopts it, then replaces it. The replace record's
+        // supersedes names the version of feature's claim.
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.pull().from(&feature).perform(&operator).await?;
+        main.commit(stream::iter(vec![Instruction::Replace(Artifact {
+            the: "user/name".parse()?,
+            of: "user:1".parse()?,
+            is: Value::String("Bob".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+        // `feature` pulls main for the first time — an empty-base merge.
+        // Its live copy of the old value can only be retired by the
+        // incoming replace record's coverage.
+        feature.pull().from(&main).perform(&operator).await?;
+
+        let names: Vec<_> = feature
+            .claims()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            names.len(),
+            1,
+            "the superseded value must not survive next to its replacement: {names:?}"
+        );
+        assert_eq!(names[0].is, Value::String("Bob".into()));
+
+        // Confluence: the reverse pull agrees and both replicas quiesce
+        // onto the same tree.
+        main.pull().from(&feature).perform(&operator).await?;
+        assert_eq!(
+            main.revision().map(|r| r.tree),
+            feature.revision().map(|r| r.tree),
+            "both replicas converge on the same tree"
         );
 
         Ok(())

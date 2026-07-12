@@ -46,7 +46,7 @@ use std::str::FromStr;
 
 use dialog_common::Blake3Hash;
 use dialog_search_tree::{
-    Change, ContentAddressedStorage, Differential, DialogSearchTreeError, Entry,
+    Change, ContentAddressedStorage, DialogSearchTreeError, Differential, Entry,
 };
 use dialog_storage::{DialogStorageError, StorageBackend};
 
@@ -54,8 +54,9 @@ use crate::history::Context;
 use crate::key::KEY_LENGTH;
 use crate::tree::ArtifactTree;
 use crate::{
-    Artifact, Attribute, AttributeKey, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, Entity, EntityKey,
-    FromKey as _, HISTORY_KEY_TAG, KeyBytes, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey,
+    Attribute, AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, Entity,
+    EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key, KeyBytes, KeyViewConstruct,
+    KeyViewMut as _, State, VALUE_KEY_TAG, ValueKey,
 };
 
 /// The full key span of one region tag.
@@ -82,27 +83,28 @@ pub fn data_scope() -> [RangeInclusive<KeyBytes>; 2] {
     [lo..=hi, tag_span(BLOB_KEY_TAG)]
 }
 
-/// Rebuild the three data-region keys for the fact a history record
-/// speaks about, from the record's stored datum.
-fn data_keys(datum: &Datum) -> Result<[KeyBytes; 3], DialogSearchTreeError> {
+/// The entity-ordered key span of the `(entity, attribute)` slot a
+/// history record speaks about — the range R3 scans for covered claims.
+///
+/// Coverage matches claims by *version*, not by the record's own value:
+/// a replace record supersedes claims of **other** values, and data keys
+/// embed the value hash, so the covered claims live at different keys
+/// than the record's. The whole slot must be scanned.
+fn coverage_range(record: &Datum) -> Result<RangeInclusive<KeyBytes>, DialogSearchTreeError> {
     let decode = |e: crate::DialogArtifactsError| {
         DialogSearchTreeError::Node(format!("history record: {e}"))
     };
-    let artifact = Artifact {
-        the: Attribute::from_str(&datum.attribute).map_err(decode)?,
-        of: Entity::from_str(&datum.entity).map_err(decode)?,
-        is: Value::try_from((ValueDataType::from(datum.value_type), datum.value.clone()))
-            .map_err(decode)?,
-        cause: None,
-    };
-    let entity_key = EntityKey::from(&artifact);
-    let value_key = ValueKey::from_key(&entity_key);
-    let attribute_key = AttributeKey::from_key(&entity_key);
-    Ok([
-        KeyBytes::from(entity_key.into_key()),
-        KeyBytes::from(attribute_key.into_key()),
-        KeyBytes::from(value_key.into_key()),
-    ])
+    let of = Entity::from_str(&record.entity).map_err(decode)?;
+    let the = Attribute::from_str(&record.attribute).map_err(decode)?;
+    let start = <EntityKey<Key> as KeyViewConstruct>::min()
+        .set_entity(EntityKeyPart::from(&of))
+        .set_attribute(AttributeKeyPart::from(&the))
+        .into_key();
+    let end = <EntityKey<Key> as KeyViewConstruct>::max()
+        .set_entity(EntityKeyPart::from(&of))
+        .set_attribute(AttributeKeyPart::from(&the))
+        .into_key();
+    Ok(KeyBytes::from(start)..=KeyBytes::from(end))
 }
 
 /// Screen the **history-region** slice of an incoming merge
@@ -128,10 +130,13 @@ where
         while let Some(change) = futures_util::StreamExt::next(&mut changes).await {
             match change? {
                 Change::Add(entry) => {
+                    // A record covers claims iff its supersedes set is
+                    // non-empty (a retraction's cause and a replace's
+                    // superseded priors both land there — see
+                    // `Record::into_entry`). A genesis retraction covers
+                    // nothing and needs no scan.
                     let covering = match &entry.value {
-                        State::Added(datum)
-                            if datum.retraction || !datum.supersedes.is_empty() =>
-                        {
+                        State::Added(datum) if !datum.supersedes.is_empty() => {
                             Some(datum.clone())
                         }
                         _ => None,
@@ -139,21 +144,43 @@ where
                     yield Change::Add(entry);
 
                     // R3: the record covers claims — retire any still
-                    // live locally. The emitted removes are guarded
-                    // (byte-exact), so a claim the record never observed
-                    // (e.g. a later re-assert standing at the same key)
-                    // is untouched.
+                    // live locally in the record's (entity, attribute)
+                    // slot. Covered claims are matched by version: a
+                    // replace supersedes claims of *other* values, which
+                    // live at other keys (keys embed the value hash), so
+                    // the scan walks the whole slot rather than probing
+                    // the record's own keys. The emitted removes are
+                    // guarded (byte-exact), so a claim the record never
+                    // observed (e.g. a later re-assert standing at the
+                    // same key) is untouched.
                     if let Some(record) = covering {
-                        for data_key in data_keys(&record)? {
-                            let standing = local.get(&data_key, &storage).await?;
-                            if let Some(State::Added(datum)) = standing
-                                && let Some(version) = datum.version
-                                && record.supersedes.contains(&version)
-                            {
-                                yield Change::Remove(Entry {
-                                    key: data_key,
-                                    value: State::Added(datum),
-                                });
+                        let candidates =
+                            local.stream_range(coverage_range(&record)?, &storage);
+                        futures_util::pin_mut!(candidates);
+                        while let Some(candidate) =
+                            futures_util::StreamExt::next(&mut candidates).await
+                        {
+                            let candidate = candidate?;
+                            let covered = match &candidate.value {
+                                State::Added(datum) => datum
+                                    .version
+                                    .is_some_and(|version| record.supersedes.contains(&version)),
+                                _ => false,
+                            };
+                            if covered {
+                                let entity_key = EntityKey(Key::from(candidate.key));
+                                let attribute_key = AttributeKey::from_key(&entity_key);
+                                let value_key = ValueKey::from_key(&entity_key);
+                                for key in [
+                                    entity_key.into_key(),
+                                    attribute_key.into_key(),
+                                    value_key.into_key(),
+                                ] {
+                                    yield Change::Remove(Entry {
+                                        key: KeyBytes::from(key),
+                                        value: candidate.value.clone(),
+                                    });
+                                }
                             }
                         }
                     }
