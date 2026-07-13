@@ -153,10 +153,13 @@ pub enum SwarmMessage {
         /// Where to fetch it: the responder's own address.
         provider: crate::IrohAddress,
     },
-    /// A new head revision was published to a memory cell (advisory;
-    /// enables reactive pull in a future subscription layer).
+    /// A new revision was published to a memory cell (advisory). Peers
+    /// surface these as head updates so applications can pull reactively
+    /// instead of polling.
     Announce {
-        /// The memory cell that changed.
+        /// The memory space the cell lives in (e.g. `branch/main`).
+        space: String,
+        /// The memory cell that changed (e.g. `revision`).
         cell: String,
         /// The new version of the cell.
         version: Version,

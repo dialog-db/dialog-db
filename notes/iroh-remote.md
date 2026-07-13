@@ -265,8 +265,8 @@ enum SwarmMessage {
     /// "I do." — includes the responder's dialable address info so the
     /// requester can connect without a discovery round-trip.
     Have { catalog: String, digest: Blake3Hash, provider: PeerInfo },
-    /// New head revision published (advisory; enables reactive pull).
-    Announce { cell: String, version: Version },
+    /// New head revision published (advisory; drives reactive pull).
+    Announce { space: String, cell: String, version: Version },
 }
 ```
 
@@ -291,9 +291,32 @@ archive.get(digest).fork(iroh_remote)                 (or NetworkedIndex read mi
 ```
 
 Serving peers run a responder loop on the topic: on `Want`, check local
-storage; if present, broadcast `Have` with their own address info. On
-`Announce`, a future subscription layer can trigger `pull` reactively —
-the message shape is reserved now, consumed later.
+storage; if present, broadcast `Have` with their own address info.
+
+### Head updates: reacting instead of polling
+
+dialog's query subscriptions are deliberately poll-driven; the swarm
+provides the wake-up signal that a poll (or a `pull`) will find something.
+A joined [`SwarmHandle::updates`] is a broadcast stream of `HeadUpdate
+{ space, cell, version, origin }` that fires when:
+
+- **a peer pushes into this device** (`origin: Pushed`) — the host's
+  publish path notifies local subscribers directly and announces the move
+  on the topic, and
+- **a peer announces a publish elsewhere in the swarm**
+  (`origin: Announced`) — the responder loop surfaces incoming `Announce`
+  messages.
+
+So in the device-to-device flow, A doesn't re-resolve its branch on a
+timer: B's push wakes A up, and A re-opens/pulls exactly then. Updates
+are advisory signals, not a log — a subscriber that lags and drops
+updates just re-resolves the head and has lost nothing, and the carried
+version is only good for change detection (all real state flows through
+the verified remote protocol).
+
+A device whose *local* commits should wake peers without a push can call
+`swarm.announce("branch/{name}", "revision", version)` after committing;
+hooking that into `commit` itself is repository-layer future work.
 
 ### Why gossip + direct fetch (and not gossip'd blocks or iroh-blobs)
 
@@ -384,8 +407,10 @@ workspace's wasm targets, the cfg boundary is the only thing that moves.
 
 ## Future work
 
-- **Reactive pull**: consume `Announce` to trigger `fetch`/`pull` on head
-  changes — live sync without polling.
+- **Auto-pull on head updates**: the `HeadUpdate` stream exists; wiring it
+  into the repository so tracked branches `pull` (and standing query
+  subscriptions re-poll) automatically on updates — and announcing local
+  commits from `commit` itself — is the remaining repository-layer piece.
 - **Replica hints**: let a host advertise the set of subjects it serves so
   peers can bootstrap swarms for spaces they learn about laterally.
 - **Verified streaming for large blobs** (iroh-blobs interop or range-based
