@@ -280,12 +280,15 @@ impl<Env: SpaceStorage> SpaceHost<Env> {
             .await
             .map_err(memory_error)?;
 
-        // Advisory: let swarm peers know this cell moved so they can pull
-        // reactively.
+        // A peer just moved a cell on this device: wake local subscribers
+        // and announce it to the swarm so other peers can pull reactively.
         if let Some(swarm) = self.swarm.get()
+            && let Ok(space) = from_args::<memory::Space>(&request.args)
             && let Ok(cell) = from_args::<memory::Cell>(&request.args)
         {
-            swarm.announce(cell.cell, version.clone()).await;
+            swarm
+                .published(space.space, cell.cell, version.clone())
+                .await;
         }
 
         Ok(version)

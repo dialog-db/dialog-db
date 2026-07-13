@@ -450,3 +450,72 @@ async fn it_derives_stable_swarm_topics() {
     assert_eq!(super::swarm::topic_for(&a), super::swarm::topic_for(&a));
     assert_ne!(super::swarm::topic_for(&a), super::swarm::topic_for(&b));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn it_delivers_head_updates_on_push_and_announce() -> TestResult {
+    let signer = Ed25519Signer::import(&[15; 32]).await?;
+    let subject = signer.did();
+
+    // Peer A hosts the space; peer B replicates it.
+    let node_a = host_node(&subject, Volatile::new()).await?;
+    let node_b = client_node().await?;
+
+    let swarm_a = node_a.join_swarm(&subject, Vec::new()).await?;
+    let swarm_b = node_b.join_swarm(&subject, vec![node_a.address()]).await?;
+    swarm_a.joined().await;
+    swarm_b.joined().await;
+
+    let mut updates_a = swarm_a.updates();
+    let mut updates_b = swarm_b.updates();
+
+    // B publishes into A over the wire: A must see a local `Pushed`
+    // update, and B must see it come back as a swarm `Announced` update.
+    let cell = subject
+        .clone()
+        .memory()
+        .space("branch/main")
+        .cell("revision");
+    let publish = cell.clone().publish(b"revision-1".to_vec(), None);
+    let invocation = container(&signer, &publish).await;
+    let connection = node_b.connect(&node_a.address()).await?;
+    let version =
+        request::memory_publish(&connection, invocation, b"revision-1".to_vec()).await??;
+
+    let update = tokio::time::timeout(std::time::Duration::from_secs(10), updates_a.recv())
+        .await
+        .expect("host should observe the push")?;
+    assert_eq!(update.space, "branch/main");
+    assert_eq!(update.cell, "revision");
+    assert_eq!(update.version, version);
+    assert_eq!(update.origin, crate::HeadUpdateOrigin::Pushed);
+
+    let update = tokio::time::timeout(std::time::Duration::from_secs(10), updates_b.recv())
+        .await
+        .expect("peers should hear the announce")?;
+    assert_eq!(update.space, "branch/main");
+    assert_eq!(update.cell, "revision");
+    assert_eq!(update.version, version);
+    assert_eq!(update.origin, crate::HeadUpdateOrigin::Announced);
+
+    // A device announcing its own local commit wakes peers the same way.
+    // (A fresh version: the gossip layer deduplicates identical messages,
+    // which is exactly right for real announces — every publish has a new
+    // version.)
+    let local_version = memory::Version::from("local-commit");
+    swarm_b
+        .announce(
+            "branch/main".into(),
+            "revision".into(),
+            local_version.clone(),
+        )
+        .await;
+    let update = tokio::time::timeout(std::time::Duration::from_secs(10), updates_a.recv())
+        .await
+        .expect("announce should reach the swarm")?;
+    assert_eq!(update.origin, crate::HeadUpdateOrigin::Announced);
+    assert_eq!(update.version, local_version);
+
+    node_a.shutdown().await;
+    node_b.shutdown().await;
+    Ok(())
+}

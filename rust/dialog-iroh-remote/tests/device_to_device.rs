@@ -90,6 +90,11 @@ async fn it_pulls_and_pushes_directly_between_two_live_devices() -> Result<()> {
         .spawn()
         .await?;
 
+    // A joins its space's swarm and listens for head updates: the wake-up
+    // signal that a peer moved a branch, so A reacts instead of polling.
+    let swarm_a = node_a.join_swarm(&repo_a.did(), Vec::new()).await?;
+    let mut updates_a = swarm_a.updates();
+
     // A commits locally. No push anywhere — A just has data.
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
     branch_a
@@ -151,7 +156,15 @@ async fn it_pulls_and_pushes_directly_between_two_live_devices() -> Result<()> {
         "B's push to the live device should succeed"
     );
 
-    // --- A observes B's push by re-resolving its own branch. ---
+    // --- A *reacts* to B's push: the head update wakes it up, and only
+    // then does it re-resolve the branch. ---
+    let update = tokio::time::timeout(std::time::Duration::from_secs(10), updates_a.recv())
+        .await
+        .expect("A should be woken up by B's push")?;
+    assert_eq!(update.space, "branch/main");
+    assert_eq!(update.cell, "revision");
+    assert_eq!(update.origin, dialog_iroh_remote::HeadUpdateOrigin::Pushed);
+
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
     assert_eq!(
         names(&branch_a, &operator_a).await?,
@@ -192,6 +205,12 @@ async fn it_pulls_and_pushes_directly_between_two_live_devices() -> Result<()> {
     );
     let retried = branch_b.push().perform(&operator_b).await?;
     assert!(retried.is_some(), "push should succeed after merging");
+
+    // The rejected push produced no update; the merged one wakes A again.
+    let update = tokio::time::timeout(std::time::Duration::from_secs(10), updates_a.recv())
+        .await
+        .expect("A should be woken up by B's merged push")?;
+    assert_eq!(update.origin, dialog_iroh_remote::HeadUpdateOrigin::Pushed);
 
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
     assert_eq!(

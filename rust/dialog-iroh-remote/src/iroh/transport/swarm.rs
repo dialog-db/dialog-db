@@ -9,6 +9,20 @@
 //! protocol, where the regular UCAN invocation is presented and verified —
 //! so the same authorization built for the addressed remote can be
 //! redeemed at whichever peer answers first.
+//!
+//! # Head updates
+//!
+//! The swarm doubles as the wake-up signal for reactive sync. A joined
+//! handle exposes [`updates`](SwarmHandle::updates), a stream of
+//! [`HeadUpdate`]s that fires when
+//!
+//! - a peer pushes *into this device* — the host publishes into a hosted
+//!   space and notifies locally ([`HeadUpdateOrigin::Pushed`]), and
+//! - a peer *announces* a publish elsewhere in the swarm
+//!   ([`HeadUpdateOrigin::Announced`]).
+//!
+//! dialog's query subscriptions are deliberately poll-driven; a head
+//! update is the signal that a poll (or a `pull`) will find something.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,7 +36,7 @@ use futures_util::StreamExt;
 use iroh_gossip::api::{Event, GossipSender};
 use iroh_gossip::net::Gossip;
 use iroh_gossip::proto::TopicId;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, watch};
 
 use super::host::SubjectHost;
 use super::node::IrohNode;
@@ -40,6 +54,40 @@ pub fn topic_for(subject: &Did) -> TopicId {
 
 type Pending = Arc<Mutex<HashMap<(String, Vec<u8>), mpsc::UnboundedSender<IrohAddress>>>>;
 
+/// How many not-yet-consumed head updates a subscriber may buffer before
+/// the oldest are dropped (`RecvError::Lagged`). Updates are wake-up
+/// signals, not a log: a lagging consumer that re-resolves the head after
+/// a `Lagged` error has lost nothing.
+const UPDATE_BUFFER: usize = 64;
+
+/// Where a [`HeadUpdate`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadUpdateOrigin {
+    /// A peer pushed into a space hosted on this device.
+    Pushed,
+    /// A peer announced a publish elsewhere in the swarm.
+    Announced,
+}
+
+/// A memory cell of the swarm's subject moved to a new version.
+///
+/// For a branch head, `space` is `branch/{name}` and `cell` is
+/// `revision`. Advisory: consumers react by re-resolving the cell (e.g.
+/// `branch.pull()`); they must not trust the carried version for
+/// anything but change detection.
+#[derive(Debug, Clone)]
+pub struct HeadUpdate {
+    /// The memory space the cell lives in (e.g. `branch/main`).
+    pub space: String,
+    /// The memory cell that changed (e.g. `revision`).
+    pub cell: String,
+    /// The version the cell moved to.
+    pub version: Version,
+    /// Whether the update landed on this device or was announced by a
+    /// peer.
+    pub origin: HeadUpdateOrigin,
+}
+
 /// A joined per-space gossip swarm.
 ///
 /// Obtained from [`IrohNode::join_swarm`]. Fetches route through
@@ -50,6 +98,7 @@ pub struct SwarmHandle {
     sender: GossipSender,
     pending: Pending,
     joined: watch::Receiver<bool>,
+    updates: broadcast::Sender<HeadUpdate>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -77,7 +126,9 @@ impl SwarmHandle {
 
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let (joined_tx, joined_rx) = watch::channel(false);
+        let (updates_tx, _) = broadcast::channel(UPDATE_BUFFER);
 
+        let loop_updates = updates_tx.clone();
         let loop_subject = subject.clone();
         let loop_pending = pending.clone();
         let loop_sender = sender.clone();
@@ -135,13 +186,25 @@ impl SwarmHandle {
                                     let _ = waiter.send(provider);
                                 }
                             }
-                            // Advisory head movement; consumed by a future
-                            // subscription layer.
-                            SwarmMessage::Announce { .. } => {
+                            // Advisory head movement: surface it to local
+                            // subscribers as a wake-up signal.
+                            SwarmMessage::Announce {
+                                space,
+                                cell,
+                                version,
+                            } => {
                                 tracing::trace!(
                                     subject = %loop_subject,
+                                    space,
+                                    cell,
                                     "revision announced on swarm"
                                 );
+                                let _ = loop_updates.send(HeadUpdate {
+                                    space,
+                                    cell,
+                                    version,
+                                    origin: HeadUpdateOrigin::Announced,
+                                });
                             }
                         }
                     }
@@ -155,6 +218,7 @@ impl SwarmHandle {
             sender,
             pending,
             joined: joined_rx,
+            updates: updates_tx,
             task,
         }))
     }
@@ -174,12 +238,43 @@ impl SwarmHandle {
         }
     }
 
+    /// Subscribe to head updates for this space.
+    ///
+    /// Fires when a peer pushes into a space hosted on this device and
+    /// when a peer announces a publish elsewhere in the swarm. Updates
+    /// are wake-up signals: on receipt (or on a `Lagged` error after
+    /// falling behind), re-resolve the cell — typically `branch.pull()`.
+    pub fn updates(&self) -> broadcast::Receiver<HeadUpdate> {
+        self.updates.subscribe()
+    }
+
     /// Announce a published revision on the swarm (advisory).
-    pub async fn announce(&self, cell: String, version: Version) {
-        let message = SwarmMessage::Announce { cell, version };
+    ///
+    /// The host calls this automatically for publishes that arrive over
+    /// the remote protocol. A device whose *local* commits should wake
+    /// peers up without a push can call it after committing — for a
+    /// branch `name`, with space `branch/{name}` and cell `revision`.
+    pub async fn announce(&self, space: String, cell: String, version: Version) {
+        let message = SwarmMessage::Announce {
+            space,
+            cell,
+            version,
+        };
         if let Ok(bytes) = serde_ipld_dagcbor::to_vec(&message) {
             let _ = self.sender.broadcast(Bytes::from(bytes)).await;
         }
+    }
+
+    /// A publish landed on this device (a peer pushed into a hosted
+    /// space): notify local subscribers and announce it to the swarm.
+    pub(crate) async fn published(&self, space: String, cell: String, version: Version) {
+        let _ = self.updates.send(HeadUpdate {
+            space: space.clone(),
+            cell: cell.clone(),
+            version: version.clone(),
+            origin: HeadUpdateOrigin::Pushed,
+        });
+        self.announce(space, cell, version).await;
     }
 
     /// Fetch a block from the swarm: broadcast `Want`, wait (bounded) for
