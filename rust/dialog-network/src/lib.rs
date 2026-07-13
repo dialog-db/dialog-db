@@ -19,6 +19,7 @@
 //! `dialog-capability`.
 
 use dialog_capability::Site;
+use dialog_iroh_remote::Iroh;
 use dialog_remote_fs::Fs;
 use dialog_remote_s3::S3;
 use dialog_remote_ucan_s3::UcanSite;
@@ -38,6 +39,7 @@ pub struct Network {
     s3: S3,
     ucan: UcanSite,
     fs: Fs,
+    iroh: Iroh,
 }
 
 #[cfg(test)]
@@ -48,6 +50,7 @@ mod tests {
     use super::*;
     use dialog_capability::{Site, SiteAddress};
     use dialog_effects::storage::Location;
+    use dialog_iroh_remote::IrohAddress;
     use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address as S3Address;
     use dialog_remote_ucan_s3::UcanAddress;
@@ -68,6 +71,10 @@ mod tests {
         FsAddress::new(Location::temp("test-vault"))
     }
 
+    fn iroh_address() -> IrohAddress {
+        IrohAddress::new("ku3zxvamvqjrmnrkiknl3d2gzwsdcbgcpqfhjbjjbmscqvlgoeoa")
+    }
+
     /// `NetworkAddress` is a public enum with one variant per field. Variant
     /// names are field names converted to PascalCase.
     #[test]
@@ -75,6 +82,7 @@ mod tests {
         let _: NetworkAddress = NetworkAddress::S3(s3_address());
         let _: NetworkAddress = NetworkAddress::Ucan(ucan_address());
         let _: NetworkAddress = NetworkAddress::Fs(fs_address());
+        let _: NetworkAddress = NetworkAddress::Iroh(iroh_address());
     }
 
     /// `From<VariantAddress> for NetworkAddress` is generated for each
@@ -89,6 +97,9 @@ mod tests {
 
         let net: NetworkAddress = fs_address().into();
         assert!(matches!(net, NetworkAddress::Fs(_)));
+
+        let net: NetworkAddress = iroh_address().into();
+        assert!(matches!(net, NetworkAddress::Iroh(_)));
     }
 
     /// `Network` implements `Site` (with the generated enums as associated

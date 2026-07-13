@@ -15,6 +15,7 @@ dialog-effects = { workspace = true }
 dialog-remote-s3 = { workspace = true }
 dialog-remote-ucan-s3 = { workspace = true }
 dialog-remote-fs = { workspace = true }
+dialog-iroh-remote = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 
