@@ -1,0 +1,60 @@
+[package]
+name = "dialog-iroh-remote"
+description = "Iroh-powered peer-to-peer remote backend for dialog-db: serve and sync spaces directly between endpoints over QUIC, with a gossip swarm for fetching blocks from any replicating peer"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+integration-tests = ["dialog-common/integration-tests"]
+web-integration-tests = ["dialog-common/web-integration-tests"]
+
+[dependencies]
+async-trait = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-ucan = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+blake3 = { workspace = true }
+bytes = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-ucan-core = { workspace = true }
+ipld-core = { workspace = true }
+futures-util = { workspace = true }
+iroh = { workspace = true }
+iroh-gossip = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
+tracing = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+dialog-artifacts = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
+dialog-credentials = { workspace = true }
+dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-repository = { workspace = true }
+dialog-storage = { workspace = true, features = ["helpers"] }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+testresult = { workspace = true }
+wasm-bindgen-test = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  "cfg(feature, values(\"web-integration-tests\"))",
+  "cfg(dialog_test_wasm_integration)",
+] }
