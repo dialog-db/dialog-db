@@ -182,6 +182,60 @@ The host is *symmetric* with the client: a device that both replicates and
 serves a space runs a `Repository` over the env **and** a `SpaceHost` over
 the same env.
 
+## Direct device-to-device sync
+
+The payoff of that symmetry: start dialog on one device, start dialog on
+another, and pull/push **directly between them** — no server, no
+intermediate replica.
+
+The trick is that there is no separate "server state" at all. A remote
+branch's upstream cell — `memory/branch/{name}/revision` at the subject —
+is the *very cell* a local repository maintains as its branch head. So a
+device that serves the same storage its repository runs on
+(`Storage` clones share state; `Operator::storage()` hands one back) is
+serving its **live** branch head:
+
+```rust
+// Device A: a normal dialog instance that also serves its space.
+let node = IrohNode::builder()
+    .host(repo.did().clone(), operator.storage())
+    .spawn()
+    .await?;
+share_with_other_device(node.address());   // endpoint id (+ hints)
+
+// Device B: track A directly.
+repo.remote("device-a")
+    .create(SiteAddress::Iroh(address))
+    .subject(shared_subject)
+    .perform(&operator)
+    .await?;
+branch.pull().perform(&operator).await?;   // A's live head, no A-side push
+```
+
+- **Pull** resolves A's live head and reads missing blocks out of A's
+  archive over QUIC. A never has to "publish" anything first — committing
+  locally *is* publishing to peers.
+- **Push** uploads B's novel blocks into A's archive and compare-and-swaps
+  A's branch head. A sees the new revision as soon as it re-resolves the
+  branch. If A committed concurrently, the CAS fails and B's push errors
+  `NonFastForward` — B pulls (three-way merge) and retries, exactly like
+  git. The CAS is what makes pushing *into a live device* safe.
+- **Authorization** is unchanged: B's invocations carry a delegation chain
+  rooted in the space subject (repo → B's profile → B's operator), verified
+  by A before any effect touches its storage.
+
+Both devices can do this to each other simultaneously (each hosts, each
+tracks the other), and the gossip swarm generalizes it to N devices. What's
+still missing for a fully live experience is *reactivity*: A learns about
+B's push when it next resolves the branch. The `Announce` swarm message is
+reserved exactly for this — a subscription layer can turn it into an
+automatic fetch/merge.
+
+`tests/device_to_device.rs` exercises the whole story end to end: B pulls
+A's live head (A never pushes), B pushes back, A observes; then both
+commit concurrently, B's push is rejected non-fast-forward, B merges and
+retries, and both devices converge.
+
 ## Gossip block swarm
 
 ### Topic
@@ -275,10 +329,10 @@ directories globally:
   the gossip fallback; populated by `node.join_swarm(..)` on hosts and
   clients alike.
 
-The crate currently pins iroh 0.98 (the last pre-1.0 release whose
-`ed25519-dalek` prerelease pin coexists with the `sha2` pin `s3s 0.13`
-carries); it already speaks the 1.0-era API (`EndpointAddr`, presets), so
-the bump to 1.x is mechanical once `s3s` moves.
+The crate tracks iroh 1.x (and iroh-gossip 0.101). Getting there required
+bumping `s3s` to 0.14: iroh 1.0's `ed25519-dalek 3.0.0-rc` wants `sha2
+0.11` final, which conflicted with the `sha2 =0.11.0-rc.5` pin `s3s 0.13`
+carried.
 
 ## wasm strategy
 

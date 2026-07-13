@@ -3,6 +3,7 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::sync::Arc;
 
 /// A pool that caches resources by address.
 ///
@@ -13,15 +14,28 @@ use std::hash::Hash;
 /// Uses `parking_lot::RwLock` for interior mutability so callers can
 /// check and insert through `&self`. All lock guards are short-lived
 /// and never held across `.await` points.
+///
+/// The table is reference-counted: a [`Clone`] of a pool shares its
+/// entries — insertions through one handle are visible through every
+/// other, which is what lets a storage environment be shared between,
+/// say, an operator and a peer-to-peer host serving the same spaces.
 pub struct Pool<Address, R> {
-    resources: RwLock<HashMap<Address, R>>,
+    resources: Arc<RwLock<HashMap<Address, R>>>,
+}
+
+impl<Address, R> Clone for Pool<Address, R> {
+    fn clone(&self) -> Self {
+        Self {
+            resources: Arc::clone(&self.resources),
+        }
+    }
 }
 
 impl<Address, R> Pool<Address, R> {
     /// Create a new empty pool.
     pub fn new() -> Self {
         Self {
-            resources: RwLock::new(HashMap::new()),
+            resources: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

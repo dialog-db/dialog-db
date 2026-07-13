@@ -22,6 +22,10 @@ use crate::resource::{Pool, Resource};
 ///
 /// Maintains a location -> DID mapping so that loading the same location
 /// twice returns the existing DID (important for non-persistent backends).
+///
+/// Clones share both tables (they are reference-counted), so every handle
+/// to the same storage environment observes the same mounts.
+#[derive(Clone)]
 pub struct Loader<S> {
     spaces: Arc<Pool<Did, S>>,
     mounts: Pool<String, Did>,

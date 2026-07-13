@@ -80,12 +80,8 @@ http-body-util = "0.1"
 hyper = "1"
 hyper-util = "0.1"
 ipld-core = { version = "0.4", features = ["serde"] }
-# Pin iroh <1.0: iroh 1.0 requires ed25519-dalek 3.0.0-rc which requires
-# sha2 0.11 final, conflicting with the sha2 =0.11.0-rc.5 pin that s3s 0.13
-# carries. iroh 0.98 uses ed25519-dalek 3.0.0-pre.6 (sha2 ^0.11.0-rc.5),
-# which coexists. Bump to 1.x together with s3s.
-iroh = "0.98"
-iroh-gossip = "0.98"
+iroh = "1"
+iroh-gossip = "0.101"
 # getrandom = "0.3"
 getrandom = "0.2"
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
@@ -126,7 +122,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 rexie = "0.6"
 rkyv = "0.8"
 rsa = "0.9"
-s3s = "0.13"
+s3s = "0.14"
 serde = "1"
 serde-value = "0.7"
 serde-big-array = "0.5"
