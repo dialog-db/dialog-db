@@ -314,9 +314,31 @@ updates just re-resolves the head and has lost nothing, and the carried
 version is only good for change detection (all real state flows through
 the verified remote protocol).
 
-A device whose *local* commits should wake peers without a push can call
-`swarm.announce("branch/{name}", "revision", version)` after committing;
-hooking that into `commit` itself is repository-layer future work.
+Local commits announce automatically: `Storage` exposes
+[`publishes()`] — a stream of every successful `memory::Publish` on the
+environment — and `IrohNode::announce_publishes(storage.publishes())`
+forwards branch-head publishes (`branch/*` spaces only — internal cells
+like remote snapshot caches must not echo across the swarm) to their
+joined swarms. Announces are deduplicated per version, so a publish
+observed both by the host (a peer pushed it) and by the storage stream is
+broadcast once.
+
+The consuming side is packaged too: [`SwarmHandle::follow`] spawns the
+auto-pull loop —
+
+```rust
+node.announce_publishes(operator.storage().publishes()); // wake peers on commit
+swarm.follow("branch/main", "revision", move |_| {       // pull when woken
+    let branch = branch.clone();
+    let operator = operator.clone();
+    async move { let _ = branch.pull().perform(&*operator).await; }
+});
+```
+
+With both wired on each device, committing on one device converges the
+others with no push and no manual pull — live sync. Reactions must be
+idempotent (a pull that finds nothing is a no-op); a follower that falls
+behind skips missed signals and catches up on the next one.
 
 ### Why gossip + direct fetch (and not gossip'd blocks or iroh-blobs)
 
@@ -407,10 +429,9 @@ workspace's wasm targets, the cfg boundary is the only thing that moves.
 
 ## Future work
 
-- **Auto-pull on head updates**: the `HeadUpdate` stream exists; wiring it
-  into the repository so tracked branches `pull` (and standing query
-  subscriptions re-poll) automatically on updates — and announcing local
-  commits from `commit` itself — is the remaining repository-layer piece.
+- **Subscription integration**: head updates wake `pull`; wiring them to
+  standing query subscriptions (poll on update instead of on demand) would
+  make live queries end-to-end reactive.
 - **Replica hints**: let a host advertise the set of subjects it serves so
   peers can bootstrap swarms for spaces they learn about laterally.
 - **Verified streaming for large blobs** (iroh-blobs interop or range-based

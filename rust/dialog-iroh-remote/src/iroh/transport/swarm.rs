@@ -99,6 +99,10 @@ pub struct SwarmHandle {
     pending: Pending,
     joined: watch::Receiver<bool>,
     updates: broadcast::Sender<HeadUpdate>,
+    /// Last version announced per (space, cell): suppresses duplicate
+    /// announces when the same publish is observed through more than one
+    /// path (the host's publish handler and the storage publish stream).
+    announced: Mutex<HashMap<(String, String), Version>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -219,6 +223,7 @@ impl SwarmHandle {
             pending,
             joined: joined_rx,
             updates: updates_tx,
+            announced: Mutex::new(HashMap::new()),
             task,
         }))
     }
@@ -250,11 +255,20 @@ impl SwarmHandle {
 
     /// Announce a published revision on the swarm (advisory).
     ///
-    /// The host calls this automatically for publishes that arrive over
-    /// the remote protocol. A device whose *local* commits should wake
-    /// peers up without a push can call it after committing — for a
-    /// branch `name`, with space `branch/{name}` and cell `revision`.
+    /// Fired automatically for publishes that arrive over the remote
+    /// protocol (the host) and for local publishes forwarded via
+    /// [`IrohNode::announce_publishes`]; deduplicated per (space, cell)
+    /// version so a publish observed through both paths is announced
+    /// once.
     pub async fn announce(&self, space: String, cell: String, version: Version) {
+        {
+            let mut announced = self.announced.lock().await;
+            let key = (space.clone(), cell.clone());
+            if announced.get(&key) == Some(&version) {
+                return;
+            }
+            announced.insert(key, version.clone());
+        }
         let message = SwarmMessage::Announce {
             space,
             cell,
@@ -263,6 +277,51 @@ impl SwarmHandle {
         if let Ok(bytes) = serde_ipld_dagcbor::to_vec(&message) {
             let _ = self.sender.broadcast(Bytes::from(bytes)).await;
         }
+    }
+
+    /// Spawn a task invoking `react` for every head update on the given
+    /// space/cell — the auto-pull loop, packaged:
+    ///
+    /// ```ignore
+    /// swarm.follow("branch/main", "revision", move |_| {
+    ///     let branch = branch.clone();
+    ///     let operator = operator.clone();
+    ///     async move {
+    ///         let _ = branch.pull().perform(&*operator).await;
+    ///     }
+    /// });
+    /// ```
+    ///
+    /// Updates are wake-up signals and the reaction is expected to be
+    /// idempotent (a `pull` that finds nothing is a no-op). A subscriber
+    /// that falls behind skips the missed signals and reacts to the next
+    /// one. Abort the returned handle to stop following; the task also
+    /// ends when the swarm handle is dropped.
+    pub fn follow<F, Fut>(
+        &self,
+        space: impl Into<String>,
+        cell: impl Into<String>,
+        mut react: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: FnMut(HeadUpdate) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let mut updates = self.updates();
+        let space = space.into();
+        let cell = cell.into();
+        tokio::spawn(async move {
+            loop {
+                match updates.recv().await {
+                    Ok(update) if update.space == space && update.cell == cell => {
+                        react(update).await;
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
     }
 
     /// A publish landed on this device (a peer pushed into a hosted
