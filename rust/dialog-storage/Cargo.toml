@@ -84,6 +84,9 @@ web-sys = { workspace = true, features = [
   "FileSystemRemoveOptions",
   "FileSystemSyncAccessHandle",
   "FileSystemWritableFileStream",
+  # `LockManager::request_with_callback` needs both — web-sys gates the
+  # callback's `Lock` argument separately from the manager itself.
+  "Lock",
   "LockManager",
   "Navigator",
   "ReadableStream",
