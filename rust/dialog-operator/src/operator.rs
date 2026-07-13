@@ -66,6 +66,17 @@ impl<S: Clone> Operator<S> {
         self.authority.operator_did()
     }
 
+    /// A handle to the operator's storage environment.
+    ///
+    /// [`Storage`] clones share state, so the returned handle observes
+    /// (and is observed by) effects performed through this operator —
+    /// suitable for serving the operator's own spaces to remote peers
+    /// (e.g. hosting them over an iroh node) while the local repository
+    /// keeps running on the same data.
+    pub fn storage(&self) -> Storage<S> {
+        self.storage.clone()
+    }
+
     /// The profile's DID (the long-lived identity).
     pub fn profile_did(&self) -> Did {
         self.authority.profile_did()

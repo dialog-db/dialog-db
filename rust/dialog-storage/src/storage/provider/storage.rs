@@ -29,6 +29,11 @@ pub use native::NativeSpace;
 pub use web::{WebOpfsSpace, WebSpace};
 
 /// Storage: the runtime context for capability dispatch.
+///
+/// Cloning a `Storage` produces a second handle to the *same* environment:
+/// the space table is shared, so effects performed through one handle are
+/// visible through every other. This is what lets the same storage back a
+/// local repository and be served to remote peers at the same time.
 #[derive(Provider)]
 pub struct Storage<S: Clone> {
     #[provide(storage::Load, storage::Create)]
@@ -50,6 +55,15 @@ pub struct Storage<S: Clone> {
         credential::Save<Secret>
     )]
     router: Router<S>,
+}
+
+impl<S: Clone> Clone for Storage<S> {
+    fn clone(&self) -> Self {
+        Self {
+            loader: self.loader.clone(),
+            router: self.router.clone(),
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
