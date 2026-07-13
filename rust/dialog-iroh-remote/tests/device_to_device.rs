@@ -25,9 +25,13 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+use dialog_capability::Subject;
 use dialog_iroh_remote::IrohNode;
+use dialog_network::Network;
 use dialog_operator::Operator;
 use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 use dialog_repository::{Branch, RepositoryExt as _, SiteAddress};
@@ -70,7 +74,7 @@ async fn it_pulls_and_pushes_directly_between_two_live_devices() -> Result<()> {
     // Outbound client node for fork invocations (both "devices" share one
     // process here, so they share the process-global client).
     let client = IrohNode::builder().direct_only().spawn().await?;
-    dialog_iroh_remote::install(client)?;
+    dialog_iroh_remote::install(client.clone())?;
 
     // --- Device A: repository over its own storage. ---
     let (operator_a, profile_a) = test_operator_with_profile().await;
@@ -94,6 +98,10 @@ async fn it_pulls_and_pushes_directly_between_two_live_devices() -> Result<()> {
     // signal that a peer moved a branch, so A reacts instead of polling.
     let swarm_a = node_a.join_swarm(&repo_a.did(), Vec::new()).await?;
     let mut updates_a = swarm_a.updates();
+
+    // A's *local commits* wake the swarm too: branch-head publishes on
+    // A's storage are forwarded to its joined swarms as announces.
+    node_a.announce_publishes(operator_a.storage().publishes());
 
     // A commits locally. No push anywhere — A just has data.
     let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
@@ -219,6 +227,61 @@ async fn it_pulls_and_pushes_directly_between_two_live_devices() -> Result<()> {
         "both devices' concurrent commits should converge on A"
     );
 
+    // --- Live sync: B follows the branch and converges on A's local
+    // commits with no manual pull. ---
+
+    // B joins the swarm (via its outbound node) so announces reach it.
+    let swarm_b = client
+        .join_swarm(&repo_a.did(), vec![node_a.address()])
+        .await?;
+    swarm_a.joined().await;
+    swarm_b.joined().await;
+
+    // A background syncer for B: its own session key over B's storage,
+    // authorized through the same repo → profile-B delegation chain.
+    let follower_operator = Arc::new(
+        profile_b
+            .derive(b"follower")
+            .allow(Subject::any())
+            .network(Network::default())
+            .build(operator_b.storage())
+            .await?,
+    );
+    let follower_branch = branch_b.clone();
+    let follower = swarm_b.follow("branch/main", "revision", move |_| {
+        let branch = follower_branch.clone();
+        let operator = follower_operator.clone();
+        async move {
+            // Idempotent reaction: a pull that finds nothing is a no-op.
+            let _ = branch.pull().perform(&*operator).await;
+        }
+    });
+
+    // A commits locally — no push, no manual pull anywhere on B.
+    branch_a
+        .commit(stream::iter(vec![Instruction::Assert(artifact(
+            "user:eve", "Eve",
+        )?)]))
+        .perform(&operator_a)
+        .await?;
+
+    // B converges: announce → follower pulls → B's replica has Eve.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let fresh = repo_b.branch("main").open().perform(&operator_b).await?;
+        let seen = names(&fresh, &operator_b).await?;
+        if seen.contains(&"Eve".to_string()) {
+            assert_eq!(seen, vec!["Alice", "Bob", "Carol", "Dave", "Eve"]);
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "B should converge on A's local commit without a manual pull, has {seen:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    follower.abort();
     node_a.shutdown().await;
     Ok(())
 }

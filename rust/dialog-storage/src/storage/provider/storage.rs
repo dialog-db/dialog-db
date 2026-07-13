@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dialog_capability::access::{AuthorizeError, Protocol, Prove, Retain};
-use dialog_capability::{Capability, Did, Provider};
+use dialog_capability::{Capability, Did, Policy as _, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
 use dialog_effects::credential::Secret;
@@ -47,7 +47,6 @@ pub struct Storage<S: Clone> {
         blob::Write,
         blob::Import,
         memory::Resolve,
-        memory::Publish,
         memory::Retract,
         credential::Load<Credential>,
         credential::Save<Credential>,
@@ -55,6 +54,10 @@ pub struct Storage<S: Clone> {
         credential::Save<Secret>
     )]
     router: Router<S>,
+
+    /// Local publish observer: every successful `memory::Publish` through
+    /// this environment is echoed here (see [`Storage::publishes`]).
+    publishes: tokio::sync::broadcast::Sender<PublishEvent>,
 }
 
 impl<S: Clone> Clone for Storage<S> {
@@ -62,7 +65,64 @@ impl<S: Clone> Clone for Storage<S> {
         Self {
             loader: self.loader.clone(),
             router: self.router.clone(),
+            publishes: self.publishes.clone(),
         }
+    }
+}
+
+/// A successful `memory::Publish` observed on a [`Storage`] environment.
+///
+/// Emitted for every publish — local commits, cache snapshots, and
+/// publishes performed on behalf of remote peers alike. Consumers filter
+/// by `space` (e.g. `branch/{name}` for branch heads) and use the event
+/// as a change signal; the payload stays in storage.
+#[derive(Debug, Clone)]
+pub struct PublishEvent {
+    /// The subject (space DID) the cell belongs to.
+    pub subject: Did,
+    /// The memory space the cell lives in (e.g. `branch/main`).
+    pub space: String,
+    /// The cell that was published (e.g. `revision`).
+    pub cell: String,
+    /// The version the publish produced.
+    pub version: memory::Version,
+}
+
+/// How many unconsumed publish events a subscriber may buffer before the
+/// oldest are dropped. Events are change signals, not a log — a lagging
+/// subscriber re-resolves whatever it tracks.
+const PUBLISH_EVENT_BUFFER: usize = 64;
+
+/// Publish is provided by hand (the rest of the memory vocabulary is
+/// derived) so that successful publishes can be observed via
+/// [`Storage::publishes`].
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<memory::Publish> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    Router<S>: Provider<memory::Publish>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<memory::Publish>,
+    ) -> Result<memory::Version, memory::MemoryError> {
+        let subject = input.subject().clone();
+        let space = memory::Space::of(&input).space.clone();
+        let cell = memory::Cell::of(&input).cell.clone();
+
+        let version = Provider::<memory::Publish>::execute(&self.router, input).await?;
+
+        // Nobody listening is fine.
+        let _ = self.publishes.send(PublishEvent {
+            subject,
+            space,
+            cell,
+            version: version.clone(),
+        });
+
+        Ok(version)
     }
 }
 
@@ -102,10 +162,23 @@ impl<S: Clone> Storage<S> {
     /// Create a new empty environment.
     pub fn new() -> Self {
         let spaces = Arc::new(Pool::new());
+        let (publishes, _) = tokio::sync::broadcast::channel(PUBLISH_EVENT_BUFFER);
         Self {
             loader: Loader::new(Arc::clone(&spaces)),
             router: Router::new(spaces),
+            publishes,
         }
+    }
+
+    /// Subscribe to successful `memory::Publish`es on this environment.
+    ///
+    /// Fires for every publish through any handle of this environment —
+    /// local commits, cache snapshots, and publishes performed on behalf
+    /// of remote peers alike. Events are change signals: a subscriber
+    /// that lags and drops some re-resolves whatever it tracks and has
+    /// lost nothing.
+    pub fn publishes(&self) -> tokio::sync::broadcast::Receiver<PublishEvent> {
+        self.publishes.subscribe()
     }
 
     /// Check if a DID is mounted.
@@ -184,6 +257,39 @@ mod tests {
             .await;
 
         assert_eq!(result.unwrap(), Some(content));
+    }
+
+    #[dialog_common::test]
+    async fn it_emits_publish_events() {
+        let env = Storage::volatile();
+        let credential = test_credential().await;
+
+        let did = StorageFx::profile("dana")
+            .create(credential)
+            .perform(&env)
+            .await
+            .unwrap()
+            .did();
+
+        // Subscribe before publishing; a clone of the environment shares
+        // the same event channel.
+        let mut publishes = env.clone().publishes();
+
+        let version = did
+            .clone()
+            .memory()
+            .space("branch/main")
+            .cell("revision")
+            .publish(b"rev-1".to_vec(), None)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        let event = publishes.try_recv().expect("publish event is emitted");
+        assert_eq!(event.subject, did);
+        assert_eq!(event.space, "branch/main");
+        assert_eq!(event.cell, "revision");
+        assert_eq!(event.version, version);
     }
 
     #[dialog_common::test]

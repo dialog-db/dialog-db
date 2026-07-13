@@ -23,6 +23,7 @@ use super::host::{HostRegistry, SubjectHost};
 use super::swarm::SwarmHandle;
 use crate::protocol::ALPN;
 use crate::{IrohAddress, IrohRemoteError};
+use dialog_storage::provider::storage::PublishEvent;
 
 static NODE: OnceCell<Arc<IrohNode>> = OnceCell::const_new();
 
@@ -240,6 +241,46 @@ impl IrohNode {
     /// The joined swarm for `subject`, if any.
     pub async fn swarm(&self, subject: &Did) -> Option<Arc<SwarmHandle>> {
         self.swarms.lock().await.get(subject).cloned()
+    }
+
+    /// Forward local branch-head publishes to their swarms as announces,
+    /// so peers are woken by this device's *local commits* without a
+    /// push — the counterpart of the host announcing publishes that
+    /// arrive over the wire.
+    ///
+    /// `publishes` is a [`Storage::publishes`](dialog_storage::provider::storage::Storage::publishes)
+    /// subscription on the environment the device's repository runs on
+    /// (the same one hosted via [`IrohNodeBuilder::host`]). Only branch
+    /// head cells (`branch/{name}` spaces) are forwarded: internal cells
+    /// — remote snapshot caches in particular — must not echo across the
+    /// swarm, where every fetch they record would trigger another round
+    /// of pulls. Announces are deduplicated per version, so a publish
+    /// also observed by the host is broadcast once.
+    ///
+    /// The task ends when the storage environment (or this node) is
+    /// dropped.
+    pub fn announce_publishes(
+        self: &Arc<Self>,
+        mut publishes: tokio::sync::broadcast::Receiver<PublishEvent>,
+    ) {
+        let node = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                let event = match publishes.recv().await {
+                    Ok(event) => event,
+                    // Signals, not a log: skip whatever we missed.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                if !event.space.starts_with("branch/") {
+                    continue;
+                }
+                let Some(node) = node.upgrade() else { break };
+                if let Some(swarm) = node.swarm(&event.subject).await {
+                    swarm.announce(event.space, event.cell, event.version).await;
+                }
+            }
+        });
     }
 
     /// Whether this node hosts (serves) the given subject.
