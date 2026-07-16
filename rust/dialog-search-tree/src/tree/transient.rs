@@ -131,7 +131,9 @@ where
             TransientRoot::Unloaded(hash) if &hash == NULL_BLAKE3_HASH => Ok(None),
             TransientRoot::Unloaded(hash) => {
                 let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
-                Ok(Some(TransientNode::try_from(&node)?))
+                // The root's left edge is the tree's global leftmost seam,
+                // whose separator is the empty string (negative infinity).
+                Ok(Some(TransientNode::open(&node, Vec::new())?))
             }
         }
     }
@@ -157,6 +159,9 @@ where
             None => TransientNode::Index(TransientIndex {
                 children: vec![Node::Transient(TransientNode::Segment(TransientSegment {
                     entries: vec![entry],
+                    // The first segment of a tree sits at the global leftmost
+                    // seam: the empty separator.
+                    separator: Vec::new(),
                 }))],
             }),
             Some(root) => Edit::Upsert(entry)
@@ -543,6 +548,14 @@ where
             };
             if fast_path_keeps_canonical::<Key, Value, D>(&segment.entries, &self) {
                 apply_to_segment(&mut segment.entries, self);
+                // The edit may have replaced the segment's first key (an
+                // insert before it, or a delete of it), which moves the seam
+                // at the segment's left edge. Re-derive the separator from
+                // the new minimum against the old separator as the floor;
+                // the rule is idempotent when the minimum did not change.
+                if let Some(first) = segment.entries.first() {
+                    segment.separator = D::reseparate(first.key.as_ref(), &segment.separator);
+                }
                 return Ok(Some(root));
             }
         }
@@ -642,7 +655,11 @@ where
 {
     if let Node::Persistent(link) = node {
         let persistent = accessor.get_node(&link.node).await?;
-        *node = TransientNode::try_from(&persistent)?.into();
+        // The link's separator is the seam at the opened subtree's left edge;
+        // it moves onto the transient node (a segment stores it, an index
+        // derives it from its first child's link).
+        let separator = link.separator.clone();
+        *node = TransientNode::open(&persistent, separator)?.into();
     }
     Ok(())
 }
@@ -768,9 +785,15 @@ where
                 ));
             };
             apply_to_segment(&mut segment.entries, edit);
-            Ok(regroup_entries::<Key, Value, D>(std::mem::take(
-                &mut segment.entries,
-            )))
+            // The segment's separator becomes the floor for the regrouped
+            // run: its first group re-derives against it, and an emptied
+            // segment propagates its removal through the boundary-delete
+            // paths, which have the neighbor's keys in memory.
+            let floor = std::mem::take(&mut segment.separator);
+            Ok(regroup_entries::<Key, Value, D>(
+                std::mem::take(&mut segment.entries),
+                floor,
+            ))
         }
         Some((&at, rest)) => {
             let child = node.child_mut(at)?;
@@ -886,13 +909,17 @@ where
         (TransientNode::Segment(mut main), TransientNode::Segment(neighbor)) => {
             // The leaf level: drop the dissolved boundary key (the main leaf's
             // last entry), then concatenate the orphans with the neighbour's
-            // entries and re-cut into segments.
+            // entries and re-cut into segments. The main segment's separator
+            // is the floor for the fused run: the run's left seam is the main
+            // segment's left seam (the neighbour's own seam dissolves and is
+            // re-derived fresh if regrouping recreates it).
+            let floor = std::mem::take(&mut main.separator);
             if main.entries.last().map(|e| &e.key == key).unwrap_or(false) {
                 main.entries.pop();
             }
             let mut entries = main.entries;
             entries.extend(neighbor.entries);
-            Ok(regroup_entries::<Key, Value, D>(entries))
+            Ok(regroup_entries::<Key, Value, D>(entries, floor))
         }
         (TransientNode::Index(mut main), TransientNode::Index(mut neighbor)) => {
             // The main spine descends through the last child; the neighbour
@@ -1133,27 +1160,19 @@ where
     }
 }
 
-/// Index of the child whose subtree covers `key`: the first child whose upper
-/// bound is `>= key`, or the last child when the key exceeds every bound.
+/// Index of the child whose subtree covers `key`: the last child whose
+/// separator is at or below the key (a probe equal to a separator belongs to
+/// the seam's right side), clamped to the leftmost child when the key sits
+/// below every separator.
 fn child_for<Key, Value>(children: &[Node<Key, Value>], key: &Key) -> usize
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
-    Value: self::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
+    Key: self::Key,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
 {
     let mut at = 0usize;
     while at + 1 < children.len() {
-        match children[at].upper_bound_ref() {
-            Ok(bound) if bound < key => at += 1,
+        match children[at + 1].separator() {
+            Ok(separator) if separator <= key.as_ref() => at += 1,
             _ => break,
         }
     }

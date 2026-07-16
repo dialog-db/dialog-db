@@ -9,7 +9,7 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{Buffer, DialogSearchTreeError, Entry, Key, Link, SymmetryWith, Value, into_owned};
+use crate::{Buffer, DialogSearchTreeError, Entry, Key, Link, SymmetryWith, Value};
 use std::marker::PhantomData;
 
 /// A tree node in its serialized, content-addressed form.
@@ -60,21 +60,26 @@ where
         &self.buffer
     }
 
-    /// Converts this node into a [`Link`] referencing it.
-    pub fn to_link(&self) -> Result<Link<Key>, DialogSearchTreeError> {
-        let upper_bound: Key = self.body()?.upper_bound().and_then(into_owned)?;
-        let self_hash = self.buffer.blake3_hash().clone();
-
+    /// Converts this node into a [`Link`] referencing it, carrying the
+    /// separator at the subtree's left edge.
+    ///
+    /// The separator is a seam property, not derivable from the node's own
+    /// body (it depends on the left-adjacent subtree), so the caller threads
+    /// it in from the context that knows the seam.
+    pub fn to_link(&self, separator: Vec<u8>) -> Result<Link, DialogSearchTreeError> {
         Ok(Link {
-            upper_bound,
-            node: self_hash,
+            separator,
+            node: self.buffer.blake3_hash().clone(),
         })
     }
 
-    /// Returns the upper bound key of this node, if it has one.
+    /// Returns the upper bound key of this segment node, if it has one.
+    ///
+    /// Index nodes carry no full keys (links hold separators), so this
+    /// returns `None` for an index; full bounds exist only in leaves.
     pub fn upper_bound(&self) -> Result<Option<&Key::Archived>, DialogSearchTreeError> {
         self.body().map(|body| match body {
-            ArchivedNodeBody::Index(index) => index.upper_bound(),
+            ArchivedNodeBody::Index(_) => None,
             ArchivedNodeBody::Segment(segment) => segment.upper_bound(),
         })
     }
@@ -87,7 +92,7 @@ where
 
     /// Interprets this node as an index node, returning an error if it's a
     /// segment.
-    pub fn as_index(&self) -> Result<&ArchivedIndex<Key>, DialogSearchTreeError> {
+    pub fn as_index(&self) -> Result<&ArchivedIndex, DialogSearchTreeError> {
         self.body().and_then(|body| match body {
             ArchivedNodeBody::Index(index) => Ok(index),
             ArchivedNodeBody::Segment(_) => Err(DialogSearchTreeError::Access(
@@ -106,40 +111,19 @@ where
             )),
         })
     }
-
-    /// Finds the index of the child containing the given key.
-    pub fn get_child_index(
-        &self,
-        key: &Key::Archived,
-    ) -> Result<Option<usize>, DialogSearchTreeError> {
-        self.body().map(|body| match body {
-            ArchivedNodeBody::Index(index) => index
-                .links
-                .binary_search_by(|link| Ord::cmp(&link.upper_bound, key))
-                .ok(),
-            ArchivedNodeBody::Segment(segment) => segment
-                .entries
-                .binary_search_by(|entry| Ord::cmp(&entry.key, key))
-                .ok(),
-        })
-    }
 }
 
 /// An index node containing links to child nodes.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedIndex)]
-pub struct PersistentIndex<Key> {
+pub struct PersistentIndex {
     /// The child node links stored in this index.
-    pub links: Vec<Link<Key>>,
+    pub links: Vec<Link>,
 }
 
-impl<Key> PersistentIndex<Key>
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-{
+impl PersistentIndex {
     /// Creates a new [`PersistentIndex`] containing a single link.
-    pub fn new(link: Link<Key>) -> Self {
+    pub fn new(link: Link) -> Self {
         Self { links: vec![link] }
     }
 }
@@ -176,7 +160,7 @@ where
 #[rkyv(archived = ArchivedNodeBody)]
 pub enum PersistentNodeBody<Key, Value> {
     /// An index node containing links to child nodes.
-    Index(PersistentIndex<Key>),
+    Index(PersistentIndex),
     /// A leaf segment containing key-value entries.
     Segment(PersistentSegment<Key, Value>),
 }
@@ -203,10 +187,10 @@ where
     }
 }
 
-impl<Key, Value> TryFrom<Vec<Link<Key>>> for PersistentNodeBody<Key, Value> {
+impl<Key, Value> TryFrom<Vec<Link>> for PersistentNodeBody<Key, Value> {
     type Error = DialogSearchTreeError;
 
-    fn try_from(links: Vec<Link<Key>>) -> Result<Self, Self::Error> {
+    fn try_from(links: Vec<Link>) -> Result<Self, Self::Error> {
         if links.is_empty() {
             return Err(DialogSearchTreeError::Node(
                 "Attempted to create an index from zero links".into(),

@@ -3,25 +3,135 @@ use dialog_common::Blake3Hash;
 /// The rank of a node in the prolly tree.
 pub type Rank = u64;
 
-/// Strategy for assigning ranks to keys.
+/// Strategy for assigning ranks to keys and separators, and for deriving the
+/// separators themselves.
 ///
-/// The distribution decides which keys become node boundaries, and thereby
-/// the shape of the tree. The default, [`Geometric`], derives ranks from the
-/// blake3 hash of the key bytes, producing the canonical production shape.
-/// Tests may inject an alternative distribution to force exact tree shapes.
+/// The distribution decides which entries end leaf segments (the leaf coin,
+/// [`rank`](Self::rank)), which seams punch boundaries through index levels
+/// (the seam coin, [`seam_rank`](Self::seam_rank)), and what byte string an
+/// index link stores to route across a seam ([`separator`](Self::separator)).
+/// Together these determine the shape of the tree as a pure function of its
+/// key set, which is what keeps it history-independent.
+///
+/// A separator follows the lower-bound convention: the separator carried by a
+/// link is the shortest byte string that sorts strictly above everything in
+/// the left-adjacent subtree and at or below everything in the link's own
+/// subtree. The global leftmost link at every level carries the empty
+/// separator (negative infinity). Because a separator is always a prefix of
+/// its own subtree's minimum leaf key, it can be maintained from the edited
+/// side of a seam alone (see [`reseparate`](Self::reseparate)).
+///
+/// The default, [`Geometric`], hashes keys and separators with blake3 and
+/// stores shortest-distinguishing separators, producing the canonical
+/// production shape. Tests may inject an alternative distribution to force
+/// exact tree shapes.
 pub trait Distribution {
-    /// Computes the rank of a key from its bytes.
+    /// The leaf coin: computes the rank of an entry key from its bytes. An
+    /// entry whose rank exceeds [`BOTTOM_RANK`](crate::BOTTOM_RANK) ends its
+    /// leaf segment.
     fn rank(key: &[u8]) -> Rank;
+
+    /// The seam coin: computes the rank of a seam from its separator bytes.
+    /// A child whose separator rank exceeds the level threshold starts a new
+    /// index node at that level. The same separator string serves every level
+    /// along a vertical boundary, so a high rank punches through several
+    /// levels at once, exactly like the key-rank recursion it replaces.
+    ///
+    /// The default applies the key coin to the separator bytes, which is the
+    /// right choice for any hash-based distribution (the two coins stay
+    /// independent because their inputs never collide: a separator sorts
+    /// strictly between two keys).
+    fn seam_rank(separator: &[u8]) -> Rank {
+        Self::rank(separator)
+    }
+
+    /// Derives the separator for a fresh seam from the two keys adjacent to
+    /// it: `left` is the last leaf key before the seam and `right` the first
+    /// leaf key after it, with `left < right`. Defaults to the canonical
+    /// shortest-distinguishing prefix of `right`.
+    fn separator(left: &[u8], right: &[u8]) -> Vec<u8> {
+        shortest_separator(left, right)
+    }
+
+    /// Re-derives a child's separator after an edit may have changed the
+    /// child's minimum leaf key, without access to the left neighbor.
+    ///
+    /// `min` is the child's (possibly new) minimum leaf key and `floor` its
+    /// previous separator. The previous separator encodes everything needed
+    /// about the unloaded left neighbor: it sorts strictly above the
+    /// neighbor's maximum, and routing guarantees `min >= floor` (every key
+    /// an edit delivers to the child was routed by `key >= separator`). The
+    /// canonical result is the shortest prefix of `min` that is `>= floor`,
+    /// the default.
+    ///
+    /// An override must stay consistent with [`separator`](Self::separator):
+    /// for any valid seam, `reseparate(min, separator(left, min))` must
+    /// reproduce `separator(left, min)`, or canonical form breaks.
+    fn reseparate(min: &[u8], floor: &[u8]) -> Vec<u8> {
+        raise_to_floor(min, floor)
+    }
 }
 
-/// The default [`Distribution`]: a geometric distribution over the blake3
-/// hash of the key bytes (see [`geometric`]).
+/// The default [`Distribution`]: geometric coins over blake3 hashes with
+/// shortest-distinguishing separators (see [`geometric`]).
 #[derive(Clone, Debug, Default)]
 pub struct Geometric;
 
 impl Distribution for Geometric {
     fn rank(key: &[u8]) -> Rank {
         geometric::rank(&Blake3Hash::hash(key))
+    }
+}
+
+/// The shortest prefix of `right` that sorts strictly above `left`, given
+/// `left < right`: the canonical shortest-distinguishing separator of a seam
+/// (RocksDB's `FindShortestSeparator`, taken as a prefix of the right-hand
+/// key so the lower-bound convention holds).
+///
+/// `left < right` guarantees `right` is not a prefix of `left`, so the byte
+/// at the divergence point always exists in `right`.
+pub fn shortest_separator(left: &[u8], right: &[u8]) -> Vec<u8> {
+    debug_assert!(
+        left < right,
+        "separator requires ordered seam keys: {left:02x?} < {right:02x?}"
+    );
+    let lcp = left
+        .iter()
+        .zip(right.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    right[..=lcp.min(right.len() - 1)].to_vec()
+}
+
+/// The shortest prefix of `min` that sorts at or above `floor`: the canonical
+/// separator of a seam whose right-hand minimum is `min`, re-derived from the
+/// seam's previous separator `floor` instead of the (unavailable) left key.
+///
+/// Correctness relies on two invariants the tree maintains: `floor` sorts
+/// strictly above the left neighbor's maximum and diverges from it exactly at
+/// its own last byte, and `min >= floor` (routing sends a key into the seam's
+/// right side only when the key is at or above the stored separator). Under
+/// those, the result equals `shortest_separator(left_max, min)` byte for
+/// byte, so incremental maintenance and a fresh build converge.
+pub fn raise_to_floor(min: &[u8], floor: &[u8]) -> Vec<u8> {
+    let lcp = min
+        .iter()
+        .zip(floor.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if lcp == floor.len() {
+        // The floor is a prefix of (or equal to) min: it remains the shortest
+        // prefix of min at or above itself. In particular an empty floor (the
+        // global leftmost seam) stays empty.
+        floor.to_vec()
+    } else if lcp < min.len() && min[lcp] > floor[lcp] {
+        min[..=lcp].to_vec()
+    } else {
+        // min < floor: outside the maintained invariant. The full minimum is
+        // always a correct (if untruncated) separator, so degrade gracefully
+        // rather than misroute.
+        debug_assert!(false, "reseparate invariant violated: min < floor");
+        min.to_vec()
     }
 }
 

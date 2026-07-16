@@ -38,76 +38,61 @@ impl StatefulWidget for NodeInspector {
                     }
                     .render(area, buf)
                 }
-                TreeNode::Branch { upper_bound, .. } => {
-                    let spans = match upper_bound.tag() {
-                        ENTITY_KEY_TAG => vec![
-                            (Color::Green, &upper_bound.as_ref()[0..1]),
-                            (Color::Green, &upper_bound.as_ref()[1..65]),
-                            (Color::Cyan, &upper_bound.as_ref()[65..129]),
-                            (Color::LightMagenta, &upper_bound.as_ref()[129..130]),
-                            (Color::Magenta, &upper_bound.as_ref()[130..]),
-                        ],
-                        ATTRIBUTE_KEY_TAG => vec![
-                            (Color::Cyan, &upper_bound.as_ref()[0..1]),
-                            (Color::Cyan, &upper_bound.as_ref()[1..65]),
-                            (Color::Green, &upper_bound.as_ref()[65..129]),
-                            (Color::LightMagenta, &upper_bound.as_ref()[129..130]),
-                            (Color::Magenta, &upper_bound.as_ref()[130..]),
-                        ],
-                        VALUE_KEY_TAG => vec![
-                            (Color::Magenta, &upper_bound.as_ref()[0..1]),
-                            (Color::LightMagenta, &upper_bound.as_ref()[1..2]),
-                            (Color::Magenta, &upper_bound.as_ref()[2..34]),
-                            (Color::Cyan, &upper_bound.as_ref()[34..98]),
-                            (Color::Green, &upper_bound.as_ref()[98..]),
-                        ],
-                        _ => vec![
-                            (Color::Gray, &upper_bound.as_ref()[0..1]),
-                            (Color::DarkGray, &upper_bound.as_ref()[1..]),
-                        ],
-                    }
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (color, bytes))| {
-                        if index == 0 {
-                            Span::from(format!("{:02X?}", bytes[0]))
-                                .bold()
-                                .fg(Color::Black)
-                                .bg(color)
-                        } else {
-                            let mut span = Span::from(format!(
-                                " {}",
-                                bytes
-                                    .iter()
-                                    .map(|byte| format!("{:02X?}", byte))
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            ))
-                            .style(Style::new().fg(color));
-
-                            if bytes.len() == 1 {
-                                span = span.bold();
+                TreeNode::Branch { separators, .. } => {
+                    // Links carry truncated separators (variable-length
+                    // prefixes of their subtree's minimum key), so render
+                    // one row per child: the tag byte highlighted when
+                    // present, the remaining bytes plain hex. The leftmost
+                    // child's separator is empty by construction.
+                    let lines: Vec<Line> = separators
+                        .iter()
+                        .map(|separator| {
+                            let mut line = Line::raw("");
+                            match separator.split_first() {
+                                None => {
+                                    line.push_span(
+                                        Span::from("(empty: leftmost)")
+                                            .style(Style::new().fg(Color::DarkGray)),
+                                    );
+                                }
+                                Some((tag, rest)) => {
+                                    let color = match *tag {
+                                        ENTITY_KEY_TAG => Color::Green,
+                                        ATTRIBUTE_KEY_TAG => Color::Cyan,
+                                        VALUE_KEY_TAG => Color::Magenta,
+                                        _ => Color::Gray,
+                                    };
+                                    line.push_span(
+                                        Span::from(format!("{tag:02X?}"))
+                                            .bold()
+                                            .fg(Color::Black)
+                                            .bg(color),
+                                    );
+                                    line.push_span(
+                                        Span::from(format!(
+                                            " {}",
+                                            rest.iter()
+                                                .map(|byte| format!("{byte:02X?}"))
+                                                .collect::<Vec<_>>()
+                                                .join(" ")
+                                        ))
+                                        .style(Style::new().fg(color)),
+                                    );
+                                }
                             }
-
-                            span
-                        }
-                    });
-
-                    let mut line = Line::raw("");
-                    for span in spans {
-                        line.push_span(span);
-                    }
+                            line
+                        })
+                        .collect();
 
                     let layout = Layout::vertical(vec![Constraint::Max(1), Constraint::Fill(1)]);
                     let [title, body] = layout.areas(area);
 
-                    Line::from("Upper Bound Key Bytes")
+                    Line::from("Child Separator Bytes")
                         .alignment(Alignment::Center)
                         .render(title, buf);
 
-                    Paragraph::new(line)
+                    Paragraph::new(lines)
                         .wrap(Wrap { trim: true })
-                        .style(Style::new().fg(Color::Red))
                         .render(body, buf);
                 }
             },

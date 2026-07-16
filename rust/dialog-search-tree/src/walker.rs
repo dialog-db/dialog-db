@@ -172,15 +172,14 @@ where
 
             match node.body()? {
                 ArchivedNodeBody::Index(index) => {
-                    // Descend into the first child whose `upper_bound >= key`,
-                    // falling back to the last child when the key is above every
-                    // bound. `partition_point` counts the children strictly below
-                    // `key`, so it lands on that first candidate without scanning
-                    // or decoding any sibling.
-                    let child_index = index
-                        .links
-                        .partition_point(|link| &link.upper_bound < key)
-                        .min(index.links.len() - 1);
+                    // Descend into the last child whose separator is at or
+                    // below the key (a probe equal to a separator belongs to
+                    // the seam's right side), clamping to the leftmost child
+                    // when the key sits below every separator.
+                    // `partition_point` counts the children whose separator
+                    // is `<= key`, so it lands one past that child without
+                    // scanning or decoding any sibling.
+                    let child_index = index.route(key.as_ref());
 
                     next_node = into_owned(&index.links[child_index].node)?;
 
@@ -371,14 +370,14 @@ where
     /// The host's children strictly to the left of the descended child, decoded
     /// to owned links. Materialized on demand: only an update that rebuilds this
     /// level calls it.
-    pub fn left_siblings(&self) -> Result<Option<NonEmpty<Link<Key>>>, DialogSearchTreeError> {
+    pub fn left_siblings(&self) -> Result<Option<NonEmpty<Link>>, DialogSearchTreeError> {
         self.siblings(0, self.index)
     }
 
     /// The host's children strictly to the right of the descended child, decoded
     /// to owned links. Materialized on demand: only an update that rebuilds this
     /// level calls it.
-    pub fn right_siblings(&self) -> Result<Option<NonEmpty<Link<Key>>>, DialogSearchTreeError> {
+    pub fn right_siblings(&self) -> Result<Option<NonEmpty<Link>>, DialogSearchTreeError> {
         let links = self.host.as_index()?.links.len();
         self.siblings(self.index + 1, links)
     }
@@ -387,12 +386,12 @@ where
         &self,
         start: usize,
         end: usize,
-    ) -> Result<Option<NonEmpty<Link<Key>>>, DialogSearchTreeError> {
+    ) -> Result<Option<NonEmpty<Link>>, DialogSearchTreeError> {
         let index = self.host.as_index()?;
         let owned = index.links[start..end]
             .iter()
             .map(into_owned)
-            .collect::<Result<Vec<Link<Key>>, _>>()?;
+            .collect::<Result<Vec<Link>, _>>()?;
         Ok(NonEmpty::from_vec(owned))
     }
 }

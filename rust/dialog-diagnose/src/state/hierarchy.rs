@@ -24,8 +24,10 @@ pub enum TreeNode {
     },
     /// A branch node containing references to child nodes
     Branch {
-        /// The upper bound key for this branch
-        upper_bound: Key,
+        /// The separator at each child's left edge (the routing lower
+        /// bounds; the leftmost child of a level carries the empty
+        /// separator)
+        separators: Vec<Vec<u8>>,
         /// Hashes of child nodes
         children: Vec<Blake3Hash>,
     },
@@ -76,17 +78,11 @@ impl ArtifactsHierarchy {
                 PersistentNode::new(Buffer::from(bytes));
             let node = match block.body()? {
                 ArchivedNodeBody::Index(index) => TreeNode::Branch {
-                    upper_bound: Key::from(into_owned::<KeyBytes>(
-                        &index
-                            .links
-                            .last()
-                            .ok_or_else(|| {
-                                DialogArtifactsError::MalformedIndex(
-                                    "Index node had no children".into(),
-                                )
-                            })?
-                            .upper_bound,
-                    )?),
+                    separators: index
+                        .links
+                        .iter()
+                        .map(|link| link.separator.as_slice().to_vec())
+                        .collect(),
                     children: index
                         .links
                         .iter()

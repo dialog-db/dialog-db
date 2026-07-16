@@ -59,25 +59,21 @@ impl<Key, Value, T> Differential<Key, Value> for T where
 /// Either a loaded node or an unloaded reference in a [`SparseTree`].
 ///
 /// Differentiation never loads nodes eagerly: a node stays a [`Link`] (hash
-/// plus upper bound, obtained from its parent) until the comparison proves
+/// plus separator, obtained from its parent) until the comparison proves
 /// the node lies on a differing path. Shared subtrees are recognized and
 /// discarded while still unloaded, which is what keeps reads proportional to
 /// the difference.
-enum SparseTreeNode<Key, Value>
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-{
-    /// A fully loaded node together with its owned upper bound key.
+enum SparseTreeNode<Key, Value> {
+    /// A fully loaded node together with the separator at its left edge.
     Loaded {
         /// The loaded node.
         node: PersistentNode<Key, Value>,
-        /// The node's upper bound key (owned copy).
-        upper_bound: Key,
+        /// The separator at the node's left edge (its lower bound; empty for
+        /// a root or the global leftmost subtree).
+        lower_bound: Vec<u8>,
     },
-    /// An unloaded reference: hash and upper bound from the parent's link.
-    Ref(Link<Key>),
+    /// An unloaded reference: hash and separator from the parent's link.
+    Ref(Link),
 }
 
 impl<Key, Value> SparseTreeNode<Key, Value>
@@ -96,10 +92,18 @@ where
         Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
     >,
 {
-    fn upper_bound(&self) -> &Key {
+    /// The separator at the node's left edge: its sort key in the frontier.
+    ///
+    /// Two canonical trees assign the same separator to the same seam, so
+    /// equal lower bounds line subtrees up for the hash comparison that
+    /// prunes shared regions. A node's key span is bounded below by this
+    /// separator and above (exclusively) by the next frontier node's
+    /// separator, which by the separator invariant sorts strictly above this
+    /// node's maximum key.
+    fn lower_bound(&self) -> &[u8] {
         match self {
-            SparseTreeNode::Loaded { upper_bound, .. } => upper_bound,
-            SparseTreeNode::Ref(link) => &link.upper_bound,
+            SparseTreeNode::Loaded { lower_bound, .. } => lower_bound.as_slice(),
+            SparseTreeNode::Ref(link) => link.separator.as_slice(),
         }
     }
 
@@ -168,8 +172,13 @@ where
             vec![]
         } else {
             let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
-            let upper_bound = node.body()?.upper_bound().and_then(into_owned)?;
-            vec![SparseTreeNode::Loaded { node, upper_bound }]
+            // A root sits at the tree's global leftmost seam: the empty
+            // separator. Both sides of a comparison agree on it, so equal
+            // roots line up immediately.
+            vec![SparseTreeNode::Loaded {
+                node,
+                lower_bound: Vec::new(),
+            }]
         };
 
         Ok(SparseTree {
@@ -181,23 +190,23 @@ where
 
     /// Expands the node covering `bound`, if any.
     ///
-    /// The frontier is sorted by upper bound, so the first node whose upper
-    /// bound is `>= bound` is the only one whose key range can contain
-    /// `bound`. If that node is an index, it is replaced by references to
-    /// its children (loading it first when it is still a reference) and the
-    /// node is recorded as expanded. If it is a segment, the loaded form
-    /// replaces the reference in place so a later entry walk does not load
-    /// it twice.
+    /// The frontier is sorted by lower bound (separator), so the last node
+    /// whose separator is at or below `bound` is the only one whose key
+    /// range can contain `bound`. If that node is an index, it is replaced
+    /// by references to its children (loading it first when it is still a
+    /// reference) and the node is recorded as expanded. If it is a segment,
+    /// the loaded form replaces the reference in place, keeping its bound,
+    /// so a later entry walk does not load it twice.
     ///
     /// Returns `true` when an index node was expanded.
-    async fn expand_at(&mut self, bound: &Key) -> Result<bool, DialogSearchTreeError> {
-        let Some(offset) = self
+    async fn expand_at(&mut self, bound: &[u8]) -> Result<bool, DialogSearchTreeError> {
+        let covering = self
             .nodes
-            .iter()
-            .position(|node| node.upper_bound() >= bound)
-        else {
+            .partition_point(|node| node.lower_bound() <= bound);
+        if covering == 0 {
             return Ok(false);
-        };
+        }
+        let offset = covering - 1;
 
         let node = match &self.nodes[offset] {
             SparseTreeNode::Loaded { node, .. } => node.clone(),
@@ -209,7 +218,7 @@ where
                 let children = index
                     .links
                     .iter()
-                    .map(|link| Ok(SparseTreeNode::Ref(into_owned::<Link<Key>>(link)?)))
+                    .map(|link| Ok(SparseTreeNode::Ref(into_owned::<Link>(link)?)))
                     .collect::<Result<Vec<_>, DialogSearchTreeError>>()?;
 
                 self.expanded.push(node);
@@ -217,8 +226,8 @@ where
                 Ok(true)
             }
             ArchivedNodeBody::Segment(_) => {
-                let upper_bound = node.body()?.upper_bound().and_then(into_owned)?;
-                self.nodes[offset] = SparseTreeNode::Loaded { node, upper_bound };
+                let lower_bound = self.nodes[offset].lower_bound().to_vec();
+                self.nodes[offset] = SparseTreeNode::Loaded { node, lower_bound };
                 Ok(false)
             }
         }
@@ -228,35 +237,42 @@ where
     /// `scope`, so out-of-scope subtrees are never expanded (and, on
     /// a partial replica, never fetched).
     ///
-    /// Links carry only upper bounds, so a node's span is bounded
-    /// conservatively: within the frontier (sorted by upper bound,
-    /// where pruning only ever *removes* nodes), a node's true span
-    /// is contained in `(predecessor's upper bound, own upper bound]`.
-    /// A node is dropped only when that conservative span misses
-    /// every scope range, which can only over-retain, never
-    /// over-drop — in-scope changes are always preserved. Dropping is
+    /// Links carry only lower bounds (separators), so a node's span is
+    /// bounded conservatively: within the frontier (sorted by lower
+    /// bound, where pruning only ever *removes* nodes), a node's true
+    /// span is contained in `[own separator, successor's separator)`
+    /// (the successor's separator sorts strictly above this node's
+    /// maximum by the separator invariant; the last node is unbounded
+    /// above). A node is dropped only when that conservative span
+    /// misses every scope range, which can only over-retain, never
+    /// over-drop: in-scope changes are always preserved. Dropping is
     /// per-side, so the entry walk may surface spurious out-of-scope
     /// changes where only one side dropped a shared region;
     /// [`TreeDifference::changes_within`] filters those.
     fn retain_scope(&mut self, scope: &[core::ops::RangeInclusive<Key>]) {
-        let mut lower: Option<Key> = None;
+        let uppers: Vec<Option<Vec<u8>>> = (0..self.nodes.len())
+            .map(|at| {
+                self.nodes
+                    .get(at + 1)
+                    .map(|next| next.lower_bound().to_vec())
+            })
+            .collect();
         let mut kept = Vec::with_capacity(self.nodes.len());
-        for node in self.nodes.drain(..) {
-            let upper = node.upper_bound().clone();
+        for (node, upper) in self.nodes.drain(..).zip(uppers) {
+            let lower = node.lower_bound();
             let intersects = scope.iter().any(|range| {
-                // (lower, upper] ∩ [start, end] is non-empty iff
-                // upper >= start and lower < end (with lower = -∞
-                // for the first node).
-                *range.start() <= upper
-                    && match &lower {
-                        Some(lower) => lower < range.end(),
+                // [lower, upper) ∩ [start, end] is non-empty iff
+                // lower <= end and upper > start (with upper = +∞
+                // for the last node).
+                lower <= range.end().as_ref()
+                    && match &upper {
+                        Some(upper) => upper.as_slice() > range.start().as_ref(),
                         None => true,
                     }
             });
             if intersects {
                 kept.push(node);
             }
-            lower = Some(upper);
         }
         self.nodes = kept;
     }
@@ -264,10 +280,14 @@ where
     /// Removes nodes that are shared between `self` and `other`, keeping
     /// only nodes that differ.
     ///
-    /// Both frontiers are sorted by upper bound. Two nodes are shared when
-    /// their upper bounds are equal and their hashes are equal; such pairs
-    /// are removed from both sides without ever being loaded. This is the
-    /// step that realizes the read-frugality contract.
+    /// Both frontiers are sorted by lower bound (separator). Two nodes are
+    /// shared when their separators are equal and their hashes are equal;
+    /// canonical trees assign the same separator to the same seam, so such
+    /// pairs are removed from both sides without ever being loaded. This is
+    /// the step that realizes the read-frugality contract. (A subtree whose
+    /// left neighbor changed can carry a different separator while being
+    /// byte-identical; it is then expanded one level before its children
+    /// prune, the documented blunting.)
     fn prune(&mut self, other: &mut Self) {
         let left = &mut self.nodes;
         let right = &mut other.nodes;
@@ -279,8 +299,8 @@ where
 
         while at_left < left.len() && at_right < right.len() {
             match left[at_left]
-                .upper_bound()
-                .cmp(right[at_right].upper_bound())
+                .lower_bound()
+                .cmp(right[at_right].lower_bound())
             {
                 Ordering::Less => {
                     left.swap(to_left, at_left);
@@ -450,7 +470,7 @@ where
         loop {
             let mut expanded = false;
             for index in 0..difference.target.nodes.len() {
-                let bound = difference.target.nodes[index].upper_bound().clone();
+                let bound = difference.target.nodes[index].lower_bound().to_vec();
                 if difference.target.expand_at(&bound).await? {
                     expanded = true;
                     break;
@@ -542,21 +562,22 @@ where
             let mut target_idx = 0;
 
             while source_idx < source.nodes.len() && target_idx < target.nodes.len() {
-                let source_bound = source.nodes[source_idx].upper_bound().clone();
-                let target_bound = target.nodes[target_idx].upper_bound().clone();
+                let source_bound = source.nodes[source_idx].lower_bound().to_vec();
+                let target_bound = target.nodes[target_idx].lower_bound().to_vec();
 
                 match source_bound.cmp(&target_bound) {
                     Ordering::Less => {
-                        // The target node covers a larger range; expand it to
-                        // reveal boundaries matching the source side.
-                        if target.expand_at(&source_bound).await? {
+                        // The source node starts earlier and may span past
+                        // the target node's left edge; expand it to reveal a
+                        // child seam matching the target side.
+                        if source.expand_at(&target_bound).await? {
                             expanded = true;
                             break;
                         }
                         source_idx += 1;
                     }
                     Ordering::Greater => {
-                        if source.expand_at(&target_bound).await? {
+                        if target.expand_at(&source_bound).await? {
                             expanded = true;
                             break;
                         }

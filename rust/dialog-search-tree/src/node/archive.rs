@@ -13,14 +13,15 @@ use crate::{
     SymmetryWith, Value,
 };
 
-impl<Key> ArchivedIndex<Key>
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-{
-    /// Returns the upper bound key of the last link in this index.
-    pub fn upper_bound(&self) -> Option<&Key::Archived> {
-        self.links.last().map(|link| &link.upper_bound)
+impl ArchivedIndex {
+    /// Index of the child whose subtree covers `key`: the last child whose
+    /// separator is at or below the key. A key below every separator (which
+    /// can only happen when the leftmost separator is non-empty) is clamped
+    /// to the leftmost child, whose subtree is the only place it could live.
+    pub fn route(&self, key: &[u8]) -> usize {
+        self.links
+            .partition_point(|link| link.separator.as_slice() <= key)
+            .saturating_sub(1)
     }
 }
 
@@ -48,15 +49,6 @@ where
         + Ord,
     Value: self::Value,
 {
-    /// Returns the upper bound key of this node body.
-    pub fn upper_bound(&self) -> Result<&Key::Archived, DialogSearchTreeError> {
-        match self {
-            Self::Index(index) => index.upper_bound(),
-            Self::Segment(segment) => segment.upper_bound(),
-        }
-        .ok_or_else(|| DialogSearchTreeError::Node("Node was unexpectedly empty".into()))
-    }
-
     /// Searches for an entry with the given key in this segment.
     ///
     /// Returns `Ok(None)` if this is an index node or if the key is not found.

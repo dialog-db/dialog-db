@@ -35,6 +35,11 @@ pub enum TransientNode<Key, Value> {
 }
 
 /// An index node holding live child nodes.
+///
+/// An index carries no separator of its own: its separator is by definition
+/// its first child's separator (the seam at any node's left edge is the seam
+/// at its leftmost leaf's left edge), so it is derived on demand via
+/// [`TransientNode::separator`].
 #[derive(Debug)]
 pub struct TransientIndex<Key, Value> {
     /// The child nodes, each persistent or transient.
@@ -46,32 +51,29 @@ pub struct TransientIndex<Key, Value> {
 pub struct TransientSegment<Key, Value> {
     /// The key-value entries stored in this segment.
     pub entries: Vec<Entry<Key, Value>>,
+    /// The separator at this segment's left edge: the shortest byte string
+    /// above everything left of the seam and at or below this segment's
+    /// first key. Empty for the tree's global leftmost segment. This is the
+    /// ground truth every index level above derives its separators from.
+    pub separator: Vec<u8>,
 }
 
-impl<Key, Value> TransientIndex<Key, Value>
-where
-    Key: self::Key,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
-    Value: self::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-{
-    /// Returns the upper bound key of this index, the bound of its last child.
+impl<Key, Value> TransientNode<Key, Value> {
+    /// The separator at this node's left edge.
     ///
-    /// Errors if the index is empty (which violates the node invariant) or if a
-    /// persistent child's bound cannot be recovered.
-    pub fn upper_bound(&self) -> Result<Key, DialogSearchTreeError> {
-        self.children
-            .last()
-            .ok_or_else(|| DialogSearchTreeError::Node("Index was unexpectedly empty".into()))?
-            .upper_bound()
+    /// A segment stores it; an index derives it from its first child (the
+    /// seam at a node's left edge is its leftmost leaf's seam, so the same
+    /// string propagates upward unchanged). Errors on an empty index, which
+    /// violates the node invariant.
+    pub fn separator(&self) -> Result<&[u8], DialogSearchTreeError> {
+        match self {
+            TransientNode::Segment(segment) => Ok(segment.separator.as_slice()),
+            TransientNode::Index(index) => index
+                .children
+                .first()
+                .ok_or_else(|| DialogSearchTreeError::Node("Index was unexpectedly empty".into()))?
+                .separator(),
+        }
     }
 }
 
@@ -175,18 +177,13 @@ where
             .as_index()?
             .links
             .iter()
-            .map(|link| Ok(Node::Persistent(into_owned::<Link<Key>>(link)?)))
+            .map(|link| Ok(Node::Persistent(into_owned::<Link>(link)?)))
             .collect::<Result<Vec<Node<Key, Value>>, DialogSearchTreeError>>()?;
         Ok(TransientIndex { children })
     }
 }
 
-/// Opens a [`PersistentNode`] one level into its editable [`TransientNode`]
-/// form: an index becomes a [`TransientIndex`] whose children stay
-/// [`Node::Persistent`] references, and a segment becomes a [`TransientSegment`]
-/// with its entries decoded to owned form. Deeper nodes are opened lazily as
-/// edits descend.
-impl<Key, Value> TryFrom<&PersistentNode<Key, Value>> for TransientNode<Key, Value>
+impl<Key, Value> TransientNode<Key, Value>
 where
     Key: self::Key,
     Key::Archived: for<'a> CheckBytes<
@@ -201,9 +198,21 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
 {
-    type Error = DialogSearchTreeError;
-
-    fn try_from(node: &PersistentNode<Key, Value>) -> Result<Self, Self::Error> {
+    /// Opens a [`PersistentNode`] one level into its editable
+    /// [`TransientNode`] form: an index becomes a [`TransientIndex`] whose
+    /// children stay [`Node::Persistent`] references (their links carry their
+    /// separators), and a segment becomes a [`TransientSegment`] with its
+    /// entries decoded to owned form. Deeper nodes are opened lazily as edits
+    /// descend.
+    ///
+    /// `separator` is the seam at the opened node's left edge, taken from the
+    /// link the caller followed to reach it (the empty separator for a root).
+    /// A segment stores it; an index needs none of its own, since its
+    /// separator is derived from its first child.
+    pub fn open(
+        node: &PersistentNode<Key, Value>,
+        separator: Vec<u8>,
+    ) -> Result<Self, DialogSearchTreeError> {
         match node.body()? {
             ArchivedNodeBody::Index(_) => {
                 Ok(TransientNode::Index(TransientNode::open_index(node)?))
@@ -214,7 +223,10 @@ where
                     .iter()
                     .map(into_owned)
                     .collect::<Result<Vec<Entry<Key, Value>>, DialogSearchTreeError>>()?;
-                Ok(TransientNode::Segment(TransientSegment { entries }))
+                Ok(TransientNode::Segment(TransientSegment {
+                    entries,
+                    separator,
+                }))
             }
         }
     }
@@ -261,7 +273,7 @@ where
                     .children
                     .into_iter()
                     .map(|child| child.into_link(delta))
-                    .collect::<Result<Vec<Link<Key>>, DialogSearchTreeError>>()?;
+                    .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
                 PersistentNodeBody::try_from(links)?
             }
         };
@@ -289,65 +301,17 @@ where
     }
 }
 
-/// Groups a flat, ordered list of children into nodes by the canonical cut
-/// rule: a group ends at the first child whose rank exceeds `level_threshold`.
-///
-/// `level_threshold` is `BOTTOM_RANK + level` for the level being built. This
-/// is the canonical cut rule applied while shaping a level; here it returns the
-/// children partitioned into groups (the leftmost-to-rightmost runs) rather than
-/// serialized nodes, so callers can wrap each run in the appropriate transient
-/// node.
-pub(crate) fn group_by_rank<Child>(
-    children: Vec<(Child, Rank)>,
-    level_threshold: Rank,
-) -> Vec<Vec<Child>> {
-    let mut groups: Vec<Vec<Child>> = vec![];
-    let mut pending: Vec<Child> = vec![];
-
-    for (child, rank) in children {
-        pending.push(child);
-        if rank > level_threshold {
-            groups.push(std::mem::take(&mut pending));
-        }
-    }
-
-    if !pending.is_empty() {
-        groups.push(pending);
-    }
-
-    groups
-}
-
-/// Computes the rank of a child node from its upper-bound key.
-pub(crate) fn rank_of_node<Key, Value, D>(
-    node: &Node<Key, Value>,
-) -> Result<Rank, DialogSearchTreeError>
-where
-    Key: self::Key,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
-    Value: self::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    D: Distribution,
-{
-    let bound = node.upper_bound()?;
-    Ok(D::rank(bound.as_ref()))
-}
-
 /// Regroups an ordered list of child nodes into index nodes by the canonical
 /// cut rule for the given `level` (its threshold is `BOTTOM_RANK + level`).
 ///
-/// Each child is ranked by its upper-bound key; a group ends at the first child
-/// whose rank exceeds the threshold. Returns one [`Node::Transient`] index per
-/// group. This is the index-level analogue of regrouping a segment's entries,
-/// applied after an edit changes a node's child list.
+/// Each child is ranked by the seam coin over its separator; a child whose
+/// rank exceeds the threshold starts a new group (the cut falls on the seam
+/// at the child's left edge). Because a node's separator equals its leftmost
+/// leaf seam's separator, the same string is ranked at every level a seam
+/// punches through, which is the rank recursion fed separator strings instead
+/// of full keys. Returns one [`Node::Transient`] index per group; each
+/// group's own separator is derived from its first child, so regrouping
+/// never recomputes a separator.
 pub(crate) fn regroup_children<Key, Value, D>(
     children: Vec<Node<Key, Value>>,
     level: Rank,
@@ -367,27 +331,42 @@ where
     >,
     D: Distribution,
 {
-    let ranked = children
-        .into_iter()
-        .map(|child| {
-            let rank = rank_of_node::<Key, Value, D>(&child)?;
-            Ok((child, rank))
-        })
-        .collect::<Result<Vec<(Node<Key, Value>, Rank)>, DialogSearchTreeError>>()?;
+    let threshold = BOTTOM_RANK + level;
+    let mut groups: Vec<Node<Key, Value>> = vec![];
+    let mut pending: Vec<Node<Key, Value>> = vec![];
 
-    Ok(group_by_rank(ranked, BOTTOM_RANK + level)
-        .into_iter()
-        .map(|group| TransientNode::Index(TransientIndex { children: group }).into())
-        .collect())
+    for child in children {
+        let rank = D::seam_rank(child.separator()?);
+        if rank > threshold && !pending.is_empty() {
+            groups.push(TransientNode::Index(TransientIndex {
+                children: std::mem::take(&mut pending),
+            })
+            .into());
+        }
+        pending.push(child);
+    }
+
+    if !pending.is_empty() {
+        groups.push(TransientNode::Index(TransientIndex { children: pending }).into());
+    }
+
+    Ok(groups)
 }
 
 /// Regroups an ordered list of entries into leaf segments by the canonical cut
-/// rule at level 0 (threshold [`BOTTOM_RANK`]).
+/// rule at level 0 (threshold [`BOTTOM_RANK`]): a segment ends at the first
+/// entry whose leaf-coin rank exceeds the threshold.
 ///
-/// Each entry is ranked by its key; a group ends at the first entry whose rank
-/// exceeds the threshold. Returns one [`Node::Transient`] segment per group.
+/// `floor` is the separator at the left edge of the run (the edited
+/// segment's previous separator). The first produced segment re-derives its
+/// separator from its (possibly changed) first key against that floor; every
+/// interior seam is fresh, with both adjacent keys in hand, so its separator
+/// is computed directly. Returns one [`Node::Transient`] segment per group;
+/// an empty entry list produces no groups (the caller propagates the removal,
+/// and with it the floor, per the boundary-delete paths).
 pub(crate) fn regroup_entries<Key, Value, D>(
     entries: Vec<Entry<Key, Value>>,
+    floor: Vec<u8>,
 ) -> Vec<Node<Key, Value>>
 where
     Key: self::Key,
@@ -395,18 +374,53 @@ where
     Value: self::Value,
     D: Distribution,
 {
-    let ranked = entries
-        .into_iter()
-        .map(|entry| {
-            let rank = D::rank(entry.key.as_ref());
-            (entry, rank)
-        })
-        .collect::<Vec<(Entry<Key, Value>, Rank)>>();
+    let mut groups: Vec<Node<Key, Value>> = vec![];
+    let mut pending: Vec<Entry<Key, Value>> = vec![];
+    // The last key of the previously sealed group; None while sealing the
+    // first group, whose separator comes from the floor instead.
+    let mut previous_last: Option<Key> = None;
 
-    group_by_rank(ranked, BOTTOM_RANK)
-        .into_iter()
-        .map(|group| TransientNode::Segment(TransientSegment { entries: group }).into())
-        .collect()
+    let seal = |pending: &mut Vec<Entry<Key, Value>>,
+                    previous_last: &mut Option<Key>,
+                    groups: &mut Vec<Node<Key, Value>>| {
+        let entries = std::mem::take(pending);
+        let first = entries
+            .first()
+            .expect("groups are sealed only when non-empty")
+            .key
+            .clone();
+        let last = entries
+            .last()
+            .expect("groups are sealed only when non-empty")
+            .key
+            .clone();
+        let separator = match previous_last.as_ref() {
+            None => D::reseparate(first.as_ref(), &floor),
+            Some(previous) => D::separator(previous.as_ref(), first.as_ref()),
+        };
+        *previous_last = Some(last);
+        groups.push(
+            TransientNode::Segment(TransientSegment {
+                entries,
+                separator,
+            })
+            .into(),
+        );
+    };
+
+    for entry in entries {
+        let rank = D::rank(entry.key.as_ref());
+        pending.push(entry);
+        if rank > BOTTOM_RANK {
+            seal(&mut pending, &mut previous_last, &mut groups);
+        }
+    }
+
+    if !pending.is_empty() {
+        seal(&mut pending, &mut previous_last, &mut groups);
+    }
+
+    groups
 }
 
 #[cfg(test)]
@@ -441,7 +455,7 @@ mod tests {
             })
             .collect();
 
-        regroup_entries::<[u8; 4], Vec<u8>, Geometric>(entries)
+        regroup_entries::<[u8; 4], Vec<u8>, Geometric>(entries, Vec::new())
             .into_iter()
             .map(|node| Ok(node.into_transient()?.as_segment()?.entries.clone()))
             .collect()
