@@ -233,14 +233,33 @@ any head's ancestry is a prefix; the watermark loses nothing. (Edition
 gaps from merges are harmless: gap editions were never minted by that
 origin, so `observes` is never asked about them.)
 
-The context is a pure function of the head, derived by walking the
-revision records in the head's ancestry (`history::context_of`), and
-cacheable by head hash. Its size is one entry per origin (devices,
-authors, branches), never growing with writes. Persisting it in the
-tree as a `dialog.`-reserved record, maintained incrementally
-(`context(commit) = context(parent) + own version`, `context(merge) =
-union(parents) + own version`), is the main deferred optimization: pull
-currently recomputes it per merge, an O(ancestry) walk.
+The context is a pure function of the head. Its size is one entry per
+origin (devices, authors, branches), never growing with writes. It is
+obtained in one of two ways:
+
+- **The walk** (`history::context_of`): fold every revision record in
+  the head's ancestry, O(ancestry) reads, each with an issuer-signature
+  verification (about 50us of CPU per ancestry revision). This is the
+  cold-start path only.
+- **The memo** (`ContextCache`, one per branch handle, shared by
+  clones): contexts are keyed by head version and never invalidate (a
+  fixed head's ancestry is immutable). Pull answers the local context
+  from the memo and writes the successor head's context back, derived
+  incrementally at zero extra reads: `merge::observe_revisions` folds
+  the version of every revision record riding the delta while the data
+  differential streams anyway (those records are exactly the
+  upstream-ancestry revisions the receiver may lack, since records at
+  or below the sync base arrived with the pulls that established the
+  base), plus the head's own version. Commit and blob writes extend the
+  memo by one version. `it_maintains_the_context_memo_incrementally`
+  pins memo-equals-walk across adopt, commit, and merge.
+
+So the walk is paid at most once per branch handle (the first pull of a
+session onto pre-existing history); every later pull is O(delta).
+Persisting the vector in the tree as a `dialog.`-reserved record stays
+deferred and would remove even the cold-start walk (fresh replicas
+would read it in one fetch, verified opportunistically against the
+signed head's ancestry).
 
 A claim that is observed but not live in the active index was covered
 by some record in the log. That is the whole deletion story: "have I
@@ -456,6 +475,65 @@ thing a partial replica must not do is prune history-region entries;
 horizon GC is a future story and needs a published floor below which
 fresh replicas bootstrap by adopting state rather than merging.
 
+## Measured costs
+
+Measured by the read-amplification harness
+(`dialog-repository`, `read_amplification` module; an ignored test —
+see its module docs for the invocation). Costs are reported in **block
+reads** (archive `Get` executions) and wall time, on an in-memory
+backend in release mode, across history depths and the three sync
+shapes. Reads are the currency that survives a backend change;
+IndexedDB and network multipliers apply to them directly.
+
+Current implementation (context memo primed, the steady state):
+
+```text
+depth   scenario                    block reads   wall ms
+  100   no-op tick                            0         0
+  100   fast-forward (1 commit)              24         1
+  100   merge (both sides moved)             21         2
+ 1000   fast-forward (1 commit)              26         8
+ 1000   merge (both sides moved)             29         8
+10000   initial pull (adopt all)            552       519
+10000   no-op tick                            0         0
+10000   fast-forward (1 commit)              34        12
+10000   merge (both sides moved)             33        14
+10000   context_of walk (cold start)         50       500
+```
+
+The pre-memo implementation paid the `context_of` walk on every
+non-no-op pull: 548ms per fast-forward and 557ms per merge at depth
+10000 (about 50us of CPU per ancestry revision, dominated by the
+per-record issuer-signature verification). The memo retires that from
+steady state; the walk survives as the last row, paid at most once per
+branch handle.
+
+Against the pre-observed-remove implementation (the replay-direction
+merge, measured at `43fdb450` with the same harness): merges are at
+parity (33 reads / 19ms at depth 10000 there vs 33 / 14ms here), and
+the no-op tick is free in both. Two paths regressed, deliberately:
+
+- **Fast-forward** was a zero-work root adoption under the old replay
+  direction (0 reads / 0ms); it now integrates the upstream delta onto
+  the local tree (34 reads / 12ms at depth 10000), which is what runs
+  the deletion screen. That is the price of deterministic
+  non-resurrection; the old direction resurrected deleted facts on
+  roughly 40 percent of empty-base merges.
+- **Initial adoption** of a deep history was likewise free under the
+  old direction (adopt the root, fetch blocks lazily) and now
+  materializes the tree through the screen plus one cold context walk
+  (552 reads / 519ms at depth 10000, once per fresh replica). If this
+  matters for clone-like flows, the empty-local-empty-base case can
+  adopt the root directly — with an empty receiver the screen is
+  provably a no-op — at the cost of keeping replication lazy; noted,
+  not done.
+
+To observe these costs in an embedder: wrap the environment in the
+`Counting` provider (`dialog-repository`, `helpers` feature), which
+tallies effect executions by type — `block_reads()` around a
+`pull()` plus a clock is the whole recipe. Once the workspace adopts a
+tracing crate, a span around `Pull::prepare` is the natural home.
+
 ## Invariants
 
 Safety-critical properties every change to this machinery must
@@ -486,10 +564,11 @@ preserve:
 ## Deferred work
 
 1. **Persist the causal context in the tree** as a `dialog.`-reserved
-   record maintained incrementally, replacing the per-pull O(ancestry)
-   `context_of` walk; fresh partial replicas would obtain it in one
-   lazy fetch, verified opportunistically against the signed head's
-   ancestry.
+   record maintained incrementally. The in-memory memo already retires
+   the O(ancestry) walk from steady state; persisting removes the
+   remaining cold-start walk (once per branch handle) and lets fresh
+   partial replicas obtain the vector in one lazy fetch, verified
+   opportunistically against the signed head's ancestry.
 2. **Fold `Replace`'s local hard-delete into R3** so local and remote
    supersession run through one code path (remote coverage already
    flows through R3).
