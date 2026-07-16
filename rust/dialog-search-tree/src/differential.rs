@@ -17,6 +17,7 @@
 //!   source tree (used to upload exactly the missing blocks to a remote).
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
@@ -113,11 +114,40 @@ where
             SparseTreeNode::Ref(link) => &link.node,
         }
     }
+
+    /// Whether this node is already loaded and is an index: expanding it
+    /// costs no storage read, so the comparison loop prefers such nodes when
+    /// it must peel a side to make progress.
+    fn is_loaded_index(&self) -> bool {
+        match self {
+            SparseTreeNode::Loaded { node, .. } => {
+                matches!(node.body(), Ok(ArchivedNodeBody::Index(_)))
+            }
+            SparseTreeNode::Ref(_) => false,
+        }
+    }
+
+    /// Whether this node is a loaded index with a direct child of the given
+    /// hash. A free containment peek: when one side's node IS a child of the
+    /// other side's, expanding the container guarantees the pair prunes on
+    /// the next pass without either subtree being read.
+    fn links_contain(&self, hash: &Blake3Hash) -> bool {
+        match self {
+            SparseTreeNode::Loaded { node, .. } => match node.body() {
+                Ok(ArchivedNodeBody::Index(index)) => index
+                    .links
+                    .iter()
+                    .any(|link| <&Blake3Hash>::from(&link.node) == hash),
+                _ => false,
+            },
+            SparseTreeNode::Ref(_) => false,
+        }
+    }
 }
 
 /// A sparse, lazily loaded view over one side of a tree comparison.
 ///
-/// Holds the current frontier of nodes sorted by upper bound (a mix of
+/// Holds the current frontier of nodes sorted by lower bound (a mix of
 /// loaded nodes and unloaded references) plus every index node that was
 /// loaded and expanded along the way (the novel interior nodes of this
 /// side).
@@ -131,6 +161,12 @@ where
     storage: &'a ContentAddressedStorage<Backend>,
     nodes: Vec<SparseTreeNode<Key, Value>>,
     expanded: Vec<PersistentNode<Key, Value>>,
+    /// Every hash that ever entered this side's frontier, including nodes
+    /// pruned or expanded away. Content addressing makes this the record of
+    /// which subtrees this side is known to possess; the other side's
+    /// novelty report filters against it, so a shared node that had to be
+    /// expanded for alignment is still never reported novel.
+    seen: HashSet<Blake3Hash>,
 }
 
 impl<'a, Key, Value, Backend> SparseTree<'a, Key, Value, Backend>
@@ -172,19 +208,31 @@ where
             vec![]
         } else {
             let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
-            // A root sits at the tree's global leftmost seam: the empty
-            // separator. Both sides of a comparison agree on it, so equal
-            // roots line up immediately.
-            vec![SparseTreeNode::Loaded {
-                node,
-                lower_bound: Vec::new(),
-            }]
+            // A root's frontier bound must be the separator the SAME subtree
+            // would carry as a link child on the other side, or equal
+            // subtrees at different heights never line up. That propagated
+            // separator is the root's first link's separator (a node's
+            // separator is its leftmost descendant's). Under the production
+            // rule the global leftmost chain is empty everywhere, so this
+            // is the empty bound; a distribution with a different
+            // reseparation rule (the test simulator) still aligns.
+            let lower_bound = match node.body()? {
+                ArchivedNodeBody::Index(index) => index
+                    .links
+                    .first()
+                    .map(|link| link.separator.as_slice().to_vec())
+                    .unwrap_or_default(),
+                ArchivedNodeBody::Segment(_) => Vec::new(),
+            };
+            vec![SparseTreeNode::Loaded { node, lower_bound }]
         };
 
+        let seen = nodes.iter().map(|node| node.hash().clone()).collect();
         Ok(SparseTree {
             storage,
             nodes,
             expanded: vec![],
+            seen,
         })
     }
 
@@ -220,6 +268,9 @@ where
                     .iter()
                     .map(|link| Ok(SparseTreeNode::Ref(into_owned::<Link>(link)?)))
                     .collect::<Result<Vec<_>, DialogSearchTreeError>>()?;
+                for child in &children {
+                    self.seen.insert(child.hash().clone());
+                }
 
                 self.expanded.push(node);
                 self.nodes.splice(offset..offset + 1, children);
@@ -280,64 +331,21 @@ where
     /// Removes nodes that are shared between `self` and `other`, keeping
     /// only nodes that differ.
     ///
-    /// Both frontiers are sorted by lower bound (separator). Two nodes are
-    /// shared when their separators are equal and their hashes are equal;
-    /// canonical trees assign the same separator to the same seam, so such
-    /// pairs are removed from both sides without ever being loaded. This is
-    /// the step that realizes the read-frugality contract. (A subtree whose
-    /// left neighbor changed can carry a different separator while being
-    /// byte-identical; it is then expanded one level before its children
-    /// prune, the documented blunting.)
+    /// Identity is the content hash alone: in a content-addressed canonical
+    /// tree, an equal hash IS the same entries under the same keys, so a
+    /// matched pair contributes nothing to the difference no matter where
+    /// each side's frontier places it (subtrees line up across height
+    /// mismatches, and a subtree whose separator shifted with a neighbor
+    /// edit still prunes). Within one tree, sibling key ranges are disjoint,
+    /// so a hash cannot recur in a frontier and set matching is exact. This
+    /// is the step that realizes the read-frugality contract: matched nodes
+    /// are discarded while still unloaded.
     fn prune(&mut self, other: &mut Self) {
-        let left = &mut self.nodes;
-        let right = &mut other.nodes;
-
-        let mut at_left = 0;
-        let mut at_right = 0;
-        let mut to_left = 0;
-        let mut to_right = 0;
-
-        while at_left < left.len() && at_right < right.len() {
-            match left[at_left]
-                .lower_bound()
-                .cmp(right[at_right].lower_bound())
-            {
-                Ordering::Less => {
-                    left.swap(to_left, at_left);
-                    to_left += 1;
-                    at_left += 1;
-                }
-                Ordering::Greater => {
-                    right.swap(to_right, at_right);
-                    to_right += 1;
-                    at_right += 1;
-                }
-                Ordering::Equal => {
-                    if left[at_left].hash() != right[at_right].hash() {
-                        left.swap(to_left, at_left);
-                        right.swap(to_right, at_right);
-                        to_left += 1;
-                        to_right += 1;
-                    }
-                    at_left += 1;
-                    at_right += 1;
-                }
-            }
-        }
-
-        while at_left < left.len() {
-            left.swap(to_left, at_left);
-            to_left += 1;
-            at_left += 1;
-        }
-        while at_right < right.len() {
-            right.swap(to_right, at_right);
-            to_right += 1;
-            at_right += 1;
-        }
-
-        left.truncate(to_left);
-        right.truncate(to_right);
+        let left: HashSet<Blake3Hash> = self.nodes.iter().map(|node| node.hash().clone()).collect();
+        let right: HashSet<Blake3Hash> =
+            other.nodes.iter().map(|node| node.hash().clone()).collect();
+        self.nodes.retain(|node| !right.contains(node.hash()));
+        other.nodes.retain(|node| !left.contains(node.hash()));
     }
 
     /// Streams the entries of every node remaining in the frontier, in key
@@ -439,7 +447,7 @@ where
     /// Computes the difference between two trees.
     ///
     /// Both trees are explored level by level in lockstep. At every step,
-    /// nodes whose upper bound and hash match on both sides are discarded
+    /// nodes whose content hashes match on both sides are discarded
     /// without being loaded; only nodes whose hashes differ (or whose key
     /// ranges do not line up) are expanded. The number of reads is therefore
     /// proportional to the number of differing nodes, never to the size of
@@ -533,11 +541,13 @@ where
                     storage: source_storage,
                     nodes: vec![],
                     expanded: vec![],
+                    seen: HashSet::new(),
                 },
                 target: SparseTree {
                     storage: target_storage,
                     nodes: vec![],
                     expanded: vec![],
+                    seen: HashSet::new(),
                 },
             });
         }
@@ -585,13 +595,56 @@ where
                     }
                     Ordering::Equal => {
                         if source.nodes[source_idx].hash() != target.nodes[target_idx].hash() {
-                            if source.expand_at(&source_bound).await? {
+                            // Equal lower bounds with differing hashes may be
+                            // the same region at different heights: every
+                            // leftmost spine shares its ancestor's lower
+                            // bound. Peel ONE side per pass, so the taller
+                            // side's child can line up with (and prune) the
+                            // other side's node without it ever being read.
+                            // Which side to peel, cheapest evidence first:
+                            // a loaded index that directly links the other
+                            // side's hash is expanded for a guaranteed prune;
+                            // a loaded index expands without a storage read;
+                            // otherwise the node spanning the wider key range
+                            // (per its successor's bound; the frontier tail
+                            // is unbounded) is the one containing the other,
+                            // so it is peeled first.
+                            let source_node = &source.nodes[source_idx];
+                            let target_node = &target.nodes[target_idx];
+                            let source_first = if source_node.links_contain(target_node.hash()) {
+                                true
+                            } else if target_node.links_contain(source_node.hash()) {
+                                false
+                            } else if source_node.is_loaded_index() != target_node.is_loaded_index()
+                            {
+                                source_node.is_loaded_index()
+                            } else if source_node.is_loaded_index() {
+                                false
+                            } else {
+                                let source_next =
+                                    source.nodes.get(source_idx + 1).map(|n| n.lower_bound());
+                                let target_next =
+                                    target.nodes.get(target_idx + 1).map(|n| n.lower_bound());
+                                match (source_next, target_next) {
+                                    (None, Some(_)) => true,
+                                    (Some(_), None) => false,
+                                    (Some(source_next), Some(target_next)) => {
+                                        source_next > target_next
+                                    }
+                                    (None, None) => false,
+                                }
+                            };
+                            let (first, first_bound, second, second_bound) = if source_first {
+                                (&mut source, &source_bound, &mut target, &target_bound)
+                            } else {
+                                (&mut target, &target_bound, &mut source, &source_bound)
+                            };
+                            if first.expand_at(first_bound).await? {
                                 expanded = true;
+                                break;
                             }
-                            if target.expand_at(&target_bound).await? {
+                            if second.expand_at(second_bound).await? {
                                 expanded = true;
-                            }
-                            if expanded {
                                 break;
                             }
                         }
@@ -712,11 +765,21 @@ where
         &'a self,
     ) -> impl Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>> + 'a {
         try_stream! {
+            // A target node whose hash the source side has seen (in its
+            // frontier, pruned or expanded) is shared, not novel, even when
+            // frontier alignment forced it to be expanded before its match
+            // surfaced.
             for node in &self.target.expanded {
+                if self.source.seen.contains(node.hash()) {
+                    continue;
+                }
                 yield node.clone();
             }
 
             for sparse_node in &self.target.nodes {
+                if self.source.seen.contains(sparse_node.hash()) {
+                    continue;
+                }
                 let node = match sparse_node {
                     SparseTreeNode::Loaded { node, .. } => node.clone(),
                     SparseTreeNode::Ref(link) => {
@@ -1642,10 +1705,16 @@ mod tests {
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
-        // Source: segments a, e - root loaded, both segments skipped (shared or no match)
+        // Source: segment a skipped (shared); segment e is peeled by the
+        // equal-bound alignment below.
+        // Separator links carry lower bounds only, so a frontier node's
+        // extent is unknowable until peeled: at an equal-bound pair of
+        // unloaded refs the comparison must load the source side too (it
+        // could be a taller index hiding the target's match), one exploratory
+        // read the old full-key bounds could rule out. Documented blunting.
         let source = tree_spec![
             [        ..e]
-            [(..a), (..e)]
+            [(..a),  ..e]
         ]
         .build(storage_source)
         .await
@@ -1705,10 +1774,12 @@ mod tests {
         let storage_source = journaled_storage(&backend);
         let storage_target = journaled_storage(&backend);
 
-        // Shallow source (height 1) - root loaded, segments skipped
+        // Shallow source (height 1): root loaded, shared segment a skipped;
+        // segment e is peeled by the equal-bound alignment (see the blunting
+        // note in it_excludes_shared_subtrees_from_novel_nodes).
         let source = tree_spec![
             [         ..e]
-            [(..a), (..e)]
+            [(..a),  ..e]
         ]
         .build(storage_source)
         .await
@@ -1833,9 +1904,12 @@ mod tests {
         let storage_target = journaled_storage(&backend);
 
         // Source: root loaded, segments skipped (disjoint so no match possible)
+        // Segment a is never touched; the frontier tail e must be peeled
+        // (its extent past the target's start is unknowable from a lower
+        // bound alone; see it_excludes_shared_subtrees_from_novel_nodes).
         let source = tree_spec![
             [        ..e]
-            [(..a), (..e)]
+            [(..a),  ..e]
         ]
         .build(storage_source)
         .await
@@ -1978,10 +2052,13 @@ mod tests {
         // Left subtree (..f, ..m) should be shared, so pruned
         // Right subtree (..t, ..z) differs - but source segments don't need loading
         // for novel_nodes (we only care about target nodes)
+        // Segment t is peeled by the equal-bound alignment against the
+        // target's replacement segment (see the blunting note in
+        // it_excludes_shared_subtrees_from_novel_nodes).
         let source = tree_spec![
             [                     ..z]
             [       (..m),        ..z]
-            [(..f), (..m), (..t), ..z]
+            [(..f), (..m),  ..t,  ..z]
         ]
         .build(storage_source)
         .await

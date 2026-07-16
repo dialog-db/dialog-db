@@ -707,11 +707,13 @@ impl TreeDescriptor {
         let node = load_node::<SpecKey, Vec<u8>, JournaledBackend>(storage, hash).await?;
 
         let upper_bound: SpecKey = match node.body()? {
-            ArchivedNodeBody::Segment(segment) => {
-                segment.upper_bound().map(into_owned).transpose()?.ok_or_else(|| {
+            ArchivedNodeBody::Segment(segment) => segment
+                .upper_bound()
+                .map(into_owned)
+                .transpose()?
+                .ok_or_else(|| {
                     DialogSearchTreeError::Node("Segment was unexpectedly empty".into())
-                })?
-            }
+                })?,
             ArchivedNodeBody::Index(index) => {
                 let mut last: Option<SpecKey> = None;
                 for link in index.links.iter() {

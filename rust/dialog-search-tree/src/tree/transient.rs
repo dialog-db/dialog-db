@@ -156,14 +156,23 @@ where
             // The first entry of an empty tree becomes a lone segment wrapped in
             // a single-child index, matching the canonical root invariant that
             // the root is always an index.
-            None => TransientNode::Index(TransientIndex {
-                children: vec![Node::Transient(TransientNode::Segment(TransientSegment {
-                    entries: vec![entry],
-                    // The first segment of a tree sits at the global leftmost
-                    // seam: the empty separator.
-                    separator: Vec::new(),
-                }))],
-            }),
+            None => {
+                // The first segment of a tree sits at the global leftmost
+                // seam. Its separator is seeded through the distribution's
+                // own rule (re-derived over the empty floor) rather than
+                // hardcoded: later min-moves refresh it with `reseparate`,
+                // and a seed the rule would not itself reproduce makes the
+                // tree's bytes depend on edit history. Under the production
+                // rule the empty floor is a fixed point, so this IS the
+                // empty separator there.
+                let separator = D::reseparate(entry.key.as_ref(), &[]);
+                TransientNode::Index(TransientIndex {
+                    children: vec![Node::Transient(TransientNode::Segment(TransientSegment {
+                        entries: vec![entry],
+                        separator,
+                    }))],
+                })
+            }
             Some(root) => Edit::Upsert(entry)
                 .apply::<Backend, D>(root, &accessor)
                 .await?
@@ -539,8 +548,65 @@ where
         //     it is canonical unless it empties the leaf (which must remove the
         //     segment from its parent).
         //
+        // An orphan append: a non-boundary key that sorts after the segment's
+        // terminating boundary. Under lower-bound routing a key in the gap
+        // between two segments routes LEFT (it is below the right segment's
+        // separator), so it lands past the boundary that closes the left
+        // segment. No cut is justified after a rank-1 key, so the appended
+        // entry belongs with the right neighbor's leftmost leaf: the same
+        // rightward fusion a boundary delete needs for its orphaned tail.
+        let is_orphan_append = match (&self, follow(&mut root, &path)?) {
+            (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
+                D::rank(entry.key.as_ref()) <= BOTTOM_RANK
+                    && segment
+                        .entries
+                        .last()
+                        .map(|last| {
+                            entry.key > last.key && D::rank(last.key.as_ref()) > BOTTOM_RANK
+                        })
+                        .unwrap_or(false)
+            }
+            _ => false,
+        };
+
+        // A min-move edit replaces the segment's first key (an insert sorting
+        // before it, or a delete of it), which rewrites the separator at the
+        // segment's left edge. When the new separator's seam rank no longer
+        // sustains an index-level cut the old one punched, that cut must
+        // dissolve, which merges the edited subtree LEFTWARD across its
+        // parent seam: the local re-shape cannot see the left sibling, so
+        // the left neighbor's spine must be lifted and fused, mirroring the
+        // boundary-delete machinery on the right edge. A rank rise needs no
+        // neighbor (a new cut is a split, handled by the local regroup), and
+        // the global leftmost seam (the empty separator) is a fixed point of
+        // the floor rule, so it can never trigger this.
+        let dissolves_left_cut = match (&self, follow(&mut root, &path)?) {
+            (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
+                match segment.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                    Err(0) => seam_cut_dissolves::<D>(
+                        &segment.separator,
+                        &D::reseparate(entry.key.as_ref(), &segment.separator),
+                    ),
+                    _ => false,
+                }
+            }
+            (Edit::Delete(key), TransientNode::Segment(segment)) => {
+                match segment.entries.binary_search_by(|e| e.key.cmp(key)) {
+                    Ok(0) if segment.entries.len() > 1 => seam_cut_dissolves::<D>(
+                        &segment.separator,
+                        &D::reseparate(segment.entries[1].key.as_ref(), &segment.separator),
+                    ),
+                    // A single-entry segment empties outright; the joined
+                    // seam is evaluated below, once the right neighbor's
+                    // minimum is reachable.
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+
         // Anything not provably canonical falls through to the re-shaping paths.
-        if !is_boundary_delete {
+        if !is_boundary_delete && !is_orphan_append && !dissolves_left_cut {
             let TransientNode::Segment(segment) = follow(&mut root, &path)? else {
                 return Err(DialogSearchTreeError::Node(
                     "Path did not reach a segment".into(),
@@ -548,11 +614,10 @@ where
             };
             if fast_path_keeps_canonical::<Key, Value, D>(&segment.entries, &self) {
                 apply_to_segment(&mut segment.entries, self);
-                // The edit may have replaced the segment's first key (an
-                // insert before it, or a delete of it), which moves the seam
-                // at the segment's left edge. Re-derive the separator from
-                // the new minimum against the old separator as the floor;
-                // the rule is idempotent when the minimum did not change.
+                // The seam at the segment's left edge moves with its first
+                // key. Re-derive the separator from the new minimum against
+                // the old separator as the floor; the rule is idempotent
+                // when the minimum did not change.
                 if let Some(first) = segment.entries.first() {
                     segment.separator = D::reseparate(first.key.as_ref(), &segment.separator);
                 }
@@ -560,8 +625,83 @@ where
             }
         }
 
-        let neighbor_path = if is_boundary_delete {
+        let neighbor_path = if is_boundary_delete || is_orphan_append {
             lift_right_neighbor_spine(&mut root, &path, accessor).await?
+        } else {
+            None
+        };
+
+        // The right-LCA: the deepest level where the main and right-neighbor
+        // paths diverge (for a boundary delete).
+        let lca_depth = match &neighbor_path {
+            Some(neighbor_path) => Some(
+                path.iter()
+                    .zip(neighbor_path.iter())
+                    .position(|(a, b)| a != b)
+                    .ok_or_else(|| {
+                        DialogSearchTreeError::Node(
+                            "Boundary delete had no diverging neighbor path".into(),
+                        )
+                    })?,
+            ),
+            None => None,
+        };
+
+        // A single-entry boundary delete removes the whole segment, joining
+        // its left seam with the right neighbor's: the joined separator is
+        // re-derived from the neighbor's minimum over the vanished segment's
+        // floor, and its rank may likewise dissolve a punched cut.
+        let dissolves_left_cut = dissolves_left_cut
+            || match &neighbor_path {
+                Some(neighbor_path) => {
+                    let floor = match follow(&mut root, &path)? {
+                        TransientNode::Segment(segment) if segment.entries.len() == 1 => {
+                            Some(segment.separator.clone())
+                        }
+                        _ => None,
+                    };
+                    match floor {
+                        Some(floor) => match follow(&mut root, neighbor_path)? {
+                            TransientNode::Segment(neighbor) => match neighbor.entries.first() {
+                                Some(first) => seam_cut_dissolves::<D>(
+                                    &floor,
+                                    &D::reseparate(first.key.as_ref(), &floor),
+                                ),
+                                None => false,
+                            },
+                            _ => false,
+                        },
+                        None => false,
+                    }
+                }
+                None => false,
+            };
+
+        // Lift the left neighbor's spine and locate the fusion depth: the
+        // deepest ancestor where the edited subtree has a left sibling. For
+        // a boundary delete, a divergence deeper than the right-LCA lies
+        // INSIDE the fused window (the fusion regroups the main subtree's
+        // own left siblings wholesale), so only a crossing at or above the
+        // LCA needs the explicit left fusion.
+        let left_fuse = if dissolves_left_cut {
+            match lift_left_neighbor_spine(&mut root, &path, accessor).await? {
+                Some(left_path) => {
+                    let depth = path
+                        .iter()
+                        .zip(left_path.iter())
+                        .position(|(a, b)| a != b)
+                        .ok_or_else(|| {
+                            DialogSearchTreeError::Node(
+                                "Left fusion had no diverging neighbor path".into(),
+                            )
+                        })?;
+                    match lca_depth {
+                        Some(lca) if depth > lca => None,
+                        _ => Some(depth),
+                    }
+                }
+                None => None,
+            }
         } else {
             None
         };
@@ -569,34 +709,52 @@ where
         // Phase two: synchronous re-shape. The whole touched region is transient, so
         // the re-shape needs no further loads and runs without any borrow spanning
         // an await.
-        let replacement = match &neighbor_path {
-            Some(neighbor_path) => {
-                // A boundary delete: the LCA is the deepest level where the main
-                // and neighbor paths diverge. Re-shape the shared prefix down to
-                // the LCA, where the two child subtrees fuse. `self` is not moved
-                // on this arm, so the boundary key is borrowed from it directly.
-                let lca_depth = path
-                    .iter()
-                    .zip(neighbor_path.iter())
-                    .position(|(a, b)| a != b)
-                    .ok_or_else(|| {
-                        DialogSearchTreeError::Node(
-                            "Boundary delete had no diverging neighbor path".into(),
-                        )
-                    })?;
+        let replacement = match (&neighbor_path, lca_depth) {
+            (Some(neighbor_path), Some(lca_depth)) => {
+                // A rightward fusion: re-shape the shared prefix down to the
+                // LCA, where the two child subtrees fuse. A boundary delete
+                // pops its key at the facing leaves; an orphan append is
+                // applied to the leaf up front and nothing is popped.
+                let pop = match self {
+                    Edit::Delete(key) => Some(key),
+                    upsert @ Edit::Upsert(_) => {
+                        let TransientNode::Segment(segment) = follow(&mut root, &path)? else {
+                            return Err(DialogSearchTreeError::Node(
+                                "Path did not reach a segment".into(),
+                            ));
+                        };
+                        apply_to_segment(&mut segment.entries, upsert);
+                        None
+                    }
+                };
                 reshape_fused::<Key, Value, D>(
                     &mut root,
                     &path,
                     neighbor_path,
                     lca_depth,
-                    self.key(),
+                    pop.as_ref(),
                     height,
+                    left_fuse,
                 )?
             }
-            None => reshape_path::<Key, Value, D>(&mut root, &path, self, height)?,
+            _ => reshape_path::<Key, Value, D>(&mut root, &path, self, height, left_fuse)?,
         };
         seal_root::<Key, Value, D>(replacement, height)
     }
+}
+
+/// Whether replacing a seam's separator dissolves an index-level cut the old
+/// separator punched: true when the old seam rank cut at least level 1 and
+/// the new rank is lower. (Punched levels form the range `1..=rank - 2`, so
+/// a drop from any rank of 3 or more removes cuts; a rise only adds them,
+/// which the local regroup realizes as a split without neighbor content.)
+fn seam_cut_dissolves<D>(old_separator: &[u8], new_separator: &[u8]) -> bool
+where
+    D: Distribution,
+{
+    let old_rank = D::seam_rank(old_separator);
+    let new_rank = D::seam_rank(new_separator);
+    old_rank > BOTTOM_RANK + 1 && new_rank < old_rank
 }
 
 /// Walks `root` down the recorded child indices in `path`, lifting the node at
@@ -743,6 +901,82 @@ where
     Ok(Some(neighbor_path))
 }
 
+/// Lifts the right spine of the subtree immediately to the left of `path`, so
+/// a left fusion (a min-move whose seam rank drop dissolves an index cut) can
+/// merge the edited subtree into that neighbor during the re-shape.
+///
+/// The mirror of [`lift_right_neighbor_spine`]: the neighbor is found by
+/// climbing `path` to the deepest ancestor whose descended child has a left
+/// sibling, then walking that sibling's rightmost edge down to its leaf,
+/// lifting each node on the way. Returns the path to the neighbor's rightmost
+/// leaf, or `None` when `path` runs along the tree's leftmost edge.
+async fn lift_left_neighbor_spine<Key, Value, Backend>(
+    root: &mut TransientNode<Key, Value>,
+    path: &[usize],
+    accessor: &Accessor<Backend>,
+) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
+where
+    Key: self::Key
+        + ConditionalSync
+        + 'static
+        + PartialOrd<Key::Archived>
+        + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + ConditionalSync
+        + for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+{
+    let mut neighbor_path: Option<Vec<usize>> = None;
+    for depth in (0..path.len()).rev() {
+        let ancestor = follow(root, &path[..depth])?;
+        if let TransientNode::Index(_) = ancestor
+            && path[depth] > 0
+        {
+            let mut prefix = path[..depth].to_vec();
+            prefix.push(path[depth] - 1);
+            neighbor_path = Some(prefix);
+            break;
+        }
+    }
+
+    let Some(mut neighbor_path) = neighbor_path else {
+        return Ok(None);
+    };
+
+    // Lift the left sibling itself so the rightmost descent below can follow
+    // into it.
+    let sibling = neighbor_path[neighbor_path.len() - 1];
+    let parent = follow(root, &neighbor_path[..neighbor_path.len() - 1])?;
+    lift(&mut parent.as_index_mut()?.children[sibling], accessor).await?;
+
+    // Walk the neighbor subtree's rightmost edge to its leaf, lifting each
+    // node so the whole spine is transient.
+    loop {
+        let node = follow(root, &neighbor_path)?;
+        match node {
+            TransientNode::Index(index) => {
+                let last = index.children.len() - 1;
+                lift(&mut index.children[last], accessor).await?;
+                neighbor_path.push(last);
+            }
+            TransientNode::Segment(_) => break,
+        }
+    }
+
+    Ok(Some(neighbor_path))
+}
+
 /// Re-shapes the path from `node` down to the target leaf after applying `edit`,
 /// returning the canonical run of nodes that should replace `node` in its
 /// parent.
@@ -755,11 +989,16 @@ where
 ///
 /// `height` is the height of `node` (0 for the leaf). A node at height `h`
 /// groups its height-`h - 1` children with the level-`h` threshold.
+///
+/// `left_fuse` names the depth (relative to `node`) of the ancestor at which
+/// the rebuilt run's head must fuse into its left sibling, when the edit
+/// dissolved the cut at the edited subtree's left edge; see [`fuse_left_run`].
 fn reshape_path<Key, Value, D>(
     node: &mut TransientNode<Key, Value>,
     path: &[usize],
     edit: Edit<Key, Value>,
     height: Rank,
+    left_fuse: Option<usize>,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -797,15 +1036,72 @@ where
         }
         Some((&at, rest)) => {
             let child = node.child_mut(at)?;
-            let replacement = reshape_path::<Key, Value, D>(child, rest, edit, height - 1)?;
-            splice_and_regroup::<Key, Value, D>(
-                &mut node.as_index_mut()?.children,
-                at..at + 1,
-                replacement,
-                height,
-            )
+            let replacement = reshape_path::<Key, Value, D>(
+                child,
+                rest,
+                edit,
+                height - 1,
+                left_fuse.and_then(|depth| depth.checked_sub(1)),
+            )?;
+            let children = &mut node.as_index_mut()?.children;
+            if left_fuse == Some(0) {
+                // The replacement's left-edge seam rank dropped: its head
+                // must merge into the left sibling. The edited child is
+                // consumed by its replacement either way.
+                children.remove(at);
+                fuse_left_run::<Key, Value, D>(children, at, replacement, height)
+            } else {
+                splice_and_regroup::<Key, Value, D>(children, at..at + 1, replacement, height)
+            }
         }
     }
+}
+
+/// Splices `run` into `children` at `insert_at` after fusing the run's first
+/// node with the child immediately to the left, then re-cuts the child list.
+///
+/// This realizes a dissolved left-edge cut: the seam at the run's left edge
+/// no longer sustains its index-level boundary, so the neighboring subtrees'
+/// contents are combined level by level ([`fuse_subtrees`] with nothing to
+/// pop) and the pointwise regroup decides every cut afresh; if the seam's
+/// new rank still punches some levels, the regroup simply recreates those
+/// cuts, so an over-wide window is safe. An empty run degenerates to a plain
+/// re-cut.
+fn fuse_left_run<Key, Value, D>(
+    children: &mut Vec<Node<Key, Value>>,
+    insert_at: usize,
+    mut run: Vec<Node<Key, Value>>,
+    height: Rank,
+) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    D: Distribution,
+{
+    if insert_at == 0 {
+        return Err(DialogSearchTreeError::Node(
+            "Left fusion requires a left sibling".into(),
+        ));
+    }
+    if run.is_empty() {
+        return splice_and_regroup::<Key, Value, D>(children, insert_at..insert_at, run, height);
+    }
+
+    let left_sibling = take_transient(children, insert_at - 1)?;
+    let first = run.remove(0).into_transient()?;
+    let mut fused = fuse_subtrees::<Key, Value, D>(left_sibling, first, None, height - 1)?;
+    fused.extend(run);
+    splice_and_regroup::<Key, Value, D>(children, (insert_at - 1)..(insert_at - 1), fused, height)
 }
 
 /// Re-shapes the shared prefix of a boundary delete down to the lowest common
@@ -817,13 +1113,20 @@ where
 /// `path[lca_depth] + 1` (the neighbour subtree) are fused by [`fuse_subtrees`]
 /// into one canonical run that replaces both, then the LCA's child list is
 /// re-cut. The returned run replaces `node` in its parent.
+///
+/// `left_fuse` names the depth (relative to `node`) at which the rebuilt
+/// run's head must additionally fuse into its LEFT sibling (a dissolved
+/// left-edge cut); it is never deeper than the LCA, since divergences below
+/// it lie inside the fused window, whose wholesale regroup re-decides those
+/// cuts anyway.
 fn reshape_fused<Key, Value, D>(
     node: &mut TransientNode<Key, Value>,
     path: &[usize],
     neighbor_path: &[usize],
     lca_depth: usize,
-    key: &Key,
+    key: Option<&Key>,
     height: Rank,
+    left_fuse: Option<usize>,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
@@ -849,7 +1152,11 @@ where
         // After removing the main child the neighbour shifted left into `at`.
         let neighbor = take_transient(children, at)?;
         let fused = fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1)?;
-        return splice_and_regroup::<Key, Value, D>(children, at..at, fused, height);
+        return if left_fuse == Some(0) {
+            fuse_left_run::<Key, Value, D>(children, at, fused, height)
+        } else {
+            splice_and_regroup::<Key, Value, D>(children, at..at, fused, height)
+        };
     }
 
     // Above the LCA: recurse through the shared prefix, then splice and re-cut.
@@ -861,13 +1168,15 @@ where
         lca_depth - 1,
         key,
         height - 1,
+        left_fuse.and_then(|depth| depth.checked_sub(1)),
     )?;
-    splice_and_regroup::<Key, Value, D>(
-        &mut node.as_index_mut()?.children,
-        at..at + 1,
-        replacement,
-        height,
-    )
+    let children = &mut node.as_index_mut()?.children;
+    if left_fuse == Some(0) {
+        children.remove(at);
+        fuse_left_run::<Key, Value, D>(children, at, replacement, height)
+    } else {
+        splice_and_regroup::<Key, Value, D>(children, at..at + 1, replacement, height)
+    }
 }
 
 /// Fuses the main subtree (whose rightmost leaf lost its boundary) with the
@@ -887,7 +1196,7 @@ where
 fn fuse_subtrees<Key, Value, D>(
     main: TransientNode<Key, Value>,
     neighbor: TransientNode<Key, Value>,
-    key: &Key,
+    key: Option<&Key>,
     height: Rank,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
@@ -914,7 +1223,9 @@ where
             // segment's left seam (the neighbour's own seam dissolves and is
             // re-derived fresh if regrouping recreates it).
             let floor = std::mem::take(&mut main.separator);
-            if main.entries.last().map(|e| &e.key == key).unwrap_or(false) {
+            if let Some(key) = key
+                && main.entries.last().map(|e| &e.key == key).unwrap_or(false)
+            {
                 main.entries.pop();
             }
             let mut entries = main.entries;
@@ -2090,6 +2401,95 @@ mod tests {
             tree_from_scratch.root(),
             "deleting last entry (key {last_u32}) should produce a canonical tree"
         );
+
+        Ok(())
+    }
+
+    /// The future of a recursive invariant walk, resolving to the subtree's
+    /// (min, max) leaf keys.
+    type LeafBounds<'a> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<([u8; 4], [u8; 4])>> + 'a>>;
+
+    /// Walks a persisted subtree verifying the separator invariants, and
+    /// returns the subtree's (min, max) leaf keys:
+    ///
+    /// - a link's separator equals the canonical shortest-distinguishing
+    ///   string of its seam (the shortest prefix of its own subtree's minimum
+    ///   leaf key that sorts strictly above the left-adjacent subtree's
+    ///   maximum), and
+    /// - a node's first link carries the separator the node itself carries in
+    ///   its parent (propagation), with the tree's global leftmost chain
+    ///   carrying the empty separator.
+    fn assert_separator_invariants<'a>(
+        hash: &'a Blake3Hash,
+        expected_leftmost: &'a [u8],
+        storage: &'a TestStorage,
+    ) -> LeafBounds<'a> {
+        Box::pin(async move {
+            use crate::{ArchivedNodeBody, Buffer, PersistentNode, distribution};
+
+            let bytes = storage
+                .retrieve(hash)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
+            let node: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::new(Buffer::from(bytes));
+
+            match node.body()? {
+                ArchivedNodeBody::Segment(segment) => {
+                    let first = segment.entries.first().expect("segment non-empty").key;
+                    let last = segment.entries.last().expect("segment non-empty").key;
+                    Ok((first, last))
+                }
+                ArchivedNodeBody::Index(index) => {
+                    let mut previous_max: Option<[u8; 4]> = None;
+                    let mut bounds: Option<([u8; 4], [u8; 4])> = None;
+                    for (at, link) in index.links.iter().enumerate() {
+                        let child: Blake3Hash = crate::into_owned(&link.node)?;
+                        let separator: Vec<u8> = link.separator.as_slice().to_vec();
+                        let expected_child_leftmost = if at == 0 {
+                            expected_leftmost.to_vec()
+                        } else {
+                            separator.clone()
+                        };
+                        let (child_min, child_max) =
+                            assert_separator_invariants(&child, &expected_child_leftmost, storage)
+                                .await?;
+
+                        match previous_max {
+                            None => assert_eq!(
+                                separator, expected_leftmost,
+                                "a node's first link must carry the node's own separator"
+                            ),
+                            Some(previous_max) => assert_eq!(
+                                separator,
+                                distribution::shortest_separator(&previous_max, &child_min),
+                                "separator at seam {previous_max:02x?}|{child_min:02x?} \
+                                 must be the canonical shortest-distinguishing string"
+                            ),
+                        }
+
+                        previous_max = Some(child_max);
+                        bounds = Some((bounds.map(|(min, _)| min).unwrap_or(child_min), child_max));
+                    }
+                    bounds.ok_or_else(|| anyhow::anyhow!("index node had no children"))
+                }
+            }
+        })
+    }
+
+    /// Every link in a built tree stores the canonical shortest-distinguishing
+    /// separator of its seam, first links propagate their node's own
+    /// separator, and the global leftmost chain is empty. This pins the
+    /// stored bytes, not just the root hash: two wrong separators that
+    /// happen to agree across build orders would pass the canonical-form
+    /// tests but fail here.
+    #[dialog_common::test]
+    async fn it_stores_canonical_shortest_separators() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let keys: Vec<u32> = (0..600).collect();
+        let tree = sequential(&keys, &mut storage).await?;
+
+        assert_separator_invariants(tree.root(), &[], &storage).await?;
 
         Ok(())
     }

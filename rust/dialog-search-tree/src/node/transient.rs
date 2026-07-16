@@ -338,10 +338,12 @@ where
     for child in children {
         let rank = D::seam_rank(child.separator()?);
         if rank > threshold && !pending.is_empty() {
-            groups.push(TransientNode::Index(TransientIndex {
-                children: std::mem::take(&mut pending),
-            })
-            .into());
+            groups.push(
+                TransientNode::Index(TransientIndex {
+                    children: std::mem::take(&mut pending),
+                })
+                .into(),
+            );
         }
         pending.push(child);
     }
@@ -381,8 +383,8 @@ where
     let mut previous_last: Option<Key> = None;
 
     let seal = |pending: &mut Vec<Entry<Key, Value>>,
-                    previous_last: &mut Option<Key>,
-                    groups: &mut Vec<Node<Key, Value>>| {
+                previous_last: &mut Option<Key>,
+                groups: &mut Vec<Node<Key, Value>>| {
         let entries = std::mem::take(pending);
         let first = entries
             .first()
@@ -399,13 +401,7 @@ where
             Some(previous) => D::separator(previous.as_ref(), first.as_ref()),
         };
         *previous_last = Some(last);
-        groups.push(
-            TransientNode::Segment(TransientSegment {
-                entries,
-                separator,
-            })
-            .into(),
-        );
+        groups.push(TransientNode::Segment(TransientSegment { entries, separator }).into());
     };
 
     for entry in entries {
