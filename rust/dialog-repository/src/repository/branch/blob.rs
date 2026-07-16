@@ -25,7 +25,7 @@ use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, TreeReference, Upstream,
 };
-use dialog_artifacts::history::{TreeHistory, extend_skips};
+use dialog_artifacts::history::{Context, TreeHistory, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity};
 use dialog_capability::{Fork, Provider};
@@ -444,7 +444,27 @@ where
         revision.tree = TreeReference::from(*tree.root().as_bytes());
         revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
+        let minted = revision.version();
         head.publish(revision, env).await?;
+
+        // Advance the head's cached causal context by the minted
+        // version, exactly as `Commit` does — a blob write advances the
+        // head like any commit. On a memo miss, skip: the next pull
+        // derives the context once by the ancestry walk.
+        let contexts = branch.contexts();
+        match &parent {
+            None => {
+                let mut context = Context::new();
+                context.record(minted);
+                contexts.insert(minted, context);
+            }
+            Some(parent) => {
+                if let Some(mut context) = contexts.cached(parent).await {
+                    context.record(minted);
+                    contexts.insert(minted, context);
+                }
+            }
+        }
 
         Ok(Entity::from_blob(&index_hash)?)
     }

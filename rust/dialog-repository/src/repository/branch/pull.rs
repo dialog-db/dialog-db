@@ -1,5 +1,7 @@
+use std::sync::{Arc, Mutex};
+
 use dialog_artifacts::DialogArtifactsError;
-use dialog_artifacts::history::{Context, context_of};
+use dialog_artifacts::history::Context;
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::tree::TreeStorageBridge;
@@ -219,10 +221,18 @@ impl<'a> Pull<'a> {
         // rejects incoming stale copies of claims the context has seen
         // but the cache no longer holds (deleted facts carry no
         // tombstone; see `notes/version-control.md`).
+        //
+        // Answered from the branch's context memo when possible: the
+        // context of a fixed head never changes, and every commit and
+        // pull on this handle writes its successor head's context back
+        // (derived incrementally, below), so the O(ancestry) walk — one
+        // signature-verified record read per ancestry revision — is paid
+        // at most once per branch handle, not once per pull.
+        let contexts = branch.contexts();
         let local_context = match &local_revision {
             Some(revision) => {
                 let history = branch.history(env);
-                context_of(&revision.version(), &history).await?
+                contexts.context_of(&revision.version(), &history).await?
             }
             None => Context::new(),
         };
@@ -257,7 +267,16 @@ impl<'a> Pull<'a> {
         let data_changes =
             base_tree.differentiate_within(&upstream_tree, &data_scope, &tree_store, &tree_store);
         let screened_history = merge::screen_history(history_changes, local_snapshot, screen_store);
-        let screened_data = merge::screen_data(data_changes, local_context);
+        // Fold the version of every revision record riding the delta
+        // into `observed` while the data differential streams anyway.
+        // Those records are exactly the upstream-ancestry revisions we
+        // may lack (records at or below the sync base arrived with the
+        // pulls that established it), so `local_context + observed` is
+        // the context of a head that adopts or merges this upstream —
+        // derived at zero extra reads, in place of the ancestry walk.
+        let observed = Arc::new(Mutex::new(Context::new()));
+        let observed_data = merge::observe_revisions(data_changes, observed.clone());
+        let screened_data = merge::screen_data(observed_data, local_context.clone());
         let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
         let mut delta = Delta::zero();
@@ -267,6 +286,7 @@ impl<'a> Pull<'a> {
 
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
+        let had_local_head = local_revision.is_some();
         let new_revision = match local_revision {
             // Merging produced the upstream tree verbatim (fast-forward):
             // adopt the upstream revision — there's nothing novel to
@@ -321,6 +341,28 @@ impl<'a> Pull<'a> {
                 revision
             }
         };
+
+        // Remember the new head's context: the local context, plus every
+        // revision that rode the delta, plus the head itself. Exact for
+        // every arm — an adopted head's ancestry is covered by the sync
+        // base (whose records entered the local ancestry with the pulls
+        // that established it) plus the delta; a minted merge adds its
+        // own version; an unchanged head folds only versions it already
+        // had. The next pull answers from the memo instead of paying the
+        // ancestry walk. The one shape where base records may be in
+        // neither side is a branch with no head but a stale nonempty
+        // sync base — an inconsistent state; skip the memo and let the
+        // next pull derive by the walk.
+        if had_local_head || base == TreeReference::default() {
+            let mut context = local_context;
+            context.merge(
+                &observed
+                    .lock()
+                    .expect("the revision observer mutex is never poisoned"),
+            );
+            context.record(new_revision.version());
+            contexts.insert(new_revision.version(), context);
+        }
 
         // Persist the merged tree's pending nodes to the local archive
         // before referencing its root in a revision. The whole flush
@@ -1805,6 +1847,83 @@ mod history_tests {
             feature.revision().map(|r| r.tree),
             "both replicas converge on the same tree"
         );
+
+        Ok(())
+    }
+
+    /// The incrementally maintained context memo must agree exactly with
+    /// the ancestry walk. Pull folds the delta's revision records into
+    /// the local context instead of re-walking the DAG, and commit
+    /// extends the memo by one version; if either drifted from
+    /// `context_of`, the observed-remove screen would silently change
+    /// behavior on later pulls (an under-watermark resurrects deletions,
+    /// an over-watermark drops live claims).
+    #[dialog_common::test]
+    async fn it_maintains_the_context_memo_incrementally() -> Result<()> {
+        use dialog_artifacts::history::context_of;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        for i in 0..3 {
+            main.commit(stream::iter(vec![assert_one(
+                "post/title",
+                &format!("post:{i}"),
+                "seed",
+            )]))
+            .perform(&operator)
+            .await?;
+        }
+
+        // Adopt (fast-forward): the memo entry comes from the fold of
+        // the delta's revision records.
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+
+        let agree = |branch: crate::Branch| {
+            let operator = &operator;
+            async move {
+                let head = branch.revision().expect("branch has a head");
+                let memo = branch
+                    .contexts()
+                    .cached(&head.version())
+                    .await
+                    .expect("the memo is primed");
+                let history = branch.history(operator);
+                let walked = context_of(&head.version(), &history).await?;
+                anyhow::Ok((memo, walked))
+            }
+        };
+
+        let (memo, walked) = agree(feature.clone()).await?;
+        assert_eq!(memo, walked, "adopt: memo must equal the walk");
+
+        // Commit extends the memo by one version.
+        feature
+            .commit(stream::iter(vec![assert_one(
+                "post/title",
+                "post:9",
+                "ours",
+            )]))
+            .perform(&operator)
+            .await?;
+        let (memo, walked) = agree(feature.clone()).await?;
+        assert_eq!(memo, walked, "commit: memo must equal the walk");
+
+        // A real merge folds the upstream's novel revisions plus the
+        // minted merge itself.
+        main.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:10",
+            "theirs",
+        )]))
+        .perform(&operator)
+        .await?;
+        feature.pull().perform(&operator).await?;
+        let (memo, walked) = agree(feature.clone()).await?;
+        assert_eq!(memo, walked, "merge: memo must equal the walk");
 
         Ok(())
     }

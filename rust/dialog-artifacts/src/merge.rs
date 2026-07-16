@@ -43,6 +43,7 @@
 
 use core::ops::RangeInclusive;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 use dialog_common::Blake3Hash;
 use dialog_search_tree::{
@@ -50,7 +51,7 @@ use dialog_search_tree::{
 };
 use dialog_storage::{DialogStorageError, StorageBackend};
 
-use crate::history::Context;
+use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord};
 use crate::key::KEY_LENGTH;
 use crate::tree::ArtifactTree;
 use crate::{
@@ -235,6 +236,50 @@ where
                 // them only when the local bytes match exactly.
                 remove @ Change::Remove(_) => yield remove,
             }
+        }
+    }
+}
+
+/// Wrap a data-region differential, folding the version of every
+/// revision record riding it into `observed`.
+///
+/// The revision records in an upstream delta are exactly the
+/// upstream-ancestry revisions the receiver may lack: a tree's records
+/// are a subset of its head's ancestry, and records at or below the
+/// sync base arrived with the pulls that established it. So `local
+/// context + observed` is the context of a head that adopts or merges
+/// this upstream — derived while the differential streams anyway, at
+/// zero extra reads, in place of the O(ancestry) `context_of` walk.
+///
+/// Versions are derived from record *contents* (`RevisionRecord::version`,
+/// the same derivation the read-side check binds records with), not
+/// trusted from the datum's version tag. A record that fails to decode
+/// fails the merge — the same strictness the durable history reader
+/// applies.
+pub fn observe_revisions<'a, C>(
+    changes: C,
+    observed: Arc<Mutex<Context>>,
+) -> impl Differential<KeyBytes, State<Datum>> + 'a
+where
+    C: Differential<KeyBytes, State<Datum>> + 'a,
+{
+    async_stream::try_stream! {
+        futures_util::pin_mut!(changes);
+        while let Some(change) = futures_util::StreamExt::next(&mut changes).await {
+            let change = change?;
+            if let Change::Add(entry) = &change
+                && let State::Added(datum) = &entry.value
+                && datum.attribute == REVISION_ATTRIBUTE
+            {
+                let record = RevisionRecord::try_from_bytes(&datum.value).map_err(|error| {
+                    DialogSearchTreeError::Node(format!("revision record: {error}"))
+                })?;
+                observed
+                    .lock()
+                    .expect("the revision observer mutex is never poisoned")
+                    .record(record.version());
+            }
+            yield change;
         }
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
+use dialog_search_tree::Cache;
 use serde::{Deserialize, Serialize};
 
 use crate::DialogArtifactsError;
@@ -115,6 +116,65 @@ pub async fn context_of<H: History>(
     }
 
     Ok(context)
+}
+
+/// Memoized causal contexts, keyed by head version.
+///
+/// The context of a *fixed* head never changes: history is append-only,
+/// so later revisions extend the DAG above a head, never beneath it. An
+/// entry therefore never needs invalidation, which is what makes sharing
+/// one cache across every pull on a branch handle sound. Storage is
+/// bounded ([`Cache`] evicts with SIEVE); an evicted context simply
+/// re-derives by the ancestry walk.
+///
+/// The walk is the expensive path — O(ancestry) record reads, each with
+/// an issuer-signature verification — so callers that know how a head
+/// was *constructed* should derive its context incrementally and
+/// [`insert`](Self::insert) it instead: `context(commit) =
+/// context(parent) + own version`, and a pull can fold the versions of
+/// the revision records riding its delta into the local context (see
+/// `merge::observe_revisions`), paying zero extra reads.
+#[derive(Clone, Debug, Default)]
+pub struct ContextCache {
+    contexts: Cache<Version, Context>,
+}
+
+impl ContextCache {
+    /// A fresh, empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The context of `head`: answered from memory when possible,
+    /// otherwise derived by the O(ancestry) [`context_of`] walk and
+    /// remembered.
+    pub async fn context_of<H: History>(
+        &self,
+        head: &Version,
+        history: &H,
+    ) -> Result<Context, DialogArtifactsError> {
+        Ok(self
+            .contexts
+            .get_or_fetch::<_, DialogArtifactsError>(head, async |head| {
+                context_of(head, history).await.map(Some)
+            })
+            .await?
+            .expect("the context fetcher always yields a context"))
+    }
+
+    /// The memoized context of `head`, if present. Never derives.
+    pub async fn cached(&self, head: &Version) -> Option<Context> {
+        self.contexts
+            .get_or_fetch::<_, DialogArtifactsError>(head, async |_| Ok(None))
+            .await
+            .expect("a fetcher that returns Ok cannot fail")
+    }
+
+    /// Remember `context` as the context of `head` — for callers that
+    /// derived it incrementally from the head's construction.
+    pub fn insert(&self, head: Version, context: Context) {
+        self.contexts.insert(head, context);
+    }
 }
 
 #[cfg(test)]

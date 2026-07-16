@@ -3,7 +3,7 @@ use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
-use dialog_artifacts::history::{Edition, TreeHistory, Version, extend_skips};
+use dialog_artifacts::history::{Context, Edition, TreeHistory, Version, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{DialogArtifactsError, Instruction};
 use dialog_capability::{Fork, Provider};
@@ -253,6 +253,27 @@ where
         revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
         head.publish(revision.clone(), env).await?;
+
+        // Advance the head's cached causal context: the new head's
+        // ancestry is the parent's plus itself, so the memo extends by
+        // one version instead of being re-derived by the ancestry walk
+        // on the next pull. On a memo miss (first commit through a
+        // handle opened onto pre-existing history) skip — the next pull
+        // derives the context once by the walk and re-primes the memo.
+        let contexts = branch.contexts();
+        match &parent {
+            None => {
+                let mut context = Context::new();
+                context.record(revision.version());
+                contexts.insert(revision.version(), context);
+            }
+            Some(parent) => {
+                if let Some(mut context) = contexts.cached(parent).await {
+                    context.record(revision.version());
+                    contexts.insert(revision.version(), context);
+                }
+            }
+        }
 
         Ok(revision)
     }

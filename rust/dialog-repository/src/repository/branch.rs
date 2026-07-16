@@ -8,7 +8,9 @@ use dialog_query::concept::query::PlanCache;
 
 use crate::{NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
 use dialog_artifacts::DialogArtifactsError;
-use dialog_artifacts::history::{CausalityCache, RevisionRecord, TreeHistory, Version, log};
+use dialog_artifacts::history::{
+    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
+};
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::Fork;
 use dialog_capability::{Capability, Did, Subject};
@@ -81,6 +83,9 @@ pub use upstream::*;
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
 
+#[cfg(all(test, feature = "integration-tests"))]
+mod read_amplification;
+
 /// Type alias for the search tree index.
 pub type Index = dialog_artifacts::Index;
 
@@ -122,6 +127,14 @@ pub struct Branch {
     /// transaction, or pull that asks the same question. See
     /// [`CausalityCache`].
     causality_cache: CausalityCache,
+    /// Shared memo of causal contexts, keyed by head version. The
+    /// context of a fixed head is immutable, like causal verdicts, so
+    /// entries never invalidate. Pull reads the local head's context
+    /// from here (falling back to the O(ancestry) walk once), and
+    /// commit/pull insert the successor head's context derived
+    /// incrementally — so steady-state sync never re-walks the DAG.
+    /// See [`ContextCache`].
+    context_cache: ContextCache,
 }
 
 impl Branch {
@@ -271,5 +284,13 @@ impl Branch {
     /// paid once per distinct question rather than once per caller.
     pub fn causality(&self) -> CausalityCache {
         self.causality_cache.clone()
+    }
+
+    /// A shared handle to this branch's causal-context memo. Pull reads
+    /// the local head's context through it (one O(ancestry) walk on the
+    /// first miss) and writes the successor head's context back, derived
+    /// incrementally — so steady-state sync never re-walks the DAG.
+    pub fn contexts(&self) -> ContextCache {
+        self.context_cache.clone()
     }
 }
