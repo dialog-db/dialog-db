@@ -557,14 +557,16 @@ where
         // rightward fusion a boundary delete needs for its orphaned tail.
         let is_orphan_append = match (&self, follow(&mut root, &path)?) {
             (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
-                D::rank(entry.key.as_ref()) <= BOTTOM_RANK
-                    && segment
-                        .entries
-                        .last()
-                        .map(|last| {
-                            entry.key > last.key && D::rank(last.key.as_ref()) > BOTTOM_RANK
-                        })
-                        .unwrap_or(false)
+                // Cheapest test first: only a key sorting past the segment's
+                // last entry can be an orphan append, so the two rank hashes
+                // are paid only on true appends.
+                match segment.entries.last() {
+                    Some(last) if entry.key > last.key => {
+                        D::rank(last.key.as_ref()) > BOTTOM_RANK
+                            && D::rank(entry.key.as_ref()) <= BOTTOM_RANK
+                    }
+                    _ => false,
+                }
             }
             _ => false,
         };

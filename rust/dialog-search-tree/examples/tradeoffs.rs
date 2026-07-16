@@ -227,9 +227,8 @@ fn reads(storage: &Storage) -> usize {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let Workload { facts } = workload();
-    let mut storage = ContentAddressedStorage::new(JournaledStorage::new(
-        MemoryStorageBackend::default(),
-    ));
+    let mut storage =
+        ContentAddressedStorage::new(JournaledStorage::new(MemoryStorageBackend::default()));
     storage.backend().disable_journal();
 
     println!("workload: {FACTS} facts (EAV keys, {KEY_LENGTH}B), batches of {BATCH}");
