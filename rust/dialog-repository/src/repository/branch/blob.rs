@@ -25,7 +25,7 @@ use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, TreeReference, Upstream,
 };
-use dialog_artifacts::history::{Context, TreeHistory, extend_skips};
+use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity};
 use dialog_capability::{Fork, Provider};
@@ -410,6 +410,7 @@ where
             }
             None => Vec::new(),
         };
+        let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
         let mut revision = match base_revision {
             Some(base) => base.advance(
                 TreeReference::default(),
@@ -441,30 +442,41 @@ where
             .await
             .map_err(DialogArtifactsError::from)?;
 
+        // The new head's causal context: the parent's plus this write's
+        // own version, exactly as `Commit` derives it — a blob write
+        // advances the head like any commit and publishes its watermark
+        // the same way.
+        let contexts = branch.contexts();
+        let minted = revision.version();
+        let context = {
+            let mut context = match (&parent, base_context) {
+                (None, _) => Context::new(),
+                (Some(_), Some(context)) => context,
+                (Some(parent), None) => match contexts.cached(parent).await {
+                    Some(context) => context,
+                    None => {
+                        let history = TreeHistory::from_root_with_cache(
+                            &base_tree_hash,
+                            store.clone(),
+                            branch.node_cache(),
+                        );
+                        context_of(parent, &history).await?
+                    }
+                },
+            };
+            context.record(minted);
+            context
+        };
+
         revision.tree = TreeReference::from(*tree.root().as_bytes());
+        revision.context = Some(context.clone());
         revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
-        let minted = revision.version();
         head.publish(revision, env).await?;
 
-        // Advance the head's cached causal context by the minted
-        // version, exactly as `Commit` does — a blob write advances the
-        // head like any commit. On a memo miss, skip: the next pull
-        // derives the context once by the ancestry walk.
-        let contexts = branch.contexts();
-        match &parent {
-            None => {
-                let mut context = Context::new();
-                context.record(minted);
-                contexts.insert(minted, context);
-            }
-            Some(parent) => {
-                if let Some(mut context) = contexts.cached(parent).await {
-                    context.record(minted);
-                    contexts.insert(minted, context);
-                }
-            }
-        }
+        // Advance the branch memo so later pulls through this handle
+        // answer the context from memory.
+        contexts.insert(minted, context);
 
         Ok(Entity::from_blob(&index_hash)?)
     }

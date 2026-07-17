@@ -1,7 +1,8 @@
 use crate::TreeReference;
 use crate::schema;
 use dialog_artifacts::history::{
-    Edition, Origin, REVISION_RECORD_FORMAT, RevisionRecord, Version, verify_issuer_signature,
+    Context, Edition, Origin, REVISION_RECORD_FORMAT, RevisionRecord, Version,
+    verify_issuer_signature,
 };
 use dialog_artifacts::{DialogArtifactsError, Entity};
 use dialog_capability::Did;
@@ -46,6 +47,20 @@ pub struct Revision {
     /// the first revision. Isomorphic to a Lamport timestamp.
     pub edition: Edition,
 
+    /// The causal context (per-origin watermark) of this revision's
+    /// ancestry, itself included. Publishing it with the head is what
+    /// lets a peer read a replica's knowledge without walking its log:
+    /// pull seeds its context memo from it, skips upstreams whose
+    /// context is included in ours (nothing new), and adopts an
+    /// upstream's tree wholesale when its context includes ours and we
+    /// have no local novelty. Covered by the head signature (see
+    /// [`Revision::payload`]), so adopting it is as trustworthy as
+    /// adopting the head. `None` on heads minted before the field
+    /// existed; readers fall back to deriving the context by the
+    /// ancestry walk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Context>,
+
     /// The issuer's Ed25519 signature over [`Revision::payload`], with the
     /// key the issuer DID names (`did:key`). This is what binds the tree
     /// root to the issuer: the in-tree [`RevisionRecord`] signs everything
@@ -74,6 +89,7 @@ impl Revision {
             tree,
             cause: HashSet::new(),
             edition: Edition::GENESIS,
+            context: None,
             signature: Vec::new(),
         }
     }
@@ -106,6 +122,7 @@ impl Revision {
             tree,
             cause: HashSet::from([self.tree.clone()]),
             edition: self.edition.successor(),
+            context: None,
             signature: Vec::new(),
         }
     }
@@ -137,6 +154,7 @@ impl Revision {
             tree,
             cause: HashSet::from([upstream.tree.clone()]),
             edition: self.edition.max(upstream.edition).successor(),
+            context: None,
             signature: Vec::new(),
         }
     }
@@ -225,7 +243,16 @@ impl Revision {
     /// tree (32)
     /// cause count (8, big-endian) ++ roots (32 each, sorted)
     /// edition (8, big-endian)
+    /// context, when present:
+    ///     0x01 ++ entry count (8, big-endian)
+    ///          ++ entries (origin (32) ++ edition (8, big-endian), sorted)
     /// ```
+    ///
+    /// A head without a context appends nothing after the edition (the
+    /// pre-context payload shape), and a head with one appends the `0x01`
+    /// marker plus the sorted watermark entries. The two shapes differ in
+    /// length for any fixed prefix, so the encoding stays injective: a
+    /// signature over one can never validate the other.
     pub fn payload(&self) -> Vec<u8> {
         let mut cause: Vec<&TreeReference> = self.cause.iter().collect();
         cause.sort_by(|left, right| left.hash().cmp(right.hash()));
@@ -246,6 +273,14 @@ impl Revision {
             bytes.extend_from_slice(tree.hash());
         }
         bytes.extend_from_slice(&self.edition.key_bytes());
+        if let Some(context) = &self.context {
+            bytes.push(0x01);
+            bytes.extend_from_slice(&(context.len() as u64).to_be_bytes());
+            for (origin, edition) in context.iter() {
+                bytes.extend_from_slice(&origin.0);
+                bytes.extend_from_slice(&edition.key_bytes());
+            }
+        }
         bytes
     }
 

@@ -3,7 +3,7 @@ use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
-use dialog_artifacts::history::{Context, Edition, TreeHistory, Version, extend_skips};
+use dialog_artifacts::history::{Context, Edition, TreeHistory, Version, context_of, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{DialogArtifactsError, Instruction};
 use dialog_capability::{Fork, Provider};
@@ -204,6 +204,34 @@ where
             }
             None => Vec::new(),
         };
+
+        // The new head's causal context: the parent's plus this commit's
+        // own version. Sourced from the parent head's published context,
+        // the branch memo, or (once, for lineages minted before heads
+        // carried contexts) the ancestry walk — so every head published
+        // from here on carries its watermark for peers to read.
+        let contexts = branch.contexts();
+        let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
+        let context = {
+            let mut context = match (&parent, base_context) {
+                (None, _) => Context::new(),
+                (Some(_), Some(context)) => context,
+                (Some(parent), None) => match contexts.cached(parent).await {
+                    Some(context) => context,
+                    None => {
+                        let history = TreeHistory::from_root_with_cache(
+                            &base_tree_hash,
+                            store.clone(),
+                            branch.node_cache(),
+                        );
+                        context_of(parent, &history).await?
+                    }
+                },
+            };
+            context.record(version);
+            context
+        };
+
         let mut revision = match base_revision {
             Some(base) => base.advance(
                 TreeReference::default(),
@@ -246,34 +274,19 @@ where
             .map_err(DialogArtifactsError::from)?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
-        // Sign the head last: only now is the tree root final, and the head
-        // signature is what binds that root to the issuer (the in-tree
-        // record cannot contain the root of the tree it lives in). A
-        // replica adopting this head verifies it first — see `Pull`.
+        revision.context = Some(context.clone());
+        // Sign the head last: only now are the tree root and context
+        // final, and the head signature is what binds them to the issuer
+        // (the in-tree record cannot contain the root of the tree it
+        // lives in). A replica adopting this head verifies it first —
+        // see `Pull`.
         revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
         head.publish(revision.clone(), env).await?;
 
-        // Advance the head's cached causal context: the new head's
-        // ancestry is the parent's plus itself, so the memo extends by
-        // one version instead of being re-derived by the ancestry walk
-        // on the next pull. On a memo miss (first commit through a
-        // handle opened onto pre-existing history) skip — the next pull
-        // derives the context once by the walk and re-primes the memo.
-        let contexts = branch.contexts();
-        match &parent {
-            None => {
-                let mut context = Context::new();
-                context.record(revision.version());
-                contexts.insert(revision.version(), context);
-            }
-            Some(parent) => {
-                if let Some(mut context) = contexts.cached(parent).await {
-                    context.record(revision.version());
-                    contexts.insert(revision.version(), context);
-                }
-            }
-        }
+        // Advance the branch memo so later pulls through this handle
+        // answer the context from memory.
+        contexts.insert(revision.version(), context);
 
         Ok(revision)
     }

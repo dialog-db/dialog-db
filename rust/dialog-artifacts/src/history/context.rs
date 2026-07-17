@@ -77,6 +77,29 @@ impl Context {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Whether this context has observed everything `other` has: for
+    /// every origin in `other`, this context's watermark is at least as
+    /// high. This is the knowledge order between replicas, and it is
+    /// what gates the frugal pull paths: an upstream whose context is
+    /// included in ours has nothing new for us (skip the pull), and an
+    /// upstream whose context includes ours can have its subtrees
+    /// adopted wholesale where we have no local novelty (nothing we
+    /// know could contradict what survived its screen).
+    pub fn includes(&self, other: &Context) -> bool {
+        other.0.iter().all(|(origin, edition)| {
+            self.0
+                .get(origin)
+                .is_some_and(|watermark| watermark >= edition)
+        })
+    }
+
+    /// The per-origin watermarks, sorted by origin. The iteration order
+    /// is deterministic, which is what lets a signing payload commit to
+    /// the context byte-for-byte.
+    pub fn iter(&self) -> impl Iterator<Item = (&Origin, &Edition)> {
+        self.0.iter()
+    }
 }
 
 /// Derive the [`Context`] of `head` by walking its ancestry through the

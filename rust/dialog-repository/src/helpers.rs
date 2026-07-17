@@ -72,11 +72,7 @@ where
     P: Provider<C> + ConditionalSync,
 {
     async fn execute(&self, input: C::Input) -> C::Output {
-        *self
-            .counts
-            .lock()
-            .entry(type_name::<C>())
-            .or_insert(0) += 1;
+        *self.counts.lock().entry(type_name::<C>()).or_insert(0) += 1;
         self.inner.execute(input).await
     }
 }

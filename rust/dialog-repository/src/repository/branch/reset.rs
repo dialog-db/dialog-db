@@ -67,6 +67,7 @@ mod tests {
             tree: TreeReference::from(EMPTY_TREE_HASH),
             cause: HashSet::new(),
             edition: Edition::GENESIS,
+            context: None,
             signature: Vec::new(),
         };
         branch.reset(revision.clone()).perform(&provider).await?;

@@ -222,20 +222,71 @@ impl<'a> Pull<'a> {
         // but the cache no longer holds (deleted facts carry no
         // tombstone; see `notes/version-control.md`).
         //
-        // Answered from the branch's context memo when possible: the
-        // context of a fixed head never changes, and every commit and
-        // pull on this handle writes its successor head's context back
-        // (derived incrementally, below), so the O(ancestry) walk — one
-        // signature-verified record read per ancestry revision — is paid
-        // at most once per branch handle, not once per pull.
+        // Answered from the branch memo, or from the watermark the head
+        // itself published (heads carry their context under the head
+        // signature), or — only for lineages minted before heads carried
+        // contexts — by the O(ancestry) walk, once.
         let contexts = branch.contexts();
         let local_context = match &local_revision {
-            Some(revision) => {
-                let history = branch.history(env);
-                contexts.context_of(&revision.version(), &history).await?
-            }
+            Some(revision) => match contexts.cached(&revision.version()).await {
+                Some(context) => context,
+                None => match &revision.context {
+                    Some(context) => {
+                        contexts.insert(revision.version(), context.clone());
+                        context.clone()
+                    }
+                    None => {
+                        let history = branch.history(env);
+                        contexts.context_of(&revision.version(), &history).await?
+                    }
+                },
+            },
             None => Context::new(),
         };
+
+        // The upstream published its watermark with its head: two frugal
+        // paths can short-circuit the tree merge entirely, both gated on
+        // comparing the two contexts (O(#origins), no reads).
+        if let Some(theirs) = &upstream_revision.context {
+            // Nothing new: everything the upstream has seen, we have
+            // seen. Every claim live there is live or covered here
+            // already, so the merge would change nothing. Keep the head
+            // and advance only the sync base, so future diffs start
+            // from the upstream's current tree.
+            if local_context.includes(theirs) {
+                if let Some(current) = &local_revision {
+                    return Ok(PreparedPull::Merged(Box::new(Merged {
+                        branch,
+                        head,
+                        new_revision: current.clone(),
+                        sync: upstream.with_tree(upstream_revision.tree.clone()),
+                        base,
+                    })));
+                }
+            }
+            // Fast-forward adoption: we have no novelty of our own (our
+            // tree is exactly the sync base) and the upstream has seen
+            // everything we have. Nothing we know could contradict what
+            // survived its screen, so its tree is adopted by root: no
+            // diff, no block reads, no import. Blocks hydrate lazily on
+            // demand like any partially replicated region — this is what
+            // keeps pull cost independent of upstream churn in regions
+            // we never touch, and what makes adopting a deep history
+            // free.
+            else if *base.hash() == local_tree_hash && theirs.includes(&local_context) {
+                contexts.insert(upstream_revision.version(), theirs.clone());
+                return Ok(PreparedPull::Merged(Box::new(Merged {
+                    branch,
+                    head,
+                    new_revision: upstream_revision.clone(),
+                    sync: upstream.with_tree(upstream_revision.tree.clone()),
+                    base,
+                })));
+            }
+            // Otherwise the histories have genuinely diverged (each side
+            // has observed something the other has not, or we carry
+            // local novelty): fall through to the screened merge.
+        }
 
         // Integrate the *upstream's* changes since the sync base onto
         // the local tree in two screened passes — history first, so
@@ -285,6 +336,22 @@ impl<'a> Pull<'a> {
             .persist(&mut delta)?;
 
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
+
+        // The merged head's context, derived incrementally: the local
+        // context plus every revision that rode the delta (folded by
+        // `observe_revisions` while the differential streamed). The
+        // records in the delta are exactly the upstream-ancestry
+        // revisions we may have lacked, so this equals the ancestry walk
+        // without paying it.
+        let merged_context = {
+            let mut context = local_context;
+            context.merge(
+                &observed
+                    .lock()
+                    .expect("the revision observer mutex is never poisoned"),
+            );
+            context
+        };
 
         let had_local_head = local_revision.is_some();
         let new_revision = match local_revision {
@@ -336,30 +403,30 @@ impl<'a> Pull<'a> {
                     .record(&mut store, &mut delta, record.entries()?)
                     .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
+                // The minted head publishes its watermark: the merged
+                // context plus its own version, signed with the rest of
+                // the head so peers can adopt it without walking.
+                let mut context = merged_context.clone();
+                context.record(revision.version());
+                revision.context = Some(context);
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
                 revision
             }
         };
 
-        // Remember the new head's context: the local context, plus every
-        // revision that rode the delta, plus the head itself. Exact for
-        // every arm — an adopted head's ancestry is covered by the sync
-        // base (whose records entered the local ancestry with the pulls
-        // that established it) plus the delta; a minted merge adds its
-        // own version; an unchanged head folds only versions it already
-        // had. The next pull answers from the memo instead of paying the
-        // ancestry walk. The one shape where base records may be in
-        // neither side is a branch with no head but a stale nonempty
-        // sync base — an inconsistent state; skip the memo and let the
-        // next pull derive by the walk.
+        // Remember the new head's context: the merged context plus the
+        // head itself. Exact for every arm — an adopted head's ancestry
+        // is covered by the sync base (whose records entered the local
+        // ancestry with the pulls that established it) plus the delta; a
+        // minted merge adds its own version; an unchanged head folds
+        // only versions it already had. The next pull answers from the
+        // memo instead of paying the ancestry walk. The one shape where
+        // base records may be in neither side is a branch with no head
+        // but a stale nonempty sync base — an inconsistent state; skip
+        // the memo and let the next pull derive by the walk.
         if had_local_head || base == TreeReference::default() {
-            let mut context = local_context;
-            context.merge(
-                &observed
-                    .lock()
-                    .expect("the revision observer mutex is never poisoned"),
-            );
+            let mut context = merged_context;
             context.record(new_revision.version());
             contexts.insert(new_revision.version(), context);
         }
@@ -869,7 +936,7 @@ mod history_tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::{test_operator_with_profile, test_repo, unique_name};
     use anyhow::Result;
 
     use dialog_artifacts::history::{Causality, History as _, causality, common_ancestor};
@@ -1399,6 +1466,7 @@ mod history_tests {
             tree: TreeReference::from([9u8; 32]),
             cause: HashSet::new(),
             edition: Edition::GENESIS,
+            context: None,
             signature: Vec::new(),
         };
         evil.reset(forged).perform(&operator).await?;
@@ -1924,6 +1992,292 @@ mod history_tests {
         feature.pull().perform(&operator).await?;
         let (memo, walked) = agree(feature.clone()).await?;
         assert_eq!(memo, walked, "merge: memo must equal the walk");
+
+        Ok(())
+    }
+
+    /// Every published head carries its causal context under the head
+    /// signature: it must equal the ancestry walk exactly, and tampering
+    /// with it must fail verification like tampering with any other
+    /// field.
+    #[dialog_common::test]
+    async fn it_publishes_the_watermark_with_the_head() -> Result<()> {
+        use dialog_artifacts::history::{Edition, Origin, Version, context_of};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        for i in 0..3 {
+            main.commit(stream::iter(vec![assert_one(
+                "post/title",
+                &format!("post:{i}"),
+                "seed",
+            )]))
+            .perform(&operator)
+            .await?;
+        }
+
+        let head = main.revision().expect("main has a head");
+        let published = head
+            .context
+            .clone()
+            .expect("a freshly minted head publishes its context");
+        let history = main.history(&operator);
+        let walked = context_of(&head.version(), &history).await?;
+        assert_eq!(
+            published, walked,
+            "the published watermark must equal the ancestry walk"
+        );
+
+        head.verify().expect("the untouched head verifies");
+
+        // Inflating the watermark (claiming observation of a revision
+        // that is not in the ancestry) must break the signature.
+        let mut tampered = head.clone();
+        let mut context = published.clone();
+        context.record(Version::new(Origin::from([9u8; 32]), Edition::new(9)));
+        tampered.context = Some(context);
+        assert!(
+            tampered.verify().is_err(),
+            "a tampered watermark must fail head verification"
+        );
+
+        // Stripping it entirely must break the signature too.
+        let mut stripped = head.clone();
+        stripped.context = None;
+        assert!(
+            stripped.verify().is_err(),
+            "a stripped watermark must fail head verification"
+        );
+
+        Ok(())
+    }
+
+    /// Adopting an upstream that has seen everything we have, when we
+    /// have no local novelty, must not read the upstream's tree at all:
+    /// the head (with its published watermark) is adopted by root and
+    /// blocks hydrate lazily on demand. This is the guard against pull
+    /// cost scaling with upstream churn in regions the replica never
+    /// touches.
+    #[dialog_common::test]
+    async fn it_adopts_an_upstream_head_without_reading_its_novelty() -> Result<()> {
+        use crate::RepositoryExt as _;
+        use crate::helpers::Counting;
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .repository(unique_name("repo"))
+            .open()
+            .perform(&env)
+            .await?;
+
+        // The upstream accumulates plenty of novelty in a namespace the
+        // replica never asks about.
+        let main = repo.branch("main").open().perform(&env).await?;
+        for i in 0..50 {
+            main.commit(stream::iter(vec![assert_one(
+                "user/name",
+                &format!("user:{i}"),
+                "resident",
+            )]))
+            .perform(&env)
+            .await?;
+        }
+
+        // First pull: empty base, no local novelty, upstream knows
+        // everything we know (we know nothing). Adopt by root.
+        let feature = repo.branch("feature").open().perform(&env).await?;
+        feature.set_upstream(&main).perform(&env).await?;
+        env.reset();
+        feature.pull().perform(&env).await?.expect("head adopted");
+        assert_eq!(
+            env.block_reads(),
+            0,
+            "adoption must not read the upstream tree: {:?}",
+            env.snapshot()
+        );
+        assert_eq!(
+            feature.revision().map(|r| r.tree),
+            main.revision().map(|r| r.tree),
+            "the upstream head is adopted verbatim"
+        );
+
+        // Steady state: upstream moves, we still have no novelty of our
+        // own. Every subsequent pull is another zero-read adoption.
+        main.commit(stream::iter(vec![assert_one(
+            "user/name",
+            "user:99",
+            "new",
+        )]))
+        .perform(&env)
+        .await?;
+        env.reset();
+        feature.pull().perform(&env).await?.expect("head adopted");
+        assert_eq!(
+            env.block_reads(),
+            0,
+            "a fast-forward pull must not read the upstream tree: {:?}",
+            env.snapshot()
+        );
+
+        // The adopted data is really there: reads hydrate lazily.
+        let rows: Vec<_> = feature
+            .claims()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .perform(&env)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(rows.len(), 51, "adopted facts are readable on demand");
+
+        Ok(())
+    }
+
+    /// Pulling from an upstream whose watermark is included in ours is
+    /// a no-op detected from the two heads alone: no tree walk, no
+    /// block reads, the local head stands, and only the sync base
+    /// advances.
+    #[dialog_common::test]
+    async fn it_skips_a_pull_from_an_upstream_that_has_seen_everything() -> Result<()> {
+        use crate::RepositoryExt as _;
+        use crate::helpers::Counting;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .repository(unique_name("repo"))
+            .open()
+            .perform(&env)
+            .await?;
+
+        let main = repo.branch("main").open().perform(&env).await?;
+        main.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&env)
+        .await?;
+
+        // `feature` adopts main's head, then commits novelty of its own,
+        // so feature has seen everything main has (and more).
+        let feature = repo.branch("feature").open().perform(&env).await?;
+        feature.set_upstream(&main).perform(&env).await?;
+        feature.pull().perform(&env).await?;
+        feature
+            .commit(stream::iter(vec![assert_one(
+                "post/title",
+                "post:2",
+                "Nej",
+            )]))
+            .perform(&env)
+            .await?;
+        let head = feature.revision().expect("feature has a head");
+
+        // Feature pulls main again: main's watermark is included in
+        // feature's, so there is nothing to gain. Zero reads, head
+        // stands.
+        env.reset();
+        feature.pull().perform(&env).await?;
+        assert_eq!(
+            env.block_reads(),
+            0,
+            "a known-subsumed upstream must be skipped without reads: {:?}",
+            env.snapshot()
+        );
+        assert_eq!(
+            feature.revision().as_ref(),
+            Some(&head),
+            "the local head stands"
+        );
+
+        Ok(())
+    }
+
+    /// Wholesale adoption must be refused when we have observed
+    /// something the upstream has not, even with no local commits: our
+    /// extra knowledge can include a deletion of a fact the upstream
+    /// still holds live, and adopting its tree would resurrect it. The
+    /// watermark-inclusion gate forces the screened merge, where R1
+    /// rejects the stale fact.
+    #[dialog_common::test]
+    async fn it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // `author` asserts the fact; `moderator` adopts it and retracts
+        // it. `author` then commits unrelated novelty the moderator has
+        // never seen, so author and moderator genuinely diverge.
+        let author = repo.branch("author").open().perform(&operator).await?;
+        author
+            .commit(stream::iter(vec![assert_one(
+                "post/title",
+                "post:1",
+                "Spam",
+            )]))
+            .perform(&operator)
+            .await?;
+
+        let moderator = repo.branch("moderator").open().perform(&operator).await?;
+        moderator.set_upstream(&author).perform(&operator).await?;
+        moderator.pull().perform(&operator).await?;
+        moderator
+            .commit(stream::iter(vec![Instruction::Retract(Artifact {
+                the: "post/title".parse()?,
+                of: "post:1".parse()?,
+                is: Value::String("Spam".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        author
+            .commit(stream::iter(vec![assert_one(
+                "post/title",
+                "post:2",
+                "Legit",
+            )]))
+            .perform(&operator)
+            .await?;
+
+        // The replica learns of the deletion first (adopting the
+        // moderator's head), then pulls the author, who still holds the
+        // deleted fact live and has novelty of his own. The gate must
+        // refuse adoption (we know the deletion, the author does not)
+        // and the screened merge must keep the fact dead while taking
+        // the novelty.
+        let replica = repo.branch("replica").open().perform(&operator).await?;
+        replica.set_upstream(&moderator).perform(&operator).await?;
+        replica.pull().perform(&operator).await?;
+        replica.pull().from(&author).perform(&operator).await?;
+
+        let titles: Vec<_> = replica
+            .claims()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let values: Vec<_> = titles.iter().map(|t| t.is.clone()).collect();
+        assert!(
+            values.contains(&Value::String("Legit".into())),
+            "the author's genuine novelty lands: {values:?}"
+        );
+        assert!(
+            !values.contains(&Value::String("Spam".into())),
+            "the deleted fact must not be resurrected by adoption: {values:?}"
+        );
 
         Ok(())
     }
