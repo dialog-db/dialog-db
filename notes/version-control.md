@@ -269,6 +269,25 @@ Two cases run the screened merge in the original direction (their delta since th
 
 This direction is also the safety net the watermark gates fall back to whenever knowledge has diverged in ways the frugal paths cannot serve. The gate refusal itself is load-bearing: `it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams` pins the case where we learned of a deletion through one upstream and then pull another that still holds the fact live; wholesale adoption would resurrect it, so the screened merge runs and R1 rejects the stale copy.
 
+### Scenario 6: two upstreams, both advanced
+
+There is no three-way merge in the system; reconciling several remotes is iterated pairwise pulling, and the overlap between two upstreams' updates is resolved on the pulling replica during the second pull. The mechanical reason: each upstream has its own sync base, so after pulling Alice, the delta against Bob's base is everything we hold that *Bob* lacked at last sync, which now includes Alice's updates. When that delta replays onto Bob's tree, Alice's and Bob's writes meet at their slots under the ordinary screen rules: identical facts collapse to the deterministic hash winner, a retraction from one side retires the other side's copy of the claim it observed (and only that: a concurrent re-assert survives), and genuinely conflicting concurrent values *both survive* in the log, shown deterministically by read-time conflict detection until a later write that has seen both cites and supersedes them.
+
+```mermaid
+sequenceDiagram
+    participant A as Alice (advanced)
+    participant Us as Us
+    participant B as Bob (advanced)
+    A->>Us: pull 1: her novelty merges in
+    Note over Us: watermark now includes Alice's
+    B->>Us: pull 2: OUR delta vs Bob's base
+    Note over Us: that delta carries Alice's updates
+    Note over Us: overlap resolves at Bob's slots via R1/R2/R3
+    Note over Us: conflicting values: both survive, deterministic read winner
+```
+
+Order does not matter to the outcome (the union log is the same either way), only to cost: pulling the better-informed peer first often collapses the second pull to the scenario 2 no-op. Adoption can never clobber the first pull's result, because after pull 1 the second upstream's watermark cannot include ours (`it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams` is this triangle's deletion variant). And convergence is a gossip property: after our two pulls *we* hold the reconciled state; Alice and Bob still diverge from each other until they pull us or each other.
+
 ## Deletion, scenario by scenario
 
 Deletion is the acid test of the design, so each shape gets its own walkthrough. The cast: a fact `(post:1, post/title, "Spam")`.
