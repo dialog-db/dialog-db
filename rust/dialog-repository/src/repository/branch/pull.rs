@@ -81,7 +81,7 @@ impl<'a> Pull<'a> {
             + ConditionalSync
             + 'static,
     {
-        self.prepare(env).await?.commit(env).await
+        Box::pin(self.prepare(env)).await?.commit(env).await
     }
 
     /// Phase one: fetch the upstream, rebase local changes onto it, and persist
@@ -283,9 +283,112 @@ impl<'a> Pull<'a> {
                     base,
                 })));
             }
-            // Otherwise the histories have genuinely diverged (each side
-            // has observed something the other has not, or we carry
-            // local novelty): fall through to the screened merge.
+            // Reverse replay: we carry local novelty, but the upstream
+            // may still have seen everything else we have. Instead of
+            // screening their (arbitrarily large) delta onto our tree,
+            // adopt their tree as the substrate and replay our (small)
+            // delta onto it — reads proportional to OUR divergence and
+            // the seams it lands in, independent of their churn.
+            //
+            // This is the same screened merge with the roles swapped,
+            // which is what makes it exact in every case. The screen
+            // rules only ever consult the RECEIVER's state, and here the
+            // receiver is the upstream: our data delta runs through R1
+            // against THEIR published watermark (an add they have
+            // observed is either already live there, a no-op, or was
+            // covered by their log, where applying it would resurrect a
+            // deletion; our fresh claims are above their watermark and
+            // pass as news), our removes stay byte-guarded against their
+            // tree (R2), and our history delta screens their tree
+            // directly (R3: a fact we adopted after the sync base and
+            // then covered nets to nothing in our data diff, so only our
+            // covering record can retire their live copy). Their novelty
+            // needs no screen at all: nothing they minted unseen by us
+            // can have been covered by us.
+            //
+            // Skipped on a first-contact pull (empty sync base): there
+            // our "delta" would be our entire tree, and the screened
+            // direction's cost is no worse.
+            else if let Some(local) = &local_revision
+                && base != TreeReference::default()
+            {
+                let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+                let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
+                let local_tree = Index::from_hash(NodeHash::from(local_tree_hash));
+                let mut merged = Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
+                let upstream_snapshot =
+                    Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
+
+                let history_scope = merge::history_scope();
+                let data_scope = merge::data_scope();
+                let history_changes = base_tree.differentiate_within(
+                    &local_tree,
+                    &history_scope,
+                    &tree_store,
+                    &tree_store,
+                );
+                let data_changes = base_tree.differentiate_within(
+                    &local_tree,
+                    &data_scope,
+                    &tree_store,
+                    &tree_store,
+                );
+                let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+                let screened_history =
+                    merge::screen_history(history_changes, upstream_snapshot, screen_store);
+                let screened_data = merge::screen_data(data_changes, theirs.clone());
+                let screened = futures_util::StreamExt::chain(screened_history, screened_data);
+
+                let mut delta = Delta::zero();
+                merged = Box::pin(merged.edit().integrate(screened, &tree_store))
+                    .await?
+                    .persist(&mut delta)?;
+
+                // Mint the merge revision exactly as the screened path
+                // does; its context needs no derivation at all: the
+                // merged ancestry is both parents', and both watermarks
+                // are in hand.
+                let authority = Identify.perform(env).await?;
+                let mut revision = local.merge(
+                    &upstream_revision,
+                    TreeReference::default(),
+                    branch.of().clone(),
+                    branch.name(),
+                    authority.did(),
+                    authority.profile().clone(),
+                );
+                let mut record = revision.record(
+                    vec![local.version(), upstream_revision.version()],
+                    Vec::new(),
+                );
+                record.signature = Attest::new(record.payload()?).perform(env).await?;
+                merged
+                    .record(&mut store, &mut delta, record.entries()?)
+                    .await?;
+                revision.tree = TreeReference::from(*merged.root().as_bytes());
+                let mut context = local_context.clone();
+                context.merge(theirs);
+                context.record(revision.version());
+                revision.context = Some(context.clone());
+                revision.signature = Attest::new(revision.payload()).perform(env).await?;
+                contexts.insert(revision.version(), context);
+
+                branch
+                    .archive()
+                    .index()
+                    .import(delta.flush().map(|(_, buffer)| buffer))
+                    .perform(env)
+                    .await
+                    .map_err(DialogArtifactsError::from)?;
+
+                return Ok(PreparedPull::Merged(Box::new(Merged {
+                    branch,
+                    head,
+                    new_revision: revision,
+                    sync: upstream.with_tree(upstream_revision.tree.clone()),
+                    base,
+                })));
+            }
         }
 
         // Integrate the *upstream's* changes since the sync base onto
@@ -2277,6 +2380,256 @@ mod history_tests {
         assert!(
             !values.contains(&Value::String("Spam".into())),
             "the deleted fact must not be resurrected by adoption: {values:?}"
+        );
+
+        Ok(())
+    }
+
+    /// A replica with local novelty pulling an upstream that has seen
+    /// everything else replays its own (small) delta onto the adopted
+    /// upstream tree: reads scale with the replica's novelty, not with
+    /// the upstream's churn.
+    #[dialog_common::test]
+    async fn it_replays_local_novelty_onto_an_upstream_without_reading_its_churn() -> Result<()> {
+        use crate::RepositoryExt as _;
+        use crate::helpers::Counting;
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .repository(unique_name("repo"))
+            .open()
+            .perform(&env)
+            .await?;
+
+        let main = repo.branch("main").open().perform(&env).await?;
+        main.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:0",
+            "seed",
+        )]))
+        .perform(&env)
+        .await?;
+
+        let feature = repo.branch("feature").open().perform(&env).await?;
+        feature.set_upstream(&main).perform(&env).await?;
+        feature.pull().perform(&env).await?;
+
+        // The replica commits one fact of its own; the upstream churns
+        // through two hundred commits in a namespace the replica never
+        // touches.
+        feature
+            .commit(stream::iter(vec![assert_one(
+                "post/title",
+                "post:1",
+                "ours",
+            )]))
+            .perform(&env)
+            .await?;
+        for i in 0..200 {
+            main.commit(stream::iter(vec![assert_one(
+                "user/name",
+                &format!("user:{i}"),
+                "resident",
+            )]))
+            .perform(&env)
+            .await?;
+        }
+
+        env.reset();
+        feature.pull().perform(&env).await?.expect("merged");
+        let reads = env.block_reads();
+        assert!(
+            reads <= 30,
+            "replaying one local commit must not read the upstream's churn \
+             (got {reads} block reads): {:?}",
+            env.snapshot()
+        );
+
+        // Both sides' content is present.
+        let titles: Vec<_> = feature
+            .claims()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .perform(&env)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(titles.len(), 2, "seed and local novelty both present");
+        let churn: Vec<_> = feature
+            .claims()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .perform(&env)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(churn.len(), 200, "the upstream churn is all adopted");
+
+        Ok(())
+    }
+
+    /// A deletion of a fact that entered the replica after its sync
+    /// base nets to nothing in the replica's data diff; only its
+    /// covering record can retire the upstream's live copy during the
+    /// replay. The record must ride the replayed history and screen the
+    /// upstream tree.
+    #[dialog_common::test]
+    async fn it_carries_a_covering_record_when_replaying_onto_a_stale_holder() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        // The shared base: replica `f` syncs upstream `m` before the
+        // contested fact exists anywhere.
+        let m = repo.branch("m").open().perform(&operator).await?;
+        m.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:0",
+            "seed",
+        )]))
+        .perform(&operator)
+        .await?;
+        let f = repo.branch("f").open().perform(&operator).await?;
+        f.set_upstream(&m).perform(&operator).await?;
+        f.pull().perform(&operator).await?;
+
+        // `a` authors the fact; both `m` and `f` adopt it laterally, so
+        // it postdates f's sync base with m.
+        let a = repo.branch("a").open().perform(&operator).await?;
+        a.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Spam",
+        )]))
+        .perform(&operator)
+        .await?;
+        m.pull().from(&a).perform(&operator).await?;
+        f.pull().from(&a).perform(&operator).await?;
+
+        // f retracts it: net zero in f's data diff against its base
+        // with m (the fact was never in that base), so only f's retract
+        // record carries the deletion into the replay.
+        f.commit(stream::iter(vec![Instruction::Retract(Artifact {
+            the: "post/title".parse()?,
+            of: "post:1".parse()?,
+            is: Value::String("Spam".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+        f.pull().perform(&operator).await?.expect("merged");
+
+        let values: Vec<_> = f
+            .claims()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|t| t.is)
+            .collect();
+        assert!(
+            values.contains(&Value::String("seed".into())),
+            "the base fact survives: {values:?}"
+        );
+        assert!(
+            !values.contains(&Value::String("Spam".into())),
+            "the replayed covering record must retire the upstream's live copy: {values:?}"
+        );
+
+        Ok(())
+    }
+
+    /// When the replica's delta adds a claim the upstream has observed,
+    /// the replay's swapped R1 drops it against the upstream's
+    /// watermark: if the upstream still holds it the add was a no-op,
+    /// and if the upstream's log covered it (as here), applying it
+    /// would resurrect the deletion. The replica's own fresh claims are
+    /// above the watermark and land as news.
+    #[dialog_common::test]
+    async fn it_drops_observed_adds_when_replaying_onto_a_covering_upstream() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let m = repo.branch("m").open().perform(&operator).await?;
+        m.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:0",
+            "seed",
+        )]))
+        .perform(&operator)
+        .await?;
+        let f = repo.branch("f").open().perform(&operator).await?;
+        f.set_upstream(&m).perform(&operator).await?;
+        f.pull().perform(&operator).await?;
+
+        // `a` authors the fact. The upstream adopts it AND covers it;
+        // the replica adopts it and keeps it live, plus commits novelty
+        // of its own.
+        let a = repo.branch("a").open().perform(&operator).await?;
+        a.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Spam",
+        )]))
+        .perform(&operator)
+        .await?;
+        m.pull().from(&a).perform(&operator).await?;
+        m.commit(stream::iter(vec![Instruction::Retract(Artifact {
+            the: "post/title".parse()?,
+            of: "post:1".parse()?,
+            is: Value::String("Spam".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+        f.pull().from(&a).perform(&operator).await?;
+        f.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:2",
+            "ours",
+        )]))
+        .perform(&operator)
+        .await?;
+
+        // f's delta adds the authored fact; m has observed it and
+        // covered it, so the replay's swapped R1 must drop the add
+        // rather than resurrect m's deletion.
+        f.pull().perform(&operator).await?.expect("merged");
+
+        let values: Vec<_> = f
+            .claims()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|t| t.is)
+            .collect();
+        assert!(
+            !values.contains(&Value::String("Spam".into())),
+            "the upstream's deletion must not be resurrected: {values:?}"
+        );
+        assert!(
+            values.contains(&Value::String("ours".into())),
+            "the replica's own novelty survives the fallback: {values:?}"
         );
 
         Ok(())
