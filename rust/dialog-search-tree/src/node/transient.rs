@@ -11,7 +11,7 @@ use rkyv::{
 
 use crate::{
     ArchivedNodeBody, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Key, Link, Node,
-    PersistentNode, PersistentNodeBody, Rank, SymmetryWith, Value, into_owned,
+    PersistentNode, PersistentNodeBody, Rank, Value, into_owned,
 };
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
@@ -151,13 +151,6 @@ impl<Key, Value> TransientNode<Key, Value> {
 impl<Key, Value> TransientNode<Key, Value>
 where
     Key: self::Key,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -175,10 +168,10 @@ where
     ) -> Result<TransientIndex<Key, Value>, DialogSearchTreeError> {
         let children = node
             .as_index()?
-            .links
-            .iter()
-            .map(|link| Ok(Node::Persistent(into_owned::<Link>(link)?)))
-            .collect::<Result<Vec<Node<Key, Value>>, DialogSearchTreeError>>()?;
+            .links()?
+            .into_iter()
+            .map(Node::Persistent)
+            .collect::<Vec<Node<Key, Value>>>();
         Ok(TransientIndex { children })
     }
 }
@@ -186,13 +179,6 @@ where
 impl<Key, Value> TransientNode<Key, Value>
 where
     Key: self::Key,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -218,11 +204,14 @@ where
                 Ok(TransientNode::Index(TransientNode::open_index(node)?))
             }
             ArchivedNodeBody::Segment(segment) => {
-                let entries = segment
-                    .entries
-                    .iter()
-                    .map(into_owned)
-                    .collect::<Result<Vec<Entry<Key, Value>>, DialogSearchTreeError>>()?;
+                let mut entries = Vec::with_capacity(segment.len());
+                let mut keys = segment.keys();
+                while let Some((at, key)) = keys.next_key()? {
+                    entries.push(Entry {
+                        key: Key::try_from_bytes(key)?,
+                        value: into_owned(segment.value_at(at)?)?,
+                    });
+                }
                 Ok(TransientNode::Segment(TransientSegment {
                     entries,
                     separator,
@@ -234,17 +223,7 @@ where
 
 impl<Key, Value> TransientNode<Key, Value>
 where
-    Key: self::Key
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
+    Key: self::Key,
     Value: self::Value
         + for<'a> Serialize<
             Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
@@ -287,7 +266,6 @@ where
 impl<Key, Value> TransientSegment<Key, Value>
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
 {
     /// Returns the upper bound key of this segment, the key of its last entry.
@@ -318,13 +296,6 @@ pub(crate) fn regroup_children<Key, Value, D>(
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -372,7 +343,6 @@ pub(crate) fn regroup_entries<Key, Value, D>(
 ) -> Vec<Node<Key, Value>>
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
     D: Distribution,
 {

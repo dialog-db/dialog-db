@@ -90,10 +90,10 @@ async fn report<const M: u64>(size: usize) {
             let node = PersistentNode::<[u8; 16], Vec<u8>>::new(bytes.into());
             if let Ok(index) = node.as_index() {
                 if depth == 0 {
-                    root_fanout = index.links.len();
+                    root_fanout = index.len();
                 }
-                for link in index.links.iter() {
-                    next.push(<&Blake3Hash>::from(&link.node).clone());
+                for at in 0..index.len() {
+                    next.push(index.hash_at(at).unwrap().clone());
                 }
             }
         }

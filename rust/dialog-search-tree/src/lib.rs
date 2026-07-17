@@ -179,9 +179,6 @@ pub use encoding::*;
 mod walker;
 pub use walker::*;
 
-mod compare;
-pub use compare::*;
-
 /// Helpers for testing and development.
 ///
 /// This module provides utilities for creating deterministic tree structures

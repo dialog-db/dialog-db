@@ -352,12 +352,12 @@ where
                 node_count += 1;
                 match node.as_index() {
                     Ok(index) => {
-                        fanout_sum += index.links.len();
-                        for link in index.links.iter() {
-                            next.push(<&Blake3Hash>::from(&link.node).clone());
+                        fanout_sum += index.len();
+                        for at in 0..index.len() {
+                            next.push(index.hash_at(at).unwrap().clone());
                         }
                     }
-                    Err(_) => fanout_sum += node.as_segment().unwrap().entries.len(),
+                    Err(_) => fanout_sum += node.as_segment().unwrap().len(),
                 }
             }
 

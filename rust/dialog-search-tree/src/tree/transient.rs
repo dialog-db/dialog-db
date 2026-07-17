@@ -16,8 +16,8 @@
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
     DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Node, PersistentNode,
-    PersistentTree, Rank, SymmetryWith, TransientIndex, TransientNode, TransientSegment,
-    TreeWalker, Value, regroup_children, regroup_entries,
+    PersistentTree, Rank, TransientIndex, TransientNode, TransientSegment, TreeWalker, Value,
+    regroup_children, regroup_entries,
 };
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
@@ -59,7 +59,6 @@ enum TransientRoot<Key, Value> {
 pub struct TransientTree<Key, Value, D = Geometric>
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
     D: Distribution,
 {
@@ -74,22 +73,7 @@ where
 
 impl<Key, Value, D> TransientTree<Key, Value, D>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value
         + ConditionalSync
         + 'static
@@ -451,22 +435,7 @@ impl<Key, Value> Edit<Key, Value> {
 
 impl<Key, Value> Edit<Key, Value>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value
         + ConditionalSync
         + 'static
@@ -798,14 +767,7 @@ async fn lift<Key, Value, Backend>(
     accessor: &Accessor<Backend>,
 ) -> Result<(), DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -840,19 +802,7 @@ async fn lift_right_neighbor_spine<Key, Value, Backend>(
     accessor: &Accessor<Backend>,
 ) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -918,19 +868,7 @@ async fn lift_left_neighbor_spine<Key, Value, Backend>(
     accessor: &Accessor<Backend>,
 ) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1003,14 +941,7 @@ fn reshape_path<Key, Value, D>(
     left_fuse: Option<usize>,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1076,14 +1007,7 @@ fn fuse_left_run<Key, Value, D>(
     height: Rank,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1131,14 +1055,7 @@ fn reshape_fused<Key, Value, D>(
     left_fuse: Option<usize>,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1202,14 +1119,7 @@ fn fuse_subtrees<Key, Value, D>(
     height: Rank,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1270,14 +1180,7 @@ fn splice_and_regroup<Key, Value, D>(
     height: Rank,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1306,14 +1209,7 @@ fn seal_root<Key, Value, D>(
     height: Rank,
 ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1425,7 +1321,6 @@ fn fast_path_keeps_canonical<Key, Value, D>(
 ) -> bool
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     D: Distribution,
 {
     match edit {
@@ -1480,7 +1375,6 @@ where
 fn child_for<Key, Value>(children: &[Node<Key, Value>], key: &Key) -> usize
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
 {
     let mut at = 0usize;
     while at + 1 < children.len() {
@@ -2438,16 +2332,16 @@ mod tests {
 
             match node.body()? {
                 ArchivedNodeBody::Segment(segment) => {
-                    let first = segment.entries.first().expect("segment non-empty").key;
-                    let last = segment.entries.last().expect("segment non-empty").key;
+                    let first: [u8; 4] = segment.first_key()?.as_slice().try_into()?;
+                    let last: [u8; 4] = segment.last_key()?.as_slice().try_into()?;
                     Ok((first, last))
                 }
                 ArchivedNodeBody::Index(index) => {
                     let mut previous_max: Option<[u8; 4]> = None;
                     let mut bounds: Option<([u8; 4], [u8; 4])> = None;
-                    for (at, link) in index.links.iter().enumerate() {
-                        let child: Blake3Hash = crate::into_owned(&link.node)?;
-                        let separator: Vec<u8> = link.separator.as_slice().to_vec();
+                    for (at, link) in index.links()?.into_iter().enumerate() {
+                        let child: Blake3Hash = link.node;
+                        let separator: Vec<u8> = link.separator;
                         let expected_child_leftmost = if at == 0 {
                             expected_leftmost.to_vec()
                         } else {

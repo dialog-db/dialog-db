@@ -181,14 +181,14 @@ async fn live_footprint(tree: &Tree, storage: &Storage) -> Footprint {
                 footprint.index_nodes += 1;
                 footprint.index_bytes += size;
                 footprint.record(level, size);
-                for link in index.links.iter() {
-                    frontier.push((<&Blake3Hash>::from(&link.node).clone(), level + 1));
+                for at in 0..index.len() {
+                    frontier.push((index.hash_at(at).unwrap().clone(), level + 1));
                 }
             }
             ArchivedNodeBody::Segment(segment) => {
                 footprint.segment_nodes += 1;
                 footprint.segment_bytes += size;
-                footprint.entries += segment.entries.len() as u64;
+                footprint.entries += segment.len() as u64;
                 footprint.record(level, size);
             }
         }

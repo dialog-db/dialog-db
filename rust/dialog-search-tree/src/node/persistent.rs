@@ -2,14 +2,16 @@ use dialog_common::Blake3Hash;
 use rkyv::{
     Archive, Deserialize, Serialize,
     bytecheck::CheckBytes,
-    de::Pool,
     rancor::Strategy,
     ser::{Serializer, allocator::ArenaHandle, sharing::Share},
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{Buffer, DialogSearchTreeError, Entry, Key, Link, SymmetryWith, Value};
+use crate::{
+    Buffer, DialogSearchTreeError, Entry, Key, Link, Value,
+    node::codec::{common_prefix, encode_keys},
+};
 use std::marker::PhantomData;
 
 /// A tree node in its serialized, content-addressed form.
@@ -29,13 +31,6 @@ pub struct PersistentNode<Key, Value> {
 impl<Key, Value> PersistentNode<Key, Value>
 where
     Key: self::Key,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -73,19 +68,20 @@ where
         })
     }
 
-    /// Returns the upper bound key of this segment node, if it has one.
+    /// Returns the upper bound (last) key of this segment node, decoded to
+    /// its bytes, if it has one.
     ///
-    /// Index nodes carry no full keys (links hold separators), so this
+    /// Index nodes carry no full keys (their table holds separators), so this
     /// returns `None` for an index; full bounds exist only in leaves.
-    pub fn upper_bound(&self) -> Result<Option<&Key::Archived>, DialogSearchTreeError> {
-        self.body().map(|body| match body {
-            ArchivedNodeBody::Index(_) => None,
-            ArchivedNodeBody::Segment(segment) => segment.upper_bound(),
-        })
+    pub fn upper_bound(&self) -> Result<Option<Vec<u8>>, DialogSearchTreeError> {
+        match self.body()? {
+            ArchivedNodeBody::Index(_) => Ok(None),
+            ArchivedNodeBody::Segment(segment) => segment.last_key().map(Some),
+        }
     }
 
     /// Accesses the deserialized body of this node.
-    pub fn body(&self) -> Result<&ArchivedNodeBody<Key, Value>, DialogSearchTreeError> {
+    pub fn body(&self) -> Result<&ArchivedNodeBody<Value>, DialogSearchTreeError> {
         rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
             .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
     }
@@ -103,7 +99,7 @@ where
 
     /// Interprets this node as a segment node, returning an error if it's an
     /// index.
-    pub fn as_segment(&self) -> Result<&ArchivedSegment<Key, Value>, DialogSearchTreeError> {
+    pub fn as_segment(&self) -> Result<&ArchivedSegment<Value>, DialogSearchTreeError> {
         self.body().and_then(|body| match body {
             ArchivedNodeBody::Segment(segment) => Ok(segment),
             ArchivedNodeBody::Index(_) => Err(DialogSearchTreeError::Access(
@@ -113,65 +109,114 @@ where
     }
 }
 
-/// An index node containing links to child nodes.
+/// An index node holding its children as a front-coded separator table.
+///
+/// Each child contributes its lower-bound separator (see [`Link`]); the table
+/// stores the longest common prefix of all separators once and each
+/// separator's remaining suffix contiguously. Routing compares a probe
+/// against the prefix once, then against suffix slices, reconstructing
+/// nothing.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedIndex)]
 pub struct PersistentIndex {
-    /// The child node links stored in this index.
-    pub links: Vec<Link>,
+    /// Longest common prefix of all child separators, stored once.
+    pub prefix: Vec<u8>,
+    /// Concatenated separator suffixes (each separator minus `prefix`), in
+    /// child order.
+    pub suffixes: Vec<u8>,
+    /// End offset of each child's suffix within `suffixes`; one per child,
+    /// monotonically nondecreasing, the last equal to `suffixes.len()`.
+    pub ends: Vec<u32>,
+    /// Child node content hashes, in child order.
+    pub hashes: Vec<Blake3Hash>,
 }
 
 impl PersistentIndex {
-    /// Creates a new [`PersistentIndex`] containing a single link.
-    pub fn new(link: Link) -> Self {
-        Self { links: vec![link] }
-    }
-}
+    /// Builds the separator table from child links, in order.
+    ///
+    /// The table layout is a pure function of the links: the prefix is the
+    /// longest common prefix of the first and last separator (separators are
+    /// sorted), so identical link lists yield identical bytes.
+    pub fn from_links(links: Vec<Link>) -> Self {
+        let prefix_length = match (links.first(), links.last()) {
+            (Some(first), Some(last)) => common_prefix(&first.separator, &last.separator),
+            _ => 0,
+        };
+        let prefix = links
+            .first()
+            .map(|link| link.separator[..prefix_length].to_vec())
+            .unwrap_or_default();
 
-/// A leaf segment containing key-value entries.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[rkyv(archived = ArchivedSegment)]
-pub struct PersistentSegment<Key, Value> {
-    /// The key-value entries stored in this segment.
-    pub entries: Vec<Entry<Key, Value>>,
-}
+        let mut suffixes = Vec::new();
+        let mut ends = Vec::with_capacity(links.len());
+        let mut hashes = Vec::with_capacity(links.len());
+        for link in links {
+            suffixes.extend_from_slice(&link.separator[prefix_length..]);
+            ends.push(suffixes.len() as u32);
+            hashes.push(link.node);
+        }
 
-impl<Key, Value> PersistentSegment<Key, Value>
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Value: self::Value,
-{
-    /// Creates a new [`PersistentSegment`] containing a single entry.
-    pub fn new(entry: Entry<Key, Value>) -> Self {
         Self {
-            entries: vec![entry],
+            prefix,
+            suffixes,
+            ends,
+            hashes,
         }
     }
+}
 
-    /// Returns the key of the last entry in this segment.
-    pub fn upper_bound(&self) -> Option<&Key> {
-        self.entries.last().map(|entry| &entry.key)
+/// A leaf segment holding entries as a front-coded key stream plus a value
+/// table.
+///
+/// Keys are stored per the codec in [`crate::node::codec`]: a node-level
+/// prefix once, then per-entry `(shared, suffix)` records with a restart
+/// every [`RESTART_INTERVAL`](crate::node::codec::RESTART_INTERVAL) entries.
+/// Values stay individually archived, index-aligned with the decoded keys.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedSegment)]
+pub struct PersistentSegment<Value> {
+    /// Longest common prefix of all keys in this segment, stored once.
+    pub prefix: Vec<u8>,
+    /// The front-coded key stream.
+    pub keys: Vec<u8>,
+    /// Byte offset into `keys` of each restart record.
+    pub restarts: Vec<u32>,
+    /// Entry values, index-aligned with the key stream.
+    pub values: Vec<Value>,
+}
+
+impl<Value> PersistentSegment<Value>
+where
+    Value: self::Value,
+{
+    /// Encodes sorted entries into the front-coded segment form.
+    pub fn from_entries<Key: self::Key>(entries: Vec<Entry<Key, Value>>) -> Self {
+        let (prefix, keys, restarts) = {
+            let key_refs: Vec<&[u8]> = entries.iter().map(|entry| entry.key.as_ref()).collect();
+            encode_keys(&key_refs)
+        };
+        let values = entries.into_iter().map(|entry| entry.value).collect();
+        Self {
+            prefix,
+            keys,
+            restarts,
+            values,
+        }
     }
 }
 
 /// The body of a tree node, either an index or a leaf segment.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedNodeBody)]
-pub enum PersistentNodeBody<Key, Value> {
+pub enum PersistentNodeBody<Value> {
     /// An index node containing links to child nodes.
     Index(PersistentIndex),
     /// A leaf segment containing key-value entries.
-    Segment(PersistentSegment<Key, Value>),
+    Segment(PersistentSegment<Value>),
 }
 
-impl<Key, Value> PersistentNodeBody<Key, Value>
+impl<Value> PersistentNodeBody<Value>
 where
-    Key: self::Key
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value
         + for<'a> Serialize<
             Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
@@ -187,7 +232,7 @@ where
     }
 }
 
-impl<Key, Value> TryFrom<Vec<Link>> for PersistentNodeBody<Key, Value> {
+impl<Value> TryFrom<Vec<Link>> for PersistentNodeBody<Value> {
     type Error = DialogSearchTreeError;
 
     fn try_from(links: Vec<Link>) -> Result<Self, Self::Error> {
@@ -196,19 +241,27 @@ impl<Key, Value> TryFrom<Vec<Link>> for PersistentNodeBody<Key, Value> {
                 "Attempted to create an index from zero links".into(),
             ));
         }
-        Ok(PersistentNodeBody::Index(PersistentIndex { links }))
+        Ok(PersistentNodeBody::Index(PersistentIndex::from_links(
+            links,
+        )))
     }
 }
 
-impl<Key, Value> TryFrom<Vec<Entry<Key, Value>>> for PersistentNodeBody<Key, Value> {
+impl<Key, Value> TryFrom<Vec<Entry<Key, Value>>> for PersistentNodeBody<Value>
+where
+    Key: self::Key,
+    Value: self::Value,
+{
     type Error = DialogSearchTreeError;
 
     fn try_from(entries: Vec<Entry<Key, Value>>) -> Result<Self, Self::Error> {
         if entries.is_empty() {
             return Err(DialogSearchTreeError::Node(
-                "Attempted to create an index from zero links".into(),
+                "Attempted to create a segment from zero entries".into(),
             ));
         }
-        Ok(PersistentNodeBody::Segment(PersistentSegment { entries }))
+        Ok(PersistentNodeBody::Segment(
+            PersistentSegment::from_entries(entries),
+        ))
     }
 }

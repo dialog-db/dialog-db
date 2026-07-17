@@ -3,8 +3,9 @@
 use std::sync::mpsc::Sender;
 
 use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, KeyBytes, State, Storage};
-use dialog_common::Blake3Hash as NodeHash;
-use dialog_search_tree::{ArchivedNodeBody, Buffer, Entry, PersistentNode, into_owned};
+use dialog_search_tree::{
+    ArchivedNodeBody, Buffer, Entry, Key as TreeKey, PersistentNode, into_owned,
+};
 use dialog_storage::{Blake3Hash, MemoryStorageBackend, StorageBackend};
 
 use super::store::WorkerMessage;
@@ -77,24 +78,20 @@ impl ArtifactsHierarchy {
             let block: PersistentNode<KeyBytes, State<Datum>> =
                 PersistentNode::new(Buffer::from(bytes));
             let node = match block.body()? {
-                ArchivedNodeBody::Index(index) => TreeNode::Branch {
-                    separators: index
-                        .links
-                        .iter()
-                        .map(|link| link.separator.as_slice().to_vec())
-                        .collect(),
-                    children: index
-                        .links
-                        .iter()
-                        .map(|link| *<&NodeHash>::from(&link.node).as_bytes())
-                        .collect(),
-                },
+                ArchivedNodeBody::Index(index) => {
+                    let links = index.links()?;
+                    TreeNode::Branch {
+                        separators: links.iter().map(|link| link.separator.clone()).collect(),
+                        children: links.iter().map(|link| *link.node.as_bytes()).collect(),
+                    }
+                }
                 ArchivedNodeBody::Segment(segment) => {
-                    let mut entries = Vec::with_capacity(segment.entries.len());
-                    for entry in segment.entries.iter() {
+                    let mut entries = Vec::with_capacity(segment.len());
+                    let mut keys = segment.keys();
+                    while let Some((at, key)) = keys.next_key()? {
                         entries.push(Entry {
-                            key: Key::from(into_owned::<KeyBytes>(&entry.key)?),
-                            value: into_owned::<State<Datum>>(&entry.value)?,
+                            key: Key::from(<KeyBytes as TreeKey>::try_from_bytes(key)?),
+                            value: into_owned::<State<Datum>>(segment.value_at(at)?)?,
                         });
                     }
                     TreeNode::Segment { entries }

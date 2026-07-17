@@ -52,7 +52,7 @@ use rkyv::{
 
 use crate::{
     ArchivedNodeBody, Buffer, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution,
-    Key, Link, PersistentNode, PersistentTree, Rank, SymmetryWith, Value, into_owned,
+    Key, PersistentNode, PersistentTree, Rank, Value,
 };
 
 /// Traversal order for tree iteration.
@@ -127,8 +127,6 @@ impl<T> TraversalQueue<T> {
 pub trait Traversable<Key, Value>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
 {
     /// Returns an async stream that traverses all nodes in the specified order.
@@ -154,18 +152,6 @@ where
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
 where
     Key: self::Key + ConditionalSync + 'static,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key: for<'b> Serialize<
-        Strategy<Serializer<AlignedVec, ArenaHandle<'b>, Share>, rkyv::rancor::Error>,
-    >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value + ConditionalSync + 'static,
     Value: for<'b> Serialize<
         Strategy<Serializer<AlignedVec, ArenaHandle<'b>, Share>, rkyv::rancor::Error>,
@@ -197,10 +183,10 @@ where
 
                     if let ArchivedNodeBody::Index(index) = node.body()? {
                         let children = index
-                            .links
-                            .iter()
-                            .map(|link| Ok(into_owned::<Link>(link)?.node))
-                            .collect::<Result<Vec<_>, DialogSearchTreeError>>()?;
+                            .links()?
+                            .into_iter()
+                            .map(|link| link.node)
+                            .collect::<Vec<_>>();
                         queue.enqueue(children);
                     }
 
@@ -218,14 +204,6 @@ async fn load_node<Key, Value, Backend>(
 ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
@@ -248,8 +226,6 @@ pub trait TreeNodes<Key, Value>:
     Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
 {
     /// Collects all node hashes into a `HashSet`, ignoring errors.
@@ -261,14 +237,6 @@ where
 impl<Key, Value, S> TreeNodes<Key, Value> for S
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
@@ -707,17 +675,10 @@ impl TreeDescriptor {
         let node = load_node::<SpecKey, Vec<u8>, JournaledBackend>(storage, hash).await?;
 
         let upper_bound: SpecKey = match node.body()? {
-            ArchivedNodeBody::Segment(segment) => segment
-                .upper_bound()
-                .map(into_owned)
-                .transpose()?
-                .ok_or_else(|| {
-                    DialogSearchTreeError::Node("Segment was unexpectedly empty".into())
-                })?,
+            ArchivedNodeBody::Segment(segment) => SpecKey::try_from_bytes(&segment.last_key()?)?,
             ArchivedNodeBody::Index(index) => {
                 let mut last: Option<SpecKey> = None;
-                for link in index.links.iter() {
-                    let link = into_owned::<Link>(link)?;
+                for link in index.links()? {
                     last = Some(
                         Box::pin(Self::build_spec_from_node(
                             spec,
@@ -854,19 +815,17 @@ impl TreeSpec {
             // and by child count for indexes, whose links carry only
             // separators.
             let (key_str, rank) = match node.body() {
-                Ok(ArchivedNodeBody::Segment(segment)) => match segment.upper_bound() {
-                    Some(upper_bound) => (
-                        String::from_utf8_lossy(&decode_key(upper_bound.as_ref())).to_string(),
-                        DistributionSimulator::rank(upper_bound.as_ref()),
+                Ok(ArchivedNodeBody::Segment(segment)) => match segment.last_key() {
+                    Ok(upper_bound) => (
+                        String::from_utf8_lossy(&decode_key(&upper_bound)).to_string(),
+                        DistributionSimulator::rank(&upper_bound),
                     ),
-                    None => {
+                    Err(_) => {
                         output.push_str(&format!("{prefix}(malformed node {hash})\n"));
                         return;
                     }
                 },
-                Ok(ArchivedNodeBody::Index(index)) => {
-                    (format!("({} children)", index.links.len()), 0)
-                }
+                Ok(ArchivedNodeBody::Index(index)) => (format!("({} children)", index.len()), 0),
                 Err(_) => {
                     output.push_str(&format!("{prefix}(malformed node {hash})\n"));
                     return;
@@ -892,11 +851,11 @@ impl TreeSpec {
 
             if let Ok(ArchivedNodeBody::Index(index)) = node.body() {
                 let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
-                let child_count = index.links.len();
-                for (i, link) in index.links.iter().enumerate() {
-                    let Ok(link) = into_owned::<Link>(link) else {
-                        continue;
-                    };
+                let child_count = index.len();
+                let Ok(links) = index.links() else {
+                    return;
+                };
+                for (i, link) in links.iter().enumerate() {
                     let is_last_child = i == child_count - 1;
                     Self::visualize_node(output, &link.node, storage, &new_prefix, is_last_child)
                         .await;

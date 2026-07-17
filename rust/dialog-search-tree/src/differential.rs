@@ -34,7 +34,7 @@ use rkyv::{
 
 use crate::{
     ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Entry,
-    Key, Link, PersistentNode, PersistentTree, SymmetryWith, Value, into_owned,
+    Key, Link, PersistentNode, PersistentTree, Value, into_owned,
 };
 
 /// Represents a change in the key-value store.
@@ -80,14 +80,6 @@ enum SparseTreeNode<Key, Value> {
 impl<Key, Value> SparseTreeNode<Key, Value>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value,
     Value::Archived: for<'b> CheckBytes<
         Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
@@ -134,10 +126,7 @@ where
     fn links_contain(&self, hash: &Blake3Hash) -> bool {
         match self {
             SparseTreeNode::Loaded { node, .. } => match node.body() {
-                Ok(ArchivedNodeBody::Index(index)) => index
-                    .links
-                    .iter()
-                    .any(|link| <&Blake3Hash>::from(&link.node) == hash),
+                Ok(ArchivedNodeBody::Index(index)) => index.contains_hash(hash),
                 _ => false,
             },
             SparseTreeNode::Ref(_) => false,
@@ -154,8 +143,6 @@ where
 struct SparseTree<'a, Key, Value, Backend>
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
 {
     storage: &'a ContentAddressedStorage<Backend>,
@@ -172,14 +159,6 @@ where
 impl<'a, Key, Value, Backend> SparseTree<'a, Key, Value, Backend>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
@@ -217,12 +196,8 @@ where
             // is the empty bound; a distribution with a different
             // reseparation rule (the test simulator) still aligns.
             let lower_bound = match node.body()? {
-                ArchivedNodeBody::Index(index) => index
-                    .links
-                    .first()
-                    .map(|link| link.separator.as_slice().to_vec())
-                    .unwrap_or_default(),
-                ArchivedNodeBody::Segment(_) => Vec::new(),
+                ArchivedNodeBody::Index(index) if !index.is_empty() => index.separator(0)?,
+                _ => Vec::new(),
             };
             vec![SparseTreeNode::Loaded { node, lower_bound }]
         };
@@ -264,10 +239,10 @@ where
         match node.body()? {
             ArchivedNodeBody::Index(index) => {
                 let children = index
-                    .links
-                    .iter()
-                    .map(|link| Ok(SparseTreeNode::Ref(into_owned::<Link>(link)?)))
-                    .collect::<Result<Vec<_>, DialogSearchTreeError>>()?;
+                    .links()?
+                    .into_iter()
+                    .map(SparseTreeNode::Ref)
+                    .collect::<Vec<_>>();
                 for child in &children {
                     self.seen.insert(child.hash().clone());
                 }
@@ -364,9 +339,9 @@ where
                 while let Some(node) = stack.pop() {
                     match node.body()? {
                         ArchivedNodeBody::Index(index) => {
-                            let mut children = Vec::with_capacity(index.links.len());
-                            for link in index.links.iter() {
-                                let hash = <&Blake3Hash>::from(&link.node);
+                            let mut children = Vec::with_capacity(index.len());
+                            for at in 0..index.len() {
+                                let hash = index.hash_at(at)?;
                                 children.push(Self::load(self.storage, hash).await?);
                             }
                             while let Some(child) = children.pop() {
@@ -374,8 +349,13 @@ where
                             }
                         }
                         ArchivedNodeBody::Segment(segment) => {
-                            for entry in segment.entries.iter() {
-                                yield into_owned(entry)?;
+                            let mut keys = segment.keys();
+                            while let Some((at, key)) = keys.next_key()? {
+                                let entry = Entry {
+                                    key: Key::try_from_bytes(key)?,
+                                    value: into_owned(segment.value_at(at)?)?,
+                                };
+                                yield entry;
                             }
                         }
                     }
@@ -395,8 +375,6 @@ where
 pub struct TreeDifference<'a, Key, Value, Backend>
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
 {
     source: SparseTree<'a, Key, Value, Backend>,
@@ -406,25 +384,6 @@ where
 impl<'a, Key, Value, Backend> TreeDifference<'a, Key, Value, Backend>
 where
     Key: self::Key + ConditionalSync + 'static,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key: for<'b> rkyv::Serialize<
-            Strategy<
-                rkyv::ser::Serializer<
-                    rkyv::util::AlignedVec,
-                    rkyv::ser::allocator::ArenaHandle<'b>,
-                    rkyv::ser::sharing::Share,
-                >,
-                rkyv::rancor::Error,
-            >,
-        >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value + PartialEq + ConditionalSync + 'static,
     Value: for<'b> rkyv::Serialize<
             Strategy<

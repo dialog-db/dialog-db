@@ -2,22 +2,24 @@ mod persistent;
 pub use persistent::*;
 
 mod archive;
+pub use archive::*;
+
+pub(crate) mod codec;
 
 mod transient;
 pub use transient::*;
 
 use dialog_common::Blake3Hash;
 use rkyv::{
-    Deserialize, Serialize,
+    Serialize,
     bytecheck::CheckBytes,
-    de::Pool,
     rancor::Strategy,
     ser::{Serializer, allocator::ArenaHandle, sharing::Share},
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{Buffer, Delta, DialogSearchTreeError, Key, Link, SymmetryWith, Value};
+use crate::{Buffer, Delta, DialogSearchTreeError, Key, Link, Value};
 
 /// A tree node in either of its two representations.
 ///
@@ -79,17 +81,7 @@ impl<Key, Value> From<TransientNode<Key, Value>> for Node<Key, Value> {
 
 impl<Key, Value> Node<Key, Value>
 where
-    Key: self::Key
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
+    Key: self::Key,
     Value: self::Value
         + for<'a> Serialize<
             Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,

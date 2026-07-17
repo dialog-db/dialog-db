@@ -17,16 +17,14 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, PersistentNode,
-    SymmetryWith, Value, into_owned,
+    Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, PersistentNode, Value,
+    into_owned,
 };
 
 /// A traversal mechanism for walking through a tree structure.
 pub struct TreeWalker<Key, Value>
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -40,20 +38,7 @@ where
 
 impl<Key, Value> TreeWalker<Key, Value>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>
-        + std::fmt::Debug,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
@@ -110,24 +95,23 @@ where
                             0
                         };
 
-                        match index.links.get(child_index) {
-                            Some(link) => {
-                                let next_node = accessor.get_node(<&Blake3Hash>::from(&link.node)).await?;
-                                search_path.push((node, Some(child_index)));
-                                search_path.push((next_node, None));
-                            }
-                            None => {
-                                // Parent needs to check next sibling
-                                continue;
-                            }
+                        if child_index < index.len() {
+                            let next_node = accessor.get_node(index.hash_at(child_index)?).await?;
+                            search_path.push((node, Some(child_index)));
+                            search_path.push((next_node, None));
+                        } else {
+                            // Parent needs to check next sibling
+                            continue;
                         }
-
                     },
                     ArchivedNodeBody::Segment(segment) => {
-                        for entry in segment.entries.iter() {
-                            if range.contains(&entry.key) {
+                        let mut keys = segment.keys();
+                        while let Some((at, key)) = keys.next_key()? {
+                            let entry_key = Key::try_from_bytes(key)?;
+                            if range.contains(&entry_key) {
                                 entered_range = true;
-                                yield into_owned(entry)?;
+                                let value = into_owned(segment.value_at(at)?)?;
+                                yield Entry { key: entry_key, value };
                             } else if entered_range {
                                 // We've surpassed the range; abort.
                                 return;
@@ -176,12 +160,9 @@ where
                     // below the key (a probe equal to a separator belongs to
                     // the seam's right side), clamping to the leftmost child
                     // when the key sits below every separator.
-                    // `partition_point` counts the children whose separator
-                    // is `<= key`, so it lands one past that child without
-                    // scanning or decoding any sibling.
-                    let child_index = index.route(key.as_ref());
+                    let child_index = index.route(key.as_ref())?;
 
-                    next_node = into_owned(&index.links[child_index].node)?;
+                    next_node = index.hash_at(child_index)?.clone();
 
                     path.push(TreeLayer {
                         host: node.clone(),
@@ -224,19 +205,7 @@ async fn prefetch_right_neighbor<Key, Value, Backend>(
     accessor: Accessor<Backend>,
 ) -> Result<Option<RightNeighbor<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
@@ -250,7 +219,7 @@ where
     let Some(leaf_upper_bound) = leaf.upper_bound()? else {
         return Ok(None);
     };
-    if key != leaf_upper_bound {
+    if key.as_ref() != leaf_upper_bound.as_slice() {
         return Ok(None);
     }
 
@@ -264,23 +233,21 @@ where
     // The right-descent starts at the LCA's first right sibling (the child just
     // past the one the main descent took).
     let lca = &path[lca_depth];
-    let lca_links = &lca.host.as_index()?.links;
-    let mut next_hash: Blake3Hash = into_owned(&lca_links[lca.index + 1].node)?;
+    let mut next_hash: Blake3Hash = lca.host.as_index()?.hash_at(lca.index + 1)?.clone();
     let mut diverged_path: Vec<TreeLayer<Key, Value>> = Vec::new();
 
     let right_leaf = loop {
         let node: PersistentNode<Key, Value> = accessor.get_node(&next_hash).await?;
         match node.body()? {
             ArchivedNodeBody::Index(index) => {
-                let first = index.links.first().ok_or_else(|| {
-                    DialogSearchTreeError::Node(
+                if index.is_empty() {
+                    return Err(DialogSearchTreeError::Node(
                         "Empty index node during right-neighbor descent".into(),
-                    )
-                })?;
-                let child_hash: Blake3Hash = into_owned(&first.node)?;
-
+                    ));
+                }
                 // The right-adjacent descent is leftmost, so it always takes
                 // child 0; the remaining children are its right siblings.
+                let child_hash = index.hash_at(0)?.clone();
                 diverged_path.push(TreeLayer {
                     host: node.clone(),
                     index: 0,
@@ -326,27 +293,17 @@ pub struct SearchOptions {
 /// [`right_siblings`](Self::right_siblings) when it rebuilds the level.
 ///
 /// [`Arc`]: std::sync::Arc
-pub struct TreeLayer<Key, Value>
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-{
+/// [`Node`]: crate::Node
+pub struct TreeLayer<Key, Value> {
     /// The index node at this layer of the tree.
     pub host: PersistentNode<Key, Value>,
-    /// Position within `host.links` of the child the descent followed.
+    /// Position within the host's children of the child the descent followed.
     pub index: usize,
 }
 
 impl<Key, Value> TreeLayer<Key, Value>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -363,7 +320,7 @@ where
     pub fn has_right_siblings(&self) -> bool {
         self.host
             .as_index()
-            .map(|index| self.index + 1 < index.links.len())
+            .map(|index| self.index + 1 < index.len())
             .unwrap_or(false)
     }
 
@@ -378,7 +335,7 @@ where
     /// to owned links. Materialized on demand: only an update that rebuilds this
     /// level calls it.
     pub fn right_siblings(&self) -> Result<Option<NonEmpty<Link>>, DialogSearchTreeError> {
-        let links = self.host.as_index()?.links.len();
+        let links = self.host.as_index()?.len();
         self.siblings(self.index + 1, links)
     }
 
@@ -388,9 +345,8 @@ where
         end: usize,
     ) -> Result<Option<NonEmpty<Link>>, DialogSearchTreeError> {
         let index = self.host.as_index()?;
-        let owned = index.links[start..end]
-            .iter()
-            .map(into_owned)
+        let owned = (start..end)
+            .map(|at| index.link_at(at))
             .collect::<Result<Vec<Link>, _>>()?;
         Ok(NonEmpty::from_vec(owned))
     }
@@ -404,16 +360,7 @@ pub type IndexedPath<Key, Value> = Vec<(PersistentNode<Key, Value>, Option<usize
 
 /// The result of a tree search, containing the leaf node and the path taken to
 /// reach it.
-pub struct SearchResult<Key, Value>
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Value: self::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-{
+pub struct SearchResult<Key, Value> {
     /// The leaf node found by the search.
     pub leaf: PersistentNode<Key, Value>,
     /// The path from root to leaf.
@@ -438,16 +385,7 @@ where
 /// and `diverged_path` is empty. For cross-parent overflow, `lca_depth` points
 /// deeper in the shared ancestor chain and `diverged_path` records the
 /// leftmost descent from there down to `leaf`'s parent.
-pub struct RightNeighbor<Key, Value>
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Value: self::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-{
+pub struct RightNeighbor<Key, Value> {
     /// Depth in the main search path at which the right-adjacent descent
     /// diverges. Main and right-adjacent descents share hosts at depths
     /// `0..=lca_depth` (this depth's host is the same node in both
@@ -461,22 +399,7 @@ where
     pub leaf: PersistentNode<Key, Value>,
 }
 
-impl<Key, Value> SearchResult<Key, Value>
-where
-    Key: self::Key,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Value: self::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-{
+impl<Key, Value> SearchResult<Key, Value> {
     /// Converts this search result into a root-to-leaf path of
     /// `(node, child index)` pairs, where the leaf carries `None` and each index
     /// node carries the slot of the child the search descended into.

@@ -18,8 +18,8 @@ use rkyv::{
 
 use crate::{
     Accessor, Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Differential,
-    Distribution, Entry, Geometric, Key, SearchOptions, SearchResult, SymmetryWith, TreeDifference,
-    TreeWalker, Value, into_owned,
+    Distribution, Entry, Geometric, Key, SearchOptions, SearchResult, TreeDifference, TreeWalker,
+    Value, into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -52,8 +52,6 @@ use crate::{
 pub struct PersistentTree<Key, Value, D = Geometric>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
     D: Distribution,
 {
@@ -70,8 +68,6 @@ where
 impl<Key, Value, D> Clone for PersistentTree<Key, Value, D>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
     D: Distribution,
 {
@@ -88,22 +84,7 @@ where
 
 impl<Key, Value, D> PersistentTree<Key, Value, D>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value
         + ConditionalSync
         + 'static
@@ -187,8 +168,9 @@ where
         // (each layer is an Arc-backed node plus a child index), so the read
         // pays nothing for the siblings an update would later decode.
         if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
-            if let Some(entry) = result.leaf.body()?.find_entry(key)? {
-                into_owned(&entry.value).map(|value| Some(value))
+            let segment = result.leaf.as_segment()?;
+            if let Some(at) = segment.find(key.as_ref())? {
+                into_owned(segment.value_at(at)?).map(Some)
             } else {
                 Ok(None)
             }
@@ -366,15 +348,6 @@ where
 impl<Key, Value, D> From<Blake3Hash> for PersistentTree<Key, Value, D>
 where
     Key: self::Key + ConditionalSync + 'static,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord + ConditionalSync,
-    Key::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Key::Archived: Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
-    Key: for<'a> Serialize<
-        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-    >,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -393,15 +366,6 @@ where
 impl<Key, Value, D> From<&PersistentTree<Key, Value, D>> for TransientTree<Key, Value, D>
 where
     Key: self::Key + ConditionalSync + 'static,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord + ConditionalSync,
-    Key::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Key::Archived: Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
-    Key: for<'a> Serialize<
-        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-    >,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
