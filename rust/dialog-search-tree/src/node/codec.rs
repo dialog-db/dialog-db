@@ -140,11 +140,6 @@ impl<'a> KeyCursor<'a> {
         self.position >= self.stream.len()
     }
 
-    /// Byte position of the next record within the stream.
-    pub fn position(&self) -> usize {
-        self.position
-    }
-
     /// Decodes the next record, leaving its full key in [`key`](Self::key).
     ///
     /// Errors on truncated records or on a shared length that exceeds the

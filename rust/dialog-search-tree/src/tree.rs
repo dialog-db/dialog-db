@@ -169,7 +169,7 @@ where
         // pays nothing for the siblings an update would later decode.
         if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
             let segment = result.leaf.as_segment()?;
-            if let Some(at) = segment.find(key.as_ref())? {
+            if let Some(at) = segment.find::<Key>(key.as_ref())? {
                 into_owned(segment.value_at(at)?).map(Some)
             } else {
                 Ok(None)

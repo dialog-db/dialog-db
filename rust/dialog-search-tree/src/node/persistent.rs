@@ -10,7 +10,8 @@ use rkyv::{
 
 use crate::{
     Buffer, DialogSearchTreeError, Entry, Key, Link, Value,
-    node::codec::{common_prefix, encode_keys},
+    node::codec::common_prefix,
+    node::columnar::{ColumnData, encode_columns},
 };
 use std::marker::PhantomData;
 
@@ -76,7 +77,7 @@ where
     pub fn upper_bound(&self) -> Result<Option<Vec<u8>>, DialogSearchTreeError> {
         match self.body()? {
             ArchivedNodeBody::Index(_) => Ok(None),
-            ArchivedNodeBody::Segment(segment) => segment.last_key().map(Some),
+            ArchivedNodeBody::Segment(segment) => segment.last_key::<Key>().map(Some),
         }
     }
 
@@ -165,23 +166,24 @@ impl PersistentIndex {
     }
 }
 
-/// A leaf segment holding entries as a front-coded key stream plus a value
-/// table.
+/// A leaf segment holding entries columnar: one column per key component
+/// (see [`Schema`](crate::Schema)) plus an index-aligned value table.
 ///
-/// Keys are stored per the codec in [`crate::node::codec`]: a node-level
-/// prefix once, then per-entry `(shared, suffix)` records with a restart
-/// every [`RESTART_INTERVAL`](crate::node::codec::RESTART_INTERVAL) entries.
-/// Values stay individually archived, index-aligned with the decoded keys.
+/// Each key is split into its schema components and each component stored in
+/// the column that fits it: large mostly-distinct components (entity, value)
+/// in front-coded byte arenas, small highly-repeated components (namespace,
+/// name, value type) in per-leaf content-derived dictionaries. A key type
+/// with no finer structure reports a single whole-key arena column, under
+/// which this degrades to a single front-coded key stream. Values stay
+/// individually archived, index-aligned with the entries.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedSegment)]
 pub struct PersistentSegment<Value> {
-    /// Longest common prefix of all keys in this segment, stored once.
-    pub prefix: Vec<u8>,
-    /// The front-coded key stream.
-    pub keys: Vec<u8>,
-    /// Byte offset into `keys` of each restart record.
-    pub restarts: Vec<u32>,
-    /// Entry values, index-aligned with the key stream.
+    /// Number of entries in the segment.
+    pub count: u32,
+    /// One encoded column per key-schema component, in schema order.
+    pub columns: Vec<ColumnData>,
+    /// Entry values, index-aligned with the entries.
     pub values: Vec<Value>,
 }
 
@@ -189,19 +191,29 @@ impl<Value> PersistentSegment<Value>
 where
     Value: self::Value,
 {
-    /// Encodes sorted entries into the front-coded segment form.
-    pub fn from_entries<Key: self::Key>(entries: Vec<Entry<Key, Value>>) -> Self {
-        let (prefix, keys, restarts) = {
-            let key_refs: Vec<&[u8]> = entries.iter().map(|entry| entry.key.as_ref()).collect();
-            encode_keys(&key_refs)
-        };
-        let values = entries.into_iter().map(|entry| entry.value).collect();
-        Self {
-            prefix,
-            keys,
-            restarts,
-            values,
+    /// Encodes sorted entries into the columnar segment form, splitting each
+    /// key into its schema components.
+    pub fn from_entries<Key: self::Key>(
+        entries: Vec<Entry<Key, Value>>,
+    ) -> Result<Self, DialogSearchTreeError> {
+        let schema = Key::schema();
+        let count = entries.len() as u32;
+
+        // Split every key into its component slices, borrowing from the keys.
+        let mut rows: Vec<Vec<&[u8]>> = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let mut row = Vec::with_capacity(schema.len());
+            entry.key.components(&mut row);
+            rows.push(row);
         }
+        let columns = encode_columns(&schema, &rows)?;
+
+        let values = entries.into_iter().map(|entry| entry.value).collect();
+        Ok(Self {
+            count,
+            columns,
+            values,
+        })
     }
 }
 
@@ -261,7 +273,7 @@ where
             ));
         }
         Ok(PersistentNodeBody::Segment(
-            PersistentSegment::from_entries(entries),
+            PersistentSegment::from_entries(entries)?,
         ))
     }
 }

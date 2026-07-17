@@ -143,6 +143,9 @@ pub use dialog_common::Buffer;
 mod kv;
 pub use kv::*;
 
+mod component;
+pub use component::*;
+
 mod link;
 pub use link::*;
 

@@ -87,10 +87,10 @@ impl ArtifactsHierarchy {
                 }
                 ArchivedNodeBody::Segment(segment) => {
                     let mut entries = Vec::with_capacity(segment.len());
-                    let mut keys = segment.keys();
+                    let mut keys = segment.keys::<KeyBytes>()?;
                     while let Some((at, key)) = keys.next_key()? {
                         entries.push(Entry {
-                            key: Key::from(<KeyBytes as TreeKey>::try_from_bytes(key)?),
+                            key: Key::from(<KeyBytes as TreeKey>::try_from_bytes(&key)?),
                             value: into_owned::<State<Datum>>(segment.value_at(at)?)?,
                         });
                     }

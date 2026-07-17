@@ -105,9 +105,9 @@ where
                         }
                     },
                     ArchivedNodeBody::Segment(segment) => {
-                        let mut keys = segment.keys();
+                        let mut keys = segment.keys::<Key>()?;
                         while let Some((at, key)) = keys.next_key()? {
-                            let entry_key = Key::try_from_bytes(key)?;
+                            let entry_key = Key::try_from_bytes(&key)?;
                             if range.contains(&entry_key) {
                                 entered_range = true;
                                 let value = into_owned(segment.value_at(at)?)?;

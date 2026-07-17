@@ -675,7 +675,7 @@ impl TreeDescriptor {
         let node = load_node::<SpecKey, Vec<u8>, JournaledBackend>(storage, hash).await?;
 
         let upper_bound: SpecKey = match node.body()? {
-            ArchivedNodeBody::Segment(segment) => SpecKey::try_from_bytes(&segment.last_key()?)?,
+            ArchivedNodeBody::Segment(segment) => SpecKey::try_from_bytes(&segment.last_key::<SpecKey>()?)?,
             ArchivedNodeBody::Index(index) => {
                 let mut last: Option<SpecKey> = None;
                 for link in index.links()? {
@@ -815,7 +815,7 @@ impl TreeSpec {
             // and by child count for indexes, whose links carry only
             // separators.
             let (key_str, rank) = match node.body() {
-                Ok(ArchivedNodeBody::Segment(segment)) => match segment.last_key() {
+                Ok(ArchivedNodeBody::Segment(segment)) => match segment.last_key::<SpecKey>() {
                     Ok(upper_bound) => (
                         String::from_utf8_lossy(&decode_key(&upper_bound)).to_string(),
                         DistributionSimulator::rank(&upper_bound),

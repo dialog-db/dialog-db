@@ -6,6 +6,9 @@ pub use archive::*;
 
 pub(crate) mod codec;
 
+pub(crate) mod columnar;
+pub use columnar::ColumnData;
+
 mod transient;
 pub use transient::*;
 

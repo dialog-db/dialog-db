@@ -2332,8 +2332,8 @@ mod tests {
 
             match node.body()? {
                 ArchivedNodeBody::Segment(segment) => {
-                    let first: [u8; 4] = segment.first_key()?.as_slice().try_into()?;
-                    let last: [u8; 4] = segment.last_key()?.as_slice().try_into()?;
+                    let first: [u8; 4] = segment.first_key::<[u8; 4]>()?.as_slice().try_into()?;
+                    let last: [u8; 4] = segment.last_key::<[u8; 4]>()?.as_slice().try_into()?;
                     Ok((first, last))
                 }
                 ArchivedNodeBody::Index(index) => {

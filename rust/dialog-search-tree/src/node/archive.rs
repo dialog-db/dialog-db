@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
 
 use dialog_common::Blake3Hash;
+use rkyv::{Deserialize, rancor::Strategy};
 
 use crate::{
-    ArchivedIndex, ArchivedSegment, DialogSearchTreeError, Link, Value,
-    node::codec::{KeyCursor, RESTART_INTERVAL, read_varint},
+    ArchivedIndex, ArchivedSegment, ColumnData, DialogSearchTreeError, Key, Link, Value,
+    node::columnar::ColumnarLeaf,
 };
 
 fn malformed(message: &str) -> DialogSearchTreeError {
@@ -140,141 +141,73 @@ where
             .ok_or_else(|| malformed("Segment entry out of range"))
     }
 
-    /// A decoding cursor over this segment's full keys, in entry order.
-    pub fn keys(&self) -> SegmentKeys<'_> {
-        SegmentKeys {
-            cursor: KeyCursor::new(&self.prefix, &self.keys, 0),
-            count: self.len(),
-            index: 0,
-        }
+    /// Deserializes the archived columns to owned form and decodes them into
+    /// a [`ColumnarLeaf`], using `Key`'s schema. One decode pass; subsequent
+    /// key access is O(1) slicing.
+    pub fn decode<Key: self::Key>(&self) -> Result<ColumnarLeaf, DialogSearchTreeError> {
+        let columns: Vec<ColumnData> = self
+            .columns
+            .iter()
+            .map(|column| {
+                column
+                    .deserialize(Strategy::<_, rkyv::rancor::Error>::wrap(&mut ()))
+                    .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))
+            })
+            .collect::<Result<_, _>>()?;
+        ColumnarLeaf::decode(&Key::schema(), &columns, self.count.to_native() as usize)
     }
 
-    /// The unprefixed key at restart block `block`: a restart record encodes
-    /// its whole unprefixed key, so it is sliceable without a cursor.
-    fn restart_head(&self, block: usize) -> Result<&[u8], DialogSearchTreeError> {
-        let offset = self
-            .restarts
-            .get(block)
-            .ok_or_else(|| malformed("Segment restart out of range"))?
-            .to_native() as usize;
-        let stream: &[u8] = &self.keys;
-        let (shared, at) = read_varint(stream, offset)?;
-        if shared != 0 {
-            return Err(malformed("Segment restart record shares bytes"));
-        }
-        let (length, at) = read_varint(stream, at)?;
-        stream
-            .get(at..at + length as usize)
-            .ok_or_else(|| malformed("Segment restart suffix exceeds the key stream"))
+    /// An iterator over this segment's full keys, in entry order, for a given
+    /// key schema. Decodes all columns once.
+    pub fn keys<Key: self::Key>(&self) -> Result<SegmentKeys, DialogSearchTreeError> {
+        Ok(SegmentKeys {
+            leaf: self.decode::<Key>()?,
+            index: 0,
+        })
     }
 
     /// The first (minimum) key of this segment, decoded to its bytes.
-    pub fn first_key(&self) -> Result<Vec<u8>, DialogSearchTreeError> {
-        if self.is_empty() {
-            return Err(malformed("Segment was unexpectedly empty"));
-        }
-        let head = self.restart_head(0)?;
-        let mut key = Vec::with_capacity(self.prefix.len() + head.len());
-        key.extend_from_slice(&self.prefix);
-        key.extend_from_slice(head);
-        Ok(key)
+    pub fn first_key<Key: self::Key>(&self) -> Result<Vec<u8>, DialogSearchTreeError> {
+        self.decode::<Key>()?.key(0)
     }
 
     /// The last (maximum) key of this segment, decoded to its bytes.
-    pub fn last_key(&self) -> Result<Vec<u8>, DialogSearchTreeError> {
-        if self.is_empty() {
-            return Err(malformed("Segment was unexpectedly empty"));
-        }
-        let last_block = self
-            .restarts
+    pub fn last_key<Key: self::Key>(&self) -> Result<Vec<u8>, DialogSearchTreeError> {
+        let leaf = self.decode::<Key>()?;
+        let last = leaf
             .len()
             .checked_sub(1)
-            .ok_or_else(|| malformed("Segment restart table is empty"))?;
-        let offset = self.restarts[last_block].to_native() as usize;
-        let stream: &[u8] = &self.keys;
-        let mut cursor = KeyCursor::new(&self.prefix, stream, offset);
-        let mut remaining = self
-            .len()
-            .checked_sub(last_block * RESTART_INTERVAL)
-            .ok_or_else(|| malformed("Segment restart table exceeds the entry count"))?;
-        while remaining > 0 {
-            cursor.advance()?;
-            remaining -= 1;
-        }
-        Ok(cursor.key().to_vec())
+            .ok_or_else(|| malformed("Segment was unexpectedly empty"))?;
+        leaf.key(last)
     }
 
-    /// Position of the entry whose key equals `key`, or `None`.
-    ///
-    /// Binary-searches the restart heads, then decodes at most one restart
-    /// block linearly.
-    pub fn find(&self, key: &[u8]) -> Result<Option<usize>, DialogSearchTreeError> {
-        let prefix: &[u8] = &self.prefix;
-        if key.len() < prefix.len() || &key[..prefix.len()] != prefix {
-            return Ok(None);
-        }
-        let probe = &key[prefix.len()..];
-
-        // Restart blocks whose head is <= the probe; the match, if present,
-        // lives in the last such block.
-        let (mut low, mut high) = (0, self.restarts.len());
-        while low < high {
-            let middle = (low + high) / 2;
-            if self.restart_head(middle)? <= probe {
-                low = middle + 1;
-            } else {
-                high = middle;
-            }
-        }
-        if low == 0 {
-            return Ok(None);
-        }
-        let block = low - 1;
-
-        let stream: &[u8] = &self.keys;
-        let mut cursor = KeyCursor::new(&[], stream, self.restarts[block].to_native() as usize);
-        let mut index = block * RESTART_INTERVAL;
-        let end = self
-            .restarts
-            .get(block + 1)
-            .map(|offset| offset.to_native() as usize)
-            .unwrap_or(stream.len());
-        while cursor.position() < end && index < self.len() {
-            cursor.advance()?;
-            match cursor.key().cmp(probe) {
-                Ordering::Equal => return Ok(Some(index)),
-                Ordering::Greater => return Ok(None),
-                Ordering::Less => index += 1,
-            }
-        }
-        Ok(None)
+    /// Position of the entry whose key equals `key`, or `None`. Binary
+    /// search via component comparison, no key reconstruction.
+    pub fn find<Key: self::Key>(&self, key: &[u8]) -> Result<Option<usize>, DialogSearchTreeError> {
+        self.decode::<Key>()?.find(key)
     }
 }
 
-/// A streaming decoder over a segment's full keys.
+/// An iterator over a segment's full keys, backed by a decoded columnar leaf.
 ///
 /// Yields `(entry index, key bytes)` pairs in order; the caller pairs the
-/// index with [`ArchivedSegment::value_at`] as needed. One buffer is reused
-/// across all keys.
-pub struct SegmentKeys<'a> {
-    cursor: KeyCursor<'a>,
-    count: usize,
+/// index with [`ArchivedSegment::value_at`] as needed. Each key is
+/// reconstructed by concatenating its components on demand.
+pub struct SegmentKeys {
+    leaf: ColumnarLeaf,
     index: usize,
 }
 
-impl SegmentKeys<'_> {
-    /// Decodes the next key, or returns `None` past the last entry.
-    ///
-    /// Errors if the key stream ends before yielding as many keys as the
-    /// segment has values, which marks the node malformed.
-    pub fn next_key(&mut self) -> Result<Option<(usize, &[u8])>, DialogSearchTreeError> {
-        if self.index >= self.count {
+impl SegmentKeys {
+    /// Reconstructs the next key, or returns `None` past the last entry.
+    pub fn next_key(&mut self) -> Result<Option<(usize, Vec<u8>)>, DialogSearchTreeError> {
+        if self.index >= self.leaf.len() {
             return Ok(None);
         }
-        self.cursor.advance()?;
         let at = self.index;
+        let key = self.leaf.key(at)?;
         self.index += 1;
-        Ok(Some((at, self.cursor.key())))
+        Ok(Some((at, key)))
     }
 }
 
@@ -286,7 +219,8 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use crate::{
-        Buffer, Entry, Link, PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment,
+        Buffer, ColumnData, Entry, Link, PersistentIndex, PersistentNode, PersistentNodeBody,
+        PersistentSegment,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -333,23 +267,23 @@ mod tests {
         let segment = node.as_segment()?;
 
         assert_eq!(segment.len(), keys.len());
-        assert_eq!(segment.first_key()?, keys[0].to_vec());
-        assert_eq!(segment.last_key()?, keys.last().unwrap().to_vec());
+        assert_eq!(segment.first_key::<[u8; 8]>()?, keys[0].to_vec());
+        assert_eq!(segment.last_key::<[u8; 8]>()?, keys.last().unwrap().to_vec());
 
-        let mut decoded = segment.keys();
+        let mut decoded = segment.keys::<[u8; 8]>()?;
         for expected in &keys {
             let (at, bytes) = decoded.next_key()?.expect("entry present");
-            assert_eq!(bytes, expected.as_slice());
+            assert_eq!(bytes, expected.to_vec());
             assert_eq!(segment.value_at(at)?.as_slice(), expected.as_slice());
         }
         assert!(decoded.next_key()?.is_none());
 
         for (at, key) in keys.iter().enumerate() {
-            assert_eq!(segment.find(key.as_slice())?, Some(at));
+            assert_eq!(segment.find::<[u8; 8]>(key.as_slice())?, Some(at));
         }
-        assert_eq!(segment.find(b"absent!!")?, None);
-        assert_eq!(segment.find(&[0xffu8; 8])?, None);
-        assert_eq!(segment.find(&[0u8; 8])?, None);
+        assert_eq!(segment.find::<[u8; 8]>(b"absent!!")?, None);
+        assert_eq!(segment.find::<[u8; 8]>(&[0xffu8; 8])?, None);
+        assert_eq!(segment.find::<[u8; 8]>(&[0u8; 8])?, None);
         Ok(())
     }
 
@@ -403,25 +337,26 @@ mod tests {
         Ok(())
     }
 
-    /// A malformed key stream (truncated records) errors at decode, and a
-    /// value table longer than the key stream errors when the cursor runs
-    /// past the stream's records.
+    /// A malformed arena column (truncated front-coded record) errors at
+    /// decode rather than panicking: nodes arrive from untrusted peers.
     #[dialog_common::test]
-    async fn it_rejects_malformed_segment_streams() -> Result<()> {
+    async fn it_rejects_malformed_segment_columns() -> Result<()> {
+        // One opaque arena column whose stream is a truncated varint, but a
+        // value table claiming two entries.
         let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Segment(PersistentSegment {
-            prefix: vec![],
-            keys: vec![0x80],
-            restarts: vec![0],
+            count: 2,
+            columns: vec![ColumnData::Arena {
+                prefix: vec![],
+                stream: vec![0x80],
+                restarts: vec![0],
+            }],
             values: vec![vec![1], vec![2]],
         });
         let node = TestNode::new(Buffer::from(body.as_bytes()?));
         let segment = node.as_segment()?;
-        assert!(segment.keys().next_key().is_err());
-        assert!(segment.last_key().is_err());
-        // The truncated restart head is reached by `find`'s binary search,
-        // so the malformed stream is rejected with an error rather than a
-        // silent miss.
-        assert!(segment.find(b"anything").is_err());
+        assert!(segment.keys::<[u8; 8]>().is_err() || segment.first_key::<[u8; 8]>().is_err());
+        assert!(segment.last_key::<[u8; 8]>().is_err());
+        assert!(segment.find::<[u8; 8]>(b"anything").is_err());
         Ok(())
     }
 }
