@@ -73,7 +73,7 @@ impl TreeKey for EavKey {
         EavKey([u8::MAX; KEY_LENGTH])
     }
 
-    fn schema() -> Schema {
+    fn schema(_layout: u8) -> Schema {
         Schema::new(EAV_SCHEMA)
     }
 

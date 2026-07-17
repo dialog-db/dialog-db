@@ -420,6 +420,40 @@ mod tests {
         Ok(())
     }
 
+    /// Replicates the tag-0 layout of the tree-level tag-dispatch test:
+    /// components [dict(1), arena(2), dict(1)] with a heavily-repeated last
+    /// dictionary byte. Every key must reconstruct and be found.
+    #[dialog_common::test]
+    async fn it_round_trips_a_dict_arena_dict_layout() -> Result<()> {
+        const PARTS: &[Component] = &[
+            Component::dictionary(1),
+            Component::arena(2),
+            Component::dictionary(1),
+        ];
+        let schema = Schema::new(PARTS);
+
+        let mut keys: Vec<[u8; 4]> = Vec::new();
+        for a in 0u8..16 {
+            for b in 0u8..8 {
+                keys.push([0, a, b, (a ^ b) % 4]);
+            }
+        }
+        keys.sort();
+
+        let rows: Vec<Vec<&[u8]>> = keys
+            .iter()
+            .map(|k| vec![&k[0..1], &k[1..3], &k[3..4]])
+            .collect();
+        let columns = encode_columns(&schema, &rows)?;
+        let leaf = ColumnarLeaf::decode(&schema, &columns, keys.len())?;
+
+        for (index, key) in keys.iter().enumerate() {
+            assert_eq!(&leaf.key(index)?, key, "reconstruct {index}");
+            assert_eq!(leaf.find(key)?, Some(index), "find {key:?}");
+        }
+        Ok(())
+    }
+
     /// `find` locates present keys and rejects absent ones, and `compare`
     /// orders keys exactly as byte comparison of the concatenation does.
     #[dialog_common::test]

@@ -166,6 +166,13 @@ impl PersistentIndex {
     }
 }
 
+/// Layout id marking a leaf that straddles a layout boundary and so holds
+/// keys of more than one layout. Such a leaf is encoded under the opaque
+/// whole-key schema rather than any single layout's columnar schema. Chosen
+/// as `u8::MAX` so it never collides with a real layout id (which are small
+/// tag-derived values).
+pub const MIXED_LAYOUT: u8 = u8::MAX;
+
 /// A leaf segment holding entries columnar: one column per key component
 /// (see [`Schema`](crate::Schema)) plus an index-aligned value table.
 ///
@@ -181,6 +188,10 @@ impl PersistentIndex {
 pub struct PersistentSegment<Value> {
     /// Number of entries in the segment.
     pub count: u32,
+    /// The layout id shared by every key in this leaf (see
+    /// [`Key::layout`](crate::Key::layout)); selects the schema the columns
+    /// were encoded under.
+    pub layout: u8,
     /// One encoded column per key-schema component, in schema order.
     pub columns: Vec<ColumnData>,
     /// Entry values, index-aligned with the entries.
@@ -193,24 +204,54 @@ where
 {
     /// Encodes sorted entries into the columnar segment form, splitting each
     /// key into its schema components.
+    ///
+    /// A leaf is normally single-layout (keys are partitioned by their
+    /// leading component, so leaves rarely straddle a layout boundary). When
+    /// every entry shares a layout, the leaf is encoded under that layout's
+    /// schema. When a leaf *does* straddle a boundary and holds more than one
+    /// layout, it is encoded under the opaque whole-key schema and marked
+    /// with [`MIXED_LAYOUT`], so decode stays correct without a tree-shape
+    /// change; such leaves are rare (one per layout boundary in the tree).
     pub fn from_entries<Key: self::Key>(
         entries: Vec<Entry<Key, Value>>,
     ) -> Result<Self, DialogSearchTreeError> {
-        let schema = Key::schema();
         let count = entries.len() as u32;
+        let first_layout = entries
+            .first()
+            .map(|entry| entry.key.layout())
+            .ok_or_else(|| {
+                DialogSearchTreeError::Node("Attempted to encode an empty segment".into())
+            })?;
+        let uniform = entries
+            .iter()
+            .all(|entry| entry.key.layout() == first_layout);
+
+        let (layout, schema) = if uniform {
+            (first_layout, Key::schema(first_layout))
+        } else {
+            (MIXED_LAYOUT, crate::Schema::opaque())
+        };
 
         // Split every key into its component slices, borrowing from the keys.
+        // Under the mixed-layout opaque schema, `components` for a structured
+        // key would push its own (varying) components, so use the whole key
+        // as the single opaque component directly.
         let mut rows: Vec<Vec<&[u8]>> = Vec::with_capacity(entries.len());
         for entry in &entries {
-            let mut row = Vec::with_capacity(schema.len());
-            entry.key.components(&mut row);
-            rows.push(row);
+            if layout == MIXED_LAYOUT {
+                rows.push(vec![entry.key.as_ref()]);
+            } else {
+                let mut row = Vec::with_capacity(schema.len());
+                entry.key.components(&mut row);
+                rows.push(row);
+            }
         }
         let columns = encode_columns(&schema, &rows)?;
 
         let values = entries.into_iter().map(|entry| entry.value).collect();
         Ok(Self {
             count,
+            layout,
             columns,
             values,
         })

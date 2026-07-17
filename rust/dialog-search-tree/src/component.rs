@@ -157,7 +157,7 @@ mod tests {
     /// and its `components` split reproduces the key bytes.
     #[dialog_common::test]
     async fn it_defaults_to_a_single_opaque_component() -> Result<()> {
-        let schema = <[u8; 8] as Key>::schema();
+        let schema = <[u8; 8] as Key>::schema(0);
         assert_eq!(schema.len(), 1);
         assert_eq!(schema.components()[0].column, Column::Arena);
         assert_eq!(schema.components()[0].width, None);

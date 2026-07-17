@@ -154,7 +154,12 @@ where
                     .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))
             })
             .collect::<Result<_, _>>()?;
-        ColumnarLeaf::decode(&Key::schema(), &columns, self.count.to_native() as usize)
+        let schema = if self.layout == crate::MIXED_LAYOUT {
+            crate::Schema::opaque()
+        } else {
+            Key::schema(self.layout)
+        };
+        ColumnarLeaf::decode(&schema, &columns, self.count.to_native() as usize)
     }
 
     /// An iterator over this segment's full keys, in entry order, for a given
@@ -348,6 +353,7 @@ mod tests {
         // value table claiming two entries.
         let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Segment(PersistentSegment {
             count: 2,
+            layout: 0,
             columns: vec![ColumnData::Arena {
                 prefix: vec![],
                 stream: vec![0x80],

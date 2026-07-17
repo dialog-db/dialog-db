@@ -43,21 +43,36 @@ pub trait Key:
     /// Returns the maximum possible value for this key type.
     fn max() -> Self;
 
-    /// The component layout of this key type, describing how each component
-    /// is stored in a columnar leaf. Defaults to a single whole-key arena
-    /// component (no finer structure), so key types that do not decompose
-    /// still round-trip through the columnar codec.
-    fn schema() -> Schema {
+    /// The layout id of this key, selecting which [`schema`](Key::schema)
+    /// applies to it. A key type with a single uniform layout (the default,
+    /// and `[u8; N]`) returns `0`. A key whose component layout varies (the
+    /// dialog artifact key, whose EAV/AEV/VAE orderings put their fields in
+    /// different byte positions) returns a distinct id per layout, typically
+    /// derived from a leading tag byte.
+    ///
+    /// Every key in one leaf has the same layout id (leaves are partitioned
+    /// by the leading component), so a leaf's columns are encoded and decoded
+    /// under a single schema, recorded once in the leaf.
+    fn layout(&self) -> u8 {
+        0
+    }
+
+    /// The component layout for a given layout id, describing how each
+    /// component is stored in a columnar leaf. Defaults to a single whole-key
+    /// arena component (no finer structure) for the only id `0`, so key types
+    /// that do not decompose still round-trip through the columnar codec.
+    fn schema(layout: u8) -> Schema {
+        let _ = layout;
         Schema::opaque()
     }
 
-    /// Splits this key into its component byte-slices, in schema order,
-    /// appending each to `out`. The default pushes the whole key as a single
-    /// component, matching [`Schema::opaque`](crate::Schema::opaque).
+    /// Splits this key into its component byte-slices, in the schema order for
+    /// its own [`layout`](Key::layout), appending each to `out`.
     ///
-    /// Concatenating the pushed slices must reproduce `self.as_ref()`.
-    /// Implementations for structured keys push one slice per schema
-    /// component, in the same order.
+    /// Concatenating the pushed slices must reproduce `self.as_ref()`, and the
+    /// slice count and per-position widths must match
+    /// `Self::schema(self.layout())`. The default pushes the whole key as a
+    /// single component, matching [`Schema::opaque`](crate::Schema::opaque).
     fn components<'a>(&'a self, out: &mut Vec<&'a [u8]>) {
         out.push(self.as_ref());
     }
