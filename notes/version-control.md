@@ -1,479 +1,98 @@
 # Version Control
 
 How Dialog keeps a database consistent across devices and people that
-edit it independently and sync later. This is both an explainer and the
-spec: it defines every term it uses and assumes no background beyond
-"git exists", while staying precise enough that the implementation can
-be checked against it.
+edit it independently and sync later. This document is both an
+explainer and the spec: it defines every term it uses and assumes no
+background beyond "git exists", and it describes exactly what is
+implemented, scenario by scenario, with the test that pins each one.
 
 ## The problem
 
 Picture a notebook app. You edit on your laptop on a plane, your phone
-edited yesterday and hasn't synced, and a collaborator has a copy of
+edited yesterday and has not synced, and a collaborator has a copy of
 her own. Eventually the copies exchange changes. Four things must be
 true afterwards:
 
-1. **Everyone ends up with the same data.** No matter who syncs with
-   whom, in what order, or how many times, two copies that have seen
-   the same changes must be byte-for-byte identical.
-2. **Deletions stick.** If you delete a note and then sync with a stale
-   copy that still has it, the note must not come back from the dead.
+1. **Everyone ends up with the same data.** Two copies that have seen
+   the same changes must be byte-for-byte identical, regardless of who
+   synced with whom, in what order, how many times.
+2. **Deletions stick.** Syncing with a stale copy must not bring a
+   deleted fact back from the dead.
 3. **You can tell what happened first.** When two copies changed the
    same thing, the system must be able to say "yours came after mine",
-   "mine came after yours", or "neither saw the other", and act on it.
-4. **No coordinator.** All of this must work offline, peer to peer,
-   with no server deciding the order of events.
+   "mine came after yours", or "neither saw the other".
+4. **No coordinator.** All of this works offline and peer to peer.
 
-Git solves a version of this problem for files, with a human resolving
-conflicts. Dialog solves it for a database of facts, with merges that
-are automatic and always agree.
+And one more, which shapes the merge design throughout:
+
+5. **Sync cost tracks what you exchange, not what exists.** A replica
+   that only cares about a slice of the data must never be forced to
+   download someone else's unrelated churn just to merge.
 
 ## The picture in one page
 
-Some vocabulary, each term defined once and used consistently:
+Vocabulary, each term defined once:
 
-- A **fact** is one statement: an entity, an attribute, and a value,
-  like `(alice, person/email, "alice@example.com")`.
-- A **repository** is a collection of facts, identified by a
-  cryptographic identity (a DID).
-- All the facts live in one **search tree**: a data structure stored as
-  content-addressed blocks, where the hash of the root block uniquely
-  identifies the entire state. Change anything and the root hash
-  changes. Two trees with the same root hash are identical, full stop.
-- A **branch** is a named line of development, like in git. It points
-  at the current state through a **revision**.
-- A **revision** is a named snapshot: "the tree with root X, produced
-  by writer Y, building on Z". Committing produces a new revision.
-- A **replica** is any copy of the repository: your laptop, your phone,
-  a server.
-- **Pull** brings another replica's changes into yours by merging.
-  **Push** publishes yours to another replica, and only succeeds when
-  the other side hasn't moved (otherwise you pull first). An
-  **upstream** is a branch you regularly pull from or push to.
+- A **fact** is one statement: entity, attribute, value, like
+  `(alice, person/email, "alice@example.com")`.
+- A **repository** is a collection of facts under a cryptographic
+  identity (a DID).
+- All facts live in one **search tree** of content-addressed blocks:
+  the hash of the root block identifies the entire state. Two trees
+  with the same root are identical, full stop.
+- A **branch** points at the current state through a **revision**, a
+  named snapshot ("the tree with root X, by writer Y, building on Z").
+- A **replica** is any copy: laptop, phone, server.
+- **Pull** merges another replica's branch into yours; **push**
+  publishes yours (and only fast-forwards). An **upstream** is a
+  branch you sync with; a branch can track several.
+- The **sync base** is, per upstream, the upstream's tree root as of
+  your last sync with it: the divergence marker both sides' deltas are
+  measured against.
 
-One design decision shapes everything else: **the tree holds both the
-facts and their history.** The tree is divided into regions by key
-prefix. The data regions hold the current facts, indexed three ways for
-queries (by entity, by attribute, by value). The history region is an
-append-only log: every write ever made, plus a metadata record for
-every revision. One root hash therefore covers the data *and* the story
-of how it got there.
+The tree is divided into regions by key prefix:
 
-From that follows the principle the whole design rests on:
+```mermaid
+flowchart LR
+    subgraph tree["one search tree, one root hash"]
+        direction TB
+        data["data regions
+        live facts, indexed three ways
+        (by entity, attribute, value)"]
+        history["history region
+        append-only log: every write's claim record
+        + every revision's metadata record"]
+    end
+    root(("root hash")) --> tree
+```
+
+One root hash covers the facts *and* the story of how they got there,
+which gives the principle everything else rests on:
 
 > **The log is the truth. The current facts are a cache.**
 >
-> A fact is "live" exactly when nothing in the log has withdrawn or
+> A fact is live exactly when nothing in the log has withdrawn or
 > replaced it. The data regions materialize precisely that live set so
-> queries are fast. Deletion is not a marker sitting in the data; it is
-> an entry in the log, and merges keep the cache consistent with the
+> queries are fast. Deletion is not a marker in the data; it is an
+> entry in the log, and merges keep the cache consistent with the
 > growing log.
-
-Why that matters becomes clear in the section on deletion. First, how
-changes are named.
 
 ## Naming every change: editions, origins, versions
 
-To merge histories you must be able to compare changes from different
-writers. Dialog names every revision with two ingredients.
-
-**The edition** is a counter that answers "how much history had this
-revision seen?". Three rules define it:
-
-- The first revision on a branch has edition `0`.
-- A commit on top of a revision gets that revision's edition plus one.
-- A merge of two revisions gets the larger of the two editions, plus
-  one.
-
-That is all. But those rules buy a powerful property: **if revision B
-was made by someone who had seen revision A, then B's edition is
-strictly greater than A's.** Seeing A forces you above A's number.
-Flip it around and you get concurrency detection with no searching at
-all: two revisions with the *same* edition from *different* writers
-cannot have seen each other. If either had, its number would be higher.
-
-(Two *independent* writers can reach the same edition by different
-paths, so the edition alone does not name a revision. That is what the
-second ingredient is for.)
-
-**The origin** answers "who is counting?". It is a hash that identifies
-one writer in one place: it folds together the user profile, the
-repository, the branch name, and the session key of the device doing
-the writing. Scoping it that finely is deliberate. The same person on
-two branches gets two origins; the same person on two devices gets two
-origins; two branches of one repository never share a counter. Each
-origin is therefore a **single sequential actor**: it produces
-revisions one at a time, in order, never in parallel with itself.
-
-**The version** is the pair `(origin, edition)`, and it is the globally
-unique name of a revision. Versions sort by edition (ties broken by
-origin so the order is total), which means they sort by "how much
-history they had seen".
-
-### The rule everything rests on
-
-The design's one non-negotiable invariant, stated plainly:
-
-> **One origin never produces two different revisions with the same
-> edition.**
-
-This is what makes editions trustworthy and what makes the deletion
-machinery below exact. It is enforced structurally, not by good
-manners: within one session, writes to a branch go through a
-compare-and-set on the branch head (explained later), so two racing
-commits cannot both land; across sessions, each session has its own key
-and therefore its own origin. If a replica ever *does* see two distinct
-revisions claiming the same version, that is corruption of the
-protocol. To avoid diverging over corrupt data, replicas order the
-offenders deterministically by their content hash, but such a history
-is broken and should surface an error.
-
-One consequence worth knowing: resetting a branch backwards and
-committing again would re-mint an edition that was already used. Reset
-exists for fast-forward bookkeeping (push uses it), not for rewinding.
-
-## What a revision is made of
-
-A revision exists in two forms with two different jobs.
-
-**The head** is a small signed value published to the branch (in a
-storage cell named after the branch). It carries: the repository DID,
-the branch name, the writer identities (the session key that signed,
-and the user profile it claims to act for), the tree root hash, the
-parent tree roots it built on, the edition, and the writer's signature
-over all of it. The head is the thing another replica fetches when it
-asks "where is this branch now?", and the signature is checked **before
-anything else happens**: a forged or tampered head (wrong root,
-reattributed writer, adjusted edition) is rejected before a single
-block of its tree is read. Pull is the trust boundary.
-
-**The record** is the revision's metadata written *into the tree
-itself*, as one atomic fact in the reserved `dialog.` namespace. It
-carries the parent versions (the edges of the history graph), the
-attribution, so-called skip links (below), and its own signature. Two
-details are worth spelling out:
-
-- The record cannot contain the tree root, because the record lives
-  inside that tree and a hash cannot contain itself. That is exactly
-  why the head exists as a separate signed object: the head is what
-  binds the root to the writer.
-- The record defends itself. Its signature covers all its fields, and
-  the version it is filed under is recomputable from its own contents
-  (origin from the identities it names, edition from its parents). A
-  tampered record, or a valid record copied to a different slot, fails
-  the check every reader performs.
-
-Because records are ordinary facts in the tree, history is queryable
-like any other data: "who committed this revision", "is X an ancestor
-of Y", and "show me the log" are normal queries over built-in derived
-relations, and records that do not verify are simply not projected.
-
-**Skip links** are an optimization for walking backwards through
-history. Besides its parent, a revision records shortcuts that jump 2,
-4, 8, ... revisions back along the chain, so finding a common ancestor
-of two branches takes logarithmically many steps instead of one step
-per revision. Two rules keep the shortcuts honest: a shortcut never
-jumps across a merge (a merge has two parents, and jumping it would
-skip the ancestry that enters through the other one), and searches
-never jump below the point they are looking for.
-
-**A known gap, stated honestly:** the record names the user profile it
-acts for, but only the session key's signature backs that claim. A
-session key could name any profile it likes. Cryptographically binding
-the profile requires embedding delegation proofs, which is blocked on a
-real problem: delegations expire, revisions are forever, and the
-history deliberately contains no wall clocks, so "was the delegation
-valid at commit time?" has no sound offline answer yet. Until there is
-a time-anchoring story, treat the profile field as attribution
-metadata; the session key is the cryptographically bound identity.
-
-## One tree for data and history
-
-The history region stores its entries under a key that starts with the
-edition and origin, so scanning it yields history in an order
-consistent with causality: revisions from different writers interleave,
-but no revision ever appears before something it built on. (The keys
-are longer than the tree's fixed key width, so they are stored as an
-order-preserving prefix plus a hash of the full key; readers verify the
-truncated parts against the stored entry.)
-
-Putting history in the same tree as the data has three consequences
-that the rest of the design leans on:
-
-1. **History and data cannot drift apart.** A revision's root hash
-   covers both. You can never replicate the facts without the story, or
-   the story without the facts.
-2. **Pulling merges history for free.** History entries ride the same
-   tree diff as data. Every entry's key is unique to its version, so
-   merging histories is a union with no conflicts, ever.
-3. **"Same root hash" means "same everything".** If two trees have
-   equal roots, their histories are equal too. So detecting that a pull
-   is a plain fast-forward is a single hash comparison.
-
-## Writing facts
-
-Every commit tags the facts it writes with its version, and appends one
-log entry (a **claim record**) per instruction describing what it did.
-The log entry's most important field is **supersedes**: the versions of
-the earlier claims this write replaced or withdrew. That field is how
-later merges know what covered what.
-
-There are three instructions:
-
-- **Assert** adds a fact. It supersedes nothing (it is purely
-  additive), and inserts the fact into all three data indexes.
-- **Replace** sets the value of `(entity, attribute)`, superseding
-  whatever different values were there. It deletes the old values from
-  the indexes and its log entry lists their versions. If the same value
-  is already in place it does nothing at all, and does not write a log
-  entry either (re-recording an unchanged fact would pointlessly fork
-  its lineage).
-- **Retract** deletes a specific fact. It removes the fact's entries
-  from all three indexes, and its log entry names the version of the
-  claim it withdrew. Note what it does **not** do: it leaves no marker
-  behind in the data. After a retract, the data regions look exactly as
-  if the fact had never existed.
-
-Small print that matters for correctness: an assert and a retract of
-the same fact within one commit cancel to nothing (and the retract must
-not cite its own commit as what it withdrew, so it records no
-coverage); retracting a fact that never existed is a no-op.
-
-That "no marker" choice is unusual, and it is the crux of the design.
-
-## Deletion that survives sync
-
-Here is the trap. Deletion-as-absence cannot survive syncing with a
-stale copy:
-
-1. Laptop and phone both have the note "buy milk".
-2. Laptop deletes it. On the laptop the fact is simply gone.
-3. Laptop pulls from the phone, which still has "buy milk".
-4. From the laptop's point of view, here is a fact it does not have.
-   Absent other information it would add it. The deleted note is back.
-
-The classic fix is a **tombstone**: instead of removing the fact, write
-a special "this is deleted" marker in its place, so the deletion is
-itself a piece of data that wins against stale copies. Dialog's earlier
-design did exactly that, and it worked, but at a price: markers
-accumulate forever in the live indexes, every merge needs special rules
-for marker-versus-fact collisions, and one of those rules (a tie broken
-by hashing) turned out to resurrect deletions on roughly forty percent
-of a particular class of merges before it was fixed. Deletion-as-data
-is fragile because it makes correctness depend on a marker winning
-races.
-
-Dialog now takes a different route. Recall the principle: the log is
-the truth, the current facts are a cache. The laptop does not need a
-marker to reject the phone's stale copy. It needs to answer one
-question:
-
-> "Have I **already seen** the change that produced this incoming
-> fact?"
-
-If yes, the incoming fact is old news, and there are only two
-possibilities. Either the fact is still in my cache (then there is
-nothing to do), or it is not, and the only way a fact I once
-incorporated can be absent from my cache is that something in my log
-covered it: a retraction or a replacement. Re-applying it would undo a
-deletion. So: **an incoming fact whose producing change I have already
-seen is never re-applied.** That single rule is deletion-safety,
-without a single marker.
-
-### The watermark: answering "have I seen it?" cheaply
-
-"Have I seen change X" sounds like it requires searching your whole
-history. The version design makes it a table lookup.
-
-Each origin writes sequentially, one revision at a time, each new
-revision building on its own previous one. So the revisions you have
-seen from any given origin are always a prefix of that origin's
-history: if you have seen their revision 7, you have necessarily seen
-their 0 through 6, because 7 was built on top of them. Therefore
-everything you have ever incorporated compresses, without loss, into
-one number per origin:
-
-```text
-watermark = { origin -> highest edition seen from that origin }
-
-seen(version)  exactly when  version.edition <= watermark[version.origin]
-```
-
-The table has one entry per writer (per device, person, branch), not
-per change. It never grows with the number of edits. Checking a version
-is one lookup. And it is *exact*, not a heuristic, precisely because of
-the one-writer-one-sequence invariant. (Editions can skip numbers when
-an origin merges, but a skipped number was never used by that origin,
-so the question "have I seen (origin, skipped-number)?" is never asked
-about a real change.)
-
-The watermark is a pure function of your current head: fold in every
-revision in the head's ancestry. Two ways to obtain it:
-
-- **The walk**: read every revision record in the ancestry and fold.
-  This costs one signature-verified read per ancestry revision, which
-  adds up (about 50 microseconds each; half a second at ten thousand
-  commits). It is the cold-start path only.
-- **The memo**: each branch handle keeps a small cache of watermarks
-  keyed by head version. A head's ancestry never changes after the
-  fact, so entries never need invalidating. Every commit extends the
-  current watermark by its own version; every pull derives the merged
-  head's watermark from the local one plus the revision records that
-  arrived in the pull itself (they stream past anyway, so this costs
-  zero extra reads). A test pins that the memo always equals the walk.
-  In steady state, the walk happens at most once per opened branch.
-
-For readers who do know the distributed-systems literature: this is an
-observed-remove set whose element identifiers are the versions and
-whose causal context is the watermark. If that sentence means nothing
-to you, you have lost nothing; everything it says is above.
-
-## Pulling changes: the merge
-
-A pull merges an upstream branch into yours. The mechanics:
-
-Your branch remembers, per upstream, the **sync base**: the upstream's
-tree root as of your last sync with it. The pull computes what the
-upstream added since then (a diff from the sync base to the upstream's
-current tree, walking only the parts that differ), passes that incoming
-diff through a **screen**, and applies the screened diff onto *your*
-tree. Applying onto your own tree (rather than replaying your changes
-onto theirs) is what lets *your* watermark protect *your* cache.
-
-The screen is three rules. Their names, R1, R2, R3, are used in the
-code:
-
-- **R1, for incoming facts:** if your watermark says you have already
-  seen the change that produced this fact, skip it. (Still live here:
-  nothing to do. No longer live here: your log covered it, and applying
-  it would resurrect a deletion.) Facts you have not seen are genuine
-  news and pass through. This is the deletion-safety rule from the
-  previous section.
-- **R2, for incoming removals:** the upstream's diff can include "key X
-  was removed". Apply it only if your copy of X is byte-for-byte what
-  the upstream removed. If your copy differs, you know something the
-  remover did not (for instance you re-added the fact after they
-  deleted it), and the removal misses. Nothing newer is ever destroyed
-  by an older removal.
-- **R3, for incoming log entries:** every log entry arriving in the
-  diff is appended to your log (history is append-only and per-version
-  unique, so this never conflicts). And if the entry *supersedes*
-  something (a retraction or replacement), the screen checks whether
-  any of the superseded versions are still live in your cache, and
-  retires them. It finds them by scanning your entries for that
-  `(entity, attribute)` and matching **by version, not by value**: a
-  replacement supersedes claims with *other* values, which live under
-  other keys, so looking only at the entry's own key would miss them.
-  R3 is how a deletion you never heard about reaches you, even when
-  your sync base predates the deleted fact entirely.
-
-R1 handles coverage that happened in your past. R3 handles coverage
-arriving right now. R2 is the cheap guard both directions share.
-
-**Order matters, and there is exactly one ordering rule:** log entries
-are screened and applied before facts, in one combined pass. Here is
-why. A single pull can deliver both a retraction and a later re-assert
-of the same fact. The retraction (via R3) must clear the slot before
-the re-asserted fact (via R1, as news) lands in it; the other order
-would make an arbitrary tie-break decide something causality already
-decided. The combined pass also must be applied as one batch with one
-persist at the end; splitting it loses the in-flight blocks.
-
-**After integrating**, the pull decides what the branch head becomes.
-Four cases:
-
-1. The result equals the upstream's tree: fast-forward, adopt the
-   upstream's head as yours. (Safe by the "same root, same everything"
-   consequence: if you had anything of your own, the roots would
-   differ.)
-2. You had no head at all: adopt theirs.
-3. The result equals your own tree: they had nothing you lacked. Your
-   head stands; only the sync base advances.
-4. Otherwise: mint a **merge revision**. Its record lists both parents,
-   its edition is the larger of the two plus one, its record is signed
-   and written into the tree, and the head is signed over the final
-   root.
-
-**Ties.** After the screen, the only remaining collision in the data is
-two copies of the *same fact* differing only in metadata (the version
-tag of who wrote it), because the storage key includes a hash of the
-value. The winner is picked by comparing hashes of the stored bytes:
-arbitrary, but deterministic and the same on both replicas, which is
-all that is required since both copies state the same fact.
-
-**Why everyone converges.** The log only grows, and merging two logs is
-a union, so exchange order cannot matter to the log. Whether a fact is
-live is a property of the log alone (live means: nothing in the log
-supersedes it), and once covered, always covered. The screen keeps each
-replica's cache equal to its log's live set at every step. Same log,
-same cache. Any order, any direction, any number of rounds.
-
-### A worked example
-
-The task label "urgent" on task 7, with four people. This is the
-scenario that pins the semantics, and it is a test
-(`it_keeps_a_concurrent_assertion_the_retraction_never_observed`):
-
-1. **Bob** labels task 7 "urgent". Alice, Mallory, and Jordan all sync
-   from Bob; everyone has the label.
-2. **Alice** retracts the label. Her log entry supersedes *Bob's*
-   claim, the one she had seen.
-3. **Mallory**, before hearing from Alice, asserts "urgent" on task 7
-   herself. Same fact, new version, from her origin.
-4. **Jordan** pulls Alice: her retraction's coverage (R3) retires Bob's
-   claim from his cache. The label is gone for him.
-5. **Jordan** pulls Mallory: her claim's version is *above* his
-   watermark for her origin, so R1 treats it as news and it lands. The
-   label is back, and rightly so: Alice retracted what she had seen,
-   and she had never seen Mallory's claim. A deletion only covers what
-   its author knew about.
-6. **Jordan**, who has now seen everything, retracts. His entry
-   supersedes both Bob's and Mallory's versions. Everyone who pulls him
-   loses the label, everywhere, permanently.
-
-And deletion is still not forever: if anyone later re-asserts the
-label, that is a fresh version above every watermark. R1 sees news
-everywhere, R2 cannot touch it (different bytes), no existing log entry
-supersedes it. The resurrection propagates and survives pulls from
-arbitrarily stale peers (also a test:
-`it_resurrects_a_deleted_fact_and_the_resurrection_survives`).
-
-## Which of two writes wins?
-
-Merging keeps replicas identical; it does not decide which of two
-concurrent values a *query* should show. That is conflict detection,
-and it runs on the log entries' supersedes chains, per
-`(entity, attribute)`, in three escalating tiers:
-
-- **Tier 0, compare versions.** Free, no reads. Same version: same
-  write. Same origin: ordered by edition (one origin is sequential).
-  Same edition, different origins: concurrent, by the edition property.
-  Otherwise, keep going.
-- **Tier 1, direct citation.** If one claim's supersedes list names the
-  other's version, it wins. One lookup.
-- **Tier 2, walk the chain.** Walk the higher-edition claim's
-  supersedes chain backwards, looking for the other's version. Editions
-  strictly decrease along the way, so any branch of the walk that drops
-  to or below the target's edition without hitting it can be abandoned.
-  Found it: supersedes. Exhausted: genuinely concurrent. The walk is
-  bounded by the number of writes to that one `(entity, attribute)`
-  between the two editions, not by the size of history.
-
-Verdicts are cached and never expire: between two fixed claims the
-relationship cannot change, because new history can only be added above
-them, never between them. The one non-answer, "I am missing part of the
-chain" (a partially replicated copy), surfaces as an error and is never
-cached; once the missing records arrive, the next ask resolves.
-
-When two claims are genuinely concurrent, both are valid; queries
-resolve deterministically (by claim hash) so every replica shows the
-same winner, and an application that wants to surface the conflict can
-ask for all concurrent values.
-
-### Walkthrough
-
-Alice makes two revisions and Bob one, all from a shared start; then
-Bob pulls and commits again:
+Merging histories requires comparing changes from different writers.
+Every revision is named by two ingredients.
+
+**The edition** answers "how much history had this revision seen?":
+
+- First revision on a branch: edition `0`.
+- Commit on top of a revision: that revision's edition plus one.
+- Merge of two revisions: the larger of the two editions, plus one.
+
+Those three rules buy the property the whole design leans on: **if
+revision B was made by someone who had seen revision A, B's edition is
+strictly greater than A's.** Flipped around, that is concurrency
+detection with no searching: two revisions with the same edition from
+different writers cannot have seen each other.
 
 ```mermaid
 %%{init: { 'gitGraph': {'showBranches': true, 'showCommitLabel':true,'mainBranchName': 'shared', 'parallelCommits': true}} }%%
@@ -486,177 +105,611 @@ gitGraph TB:
    commit id: "A:2"
    checkout bob
    commit id: "B:1"
-   checkout shared
-   merge alice tag: "edition:2"
    checkout bob
-   merge shared
-   commit id: "B:3"
-   checkout shared
-   merge bob tag: "edition:3"
+   merge alice tag: "merge: max(2,1)+1 = 3"
 ```
 
-When Alice's `A:2` (edition 2) meets Bob's `B:1` (edition 1): neither
-cites the other (tier 1 fails), so tier 2 walks `A:2`'s chain backward.
-It reaches `A:1` at edition 1, which matches `B:1`'s edition but not
-its version, and nothing deeper can match (editions only decrease), so
-the walk ends: concurrent. After Bob pulls and commits `B:3` citing
-`A:2`, any later claim of Bob's beats Alice's at tier 1, one lookup.
+Alice's `A:2` (edition 2) and Bob's `B:1` (edition 1) are ordered
+neither way by inspection alone, but Bob's merge has seen both, so it
+lands above both at edition 3.
+
+**The origin** answers "who is counting?": a hash folding together the
+user profile, the repository, the branch name, and the session key of
+the writing device. The same person on two branches, or on two
+devices, gets two origins. Each origin is therefore a **single
+sequential actor**: it produces revisions one at a time, never in
+parallel with itself.
+
+**The version** is the pair `(origin, edition)`, the globally unique
+name of a revision.
+
+**The rule everything rests on:** one origin never produces two
+different revisions with the same edition. It is enforced
+structurally: branch-head writes go through compare-and-set, and each
+session has its own key and so its own origin. Two distinct revisions
+claiming one version is protocol corruption; replicas order the
+offenders deterministically by content hash to avoid diverging, but
+such a history is broken and should surface an error. (Consequence:
+resetting a branch backwards and committing would re-mint a used
+edition; reset exists for fast-forward bookkeeping, not rewind.)
+
+## The watermark
+
+The single most load-bearing derived structure. A replica's
+**watermark** (in code: `Context`) summarizes everything its head has
+ever incorporated:
+
+```text
+watermark = { origin -> highest edition seen from that origin }
+
+seen(version)  exactly when  version.edition <= watermark[version.origin]
+```
+
+Why one number per writer suffices, exactly and not approximately:
+each origin writes sequentially, each revision building on its own
+previous one, so the revisions you have seen from any origin are
+always a prefix of that origin's history. Seen their 7 means seen
+their 0 through 6. The table has one entry per writer, never grows
+with edits, and answers "have I seen this change?" in one lookup.
+
+Watermarks also order replicas by knowledge: if every entry of
+watermark P is at or below the corresponding entry of watermark Q,
+then Q has seen everything P has (in code: `Q.includes(P)`). The pull
+scenarios below are gated entirely on this comparison.
+
+**Where the watermark lives.** Three places, in order of authority:
+
+1. **On every head, inside the signature.** A published revision
+   carries its watermark as a field, and the signing payload commits
+   to it byte for byte. This is the branch memory record a peer
+   fetches, so reading a replica's knowledge costs one small read and
+   is exactly as trustworthy as the head itself: tampering with the
+   watermark, or stripping it, fails verification.
+2. **In a per-branch-handle memo**, keyed by head version. A fixed
+   head's watermark never changes, so entries never invalidate. Every
+   commit extends the memo by its own version; every pull writes the
+   merged head's watermark back.
+3. **Derivable by walking the ancestry records** in the tree. The
+   fallback for heads minted before watermarks were published; costs
+   one signature-verified read per ancestry revision.
+
+A test pins that all three agree
+(`it_publishes_the_watermark_with_the_head`,
+`it_maintains_the_context_memo_incrementally`).
+
+## What a revision is made of
+
+**The head** is the small signed value published to the branch cell:
+repository DID, branch name, issuer (session key) and authority
+(profile) identities, the tree root, the parent tree roots, the
+edition, the watermark, and the issuer's signature over all of it. A
+replica verifies the signature **before anything else happens** with a
+head it did not mint: a forged or tampered head is rejected before a
+single block of its tree is read. Pull is the trust boundary
+(`it_refuses_to_pull_a_forged_head`).
+
+**The record** is the revision's metadata written into the tree
+itself, one atomic fact in the reserved `dialog.` namespace: parent
+versions (the edges of the history graph), attribution, skip links,
+and its own signature. Two details:
+
+- The record cannot contain the tree root, because it lives inside
+  that tree and a hash cannot contain itself. The head carries the
+  root; that is why both exist.
+- The record defends itself: its signature covers its fields, and the
+  version it is filed under is recomputable from its own contents, so
+  a tampered record, or a valid one copied to another slot, fails the
+  check every reader performs.
+
+Because records are ordinary facts, history is queryable: "who
+committed this", "is X an ancestor of Y", "show the log" are normal
+queries over built-in derived relations, and records that do not
+verify are simply not projected.
+
+**Skip links**: besides its parent, a revision records shortcuts
+jumping 2, 4, 8, ... revisions back, so ancestor search takes
+logarithmically many steps. A shortcut never jumps across a merge (it
+would skip the ancestry entering through the other parent), and
+searches never jump below the edition they seek.
+
+**A known gap, stated honestly:** the record names the profile it acts
+for, but only the session key's signature backs that claim. Binding it
+cryptographically needs delegation proofs plus a time-anchoring story
+(delegations expire; revisions are forever; the history carries no
+wall clocks). Until then the profile field is attribution metadata;
+the session key is the bound identity.
+
+## One tree for data and history
+
+History entries are keyed edition-first, so scanning yields history in
+an order consistent with causality. Three consequences the design
+leans on:
+
+1. **History and data cannot drift apart**: one root covers both.
+2. **Pulling merges history for free**: entries ride the same tree
+   diff as data, and every entry's key is unique to its version, so
+   the log union is conflict-free.
+3. **Same root means same everything**: fast-forward detection is one
+   hash comparison.
+
+## Writing facts
+
+Every commit tags its facts with its version and appends one **claim
+record** per instruction. The record's key field is **supersedes**:
+the versions of the earlier claims this write replaced or withdrew.
+
+- **Assert** adds a fact; supersedes nothing.
+- **Replace** sets the value at `(entity, attribute)`, deleting
+  different-valued priors from the indexes and listing their versions
+  in its record. An identical value already in place is a full no-op.
+- **Retract** deletes the fact's index entries and records the
+  withdrawn claim's version. **No marker is left behind**: after a
+  retract, the data regions look as if the fact never existed. What
+  makes that safe across sync is the watermark, as the scenarios below
+  show. (Same-batch assert+retract cancels to nothing; retracting a
+  nonexistent fact is a no-op.)
+
+## Pulling changes: every scenario
+
+Pull is two-phase: `prepare` does all network and CPU work with no
+writes, `commit` performs two instant cell publishes (head and sync
+base) under compare-and-set, so racing writers fail loudly and retry
+rather than losing anything. What `prepare` does is a cascade of
+checks, cheapest first:
+
+```mermaid
+flowchart TD
+    A["fetch + verify upstream head"] --> B{"upstream has
+    no revision?"}
+    B -- yes --> N1["no-op"]
+    B -- no --> C{"sync base ==
+    upstream tree?"}
+    C -- yes --> N2["no-op: upstream unmoved"]
+    C -- no --> D{"upstream watermark
+    included in ours?"}
+    D -- yes --> S2["scenario 2: nothing new
+    keep head, advance sync base
+    zero reads"]
+    D -- no --> E{"no local novelty
+    (our tree == sync base) and ours
+    included in theirs?"}
+    E -- yes --> S3["scenario 3: fast-forward
+    adopt head + tree + watermark by root
+    zero reads"]
+    E -- no --> F{"upstream watermark published
+    and sync base non-empty?"}
+    F -- yes --> S4["scenario 4: reverse replay
+    adopt their tree, replay OUR delta
+    reads proportional to our divergence"]
+    F -- no --> S5["scenario 5: screened merge
+    their delta onto our tree
+    reads proportional to their divergence"]
+```
+
+### The three screen rules
+
+Both merge directions use the same three rules. They only ever consult
+the **receiver's** state: its tree, its watermark, and the incoming
+delta. In scenario 5 the receiver is us; in scenario 4 the receiver is
+the upstream (its tree is the substrate and its published watermark is
+the screen).
+
+- **R1, incoming facts:** a fact whose producing version the receiver
+  has *seen* is never re-applied. If it is still live in the
+  receiver's tree, applying it changes nothing; if it is absent, the
+  receiver's log covered it, and applying it would resurrect a
+  deletion. Unseen facts are news and pass.
+- **R2, incoming removals:** apply only when the receiver's copy is
+  byte-for-byte what was removed. If the receiver holds something the
+  remover never observed (a later re-assert), the removal misses.
+- **R3, incoming records:** every record appends to the log (keys are
+  per-version unique, so this never conflicts). A record that
+  *supersedes* versions retires any of them still live in the
+  receiver's tree, found by scanning the record's
+  `(entity, attribute)` slot and matching **by version, not value** (a
+  replacement supersedes claims of other values, which live under
+  other keys).
+
+One ordering rule: records screen before facts, in one combined pass
+with one persist, so a retraction and a later re-assert arriving
+together resolve by causality, not by a tie-break.
+
+**Ties**: after screening, the only data collision left is two copies
+of the *same fact* differing in version metadata; the winner is the
+higher hash of the stored bytes, deterministic and identical on both
+replicas.
+
+**Why everyone converges**: the log only grows and merges as a union,
+so exchange order cannot matter to it; liveness is a property of the
+log alone (once covered, always covered); the screens keep every
+replica's cache equal to its log's live set. Same log, same cache.
+
+### Scenario 1: the idle tick
+
+The upstream has no revision, or its tree still equals the sync base.
+Nothing to do; zero reads. This is what an auto-sync loop hits almost
+every time it fires.
+
+### Scenario 2: the upstream has seen everything we have
+
+Gate: `ours.includes(theirs)`. Everything in their ancestry is in
+ours, so every fact live with them is live or covered here already.
+The pull is a no-op detected from the two heads alone: the local head
+stands, and only the sync base advances (so the next pull's delta is
+measured from their current tree).
+
+```text
+ours              theirs
+alice: 7          alice: 7
+bob:   5          bob:   3
+me:    8          me:    0
+
+theirs is included in ours: skip, zero reads.
+```
+
+This is also the mesh-sync primitive: in a five-replica mesh, pull the
+best-informed peer first, and the other pulls collapse to this check.
+Pinned by `it_skips_a_pull_from_an_upstream_that_has_seen_everything`.
+
+### Scenario 3: fast-forward adoption
+
+Gate: our tree equals the sync base (no local novelty) and
+`theirs.includes(ours)`. Nothing we know could contradict what
+survived their screen, so their head, tree, and watermark are adopted
+**by root**: no diff, no block reads, no import. Blocks hydrate lazily
+on demand later, like any partially replicated region. This covers
+both the everyday device pull and the fresh replica adopting a deep
+history, at zero cost either way.
+
+```mermaid
+sequenceDiagram
+    participant L as Laptop (no local novelty)
+    participant S as Server
+    L->>S: fetch head
+    S-->>L: head { root R, watermark W, signature }
+    Note over L: verify signature
+    Note over L: W includes ours, tree == sync base
+    Note over L: adopt R and W by reference, zero reads
+    L->>S: (later, on demand) fetch blocks of R lazily
+```
+
+Crucially, this is what keeps pull cost independent of upstream churn
+in namespaces we never touch: two hundred commits of `user/*` traffic
+we never query are adopted without downloading any of it. Pinned by
+`it_adopts_an_upstream_head_without_reading_its_novelty`.
+
+### Scenario 4: both sides moved, the reverse replay
+
+The general merge. We carry local novelty, the upstream carries churn,
+and its head published a watermark. Instead of screening *their*
+(arbitrarily large) delta onto our tree, adopt their tree as the
+substrate and replay **our** delta onto it, screened by *their*
+watermark and tree. Cost is proportional to our divergence and the
+seams it lands in, independent of their churn.
+
+Worked example. Our watermark and the upstream's (alice's):
+
+```text
+ours              alice's
+alice: 5          alice: 7
+bob:   3          bob:   5
+me:    8          me:    4
+
+neither includes the other: ours is ahead on "me",
+behind on "alice" and "bob" -> scenario 4.
+```
+
+Our delta is `diff(sync base -> our tree)`: everything we have that
+alice lacked at last sync. Usually that is just our own commits
+(me: 5 through 8), and every one of them sits above alice's `me: 4`
+watermark, so they pass R1 as pure news. Step by step:
+
+```mermaid
+sequenceDiagram
+    participant Us as Us (me:8)
+    participant A as Alice (alice:7, bob:5)
+    Us->>A: fetch head
+    A-->>Us: head { root, watermark, signature }
+    Note over Us: verify; neither watermark includes the other
+    Note over Us: diff sync base vs OUR tree (our commits me:5..8)
+    Note over Us: replay onto alice's tree, screened by HER watermark
+    Note over Us: mint merge revision, parents = both heads
+    Note over Us: merged watermark = ours UNION hers + merge version
+```
+
+The swapped screens earn their keep in the corner cases:
+
+- **An add she has observed** (possible when our delta carries facts
+  we adopted laterally from bob after our last alice-sync, and she has
+  seen bob further than us): R1 drops it. If she still holds it, the
+  add was a no-op; if she does not, her log covered it and applying it
+  would resurrect her deletion. Our fresh claims are above her
+  watermark and always land. Pinned by
+  `it_drops_observed_adds_when_replaying_onto_a_covering_upstream`.
+- **A deletion we acquired laterally** (we adopted bob's fact after
+  our alice-base, then retracted it: net zero in our data diff): only
+  our retract record carries it, and R3 screens her tree with it,
+  retiring her live copy. Pinned by
+  `it_carries_a_covering_record_when_replaying_onto_a_stale_holder`.
+- **Her novelty needs no screen at all**: nothing she minted unseen by
+  us can have been covered by us.
+
+The merged head lists both parents, and its watermark is the union of
+the two published ones plus its own version, derived without a single
+read. Frugality pinned by
+`it_replays_local_novelty_onto_an_upstream_without_reading_its_churn`
+(one local commit against two hundred commits of foreign churn stays
+under thirty block reads).
+
+### Scenario 5: first contact, or a legacy head
+
+Two cases run the screened merge in the original direction (their
+delta since the sync base onto our tree, screened by *our* watermark):
+a first-contact pull (empty sync base, where "our delta" would be our
+entire tree and the reverse direction has no advantage), and an
+upstream head minted before watermarks were published. The screen is
+the same R1/R2/R3 with us as the receiver; the merged head's watermark
+is derived incrementally by folding the revision records that ride the
+delta (zero extra reads). Afterwards the head is chosen: adopt theirs
+if the result equals their tree (or we had no head), keep ours if the
+result equals ours, otherwise mint a merge revision.
+
+This direction is also the safety net the watermark gates fall back to
+whenever knowledge has diverged in ways the frugal paths cannot serve.
+The gate refusal itself is load-bearing:
+`it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams` pins
+the case where we learned of a deletion through one upstream and then
+pull another that still holds the fact live; wholesale adoption would
+resurrect it, so the screened merge runs and R1 rejects the stale
+copy.
+
+## Deletion, scenario by scenario
+
+Deletion is the acid test of the design, so each shape gets its own
+walkthrough. The cast: a fact `(post:1, post/title, "Spam")`.
+
+### D1: a tracked deletion propagates
+
+The plain case. `feature` retracted the fact; `main` moved on
+unrelated work; `feature` pulls. The retraction is part of feature's
+state, main's delta does not disturb it, and the merge keeps the fact
+dead. Pinned by `it_propagates_a_retraction_across_a_merge`.
+
+### D2: a stale peer cannot resurrect it
+
+```mermaid
+sequenceDiagram
+    participant F as Feature (deleted the fact)
+    participant P as Peer (stale, still holds it)
+    Note over F: watermark has seen the fact's version,
+    Note over F: log contains the retraction
+    F->>P: pull (peer's copy arrives in the delta)
+    Note over F: R1: seen, but not live here
+    Note over F: -> the log covered it -> drop
+    Note over F: fact stays dead, no marker needed
+```
+
+The receiver's watermark answers "have I seen the change that produced
+this incoming fact?"; yes plus absent-from-cache means "something in
+my log covered it", and the copy is dropped. Symmetrically, when the
+stale peer pulls the deleter, the retract record arrives and R3
+retires the peer's live copy. Both replicas converge on the deletion,
+in either pull direction. Pinned by
+`it_does_not_resurrect_a_deleted_fact_on_pull` (which exercises the
+tracked, empty-base, and reverse legs).
+
+### D3: a deletion only covers what its author had seen
+
+The four-writer scenario that defines the semantics. Bob labels a
+task; everyone syncs it. Alice retracts the label, having seen only
+Bob's claim. Mallory, concurrently, asserts the same label under her
+own version.
+
+```mermaid
+sequenceDiagram
+    participant B as Bob
+    participant A as Alice
+    participant M as Mallory
+    participant J as Jordan
+    B->>A: label "urgent" (everyone syncs it)
+    B->>M: label "urgent"
+    B->>J: label "urgent"
+    A->>A: retract (covers BOB's version only)
+    M->>M: assert "urgent" (fresh version)
+    A->>J: pull: label gone (R3 retires Bob's claim)
+    M->>J: pull: label BACK (Mallory's version is news)
+    Note over J: correct: Alice never saw Mallory's claim
+    J->>J: retract (covers Bob's AND Mallory's versions)
+    J->>M: pull: label gone everywhere, permanently
+```
+
+A retraction removes exactly the claims its author had observed;
+concurrent assertions survive it; a retraction made with full
+knowledge clears everything. Pinned by
+`it_keeps_a_concurrent_assertion_the_retraction_never_observed`.
+
+### D4: deletion is not forever
+
+A re-assert after a deletion mints a fresh version above every
+watermark in existence. R1 treats it as news everywhere, R2 cannot
+touch it (different bytes), and no existing record supersedes it. The
+resurrection propagates and survives pulls from arbitrarily stale
+peers still holding the pre-deletion copy: the stale copy is dropped
+(D2), the fresh claim stands. Pinned by
+`it_resurrects_a_deleted_fact_and_the_resurrection_survives`.
+
+### D5: deletions survive the frugal paths
+
+The zero-read scenarios never bypass deletion safety, because their
+gates are exactly the conditions under which nothing can go wrong:
+
+- Scenario 2 (skip) fires only when we have seen everything they have,
+  so any fact live with them that we deleted is already covered here.
+- Scenario 3 (adopt) fires only when they have seen everything we
+  have, so our deletions are reflected in their fold already.
+- Scenario 4 (replay) screens our adds by their watermark and carries
+  our covering records into their tree, per the two corner cases
+  above.
+- When we know a deletion the upstream does not and hold no shared
+  base to express it through, the gates refuse and scenario 5's screen
+  decides (`it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams`).
+
+## Which of two writes wins?
+
+Merging keeps replicas identical; conflict *detection* decides which
+of two concurrent values a query shows. It runs on the claim records'
+supersedes chains, per `(entity, attribute)`, in three tiers:
+
+- **Tier 0, compare versions** (free): same version, same write; same
+  origin, ordered by edition; same edition and different origins,
+  concurrent. Otherwise continue.
+- **Tier 1, direct citation** (one lookup): a claim whose supersedes
+  list names the other's version wins.
+- **Tier 2, walk the chain**: walk the higher-edition claim's
+  supersedes chain backwards; editions strictly decrease, so branches
+  that drop below the target without hitting it are abandoned. Found
+  means superseded; exhausted means concurrent. Bounded by the writes
+  to that one `(entity, attribute)` between the two editions.
+
+```mermaid
+%%{init: { 'gitGraph': {'showBranches': true, 'showCommitLabel':true,'mainBranchName': 'shared', 'parallelCommits': true}} }%%
+gitGraph TB:
+   commit id: "genesis" tag: "edition:0"
+   branch alice
+   branch bob
+   checkout alice
+   commit id: "A:1"
+   commit id: "A:2"
+   checkout bob
+   commit id: "B:1"
+   checkout bob
+   merge alice
+   commit id: "B:3" tag: "cites A:2"
+```
+
+`A:2` versus `B:1`: neither cites the other; the tier-2 walk from
+`A:2` reaches `A:1` at edition 1, which matches `B:1`'s edition but
+not its version, so it prunes and exhausts: concurrent. After Bob
+merges and commits `B:3` citing `A:2`, any later claim of Bob's beats
+Alice's at tier 1.
+
+Verdicts are cached forever (new history is only ever added above two
+fixed claims, never between them). The one revisable outcome, "part of
+the chain is missing" on a partial replica, surfaces as an error, is
+never cached, and resolves once the records replicate. Genuinely
+concurrent values are both valid; queries pick deterministically by
+claim hash, and applications can ask for all of them.
 
 ## Branches and day-to-day sync
 
-A branch is two small storage cells under the repository: the head
-revision, and the upstream tracking state. Cells are versioned, and
-every write is a **compare-and-set**: "replace contents, provided they
-are still at the version I read". If someone else wrote in between, the
-write fails loudly instead of silently overwriting, and the caller
-re-reads and retries. Every race in this system resolves that way: a
-commit racing a commit, a pull racing a commit, two pulls racing each
-other. Nothing is ever silently lost (there are tests for each of these
-races).
+A branch is two versioned cells under the repository subject: the head
+revision and the upstream tracking state. Every cell write is a
+compare-and-set: "replace contents, provided they are still at the
+version I read". A commit racing a commit, a pull racing a commit, two
+pulls racing: each loser fails loudly with a version mismatch,
+refreshes, and retries; nothing is silently lost (each race has a
+test).
 
-- **Commit** applies instructions to the head's tree, writes the log
-  entries and the revision record, imports the new blocks, and
-  publishes the new head with a compare-and-set against the head it
-  built on.
-- **Fetch** reads an upstream's current head. It changes nothing
-  locally.
-- **Pull** is the merge described above. A branch can track several
+- **Commit** applies instructions to the head's tree (facts, claim
+  records, the revision record), imports the new blocks, extends the
+  watermark by its own version, signs, and publishes through the
+  checkpoint.
+- **Fetch** reads an upstream's head; changes nothing locally.
+- **Pull** is the scenario cascade above. A branch tracks several
   upstreams, each with its own sync base; `pull().from(target)` pulls
-  any local or remote branch, starting from an empty base the first
-  time and tracking it thereafter. Pull runs in two phases so callers
-  can hold locks briefly: `prepare` does all the network and CPU work
-  with no writes, `commit` performs the two instant cell publishes.
-- **Push** is fast-forward only: it verifies the upstream is still at
-  your recorded sync base, uploads the tree blocks and blob bytes the
-  upstream lacks (computed by the same region diff), and only then
-  publishes the head, so a published revision never points at bytes the
-  remote does not have. If the upstream moved, push fails and you pull
-  first. Pushing when nothing changed is a no-op.
+  any branch, tracking it from then on.
+- **Push** is fast-forward only: verify the upstream still sits at our
+  recorded sync base, upload the tree blocks and blob bytes it lacks,
+  then publish the head, so a published revision never references
+  bytes the remote is missing. If the upstream moved, pull first.
 
-**Partially replicated copies work unchanged.** "Seen" means "in my
-head's ancestry", not "bytes on my disk". A replica that adopts a head
-holds that head's state regardless of which blocks it has actually
-fetched; laziness changes what is materialized, never what the state
-is. R1 is a watermark lookup in memory; R2 and R3 read only the
-incoming diff, which touches only paths that differ, with missing
-blocks fetched from the remote on demand. The one obligation: a partial
-replica must not prune history entries. (Garbage-collecting old history
+**Partial replication is unaffected throughout**: "seen" means "in my
+head's ancestry", not "bytes on my disk". A replica that adopts head H
+holds H's state regardless of which blocks it has fetched; laziness
+changes what is materialized, never what the state is. The one
+obligation: history entries must not be pruned (garbage collection
 needs a published floor below which fresh replicas bootstrap by
-adopting state instead of merging; that is future work.)
+adoption; future work).
 
 ## Measured costs
 
-Costs are pinned by a harness (`dialog-repository`, module
-`read_amplification`, an ignored test; its docs show the invocation)
-that measures **block reads** (content-addressed storage fetches) and
-wall time, in release mode on an in-memory backend, across history
-depths. Reads are the number that survives a change of backend:
-IndexedDB or network multipliers apply directly to them.
-
-Steady state (watermark memo primed), current implementation:
+Pinned by the read-amplification harness (`dialog-repository`, module
+`read_amplification`, an ignored test; its docs show the invocation).
+Costs in **block reads** (content-addressed storage fetches) and wall
+time, release mode, in-memory backend; reads are the number IndexedDB
+and network multipliers apply to.
 
 ```text
 depth   scenario                    block reads   wall ms
   100   no-op sync tick                       0         0
-  100   fast-forward (1 commit)              24         1
-  100   merge (both sides moved)             21         2
- 1000   fast-forward (1 commit)              26         8
- 1000   merge (both sides moved)             29         8
-10000   initial pull (adopt all)            552       519
+  100   fast-forward (1 commit)               0         0
+  100   merge (both sides moved)             23         2
+ 1000   fast-forward (1 commit)               0         0
+ 1000   merge (both sides moved)             27         8
+10000   initial pull (adopt all)              0         0
 10000   no-op sync tick                       0         0
-10000   fast-forward (1 commit)              34        12
-10000   merge (both sides moved)             33        14
-10000   watermark walk (cold start)          50       500
+10000   fast-forward (1 commit)               0         0
+10000   merge (both sides moved)             40        19
+10000   watermark walk (legacy heads)        34       537
 ```
 
-Reading the table: an idle sync tick is free at any depth. Once the
-memo is warm, pull cost tracks the size of the incoming diff, not the
-depth of history. The two ~500ms rows are one-time costs: adopting a
-ten-thousand-commit history from scratch, and the cold watermark walk
-(once per opened branch; about 50 microseconds of signature
-verification per ancestry revision). Before the memo existed, that walk
-ran on *every* non-trivial pull: 548ms per fast-forward at depth ten
-thousand. The memo removed it from steady state.
+Reading it: every path is free except a genuine both-sides merge,
+whose cost tracks the *replica's own* divergence (the harness merge is
+symmetric; the asymmetric bound is pinned separately: one local commit
+against two hundred upstream commits stays under thirty reads). The
+last row is the ancestry-walk fallback, paid only for heads minted
+before watermarks were published.
 
-Compared against the previous design (the tombstone-based merge,
-measured at commit `43fdb450` with the same harness): merges are at
-parity (33 reads / 19ms there, 33 / 14ms here, at depth ten thousand),
-and two paths knowingly regressed:
-
-- **Fast-forward** used to be a zero-work pointer adoption; it now
-  integrates the incoming diff through the screen (34 reads / 12ms at
-  depth ten thousand). That is the price of running deletion screening
-  at all, and it bought determinism: the old design resurrected deleted
-  facts on roughly forty percent of empty-base merges.
-- **Initial adoption** of a deep history used to adopt the root and
-  fetch lazily; it now materializes through the screen plus one cold
-  walk (519ms at depth ten thousand, once per fresh replica). If clone
-  latency ever matters, the empty-local, empty-base case can provably
-  skip the screen and adopt the root directly; noted, not done.
-
-To observe these numbers in an embedding application: wrap the
-environment in the `Counting` provider (`dialog-repository`, `helpers`
-feature), which tallies effect executions by type; `block_reads()`
-before and after a `pull()`, plus a clock, is the whole recipe. Once
-the workspace adopts a tracing crate, a span around `Pull::prepare` is
-the natural home.
+To observe these numbers in an embedder: wrap the environment in the
+`Counting` provider (`dialog-repository`, `helpers` feature) and log
+`block_reads()` plus a clock around `pull()`.
 
 ## Rules that must never break
 
-Every future change to this machinery must preserve five properties.
-Each one is load-bearing; breaking any of them breaks convergence or
-deletion-safety silently:
-
-1. **One origin, one sequence.** A branch lineage advanced by one
-   session key, serialized by the head's compare-and-set. The watermark
-   is exact only because of this. Do not add a way to mint two
-   revisions with the same version (this includes "reset backwards,
-   then commit").
+1. **One origin, one sequence.** The watermark is exact only because
+   each origin writes sequentially (per-session keys, head CAS). Never
+   add a way to mint two revisions with the same version; reset is not
+   rewind.
 2. **A tree's revision records are a subset of its head's ancestry.**
-   True at mint (the record is written by the head that carries it) and
-   preserved by every pull outcome (fast-forward adopts a superset,
-   merges union both sides, the no-op arm changes nothing). This is
-   what makes the watermark derivable locally, the incremental memo
-   exact, and the fast-forward arm safe to reason about from root
-   equality alone.
-3. **Log entries before facts, one pass, one persist.** R3 must retire
-   slots before R1's incoming facts can contest them, and the combined
-   diff must be applied as a single batch.
-4. **The merge reads only the receiver's own state** (its snapshot and
-   its watermark) plus the incoming diff. Never the sender's watermark.
-5. **The `dialog.` namespace is reserved.** Revision metadata is
-   written only by the internal record path; user instructions cannot
-   touch it.
+   True at mint, preserved by every pull outcome. This is what makes
+   the watermark derivable locally and lets root equality stand in for
+   history equality.
+3. **Records before facts, one pass, one persist**, in both merge
+   directions.
+4. **A screen consults only the receiver's state** (its tree and
+   watermark) plus the incoming delta: ours in scenario 5, the
+   upstream's published one in scenario 4. Never mix the two sides'
+   screens.
+5. **Never act on an unverified head.** Signatures are checked before
+   any gate fires; the watermark is only trustworthy because the
+   signature covers it.
+6. **The `dialog.` namespace is reserved**: revision metadata is
+   written only by the internal record path.
 
 ## Not done yet
 
-1. **Persist the watermark in the tree** as a `dialog.`-reserved
-   record, maintained incrementally. The in-memory memo already removes
-   the ancestry walk from steady state; persisting removes the
-   remaining once-per-handle cold walk, and lets a fresh partial
-   replica fetch the watermark in one read (verified opportunistically
-   against the signed head's ancestry).
-2. **Route replacements' local deletes through R3** so local and remote
-   supersession share one code path (remote coverage already does).
-3. **Retire `State::Removed`.** The tombstone variant survives only so
-   old trees can still be read; the screen drops it on ingest. Removing
-   the variant is a serialization format change, deliberately deferred.
-4. **Bind the profile cryptographically** (the authority gap above):
-   needs a time-anchoring story for delegation proofs.
-5. **History garbage collection** behind a published bootstrap floor.
-6. **Let re-asserts cite what they overrode.** An assert over a
-   deletion could record the covered versions in its log entry, making
-   intentional resurrection first-class in the lineage. Nothing depends
-   on it; adopt when convenient.
-
-## Where this came from
-
-This document consolidates and supersedes the earlier design notes: the
-[divergence clock] (an earlier causal encoding whose sync counters
-could not be compared across repositories; editions fix that by
-deriving position from the history graph itself), the version-control
-convergence audit, and the observed-remove merge design note. The
-tombstone-based interim it replaced is described in the "Measured
-costs" and deletion sections where the comparison is instructive.
-
-[divergence clock]: ./divergence-clock.md
+1. **Structural three-way merge**: graft adopted subtrees inside a
+   contested merge so even the replica's own delta replay skips
+   untouched spans. Residual value only, now that every steady-state
+   path is already proportional to the replica's divergence; needs a
+   canonical-shape-preserving merge operation in the search tree.
+2. **Mesh sync planning**: with watermarks on every head, choosing the
+   pull order across N peers is greedy set cover over version vectors
+   (pull the peer covering the most of what you lack; peers whose
+   watermark you include are skipped by scenario 2). No new protocol
+   is needed; this is client policy.
+3. **Content erasure** (GDPR): the log retains value bytes in claim
+   records indefinitely, in any merge design. The fix is value
+   indirection (records and index entries carry the content hash;
+   bytes live outside the merkle structure) plus a replicated,
+   grow-only erasure set peers honor by dropping bytes. Hashes of
+   low-entropy values are brute-forceable, so strict erasure of such
+   fields needs app-layer salting or encryption.
+4. **Authority binding**: a time-anchoring story for delegation proofs
+   in revision records (see the known gap above).
+5. **History horizon GC** behind a published bootstrap floor.
+6. **`State::Removed`** survives only for reading old trees; removing
+   the variant is a serialization format change, deliberately
+   deferred.
+7. **Re-asserts citing what they override**, making intentional
+   resurrection first-class in the lineage; nothing depends on it.
