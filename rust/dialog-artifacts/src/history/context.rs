@@ -100,6 +100,26 @@ impl Context {
     pub fn iter(&self) -> impl Iterator<Item = (&Origin, &Edition)> {
         self.0.iter()
     }
+
+    /// How far this context reaches beyond `other`: the summed per-origin
+    /// edition excess. Editions count writes, so this is a zero-read
+    /// proxy for the size of the delta a replica holding this context
+    /// would have to send a replica holding `other` — which is what lets
+    /// a first-contact pull pick the cheaper merge direction from the
+    /// two published watermarks alone.
+    pub fn divergence(&self, other: &Context) -> u64 {
+        self.0
+            .iter()
+            .map(|(origin, edition)| {
+                let seen = other
+                    .0
+                    .get(origin)
+                    .map(|edition| edition.value())
+                    .unwrap_or(0);
+                edition.value().saturating_sub(seen)
+            })
+            .sum()
+    }
 }
 
 /// Derive the [`Context`] of `head` by walking its ancestry through the

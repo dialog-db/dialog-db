@@ -306,11 +306,18 @@ impl<'a> Pull<'a> {
             // needs no screen at all: nothing they minted unseen by us
             // can have been covered by us.
             //
-            // Skipped on a first-contact pull (empty sync base): there
-            // our "delta" would be our entire tree, and the screened
-            // direction's cost is no worse.
+            // On a first-contact pull (empty sync base) the "delta" is
+            // our entire tree, so direction is chosen by comparing the
+            // two watermarks' divergence masses (editions count writes,
+            // so the excess is a zero-read proxy for delta size): replay
+            // ours onto theirs when ours is the smaller side, screen
+            // theirs onto ours otherwise. Reads then track the smaller
+            // divergence, never the larger side's churn — a partial
+            // replica first-contacting a churning upstream replays only
+            // what it holds.
             else if let Some(local) = &local_revision
-                && base != TreeReference::default()
+                && (base != TreeReference::default()
+                    || local_context.divergence(theirs) <= theirs.divergence(&local_context))
             {
                 let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
                 let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
@@ -343,6 +350,35 @@ impl<'a> Pull<'a> {
                 merged = Box::pin(merged.edit().integrate(screened, &tree_store))
                     .await?
                     .persist(&mut delta)?;
+                let merged_tree = TreeReference::from(*merged.root().as_bytes());
+
+                // The replay can degenerate, and the head selection must
+                // mirror the screened path's arms or mutual pulls mint
+                // merge revisions forever instead of quiescing. Nothing
+                // effective replayed (their tree stands): adopt their
+                // head. Nothing of theirs was new (our tree stands):
+                // keep our head and advance only the sync base. In both
+                // arms the integrate produced no new nodes, so there is
+                // nothing to import.
+                if merged_tree == upstream_revision.tree {
+                    contexts.insert(upstream_revision.version(), theirs.clone());
+                    return Ok(PreparedPull::Merged(Box::new(Merged {
+                        branch,
+                        head,
+                        new_revision: upstream_revision.clone(),
+                        sync: upstream.with_tree(upstream_revision.tree.clone()),
+                        base,
+                    })));
+                }
+                if merged_tree == local.tree {
+                    return Ok(PreparedPull::Merged(Box::new(Merged {
+                        branch,
+                        head,
+                        new_revision: local.clone(),
+                        sync: upstream.with_tree(upstream_revision.tree.clone()),
+                        base,
+                    })));
+                }
 
                 // Mint the merge revision exactly as the screened path
                 // does; its context needs no derivation at all: the
@@ -2631,6 +2667,90 @@ mod history_tests {
             values.contains(&Value::String("ours".into())),
             "the replica's own novelty survives the fallback: {values:?}"
         );
+
+        Ok(())
+    }
+
+    /// A first-contact pull (no sync base) picks the merge direction by
+    /// comparing the two watermarks' divergence masses: a small replica
+    /// contacting a churning upstream replays its own few entries onto
+    /// the adopted upstream tree instead of walking the upstream's
+    /// churn. Reads track the smaller side.
+    #[dialog_common::test]
+    async fn it_first_contacts_a_churning_upstream_from_the_small_side() -> Result<()> {
+        use crate::RepositoryExt as _;
+        use crate::helpers::Counting;
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .repository(unique_name("repo"))
+            .open()
+            .perform(&env)
+            .await?;
+
+        // A churning upstream the replica has never synced with.
+        let main = repo.branch("main").open().perform(&env).await?;
+        for i in 0..200 {
+            main.commit(stream::iter(vec![assert_one(
+                "user/name",
+                &format!("user:{i}"),
+                "resident",
+            )]))
+            .perform(&env)
+            .await?;
+        }
+
+        // The replica holds two facts of its own, nothing shared.
+        let feature = repo.branch("feature").open().perform(&env).await?;
+        for i in 0..2 {
+            feature
+                .commit(stream::iter(vec![assert_one(
+                    "post/title",
+                    &format!("post:{i}"),
+                    "ours",
+                )]))
+                .perform(&env)
+                .await?;
+        }
+
+        env.reset();
+        feature
+            .pull()
+            .from(&main)
+            .perform(&env)
+            .await?
+            .expect("merged");
+        let reads = env.block_reads();
+        assert!(
+            reads <= 30,
+            "a first-contact pull from the small side must not read the upstream's churn (got {reads}): {:?}",
+            env.snapshot()
+        );
+
+        // Both sides' content is present in the merged state.
+        let ours: Vec<_> = feature
+            .claims()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .perform(&env)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(ours.len(), 2, "our facts survive");
+        let theirs: Vec<_> = feature
+            .claims()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .perform(&env)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(theirs.len(), 200, "the upstream churn is all adopted");
 
         Ok(())
     }

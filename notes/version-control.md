@@ -160,8 +160,8 @@ flowchart TD
     E -- yes --> S3["scenario 3: fast-forward
     adopt head + tree + watermark by root
     zero reads"]
-    E -- no --> F{"upstream watermark published
-    and sync base non-empty?"}
+    E -- no --> F{"upstream watermark published, and
+    tracked or ours is the smaller divergence?"}
     F -- yes --> S4["scenario 4: reverse replay
     adopt their tree, replay OUR delta
     reads proportional to our divergence"]
@@ -265,7 +265,7 @@ The merged head lists both parents, and its watermark is the union of the two pu
 
 ### Scenario 5: first contact, or a legacy head
 
-Two cases run the screened merge in the original direction (their delta since the sync base onto our tree, screened by *our* watermark): a first-contact pull (empty sync base, where "our delta" would be our entire tree and the reverse direction has no advantage), and an upstream head minted before watermarks were published. The screen is the same R1/R2/R3 with us as the receiver; the merged head's watermark is derived incrementally by folding the revision records that ride the delta (zero extra reads). Afterwards the head is chosen: adopt theirs if the result equals their tree (or we had no head), keep ours if the result equals ours, otherwise mint a merge revision.
+Two cases run the screened merge in the original direction (their delta since the sync base onto our tree, screened by *our* watermark): an upstream head minted before watermarks were published, and a first-contact pull where we are the *larger* side. On first contact (empty sync base) there is no divergence marker, so "our delta" is our entire tree and "their delta" is their entire tree; the direction is chosen by comparing the two watermarks' divergence masses (per-origin edition excess, summed; editions count writes, so the excess estimates delta size with zero reads). The smaller side gets replayed: a two-fact replica first-contacting a two-hundred-commit upstream replays its two facts (scenario 4, pinned by `it_first_contacts_a_churning_upstream_from_the_small_side`); a large replica pulling a small new upstream screens the small delta in (this scenario). Either way reads track the smaller divergence, never the larger side's churn. The screen is the same R1/R2/R3 with us as the receiver; the merged head's watermark is derived incrementally by folding the revision records that ride the delta (zero extra reads). Afterwards the head is chosen: adopt theirs if the result equals their tree (or we had no head), keep ours if the result equals ours, otherwise mint a merge revision.
 
 This direction is also the safety net the watermark gates fall back to whenever knowledge has diverged in ways the frugal paths cannot serve. The gate refusal itself is load-bearing: `it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams` pins the case where we learned of a deletion through one upstream and then pull another that still holds the fact live; wholesale adoption would resurrect it, so the screened merge runs and R1 rejects the stale copy.
 
