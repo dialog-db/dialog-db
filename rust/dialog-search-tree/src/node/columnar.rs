@@ -248,12 +248,7 @@ fn decode_column(
     entry_count: usize,
 ) -> Result<Vec<Vec<u8>>, DialogSearchTreeError> {
     match (component.column, column) {
-        (
-            Column::Arena,
-            ColumnData::Arena {
-                prefix, stream, ..
-            },
-        ) => {
+        (Column::Arena, ColumnData::Arena { prefix, stream, .. }) => {
             let mut cursor = KeyCursor::new(prefix, stream, 0);
             let mut out = Vec::with_capacity(entry_count);
             for _ in 0..entry_count {
@@ -281,7 +276,9 @@ fn decode_column(
                 })
                 .collect()
         }
-        _ => Err(malformed("Column class does not match the schema component")),
+        _ => Err(malformed(
+            "Column class does not match the schema component",
+        )),
     }
 }
 
@@ -450,7 +447,11 @@ mod tests {
         use std::cmp::Ordering;
         assert_eq!(leaf.compare(0, &keys[0])?, Ordering::Equal);
         assert_eq!(leaf.compare(0, b"E1zz")?, Ordering::Less, "entry < probe");
-        assert_eq!(leaf.compare(2, b"E1zz")?, Ordering::Greater, "entry > probe");
+        assert_eq!(
+            leaf.compare(2, b"E1zz")?,
+            Ordering::Greater,
+            "entry > probe"
+        );
         Ok(())
     }
 }

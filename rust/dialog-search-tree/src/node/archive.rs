@@ -268,7 +268,10 @@ mod tests {
 
         assert_eq!(segment.len(), keys.len());
         assert_eq!(segment.first_key::<[u8; 8]>()?, keys[0].to_vec());
-        assert_eq!(segment.last_key::<[u8; 8]>()?, keys.last().unwrap().to_vec());
+        assert_eq!(
+            segment.last_key::<[u8; 8]>()?,
+            keys.last().unwrap().to_vec()
+        );
 
         let mut decoded = segment.keys::<[u8; 8]>()?;
         for expected in &keys {
