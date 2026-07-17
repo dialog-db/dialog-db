@@ -2,7 +2,7 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, KeyBytes, State, Storage};
+use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, State, Storage};
 use dialog_search_tree::{
     ArchivedNodeBody, Buffer, Entry, Key as TreeKey, PersistentNode, into_owned,
 };
@@ -75,8 +75,7 @@ impl ArtifactsHierarchy {
                 return Ok(());
             };
 
-            let block: PersistentNode<KeyBytes, State<Datum>> =
-                PersistentNode::new(Buffer::from(bytes));
+            let block: PersistentNode<Key, State<Datum>> = PersistentNode::new(Buffer::from(bytes));
             let node = match block.body()? {
                 ArchivedNodeBody::Index(index) => {
                     let links = index.links()?;
@@ -87,10 +86,10 @@ impl ArtifactsHierarchy {
                 }
                 ArchivedNodeBody::Segment(segment) => {
                     let mut entries = Vec::with_capacity(segment.len());
-                    let mut keys = segment.keys::<KeyBytes>()?;
+                    let mut keys = segment.keys::<Key>()?;
                     while let Some((at, key)) = keys.next_key()? {
                         entries.push(Entry {
-                            key: Key::from(<KeyBytes as TreeKey>::try_from_bytes(&key)?),
+                            key: <Key as TreeKey>::try_from_bytes(&key)?,
                             value: into_owned::<State<Datum>>(segment.value_at(at)?)?,
                         });
                     }

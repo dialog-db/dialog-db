@@ -68,7 +68,7 @@ use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, KeyBytes, State};
+use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Key, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -99,19 +99,19 @@ use crate::{
 #[derive(Clone, Debug, Default)]
 pub struct Demand {
     /// Ranges read by fact scans: the query's data demand.
-    facts: Arc<Mutex<Vec<RangeInclusive<KeyBytes>>>>,
+    facts: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
     /// Ranges read by rule-discovery scans (`db.rule/*`). Kept
     /// apart because a change here can install a rule, which can
     /// affect any row — it invalidates the whole result, not one
     /// entity's slice.
-    rules: Arc<Mutex<Vec<RangeInclusive<KeyBytes>>>>,
+    rules: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
 }
 
 /// Insert a range into a cover, merging overlaps: the cover stays a
 /// sorted list of disjoint intervals, so it cannot grow beyond the
 /// number of genuinely distinct demanded regions no matter how many
 /// (nested, repeated) selectors record into it.
-fn record_range(ranges: &Mutex<Vec<RangeInclusive<KeyBytes>>>, range: RangeInclusive<KeyBytes>) {
+fn record_range(ranges: &Mutex<Vec<RangeInclusive<Key>>>, range: RangeInclusive<Key>) {
     let mut ranges = ranges.lock().expect("demand lock");
     let (mut start, mut end) = range.into_inner();
     // Absorb every existing interval the new one overlaps.
@@ -120,8 +120,8 @@ fn record_range(ranges: &Mutex<Vec<RangeInclusive<KeyBytes>>>, range: RangeInclu
         if *existing.start() > end || *existing.end() < start {
             merged.push(existing);
         } else {
-            start = start.min(*existing.start());
-            end = end.max(*existing.end());
+            start = start.min(existing.start().clone());
+            end = end.max(existing.end().clone());
         }
     }
     merged.push(start..=end);
@@ -148,11 +148,11 @@ impl Demand {
     }
 
     /// Whether the key falls inside any recorded range.
-    pub fn covers(&self, key: &KeyBytes) -> bool {
+    pub fn covers(&self, key: &Key) -> bool {
         self.covers_facts(key) || self.covers_rules(key)
     }
 
-    fn covers_facts(&self, key: &KeyBytes) -> bool {
+    fn covers_facts(&self, key: &Key) -> bool {
         self.facts
             .lock()
             .expect("demand lock")
@@ -160,7 +160,7 @@ impl Demand {
             .any(|range| range.contains(key))
     }
 
-    fn covers_rules(&self, key: &KeyBytes) -> bool {
+    fn covers_rules(&self, key: &Key) -> bool {
         self.rules
             .lock()
             .expect("demand lock")
@@ -170,7 +170,7 @@ impl Demand {
 
     /// A snapshot of every recorded range (facts and rules): the
     /// scope a cover-gated tree diff walks.
-    pub(crate) fn ranges(&self) -> Vec<RangeInclusive<KeyBytes>> {
+    pub(crate) fn ranges(&self) -> Vec<RangeInclusive<Key>> {
         let mut ranges = self.facts.lock().expect("demand lock").clone();
         ranges.extend(self.rules.lock().expect("demand lock").iter().cloned());
         ranges

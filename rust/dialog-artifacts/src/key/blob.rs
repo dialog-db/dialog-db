@@ -47,7 +47,8 @@ impl BlobKey {
 
     /// The blob hash carried by this key.
     pub fn blob_hash(&self) -> Blake3Hash {
-        self.0.as_ref()[BLOB_HASH_OFFSET..BLOB_HASH_OFFSET + BLOB_HASH_LENGTH]
+        let bytes: &[u8] = self.0.as_ref();
+        bytes[BLOB_HASH_OFFSET..BLOB_HASH_OFFSET + BLOB_HASH_LENGTH]
             .try_into()
             .expect("blob key always carries 32 hash bytes")
     }

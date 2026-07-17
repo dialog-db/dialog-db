@@ -7,6 +7,9 @@
 use std::ops::{Deref, DerefMut};
 
 use dialog_common::ConditionalSync;
+use dialog_search_tree::{
+    Component as TreeComponent, DialogSearchTreeError, Key as TreeKey, Schema,
+};
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 
@@ -102,7 +105,7 @@ pub type KeyBytes = [u8; KEY_LENGTH];
 /// An opaque, generic [`KeyType`] that is used when constructing the subtrees
 /// of an [`Artifacts`] index.
 #[repr(transparent)]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Key(#[serde(with = "BigArray")] KeyBytes);
 
 impl Key {
@@ -182,6 +185,129 @@ impl AsRef<KeyBytes> for Key {
 impl AsMut<KeyBytes> for Key {
     fn as_mut(&mut self) -> &mut KeyBytes {
         &mut self.0
+    }
+}
+
+impl AsRef<[u8]> for Key {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Column schema for the EAV ordering (`tag ‖ entity ‖ attribute ‖
+/// value_type ‖ value_reference`). The entity and value reference are large
+/// and mostly distinct (arena); the tag, attribute, and value type are small
+/// and highly repeated, recurring non-adjacently across the leaf
+/// (dictionary).
+const EAV_SCHEMA: &[TreeComponent] = &[
+    TreeComponent::dictionary(TAG_LENGTH),
+    TreeComponent::arena(ENTITY_LENGTH),
+    TreeComponent::dictionary(ATTRIBUTE_LENGTH),
+    TreeComponent::dictionary(VALUE_DATA_TYPE_LENGTH),
+    TreeComponent::arena(VALUE_REFERENCE_LENGTH),
+];
+
+/// Column schema for the AEV ordering (`tag ‖ attribute ‖ entity ‖
+/// value_type ‖ value_reference`).
+const AEV_SCHEMA: &[TreeComponent] = &[
+    TreeComponent::dictionary(TAG_LENGTH),
+    TreeComponent::dictionary(ATTRIBUTE_LENGTH),
+    TreeComponent::arena(ENTITY_LENGTH),
+    TreeComponent::dictionary(VALUE_DATA_TYPE_LENGTH),
+    TreeComponent::arena(VALUE_REFERENCE_LENGTH),
+];
+
+/// Column schema for the VAE ordering (`tag ‖ value_type ‖ value_reference ‖
+/// attribute ‖ entity`).
+const VAE_SCHEMA: &[TreeComponent] = &[
+    TreeComponent::dictionary(TAG_LENGTH),
+    TreeComponent::dictionary(VALUE_DATA_TYPE_LENGTH),
+    TreeComponent::arena(VALUE_REFERENCE_LENGTH),
+    TreeComponent::dictionary(ATTRIBUTE_LENGTH),
+    TreeComponent::arena(ENTITY_LENGTH),
+];
+
+/// The blob index ordering (`BLOB_KEY_TAG ‖ blob_hash ‖ 0…`) has a single
+/// large distinct component after the tag; store it as one arena.
+const BLOB_SCHEMA: &[TreeComponent] = &[
+    TreeComponent::dictionary(TAG_LENGTH),
+    TreeComponent::arena(KEY_LENGTH - TAG_LENGTH),
+];
+
+impl TreeKey for Key {
+    fn try_from_bytes(bytes: &[u8]) -> Result<Self, DialogSearchTreeError> {
+        let array: KeyBytes = bytes.try_into().map_err(|_| {
+            DialogSearchTreeError::Encoding(format!(
+                "Expected a {KEY_LENGTH}-byte artifact key, got {} bytes",
+                bytes.len()
+            ))
+        })?;
+        Ok(Key(array))
+    }
+
+    fn min() -> Self {
+        Key(MINIMUM_KEY)
+    }
+
+    fn max() -> Self {
+        Key(MAXIMUM_KEY)
+    }
+
+    /// The layout id is the key's tag byte, which selects the ordering's
+    /// column schema. Every key in one leaf shares a tag (the tag sorts
+    /// first), so a leaf is single-layout except at the rare tag boundaries,
+    /// which the codec handles by falling back to the opaque schema.
+    fn layout(&self) -> u8 {
+        self.0[0]
+    }
+
+    fn schema(layout: u8) -> Schema {
+        match layout {
+            ENTITY_KEY_TAG => Schema::new(EAV_SCHEMA),
+            ATTRIBUTE_KEY_TAG => Schema::new(AEV_SCHEMA),
+            VALUE_KEY_TAG => Schema::new(VAE_SCHEMA),
+            BLOB_KEY_TAG => Schema::new(BLOB_SCHEMA),
+            // History tag and any future ordering: opaque whole key.
+            _ => Schema::opaque(),
+        }
+    }
+
+    fn components<'a>(&'a self, out: &mut Vec<&'a [u8]>) {
+        // Field widths in byte order for this key's tag. Must match the tag's
+        // schema in `schema`.
+        let widths: &[usize] = match self.0[0] {
+            ENTITY_KEY_TAG => &[
+                TAG_LENGTH,
+                ENTITY_LENGTH,
+                ATTRIBUTE_LENGTH,
+                VALUE_DATA_TYPE_LENGTH,
+                VALUE_REFERENCE_LENGTH,
+            ],
+            ATTRIBUTE_KEY_TAG => &[
+                TAG_LENGTH,
+                ATTRIBUTE_LENGTH,
+                ENTITY_LENGTH,
+                VALUE_DATA_TYPE_LENGTH,
+                VALUE_REFERENCE_LENGTH,
+            ],
+            VALUE_KEY_TAG => &[
+                TAG_LENGTH,
+                VALUE_DATA_TYPE_LENGTH,
+                VALUE_REFERENCE_LENGTH,
+                ATTRIBUTE_LENGTH,
+                ENTITY_LENGTH,
+            ],
+            BLOB_KEY_TAG => &[TAG_LENGTH, KEY_LENGTH - TAG_LENGTH],
+            _ => {
+                out.push(&self.0);
+                return;
+            }
+        };
+        let mut at = 0;
+        for &width in widths {
+            out.push(&self.0[at..at + width]);
+            at += width;
+        }
     }
 }
 

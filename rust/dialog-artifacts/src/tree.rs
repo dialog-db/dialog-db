@@ -36,15 +36,15 @@ use std::ops::RangeInclusive;
 use crate::{
     ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum,
     DialogArtifactsError, ENTITY_LENGTH, ENTITY_RAW_HEAD, EntityKey, EntityKeyPart, FromKey,
-    Instruction, Key, KeyBytes, KeyView, KeyViewConstruct, KeyViewMut, MatchCandidate, State,
-    ValueKey, selector::Constrained,
+    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, MatchCandidate, State, ValueKey,
+    selector::Constrained,
 };
 
 /// The concrete search-tree type the artifact indexes use.
 ///
 /// Keys are the raw fixed-size bytes of [`Key`]; values are [`State`]
 /// payloads stored in the tree's native (rkyv) encoding.
-pub type ArtifactTree = PersistentTree<KeyBytes, State<Datum>>;
+pub type ArtifactTree = PersistentTree<Key, State<Datum>>;
 
 impl TreeValue for State<Datum> {}
 
@@ -224,13 +224,13 @@ impl ArtifactTreeExt for ArtifactTree {
                     let datum = Datum::from(artifact);
                     let added = State::Added(datum);
                     transient = transient
-                        .insert(entity_key.into_key().into(), added.clone(), &storage)
+                        .insert(entity_key.into_key(), added.clone(), &storage)
                         .await?;
                     transient = transient
-                        .insert(attribute_key.into_key().into(), added.clone(), &storage)
+                        .insert(attribute_key.into_key(), added.clone(), &storage)
                         .await?;
                     transient = transient
-                        .insert(value_key.into_key().into(), added, &storage)
+                        .insert(value_key.into_key(), added, &storage)
                         .await?;
                 }
                 Instruction::Replace(artifact) => {
@@ -254,10 +254,8 @@ impl ArtifactTreeExt for ArtifactTree {
                             .set_entity(entity_key.entity())
                             .set_attribute(entity_key.attribute())
                             .into_key();
-                        let search_stream = transient.stream_range(
-                            KeyBytes::from(search_start)..=KeyBytes::from(search_end),
-                            &storage,
-                        );
+                        let search_stream =
+                            transient.stream_range(search_start..=search_end, &storage);
                         tokio::pin!(search_stream);
                         while let Some(candidate) = search_stream.next().await {
                             let candidate = candidate?;
@@ -266,7 +264,7 @@ impl ArtifactTreeExt for ArtifactTree {
                                 if current.is == artifact.is {
                                     found_same_value = true;
                                 } else {
-                                    superseded_keys.push(Key::from(candidate.key));
+                                    superseded_keys.push(candidate.key);
                                 }
                             }
                         }
@@ -277,14 +275,10 @@ impl ArtifactTreeExt for ArtifactTree {
                         let value_key = ValueKey::from_key(&entity_key);
                         let attribute_key = AttributeKey::from_key(&entity_key);
 
+                        transient = transient.delete(&entity_key.into_key(), &storage).await?;
+                        transient = transient.delete(&value_key.into_key(), &storage).await?;
                         transient = transient
-                            .delete(&entity_key.into_key().into(), &storage)
-                            .await?;
-                        transient = transient
-                            .delete(&value_key.into_key().into(), &storage)
-                            .await?;
-                        transient = transient
-                            .delete(&attribute_key.into_key().into(), &storage)
+                            .delete(&attribute_key.into_key(), &storage)
                             .await?;
                     }
 
@@ -298,13 +292,13 @@ impl ArtifactTreeExt for ArtifactTree {
                     let datum = Datum::from(artifact);
                     let added = State::Added(datum);
                     transient = transient
-                        .insert(entity_key.into_key().into(), added.clone(), &storage)
+                        .insert(entity_key.into_key(), added.clone(), &storage)
                         .await?;
                     transient = transient
-                        .insert(attribute_key.into_key().into(), added.clone(), &storage)
+                        .insert(attribute_key.into_key(), added.clone(), &storage)
                         .await?;
                     transient = transient
-                        .insert(value_key.into_key().into(), added, &storage)
+                        .insert(value_key.into_key(), added, &storage)
                         .await?;
                 }
                 Instruction::Retract(artifact) => {
@@ -317,8 +311,7 @@ impl ArtifactTreeExt for ArtifactTree {
                     // the transient tree — so an assert earlier in this same
                     // batch doesn't count as a prior.
                     let committed = matches!(
-                        base.get(&value_key.clone().into_key().into(), &storage)
-                            .await?,
+                        base.get(&value_key.clone().into_key(), &storage).await?,
                         Some(State::Added(_))
                     );
 
@@ -328,13 +321,13 @@ impl ArtifactTreeExt for ArtifactTree {
                         // survives a merge and beats a stale remote assert.
                         let removed: State<Datum> = State::Removed;
                         transient = transient
-                            .insert(entity_key.into_key().into(), removed.clone(), &storage)
+                            .insert(entity_key.into_key(), removed.clone(), &storage)
                             .await?;
                         transient = transient
-                            .insert(attribute_key.into_key().into(), removed.clone(), &storage)
+                            .insert(attribute_key.into_key(), removed.clone(), &storage)
                             .await?;
                         transient = transient
-                            .insert(value_key.into_key().into(), removed, &storage)
+                            .insert(value_key.into_key(), removed, &storage)
                             .await?;
                     } else {
                         // No committed prior: the fact only exists (if at all) as
@@ -342,15 +335,11 @@ impl ArtifactTreeExt for ArtifactTree {
                         // assert and retract cancel to nothing — no tombstone,
                         // no tree churn. Deleting an absent key is a no-op, so a
                         // retract of a fact that never existed changes nothing.
+                        transient = transient.delete(&entity_key.into_key(), &storage).await?;
                         transient = transient
-                            .delete(&entity_key.into_key().into(), &storage)
+                            .delete(&attribute_key.into_key(), &storage)
                             .await?;
-                        transient = transient
-                            .delete(&attribute_key.into_key().into(), &storage)
-                            .await?;
-                        transient = transient
-                            .delete(&value_key.into_key().into(), &storage)
-                            .await?;
+                        transient = transient.delete(&value_key.into_key(), &storage).await?;
                     }
                 }
             }
@@ -383,7 +372,7 @@ impl ArtifactTreeExt for ArtifactTree {
             for await item in stream {
                 let raw = item?;
                 let entry = Entry {
-                    key: Key::from(raw.key),
+                    key: raw.key,
                     value: raw.value,
                 };
                 if entry.matches_selector(&selector)
@@ -413,7 +402,7 @@ impl ArtifactTreeExt for ArtifactTree {
 /// it as the unit of a demand cover — a range that came back empty is
 /// still demanded (the emptiness was read), so a later write into it
 /// must invalidate the reader.
-pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusive<KeyBytes> {
+pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusive<Key> {
     if selector.entity().is_some()
         || (selector.entity_prefix().is_some()
             && selector.value().is_none()
@@ -425,21 +414,21 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
             <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
             selector,
         );
-        KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
+        start.into_key()..=end.into_key()
     } else if selector.value().is_some() {
         let (start, end) = apply_prefix_bounds(
             <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
             <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
             selector,
         );
-        KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
+        start.into_key()..=end.into_key()
     } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
         let (start, end) = apply_prefix_bounds(
             <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
             <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
             selector,
         );
-        KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
+        start.into_key()..=end.into_key()
     } else {
         // `Constrained` guarantees at least one field is set.
         unreachable!("ArtifactSelector will always have at least one field specified")

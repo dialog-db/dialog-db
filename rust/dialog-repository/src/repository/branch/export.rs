@@ -1,4 +1,3 @@
-use dialog_artifacts::KeyBytes;
 use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{
     Artifact, DialogArtifactsError, EntityKey, Exporter, Key, KeyViewConstruct, State,
@@ -62,8 +61,8 @@ impl<E: Exporter> Export<'_, E> {
 
         let tree = Index::from_hash(NodeHash::from(tree_hash));
 
-        let range = KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::min().into_key())
-            ..=KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::max().into_key());
+        let range = <EntityKey<Key> as KeyViewConstruct>::min().into_key()
+            ..=<EntityKey<Key> as KeyViewConstruct>::max().into_key();
 
         let tree_store = TreeStorage::new(TreeStorageBridge(store));
         let stream = tree.stream_range(range, &tree_store);

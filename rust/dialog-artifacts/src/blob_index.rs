@@ -20,7 +20,7 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    BLOB_KEY_TAG, BlobKey, Datum, DialogArtifactsError, Key, KeyBytes, State,
+    BLOB_KEY_TAG, BlobKey, Datum, DialogArtifactsError, State,
     tree::{ArtifactTree, TreeStorageBridge},
 };
 
@@ -146,7 +146,7 @@ where
                 Change::Add(entry) => (entry, false),
                 Change::Remove(entry) => (entry, true),
             };
-            let key = Key::from(entry.key);
+            let key = entry.key;
             if key.tag() != BLOB_KEY_TAG {
                 continue;
             }
@@ -239,7 +239,7 @@ impl BlobIndexExt for ArtifactTree {
             + ConditionalSync,
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-        let key = KeyBytes::from(BlobKey::new(hash).into_key());
+        let key = BlobKey::new(hash).into_key();
         let transient = self
             .edit()
             .insert(key, record.into_state(), &storage)
@@ -259,7 +259,7 @@ impl BlobIndexExt for ArtifactTree {
             + ConditionalSync,
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-        let key = KeyBytes::from(BlobKey::new(hash).into_key());
+        let key = BlobKey::new(hash).into_key();
         match self.get(&key, &storage).await? {
             Some(state) => BlobRecord::from_state(&state),
             None => Ok(None),
@@ -280,14 +280,13 @@ impl BlobIndexExt for ArtifactTree {
         let tree: ArtifactTree = self;
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         try_stream! {
-            let range = KeyBytes::from(BlobKey::min().into_key())
-                ..=KeyBytes::from(BlobKey::max().into_key());
+            let range = BlobKey::min().into_key()..=BlobKey::max().into_key();
             let stream = tree.stream_range(range, &storage);
             tokio::pin!(stream);
             for await item in stream {
                 let entry = item?;
                 if let Some(record) = BlobRecord::from_state(&entry.value)? {
-                    let hash = BlobKey(Key::from(entry.key)).blob_hash();
+                    let hash = BlobKey(entry.key).blob_hash();
                     yield (hash, record);
                 }
             }
