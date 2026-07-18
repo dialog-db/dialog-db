@@ -513,16 +513,18 @@ where
             // at the same key.
             let arriving = matches!(&change, Change::Add(_));
             if let State::Added(datum) = &entry.value {
+                let fact = Artifact::from_key_datum(&entry.key, datum)
+                    .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
+                // Dedup on the fact's identity (entity, attribute, value), all
+                // now reconstructed from the key.
                 if !seen.insert((
                     arriving,
-                    datum.entity.clone(),
-                    datum.attribute.clone(),
-                    datum.value.clone(),
+                    fact.of.to_string(),
+                    fact.the.to_string(),
+                    fact.is.to_bytes(),
                 )) {
                     continue;
                 }
-                let fact = Artifact::try_from(datum.clone())
-                    .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
                 subjects.insert(fact.of.clone());
                 if arriving {
                     asserted.push(fact);

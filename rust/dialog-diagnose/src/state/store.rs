@@ -11,7 +11,7 @@ use std::{
     sync::mpsc::{Receiver, channel},
 };
 
-use dialog_artifacts::{Artifacts, Datum, State};
+use dialog_artifacts::{Artifacts, Datum, Key, State};
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 
 use crate::Promise;
@@ -19,6 +19,10 @@ use crate::Promise;
 use super::{
     ArtifactsCursor, ArtifactsHierarchy, ArtifactsTreeAnalysis, ArtifactsTreeStats, TreeNode,
 };
+
+/// A loaded fact for rendering: its index key (needed to reconstruct the
+/// entity, attribute, and inline value) paired with its payload, or pending.
+type FactPromise<'a> = Promise<(&'a Key, &'a State<Datum>)>;
 
 /// Unified message type for all worker communications.
 ///
@@ -30,7 +34,11 @@ pub enum WorkerMessage {
     Fact {
         /// Index position of the fact
         index: usize,
-        /// The loaded fact data
+        /// The index key the fact was stored under (needed to reconstruct the
+        /// entity, attribute, and inline value, which the payload no longer
+        /// carries)
+        key: Key,
+        /// The loaded fact payload
         data: State<Datum>,
     },
     /// Tree analysis statistics have been computed
@@ -60,8 +68,10 @@ pub struct DiagnoseStore {
     /// Unified channel receiver for all worker messages
     message_rx: Receiver<WorkerMessage>,
 
-    /// Cache of loaded facts indexed by position
-    facts: BTreeMap<usize, State<Datum>>,
+    /// Cache of loaded facts indexed by position, each with the index key it
+    /// was stored under (needed to reconstruct the entity, attribute, and
+    /// inline value from the key)
+    facts: BTreeMap<usize, (Key, State<Datum>)>,
     /// Tree statistics (computed asynchronously)
     stats: Promise<ArtifactsTreeStats>,
     /// Cache of loaded tree nodes indexed by hash
@@ -105,8 +115,8 @@ impl DiagnoseStore {
     pub fn sync(&mut self) {
         while let Ok(message) = self.message_rx.try_recv() {
             match message {
-                WorkerMessage::Fact { index, data } => {
-                    self.facts.insert(index, data);
+                WorkerMessage::Fact { index, key, data } => {
+                    self.facts.insert(index, (key, data));
                 }
                 WorkerMessage::Stats(stats) => {
                     self.stats = Promise::Resolved(stats);
@@ -144,14 +154,14 @@ impl DiagnoseStore {
     ///
     /// This method triggers loading of facts if they're not yet cached and
     /// returns a vector of Promise wrappers indicating the loading state of each fact.
-    pub fn facts(&self, range: Range<usize>) -> Result<Vec<Promise<&State<Datum>>>> {
+    pub fn facts(&self, range: Range<usize>) -> Result<Vec<FactPromise<'_>>> {
         self.cursor.seek(range.end);
 
         Ok(range
             .map(|index| {
                 self.facts
                     .get(&index)
-                    .map(Promise::Resolved)
+                    .map(|(key, state)| Promise::Resolved((key, state)))
                     .unwrap_or(Promise::Pending)
             })
             .collect())

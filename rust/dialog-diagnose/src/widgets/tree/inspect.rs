@@ -29,7 +29,7 @@ impl StatefulWidget for NodeInspector {
                 TreeNode::Segment { entries } => {
                     let facts = entries
                         .iter()
-                        .map(|entry| Promise::Resolved(&entry.value))
+                        .map(|entry| Promise::Resolved((&entry.key, &entry.value)))
                         .collect::<Vec<_>>();
 
                     FactTable {

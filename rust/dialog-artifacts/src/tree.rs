@@ -235,7 +235,7 @@ impl ArtifactTreeExt for ArtifactTree {
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
 
-                    let datum = Datum::from(artifact);
+                    let datum = Datum::for_artifact(&artifact);
                     let added = State::Added(datum);
                     transient = transient
                         .insert(entity_key.into_key(), added.clone(), &storage)
@@ -273,8 +273,9 @@ impl ArtifactTreeExt for ArtifactTree {
                         tokio::pin!(search_stream);
                         while let Some(candidate) = search_stream.next().await {
                             let candidate = candidate?;
-                            if let State::Added(current_element) = candidate.value {
-                                let current = Artifact::try_from(current_element)?;
+                            if let State::Added(current_element) = &candidate.value {
+                                let current =
+                                    Artifact::from_key_datum(&candidate.key, current_element)?;
                                 // Supersession is scoped to this exact
                                 // (entity, attribute). The range should already
                                 // guarantee that, but deleting is destructive
@@ -314,7 +315,7 @@ impl ArtifactTreeExt for ArtifactTree {
                     let entity_key = EntityKey::from(&artifact);
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
-                    let datum = Datum::from(artifact);
+                    let datum = Datum::for_artifact(&artifact);
                     let added = State::Added(datum);
                     transient = transient
                         .insert(entity_key.into_key(), added.clone(), &storage)
@@ -401,9 +402,9 @@ impl ArtifactTreeExt for ArtifactTree {
                     value: raw.value,
                 };
                 if entry.matches_selector(&selector)
-                    && let Entry { value: State::Added(datum), .. } = entry
+                    && let Entry { key, value: State::Added(datum) } = &entry
                 {
-                    yield Artifact::try_from(datum)?;
+                    yield Artifact::from_key_datum(key, datum)?;
                 }
             }
         }

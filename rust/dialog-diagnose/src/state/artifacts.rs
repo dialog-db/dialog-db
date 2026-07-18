@@ -94,11 +94,12 @@ impl ArtifactsCursor {
             };
 
             while let Some(element) = stream.try_next().await? {
-                state.last_key = Some(element.key);
+                state.last_key = Some(element.key.clone());
 
                 if tx
                     .send(WorkerMessage::Fact {
                         index: state.next_index,
+                        key: element.key,
                         data: element.value,
                     })
                     .is_err()

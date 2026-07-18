@@ -69,8 +69,8 @@ impl<E: Exporter> Export<'_, E> {
         tokio::pin!(stream);
 
         while let Some(entry) = stream.try_next().await? {
-            if let State::Added(datum) = entry.value {
-                let artifact = Artifact::try_from(datum)?;
+            if let State::Added(datum) = &entry.value {
+                let artifact = Artifact::from_key_datum(&entry.key, datum)?;
                 exporter.write(&artifact).await?;
             }
         }

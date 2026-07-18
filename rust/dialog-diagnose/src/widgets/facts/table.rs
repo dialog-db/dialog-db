@@ -1,4 +1,4 @@
-use dialog_artifacts::{Datum, State, Value, ValueDataType};
+use dialog_artifacts::{Artifact, Datum, Key, State};
 use ratatui::{
     prelude::*,
     widgets::{Cell, HighlightSpacing, Row, Table},
@@ -6,14 +6,20 @@ use ratatui::{
 
 use crate::Promise;
 
+/// A loaded fact for rendering: its index key (needed to reconstruct the
+/// entity, attribute, and inline value) paired with its payload, or pending.
+type FactPromise<'a> = Promise<(&'a Key, &'a State<Datum>)>;
+
 /// A table widget for rendering database facts.
 ///
 /// This widget displays facts in a structured table format with columns for
 /// entity, attribute, value, and cause. It handles both resolved facts and
 /// pending promises, providing visual feedback for loading states.
 pub struct FactTable<'a> {
-    /// List of facts to display, potentially including pending promises
-    pub facts: Vec<Promise<&'a State<Datum>>>,
+    /// List of facts to display, each with its index key (needed to
+    /// reconstruct the entity, attribute, and inline value), potentially
+    /// including pending promises
+    pub facts: Vec<FactPromise<'a>>,
     /// Index of currently selected row, if any
     pub selected: Option<usize>,
 }
@@ -50,34 +56,34 @@ impl Widget for FactTable<'_> {
                     Promise::Pending => {
                         Row::new([Cell::from(Text::from("Loading fact...".to_string()))])
                     }
-                    Promise::Resolved(State::Added(datum)) => {
-                        let value = Value::try_from((
-                            ValueDataType::from(datum.value_type),
-                            datum.value.clone(),
-                        ))
-                        .map(|value| value.to_utf8())
-                        .unwrap_or_else(|error| format!("{error}"));
+                    Promise::Resolved((key, State::Added(datum))) => {
+                        let (entity, attribute, value) = match Artifact::from_key_datum(key, datum)
+                        {
+                            Ok(artifact) => (
+                                artifact.of.to_string(),
+                                artifact.the.to_string(),
+                                artifact.is.to_utf8(),
+                            ),
+                            Err(error) => (String::new(), String::new(), format!("{error}")),
+                        };
 
                         Row::new(
-                            [
-                                datum.entity.to_string(),
-                                datum.attribute.to_string(),
-                                value,
-                                format!("{:?}", datum.cause),
-                            ]
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, value)| {
-                                Cell::from(Text::from(value)).style(Style::new().fg(match index {
-                                    0 => Color::Green,
-                                    1 => Color::Cyan,
-                                    2 => Color::Magenta,
-                                    _ => Color::Red,
-                                }))
-                            }),
+                            [entity, attribute, value, format!("{:?}", datum.cause)]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, value)| {
+                                    Cell::from(Text::from(value)).style(Style::new().fg(
+                                        match index {
+                                            0 => Color::Green,
+                                            1 => Color::Cyan,
+                                            2 => Color::Magenta,
+                                            _ => Color::Red,
+                                        },
+                                    ))
+                                }),
                         )
                     }
-                    Promise::Resolved(State::Removed) => {
+                    Promise::Resolved((_key, State::Removed)) => {
                         Row::new([Cell::from(Text::from("<Retracted>".to_string()))])
                     }
                 }

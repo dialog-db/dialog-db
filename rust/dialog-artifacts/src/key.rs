@@ -114,6 +114,13 @@ pub(crate) fn inline_threshold() -> usize {
     dialog_search_tree::Manifest::default().inline_n as usize
 }
 
+/// Whether `value` spills (its encoded form exceeds the inline threshold, so
+/// the key carries a reference and the payload must carry the raw bytes).
+/// The single source of truth the payload builder and the key builder share.
+pub(crate) fn value_spills(value: &Value) -> bool {
+    value_payload(value, inline_threshold()).is_reference()
+}
+
 /// The exact value-tail bytes a key carries for `value`: the value-type byte
 /// (with the spill flag set when the value spilled) followed by the payload
 /// (inline order-preserving encoding, or the 32-byte spilled reference).

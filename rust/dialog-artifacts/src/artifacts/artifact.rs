@@ -6,14 +6,17 @@
 
 use std::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},
-    str::FromStr,
+    str::{FromStr, from_utf8},
 };
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Datum, DialogArtifactsError};
+use crate::{
+    ATTRIBUTE_KEY_TAG, AttributeKey, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, Key,
+    KeyView, VALUE_KEY_TAG, ValueKey, decode_value,
+};
 
-use super::{Attribute, Cause, Entity, Value, ValueDataType};
+use super::{Attribute, Cause, Entity, Value};
 
 /// A [`Artifact`] embodies a datum - a semantic triple - that may be stored in or
 /// retrieved from a [`ArtifactStore`].
@@ -62,15 +65,65 @@ impl Display for Artifact {
     }
 }
 
-impl TryFrom<Datum> for Artifact {
-    type Error = DialogArtifactsError;
-
-    fn try_from(value: Datum) -> Result<Self, Self::Error> {
-        Ok(Artifact {
-            the: Attribute::from_str(&value.attribute)?,
-            of: Entity::from_str(&value.entity)?,
-            is: Value::try_from((ValueDataType::from(value.value_type), value.value))?,
-            cause: value.cause,
-        })
+impl Artifact {
+    /// Reconstructs a fact from an index `key` and its stored [`Datum`] payload.
+    ///
+    /// The entity, attribute, and value type come from the key (stored
+    /// losslessly and order-preservingly by [`EntityKey::from`] and friends).
+    /// The value is decoded from the key's inline order-preserving payload when
+    /// it fits inline, or taken from `datum.value` (the raw bytes carried
+    /// because the key holds only a 32-byte reference) when it spilled.
+    pub fn from_key_datum(key: &Key, datum: &Datum) -> Result<Self, DialogArtifactsError> {
+        // View the key under its own ordering so the accessors return the
+        // right components regardless of which index this entry came from, and
+        // reconstruct through the shared helper.
+        match key.tag() {
+            ENTITY_KEY_TAG => reconstruct(EntityKey(key), datum),
+            ATTRIBUTE_KEY_TAG => reconstruct(AttributeKey(key), datum),
+            VALUE_KEY_TAG => reconstruct(ValueKey(key), datum),
+            tag => Err(DialogArtifactsError::InvalidKey(format!(
+                "unknown index key tag {tag}"
+            ))),
+        }
     }
+}
+
+/// Reconstructs an [`Artifact`] from a key view and its payload. The entity,
+/// attribute, and value type come from the key; the value is decoded inline
+/// from the key or taken from `datum.value` when it spilled.
+fn reconstruct<K: KeyView>(key: K, datum: &Datum) -> Result<Artifact, DialogArtifactsError> {
+    let of = Entity::from_str(from_utf8(key.entity().raw()).map_err(|error| {
+        DialogArtifactsError::InvalidEntity(format!("entity key is not UTF-8: {error}"))
+    })?)?;
+    let the = Attribute::from_str(from_utf8(key.attribute().raw()).map_err(|error| {
+        DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
+    })?)?;
+    let value_type = key.value_type();
+
+    let is = if key.value_is_spilled() {
+        // The key carries only a reference; the raw value bytes travel in the
+        // payload.
+        let bytes = datum.value.clone().ok_or_else(|| {
+            DialogArtifactsError::InvalidValue("spilled value key has no payload bytes".to_string())
+        })?;
+        Value::try_from((value_type, bytes))?
+    } else {
+        // Decode the inline order-preserving value from the key.
+        let (value, rest) = decode_value(value_type, key.value_payload()).ok_or_else(|| {
+            DialogArtifactsError::InvalidValue("inline value payload did not decode".to_string())
+        })?;
+        if !rest.is_empty() {
+            return Err(DialogArtifactsError::InvalidValue(
+                "inline value payload had trailing bytes".to_string(),
+            ));
+        }
+        value
+    };
+
+    Ok(Artifact {
+        the,
+        of,
+        is,
+        cause: datum.cause.clone(),
+    })
 }

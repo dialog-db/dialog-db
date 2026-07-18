@@ -210,8 +210,8 @@ where
         tokio::pin!(entity_stream);
 
         while let Some(entry) = entity_stream.try_next().await? {
-            if let State::Added(datum) = entry.value {
-                let artifact = Artifact::try_from(datum)?;
+            if let State::Added(datum) = &entry.value {
+                let artifact = Artifact::from_key_datum(&entry.key, datum)?;
 
                 csv.serialize(artifact)
                     .await
@@ -1042,6 +1042,56 @@ mod tests {
         // point query walks one fewer block to reach its leaf.
         assert_eq!(net_reads, 2);
         assert_eq!(net_writes, 0);
+
+        Ok(())
+    }
+
+    /// Measures on-disk size and write amplification per fact. Not a pass/fail
+    /// assertion of an exact number (that would be brittle across format
+    /// tweaks); it prints the persisted bytes-per-fact so the M3 format epoch's
+    /// size win can be tracked, and guards a loose upper bound so a regression
+    /// that doubled the size would fail. `generate_data` is a realistic mixed
+    /// workload (five attributes per entity, several value types).
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_measures_persisted_size_per_fact() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let entities = 512;
+        let data = generate_data(entities)?;
+        let fact_count = data.len();
+
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
+        let mut facts = Artifacts::anonymous(storage_backend.clone()).await?;
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let (write_bytes, writes) = {
+            let storage = storage_backend.lock().await;
+            (storage.write_bytes(), storage.writes())
+        };
+
+        let bytes_per_fact = write_bytes as f64 / fact_count as f64;
+        // Each logical fact writes three index entries (EAV/AEV/VAE); the
+        // per-entry figure is the apples-to-apples comparison against the
+        // pre-M3 baseline, which was measured per single index entry (~172
+        // B/entry, where the payload stored the whole fact again).
+        let bytes_per_entry = bytes_per_fact / 3.0;
+        let blocks_per_fact = writes as f64 / fact_count as f64;
+        println!(
+            "SIZE {fact_count} facts: {write_bytes} bytes total, \
+             {bytes_per_fact:.1} bytes/fact = {bytes_per_entry:.1} bytes/entry \
+             (3 indexes), {blocks_per_fact:.3} blocks/fact"
+        );
+
+        // Regression guard against the pre-M3 flat baseline of ~172 B/entry
+        // (which duplicated the whole fact in the payload). After the value is
+        // in the key and the payload is just `State<Cause>`, an entry is well
+        // under that.
+        assert!(
+            bytes_per_entry < 172.0,
+            "per-entry size regressed to {bytes_per_entry:.1} bytes/entry (pre-M3 was ~172)"
+        );
 
         Ok(())
     }
