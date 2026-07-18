@@ -106,10 +106,15 @@ pub(crate) fn value_payload(value: &Value, inline_n: usize) -> ValuePayload {
 
 /// The inline-vs-spill threshold for value payloads in keys.
 ///
-// TODO(m3.2c): the manifest is read from `Manifest::default()` here. A later
-// stage persists the manifest into node bytes and threads it down to the key
-// builders; until then this mirrors the default note in the search tree's
-// distribution/transient reshape path.
+// TODO(m3.2c): the manifest is now persisted into every node's bytes, and the
+// search tree's coin reads the value-spill threshold FROM the tree's own
+// manifest at edit time (see `dialog_search_tree`'s node envelope and the
+// transient reshape path). This fact-build spill decision, however, still reads
+// `Manifest::default()`, because the artifact key builders decide inline-vs-spill
+// before the tree edit and do not have the tree/manifest in scope. Wiring this to
+// the tree's manifest needs the manifest threaded to the key builders (the
+// commit/key-build path), which is deferred; a non-default tree manifest and this
+// default would then disagree on the spill boundary.
 pub(crate) fn inline_threshold() -> usize {
     dialog_search_tree::Manifest::default().inline_n as usize
 }

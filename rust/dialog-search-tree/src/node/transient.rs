@@ -244,16 +244,19 @@ where
     pub fn persist(
         self,
         delta: &mut Delta<Blake3Hash, Buffer>,
+        manifest: &Manifest,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         let body = match self {
-            TransientNode::Segment(segment) => PersistentNodeBody::try_from(segment.entries)?,
+            TransientNode::Segment(segment) => {
+                PersistentNodeBody::segment_from_entries(segment.entries, *manifest)?
+            }
             TransientNode::Index(index) => {
                 let links = index
                     .children
                     .into_iter()
-                    .map(|child| child.into_link(delta))
+                    .map(|child| child.into_link(delta, manifest))
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
-                PersistentNodeBody::try_from(links)?
+                PersistentNodeBody::index_from_links(links, *manifest)?
             }
         };
 

@@ -9,7 +9,7 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, DialogSearchTreeError, Entry, Key, Link, Value,
+    Buffer, DialogSearchTreeError, Entry, Key, Link, Manifest, Value,
     node::codec::common_prefix,
     node::columnar::{ColumnData, encode_columns},
 };
@@ -87,6 +87,21 @@ where
             .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
     }
 
+    /// The tree's format header carried by this node.
+    ///
+    /// Every node embeds the same [`Manifest`], so reading it from any node
+    /// (in particular a root) recovers the tree's format constants (branching
+    /// parameter, separator bound, value inline-vs-spill threshold) without a
+    /// side channel: any node hash is a complete, self-describing tree root.
+    pub fn manifest(&self) -> Result<Manifest, DialogSearchTreeError> {
+        let header = match self.body()? {
+            ArchivedNodeBody::Index(index) => &index.header,
+            ArchivedNodeBody::Segment(segment) => &segment.header,
+        };
+        rkyv::deserialize::<Manifest, rkyv::rancor::Error>(header)
+            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
+    }
+
     /// Interprets this node as an index node, returning an error if it's a
     /// segment.
     pub fn as_index(&self) -> Result<&ArchivedIndex, DialogSearchTreeError> {
@@ -120,6 +135,10 @@ where
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedIndex)]
 pub struct PersistentIndex {
+    /// The tree's format header, carried by every node so any node hash is a
+    /// complete, self-describing tree root. Identical across a tree's nodes,
+    /// so structural sharing stores it once in practice.
+    pub header: Manifest,
     /// Longest common prefix of all child separators, stored once.
     pub prefix: Vec<u8>,
     /// Concatenated separator suffixes (each separator minus `prefix`), in
@@ -138,7 +157,7 @@ impl PersistentIndex {
     /// The table layout is a pure function of the links: the prefix is the
     /// longest common prefix of the first and last separator (separators are
     /// sorted), so identical link lists yield identical bytes.
-    pub fn from_links(links: Vec<Link>) -> Self {
+    pub fn from_links(links: Vec<Link>, header: Manifest) -> Self {
         let prefix_length = match (links.first(), links.last()) {
             (Some(first), Some(last)) => common_prefix(&first.separator, &last.separator),
             _ => 0,
@@ -158,6 +177,7 @@ impl PersistentIndex {
         }
 
         Self {
+            header,
             prefix,
             suffixes,
             ends,
@@ -186,6 +206,10 @@ pub const MIXED_LAYOUT: u8 = u8::MAX;
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedSegment)]
 pub struct PersistentSegment<Value> {
+    /// The tree's format header, carried by every node so any node hash is a
+    /// complete, self-describing tree root. Identical across a tree's nodes,
+    /// so structural sharing stores it once in practice.
+    pub header: Manifest,
     /// Number of entries in the segment.
     pub count: u32,
     /// The layout id shared by every key in this leaf (see
@@ -214,6 +238,7 @@ where
     /// change; such leaves are rare (one per layout boundary in the tree).
     pub fn from_entries<Key: self::Key>(
         entries: Vec<Entry<Key, Value>>,
+        header: Manifest,
     ) -> Result<Self, DialogSearchTreeError> {
         let count = entries.len() as u32;
         let first_layout = entries
@@ -250,6 +275,7 @@ where
 
         let values = entries.into_iter().map(|entry| entry.value).collect();
         Ok(Self {
+            header,
             count,
             layout,
             columns,
@@ -285,36 +311,42 @@ where
     }
 }
 
-impl<Value> TryFrom<Vec<Link>> for PersistentNodeBody<Value> {
-    type Error = DialogSearchTreeError;
-
-    fn try_from(links: Vec<Link>) -> Result<Self, Self::Error> {
+impl<Value> PersistentNodeBody<Value>
+where
+    Value: self::Value,
+{
+    /// Builds an index node body from child links, stamping the tree's format
+    /// header.
+    pub fn index_from_links(
+        links: Vec<Link>,
+        header: Manifest,
+    ) -> Result<Self, DialogSearchTreeError> {
         if links.is_empty() {
             return Err(DialogSearchTreeError::Node(
                 "Attempted to create an index from zero links".into(),
             ));
         }
         Ok(PersistentNodeBody::Index(PersistentIndex::from_links(
-            links,
+            links, header,
         )))
     }
-}
 
-impl<Key, Value> TryFrom<Vec<Entry<Key, Value>>> for PersistentNodeBody<Value>
-where
-    Key: self::Key,
-    Value: self::Value,
-{
-    type Error = DialogSearchTreeError;
-
-    fn try_from(entries: Vec<Entry<Key, Value>>) -> Result<Self, Self::Error> {
+    /// Builds a leaf segment node body from entries, stamping the tree's
+    /// format header.
+    pub fn segment_from_entries<Key>(
+        entries: Vec<Entry<Key, Value>>,
+        header: Manifest,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Key: self::Key,
+    {
         if entries.is_empty() {
             return Err(DialogSearchTreeError::Node(
                 "Attempted to create a segment from zero entries".into(),
             ));
         }
         Ok(PersistentNodeBody::Segment(
-            PersistentSegment::from_entries(entries)?,
+            PersistentSegment::from_entries(entries, header)?,
         ))
     }
 }

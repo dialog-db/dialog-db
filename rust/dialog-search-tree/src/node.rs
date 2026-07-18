@@ -28,7 +28,7 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{Buffer, Delta, DialogSearchTreeError, Key, Link, Value};
+use crate::{Buffer, Delta, DialogSearchTreeError, Key, Link, Manifest, Value};
 
 /// A tree node in either of its two representations.
 ///
@@ -111,12 +111,13 @@ where
     pub fn into_link(
         self,
         delta: &mut Delta<Blake3Hash, Buffer>,
+        manifest: &Manifest,
     ) -> Result<Link, DialogSearchTreeError> {
         match self {
             Node::Persistent(link) => Ok(link),
             Node::Transient(transient) => {
                 let separator = transient.separator()?.to_vec();
-                transient.persist(delta)?.to_link(separator)
+                transient.persist(delta, manifest)?.to_link(separator)
             }
         }
     }

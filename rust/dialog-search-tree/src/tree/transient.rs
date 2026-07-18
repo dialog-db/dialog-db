@@ -68,6 +68,16 @@ where
     /// nor touches storage.
     root: TransientRoot<Key, Value>,
     cache: Cache<Blake3Hash, Buffer>,
+    /// The tree's format header, stamped into every node this batch persists
+    /// and read by the boundary coin during reshaping. Every node in a tree
+    /// carries the same manifest.
+    // TODO: when editing an existing NON-default tree, adopt the manifest from
+    // the loaded root node (via `PersistentNode::manifest`) so an edit
+    // preserves the tree's format. That read is async (it loads the root),
+    // which the synchronous `edit()`/`new` entry cannot do; today every tree
+    // uses `Manifest::default()`, so this is correct until non-default trees
+    // exist. See `PersistentTree::edit`.
+    manifest: Manifest,
     distribution: PhantomData<D>,
 }
 
@@ -96,6 +106,7 @@ where
         Self {
             root: TransientRoot::Unloaded(root),
             cache,
+            manifest: Manifest::default(),
             distribution: PhantomData,
         }
     }
@@ -135,6 +146,7 @@ where
     {
         let entry = Entry { key, value };
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let manifest = self.manifest;
 
         let node = match Self::load(self.root, &accessor).await? {
             // The first entry of an empty tree becomes a lone segment wrapped in
@@ -158,7 +170,7 @@ where
                 })
             }
             Some(root) => Edit::Upsert(entry)
-                .apply::<Backend, D>(root, &accessor)
+                .apply::<Backend, D>(root, &accessor, &manifest)
                 .await?
                 .expect("an insert never empties the tree"),
         };
@@ -178,6 +190,7 @@ where
             + ConditionalSync,
     {
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let manifest = self.manifest;
 
         let Some(root) = Self::load(self.root, &accessor).await? else {
             // Deleting from an empty tree is a no-op; leave it empty.
@@ -185,7 +198,7 @@ where
             return Ok(self);
         };
         let edited = Edit::Delete(key.clone())
-            .apply::<Backend, D>(root, &accessor)
+            .apply::<Backend, D>(root, &accessor, &manifest)
             .await?;
         self.root = match edited {
             Some(node) => TransientRoot::Loaded(node),
@@ -338,7 +351,9 @@ where
             // loaded; its hash is already durable and is returned verbatim,
             // touching no storage.
             TransientRoot::Unloaded(hash) => hash,
-            TransientRoot::Loaded(transient) => transient.persist(delta)?.hash().clone(),
+            TransientRoot::Loaded(transient) => {
+                transient.persist(delta, &self.manifest)?.hash().clone()
+            }
         };
 
         Ok(PersistentTree::seal(root, self.cache))
@@ -462,6 +477,7 @@ where
         self,
         mut root: TransientNode<Key, Value>,
         accessor: &Accessor<Backend>,
+        manifest: &Manifest,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -469,10 +485,10 @@ where
         D: Distribution,
     {
         // The manifest supplies the branching parameter and the length-guard
-        // bound to the rank coin. It is currently always the default; threading
-        // a single reference down the reshape chain keeps every rank decision on
-        // the same parameters. See the comment on the reshape calls below.
-        let manifest = Manifest::default();
+        // bound to the rank coin, threaded down the reshape chain so every rank
+        // decision uses the tree's own format parameters. It is the same
+        // manifest stamped into every node this batch persists.
+        let manifest = *manifest;
 
         // Phase one: lift the path to the target leaf, recording the child index
         // chosen at each level. The routing key is borrowed from this edit, so
@@ -1560,6 +1576,40 @@ mod tests {
             expected.root(),
             "batched inserts must match sequential inserts"
         );
+        Ok(())
+    }
+
+    /// Building and then editing a tree stamps the manifest into the root node
+    /// both times: an edit re-persists with the same manifest, so the format
+    /// is stable across edits and readable from any node.
+    #[dialog_common::test]
+    async fn it_stamps_the_manifest_into_the_root_across_edits() -> Result<()> {
+        use crate::{Accessor, Cache, Manifest, PersistentNode};
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let built = sequential(&(0..200).collect::<Vec<u32>>(), &mut storage).await?;
+
+        // A fresh cache reads the persisted nodes straight from storage.
+        let accessor = Accessor::new(Cache::new(), storage.clone());
+        let root: PersistentNode<[u8; 4], Vec<u8>> = accessor.get_node(built.root()).await?;
+        assert_eq!(root.manifest()?, Manifest::default());
+
+        // Edit the built tree and persist; the new root still carries the
+        // manifest.
+        let mut delta = Delta::zero();
+        let edited = built
+            .edit()
+            .insert(9999u32.to_le_bytes(), vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        let edited_root: PersistentNode<[u8; 4], Vec<u8>> =
+            accessor.get_node(edited.root()).await?;
+        assert_eq!(edited_root.manifest()?, Manifest::default());
         Ok(())
     }
 

@@ -224,8 +224,8 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use crate::{
-        Buffer, ColumnData, Entry, Link, PersistentIndex, PersistentNode, PersistentNodeBody,
-        PersistentSegment,
+        Buffer, ColumnData, Entry, Link, Manifest, PersistentIndex, PersistentNode,
+        PersistentNodeBody, PersistentSegment,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -247,7 +247,7 @@ mod tests {
                 value: key.to_vec(),
             })
             .collect();
-        let body = PersistentNodeBody::try_from(entries)?;
+        let body = PersistentNodeBody::segment_from_entries(entries, Manifest::default())?;
         Ok(PersistentNode::new(Buffer::from(body.as_bytes()?)))
     }
 
@@ -259,7 +259,8 @@ mod tests {
                 node: Blake3Hash::hash(separator),
             })
             .collect();
-        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::try_from(links)?;
+        let body: PersistentNodeBody<Vec<u8>> =
+            PersistentNodeBody::index_from_links(links, Manifest::default())?;
         Ok(PersistentNode::new(Buffer::from(body.as_bytes()?)))
     }
 
@@ -324,6 +325,7 @@ mod tests {
     async fn it_rejects_malformed_index_tables() -> Result<()> {
         // Non-monotone ends.
         let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Index(PersistentIndex {
+            header: Manifest::default(),
             prefix: vec![],
             suffixes: b"abcd".to_vec(),
             ends: vec![3, 1],
@@ -335,6 +337,7 @@ mod tests {
 
         // End offset past the suffix table.
         let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Index(PersistentIndex {
+            header: Manifest::default(),
             prefix: vec![],
             suffixes: b"ab".to_vec(),
             ends: vec![9],
@@ -352,6 +355,7 @@ mod tests {
         // One opaque arena column whose stream is a truncated varint, but a
         // value table claiming two entries.
         let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Segment(PersistentSegment {
+            header: Manifest::default(),
             count: 2,
             layout: 0,
             columns: vec![ColumnData::Arena {
@@ -366,6 +370,42 @@ mod tests {
         assert!(segment.keys::<[u8; 8]>().is_err() || segment.first_key::<[u8; 8]>().is_err());
         assert!(segment.last_key::<[u8; 8]>().is_err());
         assert!(segment.find::<[u8; 8]>(b"anything").is_err());
+        Ok(())
+    }
+
+    /// Every persisted node carries the tree's manifest in its bytes, readable
+    /// from the node alone: a segment and an index both round-trip the default
+    /// manifest through serialization.
+    #[dialog_common::test]
+    async fn it_persists_the_manifest_in_every_node() -> Result<()> {
+        let segment = segment_node(&[key("a"), key("b")])?;
+        assert_eq!(segment.manifest()?, Manifest::default());
+
+        let index = index_node(&[b"", b"m"])?;
+        assert_eq!(index.manifest()?, Manifest::default());
+        Ok(())
+    }
+
+    /// A NON-default manifest survives serialization, proving the manifest is
+    /// real per-node data, not a compile-time constant read back.
+    #[dialog_common::test]
+    async fn it_round_trips_a_non_default_manifest() -> Result<()> {
+        let manifest = Manifest {
+            version: 1,
+            fanout_n: 4,
+            max_separator: 128,
+            inline_n: 64,
+        };
+        let entries: Vec<Entry<[u8; 8], Vec<u8>>> = [key("x")]
+            .into_iter()
+            .map(|k| Entry {
+                key: k,
+                value: k.to_vec(),
+            })
+            .collect();
+        let body = PersistentNodeBody::segment_from_entries(entries, manifest)?;
+        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        assert_eq!(node.manifest()?, manifest);
         Ok(())
     }
 }
