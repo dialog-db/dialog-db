@@ -30,7 +30,10 @@ use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::{
     Column, Component, DialogSearchTreeError, Schema,
-    node::codec::{KeyCursor, encode_keys, read_varint, write_varint},
+    node::codec::{
+        KeyCursor, encode_keys, pack_varints, read_varint, unpack_varints, unpack_varints_all,
+        write_varint,
+    },
 };
 
 fn malformed(message: &str) -> DialogSearchTreeError {
@@ -52,19 +55,23 @@ pub enum ColumnData {
         prefix: Vec<u8>,
         /// Front-coded per-entry stream of this component.
         stream: Vec<u8>,
-        /// Restart offsets into `stream`.
-        restarts: Vec<u32>,
+        /// Restart offsets into `stream`, LEB128 varint-packed. Small
+        /// segments keep these to one byte each rather than a fixed 4.
+        restarts: Vec<u8>,
     },
     /// Dictionary: a sorted table of distinct values (each length-prefixed)
-    /// plus one table index per entry.
+    /// plus one varint index per entry into the table.
     Dictionary {
         /// Concatenated distinct values, each preceded by a varint length,
         /// in ascending byte order.
         table: Vec<u8>,
-        /// End offset of each table entry within `table`.
-        table_ends: Vec<u32>,
-        /// Table index per entry.
-        indices: Vec<u32>,
+        /// End offset of each table entry within `table`, varint-packed.
+        table_ends: Vec<u8>,
+        /// Table index per entry, varint-packed. A component with few
+        /// distinct values (a tag, a value type) costs one byte per entry
+        /// rather than a fixed 4, which is the difference between the
+        /// columnar leaf helping and hurting on such components.
+        indices: Vec<u8>,
     },
 }
 
@@ -96,7 +103,7 @@ pub fn encode_columns(
                 ColumnData::Arena {
                     prefix,
                     stream,
-                    restarts,
+                    restarts: pack_varints(&restarts),
                 }
             }
             Column::Dictionary => encode_dictionary(&column_values),
@@ -115,7 +122,7 @@ fn encode_dictionary(values: &[&[u8]]) -> ColumnData {
     distinct.dedup();
 
     let mut table = Vec::new();
-    let mut table_ends = Vec::with_capacity(distinct.len());
+    let mut table_ends: Vec<u32> = Vec::with_capacity(distinct.len());
     for value in &distinct {
         write_varint(&mut table, value.len() as u32);
         table.extend_from_slice(value);
@@ -123,7 +130,7 @@ fn encode_dictionary(values: &[&[u8]]) -> ColumnData {
     }
 
     // Binary-search the sorted distinct table for each entry's index.
-    let indices = values
+    let indices: Vec<u32> = values
         .iter()
         .map(|value| {
             distinct
@@ -134,8 +141,8 @@ fn encode_dictionary(values: &[&[u8]]) -> ColumnData {
 
     ColumnData::Dictionary {
         table,
-        table_ends,
-        indices,
+        table_ends: pack_varints(&table_ends),
+        indices: pack_varints(&indices),
     }
 }
 
@@ -266,6 +273,7 @@ fn decode_column(
             },
         ) => {
             let values = resolve_dictionary(table, table_ends)?;
+            let indices = unpack_varints(indices, entry_count)?;
             indices
                 .iter()
                 .map(|&index| {
@@ -282,14 +290,16 @@ fn decode_column(
     }
 }
 
-/// Resolves a dictionary table into its distinct value slices.
+/// Resolves a dictionary table into its distinct value slices. `table_ends`
+/// is varint-packed.
 fn resolve_dictionary<'a>(
     table: &'a [u8],
-    table_ends: &[u32],
+    table_ends: &[u8],
 ) -> Result<Vec<&'a [u8]>, DialogSearchTreeError> {
-    let mut values = Vec::with_capacity(table_ends.len());
+    let ends = unpack_varints_all(table_ends)?;
+    let mut values = Vec::with_capacity(ends.len());
     let mut start = 0usize;
-    for &end in table_ends {
+    for end in ends {
         let end = end as usize;
         if end < start || end > table.len() {
             return Err(malformed("Dictionary table offset out of range"));

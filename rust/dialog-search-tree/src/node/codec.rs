@@ -69,6 +69,47 @@ pub fn read_varint(bytes: &[u8], at: usize) -> Result<(u32, usize), DialogSearch
     }
 }
 
+/// Packs a list of `u32`s into LEB128 varints, back to back.
+pub fn pack_varints(values: &[u32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len());
+    for &value in values {
+        write_varint(&mut out, value);
+    }
+    out
+}
+
+/// Unpacks `count` LEB128 varints from `bytes`, erroring on truncation or on
+/// leftover bytes (which would mark the column malformed).
+pub fn unpack_varints(bytes: &[u8], count: usize) -> Result<Vec<u32>, DialogSearchTreeError> {
+    let mut out = Vec::with_capacity(count);
+    let mut at = 0usize;
+    for _ in 0..count {
+        let (value, next) = read_varint(bytes, at)?;
+        out.push(value);
+        at = next;
+    }
+    if at != bytes.len() {
+        return Err(DialogSearchTreeError::Encoding(
+            "Trailing bytes after a varint-packed list".into(),
+        ));
+    }
+    Ok(out)
+}
+
+/// Unpacks all LEB128 varints from `bytes` until it is exhausted (count is
+/// implied by the byte length). Used where the number of packed values is
+/// not known independently.
+pub fn unpack_varints_all(bytes: &[u8]) -> Result<Vec<u32>, DialogSearchTreeError> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let (value, next) = read_varint(bytes, at)?;
+        out.push(value);
+        at = next;
+    }
+    Ok(out)
+}
+
 /// Length of the longest common prefix of two byte strings.
 pub fn common_prefix(left: &[u8], right: &[u8]) -> usize {
     left.iter().zip(right).take_while(|(l, r)| l == r).count()
