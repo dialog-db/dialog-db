@@ -163,19 +163,25 @@ flowchart TD
     E -- yes --> S3["scenario 3: fast-forward
     adopt head + tree + watermark by root
     zero reads"]
-    E -- no --> F{"upstream watermark published, and
-    tracked or ours is the smaller divergence?"}
-    F -- yes --> S4["scenario 4: graft merge (tracked)
-    or smaller-side replay (first contact)
+    E -- no --> F{"tracked, and both sides'
+    divergence above the
+    small-delta threshold?"}
+    F -- yes --> S4["scenario 4: graft merge
     reads: intersection + coverage + seams"]
-    F -- no --> S5["scenario 5: screened merge
-    their delta onto our tree
-    reads proportional to their divergence"]
+    F -- no --> G{"our divergence at or
+    below theirs, and theirs
+    published a watermark?"}
+    G -- yes --> S5a["scenario 5, replay direction:
+    OUR delta onto their tree, roles swapped
+    reads track our divergence"]
+    G -- no --> S5b["scenario 5, screened direction:
+    THEIR delta onto our tree
+    reads track their divergence"]
 ```
 
 ### The three screen rules
 
-Both merge directions use the same three rules. They only ever consult the **receiver's** state: its tree, its watermark, and the incoming delta. In scenario 5 the receiver is us; in scenario 4 the receiver is the upstream (its tree is the substrate and its published watermark is the screen).
+Every merge direction uses the same three rules. They only ever consult the **receiver's** state: its tree, its watermark, and the incoming delta. In the screened direction the receiver is us; in the replay and graft directions the receiver is the substrate side, whose tree is adopted and whose published watermark does the screening.
 
 - **R1, incoming facts:** a fact whose producing version the receiver has *seen* is never re-applied. If it is still live in the receiver's tree, applying it changes nothing; if it is absent, the receiver's log covered it, and applying it would resurrect a deletion. Unseen facts are news and pass.
 - **R2, incoming removals:** apply only when the receiver's copy is byte-for-byte what was removed. If the receiver holds something the remover never observed (a later re-assert), the removal misses.
@@ -228,7 +234,7 @@ Crucially, this is what keeps pull cost independent of upstream churn in namespa
 
 ### Scenario 4: both sides moved, the graft merge
 
-The general tracked merge. We carry local novelty (possibly including bulk adopted from other upstreams), the upstream carries its own churn, and both heads publish watermarks. The merge never enumerates either side's bulk; it partitions the key space and works only where the two change sets actually meet.
+The general tracked merge. It fires when a sync base exists and both sides' divergence masses exceed a small threshold (currently 8; below it the per-piece seam work of the stitch costs more than just walking the few entries, and scenario 5 is strictly cheaper). We carry local novelty (possibly including bulk adopted from other upstreams), the upstream carries its own churn, and both heads publish watermarks. The merge never enumerates either side's bulk; it partitions the key space and works only where the two change sets actually meet.
 
 Mechanics, in order:
 
@@ -238,15 +244,44 @@ Mechanics, in order:
 4. **Coverage repair.** Every covering record either side minted since the base (enumerated from the compact coverage region, a scoped diff costing deletions and replacements, never churn) retires the covered claims still live in the stitched tree, matched by version at all three orderings. Repair is version-exact, so it commutes with the contested integrate: a re-assert mints a fresh version no coverage names.
 5. **Head selection** mirrors every other path (adopt theirs, keep ours, or mint a merge whose watermark is the union of the two published ones plus its own version), so mutual pulls quiesce.
 
+A worked example. We track Bob and also pull from Alice. Yesterday we pulled Alice and adopted two hundred commits of her bulk by root (scenario 3). Today we pull Bob, who made a dozen commits since our shared sync base, most touching `post/*` entries we also touched:
+
+```text
+region              ours vs base          Bob vs base        classified as
+log, Alice's span   changed (her bulk)    unchanged          ours: grafted from our tree, unread
+log, Bob's span     unchanged             changed            theirs: grafted from Bob's tree, unread
+data, post/*        changed               changed            contested: merged entry by entry
+data, user/*        unchanged             unchanged          either: grafted, unread
+```
+
+Our side carries the bigger divergence (Alice's bulk counts as ours now), so our tree is the substrate; Bob's delta, scoped to the contested `post/*` spans, is read and screened in. Alice's two hundred commits and Bob's untouched regions cross the merge by subtree hash without a single interior read. The pre-graft design would have replayed Alice's entire bulk into Bob's tree here, which is the composition failure the graft exists to prevent.
+
 Cost: the intersection of the two change sets, plus coverage since base on both sides, plus seams. Pinned by `it_grafts_a_tracked_merge_without_walking_adopted_bulk`: a replica that adopted two hundred commits of foreign bulk and carries its own novelty pulls a three-commit tracked upstream in well under a hundred block reads. One honest limit: span locality follows key clustering. The log region (origin-first), the coverage region, and the attribute-ordered index cluster well; the entity-ordered and value-ordered indexes scatter content-hashed keys, so when *both* sides carry large novelty the contested work in those regions is irreducibly proportional to the smaller side, not to the true overlap.
 
-### Scenario 5: first contact, or a legacy head
+### Scenario 5: replaying the smaller side
 
-A first-contact pull has no sync base, so the graft has no third tree to partition against; it falls back to whole-side transfer in the cheaper direction.
+Fires when the graft does not: the pull is first contact (no sync base to partition against), or one side's delta sits at or below the small-delta threshold. One whole side's delta is transferred, and the only question is direction: which side is smaller. That is answered with zero reads by comparing the two watermarks' **divergence masses**: for each origin, how far one watermark's edition runs beyond the other's, summed. Editions count writes, so the excess estimates delta size.
 
-Two cases run the screened merge in the original direction (their delta since the sync base onto our tree, screened by *our* watermark): an upstream head minted before watermarks were published, and a first-contact pull where we are the *larger* side. On first contact (empty sync base) there is no divergence marker, so "our delta" is our entire tree and "their delta" is their entire tree; the direction is chosen by comparing the two watermarks' divergence masses (per-origin edition excess, summed; editions count writes, so the excess estimates delta size with zero reads). The smaller side gets replayed, and this rule applies to every pull, tracked or first contact: a two-fact replica first-contacting a two-hundred-commit upstream replays its two facts (scenario 4, pinned by `it_first_contacts_a_churning_upstream_from_the_small_side`); a replica that just adopted a bulky third upstream and then pulls a small tracked upstream screens the small delta in rather than replaying the adopted bulk out (this scenario; the `triangle` rows of the measurement harness pin it). Either way reads track the smaller of the two divergences, never the larger side's churn. The one shape neither direction serves cheaply is both sides bulky with a small overlap, which is what the graft merge (below) is for. The screen is the same R1/R2/R3 with us as the receiver; the merged head's watermark is derived incrementally by folding the revision records that ride the delta (zero extra reads). Afterwards the head is chosen: adopt theirs if the result equals their tree (or we had no head), keep ours if the result equals ours, otherwise mint a merge revision.
+```text
+ours               theirs
+alice: 5           alice: 7
+bob:   3           bob:   5
+me:    6           me:    4
 
-This direction is also the safety net the watermark gates fall back to whenever knowledge has diverged in ways the frugal paths cannot serve. The gate refusal itself is load-bearing: `it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams` pins the case where we learned of a deletion through one upstream and then pull another that still holds the fact live; wholesale adoption would resurrect it, so the screened merge runs and R1 rejects the stale copy.
+Neither watermark includes the other.
+Ours beyond theirs:    me 6-4                  = 2
+Theirs beyond ours:    alice 7-5 + bob 5-3     = 4
+
+We are the smaller side: replay our 2 revisions onto their tree.
+```
+
+**When our side is smaller (the replay direction)**: their tree is adopted by root as the substrate, and our delta since the sync base (on first contact, our whole tree) replays onto it through the same three rules with *them* as the receiver. R1 drops any of our adds their watermark has already seen: either the fact is live in their tree, in which case re-applying it changes nothing, or their log covered it, in which case applying it would resurrect their deletion. R2 keeps our removals byte-guarded against their copies. R3 carries our covering records in and retires anything they still hold live that we deleted. Their churn is never enumerated; reads track *our* divergence. Pinned by `it_replays_local_novelty_onto_an_upstream_without_reading_its_churn` (two hundred commits of upstream churn merged in a handful of block reads), the deletion legs by `it_carries_a_covering_record_when_replaying_onto_a_stale_holder` and `it_drops_observed_adds_when_replaying_onto_a_covering_upstream`, and the first-contact leg by `it_first_contacts_a_churning_upstream_from_the_small_side` (a two-fact replica meeting a two-hundred-commit upstream replays its two facts).
+
+**When their side is smaller (the screened direction)**: their delta since the sync base is read, screened by *our* tree and watermark under the same rules, and integrated onto our tree; reads track their divergence, and the merged head's watermark is derived with zero extra reads by folding the revision records that ride the delta. This direction also serves two cases regardless of size: an upstream head minted before watermarks were published (it gives the replay direction nothing to screen by), and the safety-net fallback whenever the frugal gates refuse. The refusal is itself load-bearing: `it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams` pins the triangle where we learned of a deletion through one upstream and then pull another that still holds the fact live; wholesale adoption would resurrect it, so the gate refuses, this screen runs, and R1 rejects the stale copy.
+
+**Head selection**, identical in both directions so that mutual pulls quiesce: if the merged tree equals theirs, their head is adopted outright; if it equals ours, our head stands and only the sync base advances; otherwise a merge revision is minted whose watermark is the union of the two plus its own version. The degenerate arms matter: without them, two replicas pulling each other would mint fresh merge revisions forever instead of settling in two rounds.
+
+Between them, the two directions guarantee that reads track the smaller of the two divergences, never the larger side's churn; the one shape neither serves cheaply, both sides bulky with a small overlap, is exactly what the graft (scenario 4) is for.
 
 ### Scenario 6: two upstreams, both advanced
 
@@ -325,8 +360,9 @@ The zero-read scenarios never bypass deletion safety, because their gates are ex
 
 - Scenario 2 (skip) fires only when we have seen everything they have, so any fact live with them that we deleted is already covered here.
 - Scenario 3 (adopt) fires only when they have seen everything we have, so our deletions are reflected in their fold already.
-- Scenario 4 (replay) screens our adds by their watermark and carries our covering records into their tree, per the two corner cases above.
-- When we know a deletion the upstream does not and hold no shared base to express it through, the gates refuse and scenario 5's screen decides (`it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams`).
+- Scenario 4 (graft) repairs the stitched tree from both sides' coverage regions, so a deletion either side minted since the base retires the other side's grafted copies.
+- Scenario 5's replay direction screens our adds by their watermark and carries our covering records into their tree, per its two deletion legs above.
+- When we know a deletion the upstream does not and hold no shared base to express it through, the gates refuse and scenario 5's screened direction decides (`it_refuses_adoption_when_local_knowledge_exceeds_the_upstreams`).
 
 ## Which of two writes wins?
 
@@ -353,6 +389,15 @@ gitGraph TB:
 ```
 
 `A:2` versus `B:1`: neither cites the other; the tier-2 walk from `A:2` reaches `A:1` at edition 1, which matches `B:1`'s edition but not its version, so it prunes and exhausts: concurrent. After Bob merges and commits `B:3` citing `A:2`, any later claim of Bob's beats Alice's at tier 1.
+
+The same machinery end to end, on values. A note's title is `"Draft"`, asserted by Bob and synced everywhere. Alice replaces it with `"Final"`; concurrently, Bob replaces it with `"Ready"`. Each replace deleted the `"Draft"` its author had observed and listed Bob's original version in its supersedes:
+
+1. **After sync, both values are live.** Alice's claim covers only `"Draft"`; so does Bob's. Neither covers the other, so the screens rightly keep both `"Final"` and `"Ready"` in the index and both claim records in the log. Nothing was silently discarded.
+2. **Detection says concurrent.** The tier-2 walk from either claim reaches only Bob's original `"Draft"` version, never the other claim: neither author had seen the other's write.
+3. **Display is deterministic.** Every replica shows the same title, picked by the higher claim hash; say `"Ready"` wins. `"Final"` is not lost: an application can list both values and surface a conflict badge instead of pretending there is one answer.
+4. **Resolution is just the next write.** The first writer who has seen both and sets the title again closes the conflict everywhere. Setting a third value mints a claim citing both versions, winning at tier 1 against each and retiring both from the index. Re-affirming one of them, say `"Ready"`, cites and retires only the rival `"Final"` (an identical value in place is a no-op, so `"Ready"` itself stands at its existing version); one value remains live either way, and the resolution propagates like any other write.
+
+There is no special conflict pathway in any of this: it is the ordinary replace instruction plus the ordinary screens, and detection runs entirely at read time.
 
 Verdicts are cached forever (new history is only ever added above two fixed claims, never between them). The one revisable outcome, "part of the chain is missing" on a partial replica, surfaces as an error, is never cached, and resolves once the records replicate. Genuinely concurrent values are both valid; queries pick deterministically by claim hash, and applications can ask for all of them.
 
@@ -386,16 +431,22 @@ depth   scenario                        block reads   wall ms
 10000   watermark walk (legacy heads)            22       578
 ```
 
-Reading it: every path is free except a genuine both-sides merge, whose reads sit at the write-amplification floor of the key layout and are independent of either side's bulk. The floor: a one-fact commit touches six keys (three data orderings, its claim record, and the revision record's two orderings), each content-hashed into a different leaf, so merging two such deltas legitimately reads both sides' scattered leaves plus index and write paths, 19 to 32 nodes of a 249-node tree at any depth. Merge strategy is chosen by size: tiny deltas (divergence mass at or below a small threshold) take the direct replay or screen in the cheaper direction, since the graft's per-piece seam lifts exceed walking a handful of entries; anything bulkier takes the graft, whose cost is the intersection plus coverage plus seams. Remaining levers live below the merge: the revision record needs only one ordering (not three) and could cluster like the log region, roughly halving the floor, and roundtrip structure is the latency lever since walks currently fetch sequentially: level-parallel frontier expansion bounds fetch rounds by tree height, and a pull-side analogue of push's novel-node batch (the upstream streams its delta closure in one response) makes any merge one or two roundtrips. The last row is the ancestry walk paid only for pre-watermark heads.
+Reading it: every path is free except a genuine both-sides merge, whose reads sit at the write-amplification floor of the key layout and are independent of either side's bulk. The floor: a one-fact commit touches six keys (three data orderings, its claim record, and the revision record's two orderings), each content-hashed into a different leaf, so merging two such deltas legitimately reads both sides' scattered leaves plus index and write paths, 19 to 32 nodes of a 249-node tree at any depth. Merge strategy is chosen by size, per the scenario cascade: tiny deltas take scenario 5's cheaper direction, bulkier ones take the graft. Remaining levers live below the merge. The revision record could collapse to a single ordering (it is only ever looked up directly, never scanned by value; blocked on the planner learning per-attribute index availability) and cluster its keys like the log region (blocked on variable-length keys: a full origin plus edition does not fit the fixed order-preserving key head), together shaving the floor further. Roundtrip structure is the latency lever, since diff walks currently fetch level by level, sequentially: expanding each frontier level's fetches concurrently bounds rounds by tree height, and a push-time delta manifest (the pusher already knows its novel blocks; publishing that list lets a puller fetch them in one concurrent volley, with no active server, only read-by-hash storage) makes any merge one or two rounds. The last row is the ancestry walk paid only for pre-watermark heads.
 
 To observe these numbers in an embedder: wrap the environment in the `Counting` provider (`dialog-repository`, `helpers` feature) and log `block_reads()` plus a clock around `pull()`.
+
+### The cost of a commit
+
+Commits never touch the network; their cost is CPU plus local writes. Measured in the same conditions (release, in-memory storage, one fact per commit, history thousands of revisions deep): about 3ms per commit. Where it goes: the six keys above are each content-hashed into a different leaf, and the measured tree carries ~240 entries per leaf, so a one-fact commit rebuilds, re-serializes, and re-hashes several large leaves; the revision record's two inserts alone are roughly half the total. Signing costs ~30µs and ancestry reads are served by the verified-record memo, both negligible. Everything above the raw data writes is per *commit*, not per fact, so batching amortizes it: a hundred-fact transaction pays the record, signature, and head-publish cost once.
+
+Levers if interactive single-fact commits need to be cheaper, none started: the leaf-size parameter lives in the tree's format manifest as data, and smaller leaves cut the bytes hashed per commit proportionally, at the price of more, smaller blocks per merge span (a sweep in this harness would find the knee); a durable novelty buffer, where a commit appends its few operations to a small log folded into the root hash and tree shaping is deferred to an amortized flush (structurally a write-ahead log plus checkpoint), would drop the per-commit work to appending a handful of operations plus the signatures; and the record-layout items above shrink the dominant term.
 
 ## Rules that must never break
 
 1. **One origin, one sequence.** The watermark is exact only because each origin writes sequentially (per-session keys, head CAS). Never add a way to mint two revisions with the same version; reset is not rewind.
 2. **A tree's revision records are a subset of its head's ancestry.** True at mint, preserved by every pull outcome. This is what makes the watermark derivable locally and lets root equality stand in for history equality.
 3. **Records before facts, one pass, one persist**, in both merge directions.
-4. **A screen consults only the receiver's state** (its tree and watermark) plus the incoming delta: ours in scenario 5, the upstream's published one in scenario 4. Never mix the two sides' screens.
+4. **A screen consults only the receiver's state** (its tree and watermark) plus the incoming delta: ours in the screened direction, the substrate side's published one in the replay and graft directions. Never mix the two sides' screens.
 5. **Never act on an unverified head.** Signatures are checked before any gate fires; the watermark is only trustworthy because the signature covers it.
 6. **The `dialog.` namespace is reserved**: revision metadata is written only by the internal record path.
 
