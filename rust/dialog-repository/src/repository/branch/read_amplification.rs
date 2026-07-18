@@ -154,6 +154,79 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     Ok(())
 }
 
+/// The cross-upstream (triangle) shape: adopt a bulky upstream by root,
+/// then merge with a second upstream that has never seen that bulk. The
+/// merge's cost should track the intersection of the two change sets,
+/// not the adopted bulk — this is the scenario the graft merge exists
+/// for, and the row that shows whether it is doing its job.
+async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+    let env = Counting::new(operator);
+    let repo = profile
+        .repository(unique_name("bench"))
+        .open()
+        .perform(&env)
+        .await?;
+
+    // A shared seed both upstreams start from.
+    let seed = repo.branch("seed").open().perform(&env).await?;
+    seed.commit(stream::iter(vec![assert_fact(0, "seed")]))
+        .perform(&env)
+        .await?;
+
+    // Bob diverges from the seed with a handful of commits.
+    let bob = repo.branch("bob").open().perform(&env).await?;
+    bob.set_upstream(&seed).perform(&env).await?;
+    bob.pull().perform(&env).await?;
+    for i in 0..5 {
+        bob.commit(stream::iter(vec![assert_fact(depth + 10 + i, "bob")]))
+            .perform(&env)
+            .await?;
+    }
+
+    // Alice diverges from the seed with `depth` commits of bulk.
+    let alice = repo.branch("alice").open().perform(&env).await?;
+    alice.set_upstream(&seed).perform(&env).await?;
+    alice.pull().perform(&env).await?;
+    for i in 0..depth {
+        alice
+            .commit(stream::iter(vec![assert_fact(i + 1, "alice")]))
+            .perform(&env)
+            .await?;
+    }
+
+    // We adopt the seed, sync Bob while he is small (tracking him), then
+    // adopt Alice's bulk, and finally pull Bob again after he moved: the
+    // tracked cross-upstream merge, where our divergence is bulky and
+    // his delta is tiny. The merge direction must follow the smaller
+    // side, not the tracked-ness of the upstream.
+    let us = repo.branch("us").open().perform(&env).await?;
+    us.set_upstream(&seed).perform(&env).await?;
+    us.pull().perform(&env).await?;
+    us.pull().from(&bob).perform(&env).await?;
+    for i in 0..3 {
+        bob.commit(stream::iter(vec![assert_fact(depth + 20 + i, "bob late")]))
+            .perform(&env)
+            .await?;
+    }
+    measured!(
+        samples,
+        env,
+        depth,
+        "triangle: adopt alice",
+        us.pull().from(&alice).perform(&env).await?
+    );
+    measured!(
+        samples,
+        env,
+        depth,
+        "triangle: tracked bob after",
+        us.pull().from(&bob).perform(&env).await?
+    );
+
+    Ok(())
+}
+
 /// Prints a table of block reads, total effect dispatches, and wall
 /// time per scenario and depth. `#[ignore]`d: a measurement, not an
 /// assertion; see the module docs for the invocation.
@@ -163,6 +236,9 @@ async fn read_amplification_by_depth() -> Result<()> {
     let mut samples = Vec::new();
     for depth in [100, 1_000, 10_000] {
         measure_depth(depth, &mut samples).await?;
+    }
+    for depth in [1_000, 10_000] {
+        measure_triangle(depth, &mut samples).await?;
     }
 
     println!("| depth  | scenario                   | block reads | effects | wall ms  |");

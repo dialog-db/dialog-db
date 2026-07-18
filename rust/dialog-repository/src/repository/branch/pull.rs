@@ -306,18 +306,21 @@ impl<'a> Pull<'a> {
             // needs no screen at all: nothing they minted unseen by us
             // can have been covered by us.
             //
-            // On a first-contact pull (empty sync base) the "delta" is
-            // our entire tree, so direction is chosen by comparing the
-            // two watermarks' divergence masses (editions count writes,
-            // so the excess is a zero-read proxy for delta size): replay
-            // ours onto theirs when ours is the smaller side, screen
-            // theirs onto ours otherwise. Reads then track the smaller
-            // divergence, never the larger side's churn — a partial
-            // replica first-contacting a churning upstream replays only
-            // what it holds.
+            // Direction is chosen by comparing the two watermarks'
+            // divergence masses (summed per-origin edition excess over
+            // the other side; editions count writes, so the excess is a
+            // zero-read proxy for delta size): replay our delta onto
+            // their tree when ours is the smaller side, screen their
+            // delta onto our tree otherwise. Reads then track the
+            // smaller divergence, never the larger side's churn — in
+            // both directions of asymmetry. A replica that adopted a
+            // bulky third upstream screens a small tracked upstream's
+            // delta in rather than replaying the adopted bulk out; a
+            // small replica facing a churning upstream replays only
+            // what it holds. This applies on tracked and first-contact
+            // pulls alike.
             else if let Some(local) = &local_revision
-                && (base != TreeReference::default()
-                    || local_context.divergence(theirs) <= theirs.divergence(&local_context))
+                && local_context.divergence(theirs) <= theirs.divergence(&local_context)
             {
                 let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
                 let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
@@ -1342,10 +1345,16 @@ mod history_tests {
             .filter(|(_, record)| record.claim().the.to_string() == "post/title")
             .collect();
         assert_eq!(title_claims.len(), 2);
-        let (hej_version, hej) = &title_claims[0];
-        let (hi_version, hi) = &title_claims[1];
-        assert_eq!(*hej_version, first.version());
-        assert_eq!(*hi_version, replacement.version());
+        // The region clusters by origin, not causal order; locate the two
+        // claims by version.
+        let (hej_version, hej) = title_claims
+            .iter()
+            .find(|(version, _)| *version == first.version())
+            .expect("the original claim is in the merged history");
+        let (hi_version, hi) = title_claims
+            .iter()
+            .find(|(version, _)| *version == replacement.version())
+            .expect("the replacement claim is in the merged history");
         assert_eq!(
             causality(
                 (hi.claim(), hi_version),
@@ -2751,6 +2760,108 @@ mod history_tests {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(theirs.len(), 200, "the upstream churn is all adopted");
+
+        Ok(())
+    }
+
+    /// Randomized three-replica convergence: three branches make
+    /// deterministic pseudo-random writes (assert, replace, retract over
+    /// small entity and value pools) interleaved with pseudo-random
+    /// pairwise pulls, across every merge path the gates can pick
+    /// (adopt, skip, replay, screened). Afterwards, bounded rounds of
+    /// all-pairs pulls must land all three replicas on byte-identical
+    /// trees. This is the convergence invariant stated in
+    /// `notes/version-control.md`: same log, same cache, any exchange
+    /// order.
+    #[dialog_common::test]
+    async fn it_converges_under_randomized_triangle_sync() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let a = repo.branch("a").open().perform(&operator).await?;
+        let b = repo.branch("b").open().perform(&operator).await?;
+        let c = repo.branch("c").open().perform(&operator).await?;
+        let branches = [&a, &b, &c];
+
+        // A small deterministic generator (an LCG): reproducible runs,
+        // no wall-clock or OS randomness.
+        let mut state: u64 = 0x5DEECE66D;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % bound
+        };
+
+        let entity = |i: u64| format!("thing:{i}");
+        let value = |i: u64| Value::String(format!("value {i}"));
+
+        for _round in 0..12 {
+            // Every branch performs one pseudo-random write.
+            for branch in branches {
+                let of: dialog_artifacts::Entity = entity(next(4)).parse()?;
+                let the: dialog_artifacts::Attribute = "bench/field".parse()?;
+                let is = value(next(3));
+                let artifact = Artifact {
+                    the,
+                    of,
+                    is,
+                    cause: None,
+                };
+                let instruction = match next(3) {
+                    0 => Instruction::Assert(artifact),
+                    1 => Instruction::Replace(artifact),
+                    _ => Instruction::Retract(artifact),
+                };
+                // A retract of an absent fact is a no-op commit; both
+                // outcomes are fine for the property.
+                let _ = branch
+                    .commit(stream::iter(vec![instruction]))
+                    .perform(&operator)
+                    .await;
+            }
+            // One pseudo-random pairwise pull.
+            let from = next(3) as usize;
+            let into = (from + 1 + next(2) as usize) % 3;
+            branches[into]
+                .pull()
+                .from(branches[from])
+                .perform(&operator)
+                .await?;
+        }
+
+        // Bounded all-pairs rounds must reach a fixed point where all
+        // three roots agree.
+        let mut converged = false;
+        for _ in 0..6 {
+            for into in 0..3 {
+                for from in 0..3 {
+                    if into != from {
+                        branches[into]
+                            .pull()
+                            .from(branches[from])
+                            .perform(&operator)
+                            .await?;
+                    }
+                }
+            }
+            let roots: Vec<_> = branches
+                .iter()
+                .map(|branch| branch.revision().map(|r| r.tree))
+                .collect();
+            if roots[0] == roots[1] && roots[1] == roots[2] {
+                converged = true;
+                break;
+            }
+        }
+        let roots: Vec<_> = branches
+            .iter()
+            .map(|branch| branch.revision().map(|r| r.tree))
+            .collect();
+        assert!(
+            converged,
+            "three replicas must converge within bounded all-pairs rounds: {roots:?}"
+        );
 
         Ok(())
     }

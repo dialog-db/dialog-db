@@ -4,7 +4,7 @@
 //! entries, under their own leading tag. The logical key is
 //!
 //! ```text
-//! /tag/edition/origin/entity/attribute/value_type/value_reference
+//! /tag/origin/edition/entity/attribute/value_type/value_reference
 //! ```
 //!
 //! — 202 bytes, which exceeds the tree's fixed key width. It is fit by the
@@ -18,17 +18,22 @@
 //! ```text
 //! offset  width  field
 //! 0       1      HISTORY_KEY_TAG
-//! 1       8      edition (big-endian, so order matches causal depth)
-//! 9       32     origin
+//! 1       32     origin
+//! 33      8      edition (big-endian)
 //! 41      32     entity head (the raw span of the entity key form)
 //! 73      57     attribute head (attributes ≤ 57 bytes appear verbatim)
 //! 130     32     Blake3 of the full logical key
 //! ```
 //!
-//! Edition leads (after the tag) so that lexicographic order within the
-//! history region matches causal depth order, and the raw entity/attribute
-//! heads order the records of one revision by entity, then attribute. The
-//! only lookup over this region is [`history_claim_range`], which knows
+//! The origin leads (after the tag), so one writer's records form one
+//! contiguous span of the region, ordered by edition within it. That
+//! per-writer contiguity is what lets a graft merge adopt another
+//! replica's log wholesale by subtree hash: two sides' novel records
+//! cluster apart instead of interleaving by edition, so only origins
+//! both sides wrote need merging. Causally ordered listings come from
+//! walking the revision DAG, not from scanning this region. The raw
+//! entity/attribute heads order one revision's records by entity, then
+//! attribute. The only lookup over this region is [`history_claim_range`], which knows
 //! every component; revision metadata lives as an ordinary fact in the
 //! data indexes (see [`RevisionRecord`](crate::history::RevisionRecord)),
 //! not here.
@@ -63,9 +68,9 @@ pub const HISTORY_KEY_TAG: u8 = 3;
 /// proportional to the coverage since base, not the write churn.
 pub const COVERAGE_KEY_TAG: u8 = 5;
 
-const EDITION_OFFSET: usize = TAG_LENGTH;
-const ORIGIN_OFFSET: usize = EDITION_OFFSET + EDITION_LENGTH;
-const ENTITY_OFFSET: usize = ORIGIN_OFFSET + ORIGIN_LENGTH;
+const ORIGIN_OFFSET: usize = TAG_LENGTH;
+const EDITION_OFFSET: usize = ORIGIN_OFFSET + ORIGIN_LENGTH;
+const ENTITY_OFFSET: usize = EDITION_OFFSET + EDITION_LENGTH;
 const ATTRIBUTE_OFFSET: usize = ENTITY_OFFSET + ENTITY_RAW_HEAD;
 const HASH_OFFSET: usize = ATTRIBUTE_OFFSET + HISTORY_ATTRIBUTE_HEAD;
 
@@ -151,7 +156,8 @@ fn tagged_key(
 
     let mut bytes = MINIMUM_KEY;
     bytes[0] = tag;
-    bytes[EDITION_OFFSET..ENTITY_OFFSET].copy_from_slice(&version_bytes);
+    bytes[ORIGIN_OFFSET..EDITION_OFFSET].copy_from_slice(version.origin.key_bytes());
+    bytes[EDITION_OFFSET..ENTITY_OFFSET].copy_from_slice(&version.edition.key_bytes());
     bytes[ENTITY_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&entity[..ENTITY_RAW_HEAD]);
     bytes[ATTRIBUTE_OFFSET..HASH_OFFSET].copy_from_slice(&attribute[..HISTORY_ATTRIBUTE_HEAD]);
     bytes[HASH_OFFSET..KEY_LENGTH].copy_from_slice(&make_reference(preimage));
@@ -170,7 +176,8 @@ pub fn history_claim_range(version: &Version, of: &Entity, the: &Attribute) -> (
     let mut max = MAXIMUM_KEY;
     for bytes in [&mut min, &mut max] {
         bytes[0] = HISTORY_KEY_TAG;
-        bytes[EDITION_OFFSET..ENTITY_OFFSET].copy_from_slice(&version.key_bytes());
+        bytes[ORIGIN_OFFSET..EDITION_OFFSET].copy_from_slice(version.origin.key_bytes());
+        bytes[EDITION_OFFSET..ENTITY_OFFSET].copy_from_slice(&version.edition.key_bytes());
         bytes[ENTITY_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&of.key_bytes()[..ENTITY_RAW_HEAD]);
         bytes[ATTRIBUTE_OFFSET..HASH_OFFSET]
             .copy_from_slice(&the.key_bytes()[..HISTORY_ATTRIBUTE_HEAD]);
@@ -189,7 +196,15 @@ pub fn history_region_range() -> (Key, Key) {
 
 /// The [`Version`] component of a history region key
 pub fn history_key_version(key: &KeyBytes) -> Result<Version, crate::DialogArtifactsError> {
-    Version::from_key_bytes(&key[EDITION_OFFSET..EDITION_OFFSET + VERSION_LENGTH])
+    use crate::history::{Edition, Origin};
+    let mut origin = [0u8; ORIGIN_LENGTH];
+    origin.copy_from_slice(&key[ORIGIN_OFFSET..EDITION_OFFSET]);
+    let mut edition = [0u8; EDITION_LENGTH];
+    edition.copy_from_slice(&key[EDITION_OFFSET..ENTITY_OFFSET]);
+    Ok(Version::new(
+        Origin::from(origin),
+        Edition::from_key_bytes(edition),
+    ))
 }
 
 #[cfg(test)]
@@ -211,21 +226,41 @@ mod tests {
     }
 
     #[test]
-    fn it_recovers_the_version_and_orders_by_edition() -> anyhow::Result<()> {
+    fn it_recovers_the_version_and_clusters_by_origin() -> anyhow::Result<()> {
         let of = Entity::from_str("test:entity")?;
         let the = Attribute::from_str("test/attribute")?;
         let value = crate::Value::String("value".into());
 
+        // One writer's records order by edition within its span.
         let early = version(1, 7);
-        let late = version(2, 5);
+        let late = version(2, 7);
         let early_key = history_key(&early, &of, &the, value.data_type(), &value.to_reference());
         let late_key = history_key(&late, &of, &the, value.data_type(), &value.to_reference());
-
         assert_eq!(
             history_key_version(&KeyBytes::from(early_key.clone()))?,
             early
         );
-        assert!(early_key < late_key, "keys order by edition first");
+        assert!(
+            early_key < late_key,
+            "one origin's keys order by edition within its span"
+        );
+
+        // Different writers cluster apart regardless of edition: a lower
+        // origin's later edition still sorts before a higher origin's
+        // earlier one. This per-writer contiguity is what a graft merge
+        // adopts logs by.
+        let low_origin_late = version(9, 5);
+        let clustered = history_key(
+            &low_origin_late,
+            &of,
+            &the,
+            value.data_type(),
+            &value.to_reference(),
+        );
+        assert!(
+            clustered < early_key,
+            "origins cluster before editions order"
+        );
         Ok(())
     }
 
