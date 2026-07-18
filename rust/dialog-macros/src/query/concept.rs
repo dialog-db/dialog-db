@@ -416,6 +416,51 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     #(#realize_fields,)*
                 })
             }
+
+            // Restriction to one subject entity: the goal-directed
+            // unit incremental subscription maintenance re-derives
+            // with. Pinning is refused when the subject variable
+            // joins a field term through a shared name (the pin
+            // would sever the join).
+            fn restrict(&self, entity: &dialog_query::Entity) -> dialog_query::query::Restriction<Self> {
+                use dialog_query::query::Restriction;
+                match &self.this {
+                    dialog_query::Term::Constant(dialog_query::Value::Entity(this)) => {
+                        return if this == entity {
+                            Restriction::Scoped(self.clone())
+                        } else {
+                            Restriction::Unaffected
+                        };
+                    }
+                    dialog_query::Term::Constant(_) => return Restriction::Unaffected,
+                    dialog_query::Term::Variable { name: Some(name), .. } => {
+                        let shared = [ #( self.#field_names.name() ),* ]
+                            .into_iter()
+                            .flatten()
+                            .any(|other| other == name.as_str());
+                        if shared {
+                            return Restriction::Unsupported;
+                        }
+                    }
+                    dialog_query::Term::Variable { name: None, .. } => {}
+                }
+                let mut scoped = self.clone();
+                scoped.this = dialog_query::Term::Constant(
+                    dialog_query::Value::Entity(entity.clone()),
+                );
+                Restriction::Scoped(scoped)
+            }
+
+            // The concept this query applies; lets incremental
+            // maintainers resolve the rule set for the soundness
+            // gate.
+            fn concept(&self) -> std::option::Option<&dialog_query::ConceptDescriptor> {
+                std::option::Option::Some(
+                    <#struct_name as dialog_query::Descriptor<
+                        dialog_query::ConceptDescriptor,
+                    >>::descriptor(),
+                )
+            }
         }
 
         // Add inherent perform method so users don't need to import Application trait

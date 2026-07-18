@@ -10,13 +10,15 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
-use dialog_query::DeductiveRule;
 use dialog_query::concept::descriptor::ConceptDescriptor;
-use dialog_query::concept::query::ConceptRules;
+use dialog_query::concept::query::{ConceptRules, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
+use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
+use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
 use futures_util::TryStreamExt as _;
+use std::sync::Arc;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
 use crate::rules::{
@@ -477,6 +479,15 @@ where
     /// each branch is a durable layer (committed `db.rule/*`, head-cached),
     /// the overlay is a transient layer (uncommitted `db.rule/*`, fresh).
     /// The implicit per-descriptor rule is assembled once on top.
+    ///
+    /// The resolved rule set is checked against the program analysis
+    /// of its dependency closure: an ill-stratified closure fails
+    /// here (exactly like [`RuleRegistry::acquire`]), and a concept
+    /// on a (stratified) cycle gets the analysis attached so
+    /// evaluation runs the semi-naive fixpoint instead of recursing
+    /// top-down unboundedly.
+    ///
+    /// [`RuleRegistry::acquire`]: dialog_query::session::RuleRegistry::acquire
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let concept = input.this();
         let mut rules: Vec<DeductiveRule> = Vec::new();
@@ -497,7 +508,81 @@ where
             .map(|branch| branch.plan_cache())
             .unwrap_or_default();
 
-        Ok(assemble(&input, rules, plan_cache))
+        let bundle = assemble(&input, rules, plan_cache);
+        let analysis = self.program_analysis(&input, &bundle).await?;
+        analysis.check(&input)?;
+        Ok(if analysis.is_recursive(&concept) {
+            bundle.with_recursion(analysis)
+        } else {
+            bundle
+        })
+    }
+}
+
+impl<'a, Env> QueryEnv<'a, Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    /// The program analysis over the rule set reachable from `root`:
+    /// every concept referenced (transitively) by a resolved rule's
+    /// concept premises contributes its own resolved rules, so
+    /// cycles that span concepts — including ones closed entirely by
+    /// durable rules — are visible.
+    ///
+    /// Per-concept rule discovery is head-cached
+    /// ([`durable_rules`](Self::durable_rules)), so the walk is
+    /// cheap after the first query at a given head.
+    async fn program_analysis(
+        &self,
+        root: &ConceptDescriptor,
+        root_bundle: &ConceptRules,
+    ) -> Result<Arc<ProgramAnalysis>, EvaluationError> {
+        fn referenced(bundle: &ConceptRules, queue: &mut Vec<ConceptDescriptor>) {
+            for rule in bundle.rules() {
+                for premise in rule.analysis().premises() {
+                    match premise {
+                        Premise::Assert(Proposition::Concept(query))
+                        | Premise::Unless(Negation(Proposition::Concept(query))) => {
+                            queue.push(query.predicate.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let mut entries: Vec<(Entity, ConceptRules)> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut queue = Vec::new();
+
+        seen.insert(root.this());
+        referenced(root_bundle, &mut queue);
+        entries.push((root.this(), root_bundle.clone()));
+
+        while let Some(descriptor) = queue.pop() {
+            let entity = descriptor.this();
+            if !seen.insert(entity.clone()) {
+                continue;
+            }
+            let mut rules: Vec<DeductiveRule> = Vec::new();
+            for branch in &self.branches {
+                rules.extend(self.durable_rules(branch, &entity).await?);
+            }
+            rules.extend(overlay_rules(&self.changes, &entity));
+            let bundle = assemble(&descriptor, rules, PlanCache::default());
+            referenced(&bundle, &mut queue);
+            entries.push((entity, bundle));
+        }
+
+        Ok(Arc::new(ProgramAnalysis::analyze(
+            entries.iter().map(|(entity, bundle)| (entity, bundle)),
+        )))
     }
 }
 
