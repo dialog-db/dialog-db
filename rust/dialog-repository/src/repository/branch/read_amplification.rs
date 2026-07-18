@@ -227,6 +227,64 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
     Ok(())
 }
 
+/// Prints the actual shape of the harness tree at one depth: how many
+/// entries and how many tree nodes it holds. Grounds the read counts:
+/// a merge's reads should be compared against these totals.
+async fn measure_shape(depth: usize) -> Result<()> {
+    use crate::RepositoryArchiveExt as _;
+    use dialog_search_tree::TreeDifference;
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let env = Counting::new(operator);
+    let repo = profile
+        .repository(unique_name("bench"))
+        .open()
+        .perform(&env)
+        .await?;
+    let main = repo.branch("main").open().perform(&env).await?;
+    for i in 0..depth {
+        main.commit(stream::iter(vec![assert_fact(i, "seed")]))
+            .perform(&env)
+            .await?;
+    }
+
+    let root = main.revision().expect("committed").tree;
+    let store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
+    let tree = crate::Index::from_hash(dialog_common::Blake3Hash::from(*root.hash()));
+    let tree_store = dialog_search_tree::ContentAddressedStorage::new(
+        dialog_artifacts::tree::TreeStorageBridge(store),
+    );
+
+    let entries = {
+        use futures_util::StreamExt as _;
+        let stream = tree.stream(&tree_store);
+        futures_util::pin_mut!(stream);
+        let mut count = 0usize;
+        while let Some(entry) = stream.next().await {
+            entry?;
+            count += 1;
+        }
+        count
+    };
+
+    let empty = crate::Index::from_hash(dialog_common::Blake3Hash::from(crate::EMPTY_TREE_HASH));
+    let difference = TreeDifference::compute(&empty, &tree, &tree_store, &tree_store).await?;
+    let nodes = {
+        use futures_util::StreamExt as _;
+        let stream = difference.novel_nodes();
+        futures_util::pin_mut!(stream);
+        let mut count = 0usize;
+        while let Some(node) = stream.next().await {
+            node?;
+            count += 1;
+        }
+        count
+    };
+
+    println!("| shape at depth {depth}: {entries} entries in {nodes} tree nodes |");
+    Ok(())
+}
+
 /// Prints a table of block reads, total effect dispatches, and wall
 /// time per scenario and depth. `#[ignore]`d: a measurement, not an
 /// assertion; see the module docs for the invocation.
@@ -240,6 +298,7 @@ async fn read_amplification_by_depth() -> Result<()> {
     for depth in [1_000, 10_000] {
         measure_triangle(depth, &mut samples).await?;
     }
+    measure_shape(10_000).await?;
 
     println!("| depth  | scenario                   | block reads | effects | wall ms  |");
     println!("|--------|----------------------------|-------------|---------|----------|");

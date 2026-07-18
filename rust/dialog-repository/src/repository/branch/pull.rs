@@ -21,6 +21,12 @@ use crate::{
     UpstreamBranch,
 };
 
+/// Below this divergence mass (summed edition excess, roughly commits),
+/// a merge routes to the direct replay or screen instead of the graft:
+/// tiny deltas fragment into per-key spans, and the stitch's seam work
+/// then exceeds simply walking the few entries.
+const SMALL_DIVERGENCE: u64 = 8;
+
 /// Command struct for pulling from upstream (auto-dispatches local/remote).
 pub struct Pull<'a> {
     branch: &'a Branch,
@@ -289,15 +295,28 @@ impl<'a> Pull<'a> {
                     base,
                 })));
             }
-            // The graft merge, for tracked pulls: partition the key
-            // space by each side's node-level divergence from the sync
-            // base, stitch the merged tree from whole subtrees of the
+            // The graft merge, for tracked pulls where at least one
+            // side's delta is substantial: partition the key space by
+            // each side's node-level divergence from the sync base,
+            // stitch the merged tree from whole subtrees of the
             // unilaterally-changed spans (adopted by hash, unread), and
             // do real merge work only where both sides changed. Cost is
             // the intersection of the two change sets plus coverage and
             // seams, independent of either side's bulk.
+            //
+            // Tiny deltas skip the graft: a couple of commits fragment
+            // into as many divergence spans as they have keys, and the
+            // stitch pays edge-spine lifts per piece that a direct
+            // replay of so few entries never touches. Below the
+            // threshold the direct paths (replay ours or screen theirs,
+            // whichever side is smaller) are strictly cheaper; the
+            // graft's economics need bulk on both sides.
             else if let Some(local) = &local_revision
                 && base != TreeReference::default()
+                && local_context
+                    .divergence(theirs)
+                    .min(theirs.divergence(&local_context))
+                    > SMALL_DIVERGENCE
             {
                 let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
                 let base_tree =

@@ -373,19 +373,20 @@ Pinned by the read-amplification harness (`dialog-repository`, module `read_ampl
 
 ```text
 depth   scenario                        block reads   wall ms
+10000   tree shape: 70000 entries in 279 nodes
   100   no-op sync tick                           0         0
   100   fast-forward (1 commit)                   0         0
-  100   merge, both sides moved                  35         3
- 1000   merge, both sides moved                  55        15
+  100   merge, both sides moved                  19         2
+ 1000   merge, both sides moved                  29        14
 10000   initial pull (adopt all)                  0         0
 10000   no-op sync tick                           0         0
 10000   fast-forward (1 commit)                   0         0
-10000   merge, both sides moved                  79        50
-10000   tracked pull after adopting bulk         39        12
+10000   merge, both sides moved                  37        17
+10000   tracked pull after adopting bulk         25        17
 10000   watermark walk (legacy heads)            22       578
 ```
 
-Reading it: every path is free except a genuine both-sides merge, and a merge's node count has a floor set by write amplification, not by tree size or merge overhead: a single one-fact commit touches about seven keys (three data orderings, its claim record, and the revision record's three orderings), each content-hashed into a different leaf, so merging two one-commit deltas legitimately reads both sides' scattered leaves plus index paths and seams, roughly 30 to 85 nodes at any depth. The evidence that this is scatter and not waste: at depth one hundred the merge reads most of the (30-node) tree, at ten thousand it reads 85 of roughly 300 nodes, and sharing one node cache across every phase changes nothing. The count lever is therefore the key layout (how many orderings a record needs), not the merge; the latency lever is roundtrip structure, since the walks currently fetch sequentially: expanding diff frontiers level-parallel bounds rounds by tree height, and a pull-side analogue of push's novel-node batch (ask the upstream for its delta closure in one request) makes any merge one or two roundtrips. The tracked-pull-after-bulk row merges a three-commit upstream delta in 38 reads with two hundred adopted commits on our side (`it_grafts_a_tracked_merge_without_walking_adopted_bulk` pins the bound), and the last row is the ancestry walk paid only for pre-watermark heads.
+Reading it: every path is free except a genuine both-sides merge, whose reads sit at the write-amplification floor of the key layout and are independent of either side's bulk. The floor: a one-fact commit touches about seven keys (three data orderings, its claim record, and the revision record's three orderings), each content-hashed into a different leaf, so merging two such deltas legitimately reads both sides' scattered leaves plus index and write paths, 19 to 37 nodes of a 279-node tree at any depth. Merge strategy is chosen by size: tiny deltas (divergence mass at or below a small threshold) take the direct replay or screen in the cheaper direction, since the graft's per-piece seam lifts exceed walking a handful of entries; anything bulkier takes the graft, whose cost is the intersection plus coverage plus seams. Remaining levers live below the merge: the revision record needs only one ordering (not three) and could cluster like the log region, roughly halving the floor, and roundtrip structure is the latency lever since walks currently fetch sequentially: level-parallel frontier expansion bounds fetch rounds by tree height, and a pull-side analogue of push's novel-node batch (the upstream streams its delta closure in one response) makes any merge one or two roundtrips. The last row is the ancestry walk paid only for pre-watermark heads.
 
 To observe these numbers in an embedder: wrap the environment in the `Counting` provider (`dialog-repository`, `helpers` feature) and log `block_reads()` plus a clock around `pull()`.
 
