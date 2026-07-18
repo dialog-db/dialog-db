@@ -212,9 +212,14 @@ impl<'a> Pull<'a> {
         // merging in, and the local tree the merge integrates onto.
         // Hydration is lazy; blocks load on demand as the differential
         // walks them.
-        let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
-        let upstream_tree = Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
-        let mut merged = Index::from_hash(NodeHash::from(local_tree_hash));
+        let base_tree =
+            Index::from_hash_with_cache(NodeHash::from(*base.hash()), branch.node_cache());
+        let upstream_tree = Index::from_hash_with_cache(
+            NodeHash::from(*upstream_revision.tree.hash()),
+            branch.node_cache(),
+        );
+        let mut merged =
+            Index::from_hash_with_cache(NodeHash::from(local_tree_hash), branch.node_cache());
 
         // The receiver's causal context: the per-origin watermark of the
         // local head's ancestry. This is the merge's memory of every
@@ -295,10 +300,16 @@ impl<'a> Pull<'a> {
                 && base != TreeReference::default()
             {
                 let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-                let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
-                let local_tree = Index::from_hash(NodeHash::from(local_tree_hash));
-                let upstream_tree =
-                    Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
+                let base_tree =
+                    Index::from_hash_with_cache(NodeHash::from(*base.hash()), branch.node_cache());
+                let local_tree = Index::from_hash_with_cache(
+                    NodeHash::from(local_tree_hash),
+                    branch.node_cache(),
+                );
+                let upstream_tree = Index::from_hash_with_cache(
+                    NodeHash::from(*upstream_revision.tree.hash()),
+                    branch.node_cache(),
+                );
 
                 // Node-level divergence spans of each side against the
                 // base: conservative supersets read from the pruned diff
@@ -551,11 +562,20 @@ impl<'a> Pull<'a> {
                 && local_context.divergence(theirs) <= theirs.divergence(&local_context)
             {
                 let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-                let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
-                let local_tree = Index::from_hash(NodeHash::from(local_tree_hash));
-                let mut merged = Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
-                let upstream_snapshot =
-                    Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
+                let base_tree =
+                    Index::from_hash_with_cache(NodeHash::from(*base.hash()), branch.node_cache());
+                let local_tree = Index::from_hash_with_cache(
+                    NodeHash::from(local_tree_hash),
+                    branch.node_cache(),
+                );
+                let mut merged = Index::from_hash_with_cache(
+                    NodeHash::from(*upstream_revision.tree.hash()),
+                    branch.node_cache(),
+                );
+                let upstream_snapshot = Index::from_hash_with_cache(
+                    NodeHash::from(*upstream_revision.tree.hash()),
+                    branch.node_cache(),
+                );
 
                 let history_scope = merge::history_scope();
                 let data_scope = merge::data_scope();
@@ -669,7 +689,8 @@ impl<'a> Pull<'a> {
         // base and upstream actually differ within its region.
         let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
         let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-        let local_snapshot = Index::from_hash(NodeHash::from(local_tree_hash));
+        let local_snapshot =
+            Index::from_hash_with_cache(NodeHash::from(local_tree_hash), branch.node_cache());
 
         // History changes are screened + emitted first, data changes
         // second; chaining them into one stream integrated in a single
