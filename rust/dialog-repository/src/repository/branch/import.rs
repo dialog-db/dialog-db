@@ -2,7 +2,7 @@ use dialog_artifacts::{Importer, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Import as ArchiveImport, Put};
-use dialog_effects::authority::Identify;
+use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{Publish, Resolve};
 use futures_util::StreamExt;
 
@@ -30,6 +30,7 @@ impl<I: Importer + Unpin + ConditionalSend> Import<'_, I> {
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
+            + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync

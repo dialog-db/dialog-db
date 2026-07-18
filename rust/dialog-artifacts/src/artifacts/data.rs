@@ -8,7 +8,7 @@ use dialog_storage::Blake3Hash;
 use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 
-use crate::{Artifact, Cause, make_reference};
+use crate::{Artifact, Cause, history::Version, make_reference};
 
 #[cfg(doc)]
 use crate::{Artifacts, Attribute, Entity};
@@ -28,6 +28,22 @@ pub struct Datum {
     pub value: Vec<u8>,
     /// Get the [`Cause`] of this [`ValueDatum`], if any
     pub cause: Option<Cause>,
+    /// The [`Version`] of the revision that produced this [`Datum`], when it
+    /// was committed through a version-tagged write (see
+    /// [`ArtifactTreeExt::apply_versioned`](crate::tree::ArtifactTreeExt::apply_versioned)).
+    /// Data committed directly through [`Artifacts`] carries no version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<Version>,
+    /// For history records (entries under
+    /// [`HISTORY_KEY_TAG`](crate::HISTORY_KEY_TAG)): the versions of the
+    /// prior claims on the same `(entity, attribute)` that this record
+    /// supersedes. Always empty on index data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supersedes: Vec<Version>,
+    /// For history records: whether this record withdraws (retracts) its
+    /// value rather than asserting it. Always `false` on index data.
+    #[serde(default)]
+    pub retraction: bool,
 }
 
 impl Datum {
@@ -51,6 +67,9 @@ impl From<Artifact> for Datum {
             value_type: artifact.is.data_type().into(),
             value: artifact.is.to_bytes(),
             cause: artifact.cause,
+            version: None,
+            supersedes: Vec::new(),
+            retraction: false,
         }
     }
 }

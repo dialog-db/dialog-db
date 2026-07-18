@@ -136,22 +136,26 @@ pub mod branch {
         pub String,
     );
 
-    /// `dialog.branch/period` — logical-clock period of the current
-    /// revision.
+    /// `dialog.branch/edition` — causal depth of the current revision.
+    ///
+    /// A Lamport timestamp derived from the revision DAG:
+    /// `max(cause editions) + 1`, or zero for the first revision.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
-    pub struct Period(
-        /// Period component of the revision's logical clock.
+    pub struct Edition(
+        /// Edition of the revision's logical clock.
         pub u128,
     );
 
-    /// `dialog.branch/moment` — logical-clock moment of the current
-    /// revision.
+    /// `dialog.branch/revision` — the content-derived entity of the
+    /// current revision: the join key from "where is this branch now?"
+    /// to everything recorded about that revision (see
+    /// [`RevisionRecord`](dialog_artifacts::history::RevisionRecord)).
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
-    pub struct Moment(
-        /// Moment component of the revision's logical clock.
-        pub u128,
+    pub struct Revision(
+        /// The revision entity URI.
+        pub Entity,
     );
 }
 
@@ -177,6 +181,76 @@ pub mod origin {
     #[domain("dialog.origin")]
     pub struct Profile(
         /// The profile entity (its DID as Entity).
+        pub Entity,
+    );
+}
+
+/// Attribute newtypes for the [`Revision`] / [`RevisionParent`]
+/// concepts.
+///
+/// All attributes here live under the `dialog.revision` domain — and
+/// none of them is ever stored. A revision describes itself with one
+/// atomic `dialog.db/revision` record fact; these attributes are the
+/// *conclusion shape* of the built-in rules (see
+/// [`rules::revision_rule`](crate::rules)) that project the record's
+/// fields at query time, verification included.
+pub mod revision {
+    use super::{Attribute, Entity};
+
+    /// `dialog.revision/lineage` — the branch lineage entity the
+    /// revision was minted on (a [`Branch`](super::Branch) entity).
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Lineage(
+        /// The lineage (branch) entity.
+        pub Entity,
+    );
+
+    /// `dialog.revision/issuer` — the operator DID (as entity) that
+    /// minted the revision.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Issuer(
+        /// The issuer entity (the operator's DID).
+        pub Entity,
+    );
+
+    /// `dialog.revision/authority` — the profile DID (as entity) that
+    /// authorized the revision.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Authority(
+        /// The authority entity (the profile's DID).
+        pub Entity,
+    );
+
+    /// `dialog.revision/edition` — the revision's causal depth
+    /// (a Lamport timestamp), derived from its parents.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Edition(
+        /// The revision's edition.
+        pub u64,
+    );
+
+    /// `dialog.revision/parent` — a parent revision's entity; one per
+    /// parent (two for a merge), so cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    #[cardinality(many)]
+    pub struct Parent(
+        /// A parent revision's entity.
+        pub Entity,
+    );
+
+    /// `dialog.revision/ancestor` — a revision reachable from this one
+    /// through any chain of `parent` edges; one per reachable revision,
+    /// so cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    #[cardinality(many)]
+    pub struct Ancestor(
+        /// An ancestor revision's entity.
         pub Entity,
     );
 }
@@ -363,10 +437,72 @@ pub struct BranchRevision {
     pub this: Entity,
     /// Tree hash of the current revision, base58-encoded.
     pub tree: branch::Tree,
-    /// Logical-clock period component.
-    pub period: branch::Period,
-    /// Logical-clock moment component.
-    pub moment: branch::Moment,
+    /// Causal depth of the revision (Lamport timestamp).
+    pub edition: branch::Edition,
+    /// The revision entity — the join key to the revision's recorded
+    /// metadata.
+    pub revision: branch::Revision,
+}
+
+/// What a revision states about itself, projected from its signed
+/// record.
+///
+/// `this` is the content-derived revision entity (the same entity the
+/// overlay's [`BranchRevision::revision`] points at). The fields are
+/// never stored as facts: built-in rules derive them at query time
+/// from the branch's `dialog.db/revision` record fact via the
+/// `dialog/revision` formula, which refuses records that don't carry
+/// a valid issuer signature — forged attribution never surfaces in a
+/// query result. The DAG edge (one row per parent) is the separate
+/// cardinality-many [`RevisionParent`].
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Revision {
+    /// The revision entity, derivable by any replica from the version.
+    pub this: Entity,
+    /// The branch lineage the revision was minted on.
+    pub lineage: revision::Lineage,
+    /// The operator DID (as entity) that minted the revision.
+    pub issuer: revision::Issuer,
+    /// The profile DID (as entity) that authorized it.
+    pub authority: revision::Authority,
+    /// The revision's causal depth.
+    pub edition: revision::Edition,
+}
+
+/// One edge of the revision DAG: `this` revision was minted on top of
+/// `parent`. Cardinality-many — a merge revision yields two rows; a
+/// genesis revision yields none. Derived at query time from the same
+/// signed record as [`Revision`].
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RevisionParent {
+    /// The revision entity.
+    pub this: Entity,
+    /// A parent revision's entity.
+    pub parent: revision::Parent,
+}
+
+/// The transitive closure of [`RevisionParent`]: `ancestor` is
+/// reachable from `this` through one or more `parent` edges. One row
+/// per reachable revision — a merge's ancestry unions both parents'
+/// histories, with converging paths collapsed to a single row.
+///
+/// Derived by a built-in recursive rule (see
+/// [`rules::builtin`](crate::rules)), so it inherits
+/// [`RevisionParent`]'s trust boundary: every edge the closure walks
+/// comes from a signature-verified revision record. Ancestry only
+/// reaches as far as the replicated records — an unreplicated parent
+/// simply contributes no rows, it does not error.
+///
+/// Answers "is X an ancestor of Y?" (bind both), "everything
+/// reachable from Y" (bind `this`), or "everything that leads to X"
+/// (bind `ancestor`). For an ordered walk with editions, use
+/// [`Branch::log`](crate::Branch::log) instead.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RevisionAncestor {
+    /// The descendant revision entity.
+    pub this: Entity,
+    /// An ancestor revision's entity.
+    pub ancestor: revision::Ancestor,
 }
 
 /// What this query session is reading from.
@@ -533,8 +669,8 @@ mod tests {
         let rev = BranchRevision {
             this: b.this.clone(),
             tree: branch::Tree("zSomeHash".into()),
-            period: branch::Period(1),
-            moment: branch::Moment(42),
+            edition: branch::Edition(42),
+            revision: branch::Revision("test:revision".parse().expect("valid entity")),
         };
         assert_eq!(rev.this, b.this);
     }

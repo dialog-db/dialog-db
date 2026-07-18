@@ -13,7 +13,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use crate::{
     Branch, Index, LocalIndex, PushError, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt, Revision, Upstream,
+    RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -22,19 +22,33 @@ use crate::{
 /// dispatch to local or remote push logic.
 pub struct Push<'a> {
     branch: &'a Branch,
+    to: Option<Upstream>,
 }
 
 impl<'a> Push<'a> {
     fn new(branch: &'a Branch) -> Self {
-        Self { branch }
+        Self { branch, to: None }
+    }
+
+    /// Push to the given branch instead of the default upstream.
+    ///
+    /// Accepts either a `&Branch` or a `&RemoteBranch` — the same inputs as
+    /// [`Branch::set_upstream`]. If the target is already tracked, its
+    /// recorded sync base drives the fast-forward check and the novelty
+    /// upload; otherwise the empty base does (only a target with no
+    /// revision of its own accepts such a push), and a successful push
+    /// starts tracking the target — without changing the default upstream.
+    pub fn to(mut self, source: impl Into<UpstreamBranch>) -> Self {
+        self.to = Some(Upstream::from(source.into()));
+        self
     }
 }
 
 impl Branch {
     /// Create a command to push local changes to the upstream branch.
     ///
-    /// Reads the upstream configuration from branch state and dispatches
-    /// to local or remote push logic.
+    /// Targets the default upstream; chain [`Push::to`] to push to another
+    /// tracked (or brand-new) upstream instead.
     pub fn push(&self) -> Push<'_> {
         Push::new(self)
     }
@@ -68,11 +82,29 @@ impl Push<'_> {
             + 'static,
     {
         let branch = self.branch;
-        let upstream_state = branch
-            .upstream()
-            .ok_or_else(|| PushError::BranchHasNoUpstream {
-                branch: branch.name().to_string(),
-            })?;
+
+        // Select the upstream entry to push to: the default when no
+        // explicit target was given, otherwise the tracked entry for that
+        // target — or, for a target not tracked yet, a fresh entry whose
+        // empty sync base only fast-forwards onto an empty target.
+        let upstreams = branch.upstreams();
+        let upstream_state = match self.to {
+            None => upstreams.default_upstream().cloned().ok_or_else(|| {
+                PushError::BranchHasNoUpstream {
+                    branch: branch.name().to_string(),
+                }
+            })?,
+            Some(target) => {
+                if let Upstream::Local { branch: name, .. } = &target
+                    && name == branch.name()
+                {
+                    return Err(PushError::UpstreamIsItself {
+                        branch: branch.name().to_string(),
+                    });
+                }
+                upstreams.find(&target).cloned().unwrap_or(target)
+            }
+        };
 
         let revision = match branch.revision() {
             Some(revision) => revision,
@@ -222,12 +254,12 @@ impl Push<'_> {
             }
         }
 
-        // Advance our recorded sync point to the just-pushed tree.
-        branch
-            .upstream
-            .publish(upstream_state.with_tree(revision.tree.clone()))
-            .perform(env)
-            .await?;
+        // Advance this upstream's recorded sync point to the just-pushed
+        // tree. A target pushed explicitly for the first time gets tracked
+        // here (appended, not made the default).
+        let mut upstreams = branch.upstreams();
+        upstreams.upsert(upstream_state.with_tree(revision.tree.clone()));
+        branch.upstream.publish(upstreams).perform(env).await?;
 
         Ok(Some(revision))
     }
@@ -320,6 +352,106 @@ mod tests {
             second.map(|r| r.tree),
             Some(revision.tree),
             "second push with nothing new returns the current revision as a no-op"
+        );
+
+        Ok(())
+    }
+
+    /// A branch can push to an upstream other than its default: the target
+    /// advances, starts being tracked with its own sync base, and the
+    /// default stays put.
+    #[dialog_common::test]
+    async fn it_pushes_to_a_non_default_upstream_and_tracks_it() -> Result<()> {
+        use crate::Upstream;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let backup = repo.branch("backup").open().perform(&operator).await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        feature
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:123".parse()?,
+                is: Value::String("Alice".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let revision = feature.revision().expect("feature has a revision");
+
+        // Bare push targets the default upstream (main)...
+        feature.push().perform(&operator).await?;
+        let main = repo.branch("main").load().perform(&operator).await?;
+        assert_eq!(main.revision().map(|r| r.tree), Some(revision.tree.clone()));
+
+        // ... and an explicit push targets another branch entirely.
+        let pushed = feature.push().to(&backup).perform(&operator).await?;
+        assert!(pushed.is_some());
+        let backup = repo.branch("backup").load().perform(&operator).await?;
+        assert_eq!(
+            backup.revision().map(|r| r.tree),
+            Some(revision.tree.clone())
+        );
+
+        // Backup is now tracked with its own sync base; main stays default.
+        let upstreams = feature.upstreams();
+        assert_eq!(upstreams.iter().count(), 2);
+        assert!(matches!(
+            upstreams.default_upstream(),
+            Some(Upstream::Local { branch, .. }) if branch == "main"
+        ));
+        assert!(upstreams.iter().any(|entry| matches!(
+            entry,
+            Upstream::Local { branch, tree } if branch == "backup" && *tree == revision.tree
+        )));
+
+        // Pushing to the branch itself is refused.
+        let selfish = feature.push().to(&feature).perform(&operator).await;
+        assert!(matches!(selfish, Err(PushError::UpstreamIsItself { .. })));
+
+        Ok(())
+    }
+
+    /// Pushing to an untracked target that already has its own history is
+    /// refused as non-fast-forward: with no recorded sync base, only an
+    /// empty target can be fast-forwarded onto. Pull it first.
+    #[dialog_common::test]
+    async fn it_refuses_pushing_to_an_untracked_nonempty_target() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let occupied = repo.branch("occupied").open().perform(&operator).await?;
+        occupied
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:theirs".parse()?,
+                is: Value::String("Existing".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:ours".parse()?,
+                is: Value::String("New".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let result = feature.push().to(&occupied).perform(&operator).await;
+        assert!(
+            matches!(result, Err(PushError::NonFastForward { .. })),
+            "an untracked, nonempty target must not be overwritten: {result:?}"
         );
 
         Ok(())

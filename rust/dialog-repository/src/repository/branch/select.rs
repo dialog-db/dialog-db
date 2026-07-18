@@ -14,7 +14,7 @@ use futures_util::Stream;
 
 use crate::{
     Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt, Upstream,
+    RepositoryMemoryExt,
 };
 
 /// Command struct for selecting artifacts from a branch.
@@ -63,20 +63,21 @@ impl Select<'_> {
             + ConditionalSync
             + 'static,
     {
-        // Load the remote if the branch tracks one so the networked
+        // Load a remote if the branch tracks one so the networked
         // index can fall back to it for blocks missing locally. Failing
         // to load the remote (e.g. no credentials) is non-fatal — the
         // local archive alone may still satisfy the query.
-        let remote = match self.branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => self
+        let upstreams = self.branch.upstreams();
+        let remote = match upstreams.remote_name() {
+            Some(name) => self
                 .branch
                 .subject()
-                .remote(name)
+                .remote(name.to_string())
                 .load()
                 .perform(env)
                 .await
                 .ok(),
-            _ => None,
+            None => None,
         };
 
         let store = NetworkedIndex::new(env, self.catalog(), remote);

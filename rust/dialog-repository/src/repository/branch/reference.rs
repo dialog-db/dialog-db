@@ -2,7 +2,7 @@ use dialog_capability::{Capability, Did, Policy, Subject};
 use dialog_effects::memory::Space;
 use dialog_effects::memory::prelude::SpaceExt;
 
-use crate::{Cell, LoadBranch, OpenBranch, Revision, Upstream};
+use crate::{Cell, LoadBranch, OpenBranch, Revision, Upstreams};
 
 /// A reference to a named branch within a repository's memory.
 ///
@@ -51,8 +51,8 @@ impl BranchReference {
         self.cell("revision")
     }
 
-    /// The cell holding this branch's [`UpstreamBranch`], if any.
-    pub fn upstream(&self) -> Cell<Upstream> {
+    /// The cell holding this branch's [`Upstreams`] tracking entries.
+    pub fn upstream(&self) -> Cell<Upstreams> {
         self.cell("upstream")
     }
 

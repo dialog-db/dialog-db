@@ -66,6 +66,9 @@ impl BlobRecord {
             value_type: 0,
             value,
             cause: None,
+            version: None,
+            supersedes: Vec::new(),
+            retraction: false,
         })
     }
 

@@ -19,7 +19,7 @@ use dialog_effects::authority::{Operator, OperatorExt as _};
 
 use crate::Branch;
 use crate::schema::Branch as BranchConcept;
-use crate::schema::branch::{Moment, Period, Tree};
+use crate::schema::branch::{Edition, Revision as RevisionEntity, Tree};
 use crate::schema::{BranchRevision, Origin};
 
 /// The schema-shaped metadata for a single branch.
@@ -77,8 +77,8 @@ impl Branch {
             BranchRevision {
                 this: branch.this.clone(),
                 tree: Tree(ToBase58::to_base58(tree_bytes)),
-                period: Period(revision.period as u128),
-                moment: Moment(revision.moment as u128),
+                edition: Edition(u128::from(revision.edition.value())),
+                revision: RevisionEntity(revision.entity()),
             }
         });
         BranchMetadata {

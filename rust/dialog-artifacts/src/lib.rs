@@ -53,6 +53,8 @@ pub mod web;
 mod artifacts;
 pub use artifacts::*;
 
+pub mod history;
+
 mod reference;
 pub use reference::*;
 
@@ -80,6 +82,7 @@ mod key;
 pub use key::*;
 
 /// Shared tree-ops on the artifact prolly tree.
+pub mod merge;
 pub mod tree;
 
 mod uri;
