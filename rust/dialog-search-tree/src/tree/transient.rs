@@ -15,9 +15,9 @@
 
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Node, PersistentNode,
-    PersistentTree, Rank, TransientIndex, TransientNode, TransientSegment, TreeWalker, Value,
-    regroup_children, regroup_entries,
+    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest, Node,
+    PersistentNode, PersistentTree, Rank, TransientIndex, TransientNode, TransientSegment,
+    TreeWalker, Value, regroup_children, regroup_entries,
 };
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
@@ -468,6 +468,12 @@ where
             + ConditionalSync,
         D: Distribution,
     {
+        // The manifest supplies the branching parameter and the length-guard
+        // bound to the rank coin. It is currently always the default; threading
+        // a single reference down the reshape chain keeps every rank decision on
+        // the same parameters. See the comment on the reshape calls below.
+        let manifest = Manifest::default();
+
         // Phase one: lift the path to the target leaf, recording the child index
         // chosen at each level. The routing key is borrowed from this edit, so
         // the descent clones no separate key.
@@ -531,8 +537,8 @@ where
                 // are paid only on true appends.
                 match segment.entries.last() {
                     Some(last) if entry.key > last.key => {
-                        D::rank(last.key.as_ref()) > BOTTOM_RANK
-                            && D::rank(entry.key.as_ref()) <= BOTTOM_RANK
+                        D::rank(last.key.as_ref(), &manifest) > BOTTOM_RANK
+                            && D::rank(entry.key.as_ref(), &manifest) <= BOTTOM_RANK
                     }
                     _ => false,
                 }
@@ -557,6 +563,7 @@ where
                     Err(0) => seam_cut_dissolves::<D>(
                         &segment.separator,
                         &D::reseparate(entry.key.as_ref(), &segment.separator),
+                        &manifest,
                     ),
                     _ => false,
                 }
@@ -566,6 +573,7 @@ where
                     Ok(0) if segment.entries.len() > 1 => seam_cut_dissolves::<D>(
                         &segment.separator,
                         &D::reseparate(segment.entries[1].key.as_ref(), &segment.separator),
+                        &manifest,
                     ),
                     // A single-entry segment empties outright; the joined
                     // seam is evaluated below, once the right neighbor's
@@ -583,7 +591,7 @@ where
                     "Path did not reach a segment".into(),
                 ));
             };
-            if fast_path_keeps_canonical::<Key, Value, D>(&segment.entries, &self) {
+            if fast_path_keeps_canonical::<Key, Value, D>(&segment.entries, &self, &manifest) {
                 apply_to_segment(&mut segment.entries, self);
                 // The seam at the segment's left edge moves with its first
                 // key. Re-derive the separator from the new minimum against
@@ -637,6 +645,7 @@ where
                                 Some(first) => seam_cut_dissolves::<D>(
                                     &floor,
                                     &D::reseparate(first.key.as_ref(), &floor),
+                                    &manifest,
                                 ),
                                 None => false,
                             },
@@ -706,11 +715,14 @@ where
                     pop.as_ref(),
                     height,
                     left_fuse,
+                    &manifest,
                 )?
             }
-            _ => reshape_path::<Key, Value, D>(&mut root, &path, self, height, left_fuse)?,
+            _ => {
+                reshape_path::<Key, Value, D>(&mut root, &path, self, height, left_fuse, &manifest)?
+            }
         };
-        seal_root::<Key, Value, D>(replacement, height)
+        seal_root::<Key, Value, D>(replacement, height, &manifest)
     }
 }
 
@@ -719,12 +731,12 @@ where
 /// the new rank is lower. (Punched levels form the range `1..=rank - 2`, so
 /// a drop from any rank of 3 or more removes cuts; a rise only adds them,
 /// which the local regroup realizes as a split without neighbor content.)
-fn seam_cut_dissolves<D>(old_separator: &[u8], new_separator: &[u8]) -> bool
+fn seam_cut_dissolves<D>(old_separator: &[u8], new_separator: &[u8], manifest: &Manifest) -> bool
 where
     D: Distribution,
 {
-    let old_rank = D::seam_rank(old_separator);
-    let new_rank = D::seam_rank(new_separator);
+    let old_rank = D::seam_rank(old_separator, manifest);
+    let new_rank = D::seam_rank(new_separator, manifest);
     old_rank > BOTTOM_RANK + 1 && new_rank < old_rank
 }
 
@@ -939,6 +951,7 @@ fn reshape_path<Key, Value, D>(
     edit: Edit<Key, Value>,
     height: Rank,
     left_fuse: Option<usize>,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -965,6 +978,7 @@ where
             Ok(regroup_entries::<Key, Value, D>(
                 std::mem::take(&mut segment.entries),
                 floor,
+                manifest,
             ))
         }
         Some((&at, rest)) => {
@@ -975,6 +989,7 @@ where
                 edit,
                 height - 1,
                 left_fuse.and_then(|depth| depth.checked_sub(1)),
+                manifest,
             )?;
             let children = &mut node.as_index_mut()?.children;
             if left_fuse == Some(0) {
@@ -982,9 +997,15 @@ where
                 // must merge into the left sibling. The edited child is
                 // consumed by its replacement either way.
                 children.remove(at);
-                fuse_left_run::<Key, Value, D>(children, at, replacement, height)
+                fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)
             } else {
-                splice_and_regroup::<Key, Value, D>(children, at..at + 1, replacement, height)
+                splice_and_regroup::<Key, Value, D>(
+                    children,
+                    at..at + 1,
+                    replacement,
+                    height,
+                    manifest,
+                )
             }
         }
     }
@@ -1005,6 +1026,7 @@ fn fuse_left_run<Key, Value, D>(
     insert_at: usize,
     mut run: Vec<Node<Key, Value>>,
     height: Rank,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1020,14 +1042,27 @@ where
         ));
     }
     if run.is_empty() {
-        return splice_and_regroup::<Key, Value, D>(children, insert_at..insert_at, run, height);
+        return splice_and_regroup::<Key, Value, D>(
+            children,
+            insert_at..insert_at,
+            run,
+            height,
+            manifest,
+        );
     }
 
     let left_sibling = take_transient(children, insert_at - 1)?;
     let first = run.remove(0).into_transient()?;
-    let mut fused = fuse_subtrees::<Key, Value, D>(left_sibling, first, None, height - 1)?;
+    let mut fused =
+        fuse_subtrees::<Key, Value, D>(left_sibling, first, None, height - 1, manifest)?;
     fused.extend(run);
-    splice_and_regroup::<Key, Value, D>(children, (insert_at - 1)..(insert_at - 1), fused, height)
+    splice_and_regroup::<Key, Value, D>(
+        children,
+        (insert_at - 1)..(insert_at - 1),
+        fused,
+        height,
+        manifest,
+    )
 }
 
 /// Re-shapes the shared prefix of a boundary delete down to the lowest common
@@ -1045,6 +1080,11 @@ where
 /// left-edge cut); it is never deeper than the LCA, since divergences below
 /// it lie inside the fused window, whose wholesale regroup re-decides those
 /// cuts anyway.
+// The fused-reshape path genuinely needs each of these distinct inputs (both
+// descent paths, the LCA depth, the pop key, the height, the left-fuse index,
+// and now the manifest for the coin); grouping them into a struct would only
+// move the argument list, not simplify it.
+#[allow(clippy::too_many_arguments)]
 fn reshape_fused<Key, Value, D>(
     node: &mut TransientNode<Key, Value>,
     path: &[usize],
@@ -1053,6 +1093,7 @@ fn reshape_fused<Key, Value, D>(
     key: Option<&Key>,
     height: Rank,
     left_fuse: Option<usize>,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1070,11 +1111,11 @@ where
         let main = take_transient(children, at)?;
         // After removing the main child the neighbour shifted left into `at`.
         let neighbor = take_transient(children, at)?;
-        let fused = fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1)?;
+        let fused = fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1, manifest)?;
         return if left_fuse == Some(0) {
-            fuse_left_run::<Key, Value, D>(children, at, fused, height)
+            fuse_left_run::<Key, Value, D>(children, at, fused, height, manifest)
         } else {
-            splice_and_regroup::<Key, Value, D>(children, at..at, fused, height)
+            splice_and_regroup::<Key, Value, D>(children, at..at, fused, height, manifest)
         };
     }
 
@@ -1088,13 +1129,14 @@ where
         key,
         height - 1,
         left_fuse.and_then(|depth| depth.checked_sub(1)),
+        manifest,
     )?;
     let children = &mut node.as_index_mut()?.children;
     if left_fuse == Some(0) {
         children.remove(at);
-        fuse_left_run::<Key, Value, D>(children, at, replacement, height)
+        fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)
     } else {
-        splice_and_regroup::<Key, Value, D>(children, at..at + 1, replacement, height)
+        splice_and_regroup::<Key, Value, D>(children, at..at + 1, replacement, height, manifest)
     }
 }
 
@@ -1117,6 +1159,7 @@ fn fuse_subtrees<Key, Value, D>(
     neighbor: TransientNode<Key, Value>,
     key: Option<&Key>,
     height: Rank,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1142,7 +1185,7 @@ where
             }
             let mut entries = main.entries;
             entries.extend(neighbor.entries);
-            Ok(regroup_entries::<Key, Value, D>(entries, floor))
+            Ok(regroup_entries::<Key, Value, D>(entries, floor, manifest))
         }
         (TransientNode::Index(mut main), TransientNode::Index(mut neighbor)) => {
             // The main spine descends through the last child; the neighbour
@@ -1156,12 +1199,18 @@ where
             let neighbor_first = remove_first(&mut neighbor.children)?;
             let neighbor_first = neighbor_first.into_transient()?;
 
-            let fused = fuse_subtrees::<Key, Value, D>(main_last, neighbor_first, key, height - 1)?;
+            let fused = fuse_subtrees::<Key, Value, D>(
+                main_last,
+                neighbor_first,
+                key,
+                height - 1,
+                manifest,
+            )?;
 
             let mut combined = main.children;
             combined.extend(fused);
             combined.extend(neighbor.children);
-            regroup_children::<Key, Value, D>(combined, height)
+            regroup_children::<Key, Value, D>(combined, height, manifest)
         }
         _ => Err(DialogSearchTreeError::Node(
             "Fused subtrees had mismatched heights".into(),
@@ -1178,6 +1227,7 @@ fn splice_and_regroup<Key, Value, D>(
     range: std::ops::Range<usize>,
     replacement: Vec<Node<Key, Value>>,
     height: Rank,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1191,7 +1241,7 @@ where
     if children.is_empty() {
         return Ok(vec![]);
     }
-    regroup_children::<Key, Value, D>(std::mem::take(children), height)
+    regroup_children::<Key, Value, D>(std::mem::take(children), height, manifest)
 }
 
 /// Turns the root's replacement run (the nodes that stand for the old root after
@@ -1207,6 +1257,7 @@ where
 fn seal_root<Key, Value, D>(
     mut replacement: Vec<Node<Key, Value>>,
     height: Rank,
+    manifest: &Manifest,
 ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1231,7 +1282,7 @@ where
             Some(Node::Transient(TransientNode::Segment(_)))
         )
     {
-        replacement = regroup_children::<Key, Value, D>(replacement, level)?;
+        replacement = regroup_children::<Key, Value, D>(replacement, level, manifest)?;
         level += 1;
     }
 
@@ -1318,6 +1369,7 @@ fn remove_first<Key, Value>(
 fn fast_path_keeps_canonical<Key, Value, D>(
     entries: &[Entry<Key, Value>],
     edit: &Edit<Key, Value>,
+    manifest: &Manifest,
 ) -> bool
 where
     Key: self::Key,
@@ -1329,7 +1381,7 @@ where
             if found.is_ok() {
                 return true; // value update only, shape unchanged
             }
-            if D::rank(entry.key.as_ref()) > BOTTOM_RANK {
+            if D::rank(entry.key.as_ref(), manifest) > BOTTOM_RANK {
                 return false; // inserting a boundary splits the segment
             }
             let at = found.unwrap_err();
@@ -1337,7 +1389,7 @@ where
             let appends_last = at == entries.len();
             let last_is_boundary = entries
                 .last()
-                .map(|e| D::rank(e.key.as_ref()) > BOTTOM_RANK)
+                .map(|e| D::rank(e.key.as_ref(), manifest) > BOTTOM_RANK)
                 .unwrap_or(false);
             !(appends_last && last_is_boundary)
         }

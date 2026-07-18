@@ -144,6 +144,9 @@ pub fn encode_str(value: &str, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     #![allow(unexpected_cfgs)]
+    // The dialog_common::test macro requires async test fns; these pure-codec
+    // tests await nothing.
+    #![allow(clippy::unused_async)]
 
     use super::*;
 

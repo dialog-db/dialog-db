@@ -10,8 +10,8 @@ use rkyv::{
 };
 
 use crate::{
-    ArchivedNodeBody, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Key, Link, Node,
-    PersistentNode, PersistentNodeBody, Rank, Value, into_owned,
+    ArchivedNodeBody, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Key, Link,
+    Manifest, Node, PersistentNode, PersistentNodeBody, Rank, Value, into_owned,
 };
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
@@ -293,6 +293,7 @@ where
 pub(crate) fn regroup_children<Key, Value, D>(
     children: Vec<Node<Key, Value>>,
     level: Rank,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -307,7 +308,7 @@ where
     let mut pending: Vec<Node<Key, Value>> = vec![];
 
     for child in children {
-        let rank = D::seam_rank(child.separator()?);
+        let rank = D::seam_rank(child.separator()?, manifest);
         if rank > threshold && !pending.is_empty() {
             groups.push(
                 TransientNode::Index(TransientIndex {
@@ -340,6 +341,7 @@ where
 pub(crate) fn regroup_entries<Key, Value, D>(
     entries: Vec<Entry<Key, Value>>,
     floor: Vec<u8>,
+    manifest: &Manifest,
 ) -> Vec<Node<Key, Value>>
 where
     Key: self::Key,
@@ -375,7 +377,7 @@ where
     };
 
     for entry in entries {
-        let rank = D::rank(entry.key.as_ref());
+        let rank = D::rank(entry.key.as_ref(), manifest);
         pending.push(entry);
         if rank > BOTTOM_RANK {
             seal(&mut pending, &mut previous_last, &mut groups);
@@ -397,7 +399,7 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use super::{BOTTOM_RANK, regroup_entries};
-    use crate::{Entry, Geometric, Rank, distribution};
+    use crate::{Entry, Geometric, Manifest, Rank, distribution};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -421,7 +423,7 @@ mod tests {
             })
             .collect();
 
-        regroup_entries::<[u8; 4], Vec<u8>, Geometric>(entries, Vec::new())
+        regroup_entries::<[u8; 4], Vec<u8>, Geometric>(entries, Vec::new(), &Manifest::default())
             .into_iter()
             .map(|node| Ok(node.into_transient()?.as_segment()?.entries.clone()))
             .collect()

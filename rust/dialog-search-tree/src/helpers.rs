@@ -52,7 +52,7 @@ use rkyv::{
 
 use crate::{
     ArchivedNodeBody, Buffer, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution,
-    Key, PersistentNode, PersistentTree, Rank, Value,
+    Key, Manifest, PersistentNode, PersistentTree, Rank, Value,
 };
 
 /// Traversal order for tree iteration.
@@ -305,11 +305,14 @@ fn rank_byte(bytes: &[u8], offset: usize) -> Rank {
 }
 
 impl Distribution for DistributionSimulator {
-    fn rank(key: &[u8]) -> Rank {
+    // The simulator drives tree shape from bytes baked into the spec keys, so
+    // it ignores the manifest's branching parameter and length guard: tests
+    // that use it want an exact, byte-controlled shape, not a coin.
+    fn rank(key: &[u8], _manifest: &Manifest) -> Rank {
         rank_byte(key, 1)
     }
 
-    fn seam_rank(separator: &[u8]) -> Rank {
+    fn seam_rank(separator: &[u8], _manifest: &Manifest) -> Rank {
         rank_byte(separator, 2)
     }
 
@@ -820,7 +823,7 @@ impl TreeSpec {
                 Ok(ArchivedNodeBody::Segment(segment)) => match segment.last_key::<SpecKey>() {
                     Ok(upper_bound) => (
                         String::from_utf8_lossy(&decode_key(&upper_bound)).to_string(),
-                        DistributionSimulator::rank(&upper_bound),
+                        DistributionSimulator::rank(&upper_bound, &Manifest::default()),
                     ),
                     Err(_) => {
                         output.push_str(&format!("{prefix}(malformed node {hash})\n"));

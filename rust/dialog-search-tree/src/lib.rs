@@ -146,6 +146,9 @@ pub use kv::*;
 mod component;
 pub use component::*;
 
+mod manifest;
+pub use manifest::*;
+
 mod link;
 pub use link::*;
 

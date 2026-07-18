@@ -1,5 +1,7 @@
 use dialog_common::Blake3Hash;
 
+use crate::Manifest;
+
 /// The rank of a node in the prolly tree.
 pub type Rank = u64;
 
@@ -26,10 +28,17 @@ pub type Rank = u64;
 /// production shape. Tests may inject an alternative distribution to force
 /// exact tree shapes.
 pub trait Distribution {
-    /// The leaf coin: computes the rank of an entry key from its bytes. An
-    /// entry whose rank exceeds [`BOTTOM_RANK`](crate::BOTTOM_RANK) ends its
-    /// leaf segment.
-    fn rank(key: &[u8]) -> Rank;
+    /// The leaf coin: computes the rank of an entry key from its bytes and the
+    /// tree's [`Manifest`]. An entry whose rank exceeds
+    /// [`BOTTOM_RANK`](crate::BOTTOM_RANK) ends its leaf segment.
+    ///
+    /// A key longer than `manifest.max_separator` is forced to rank 0 so it
+    /// can never become a boundary; this bounds every separator by
+    /// construction (plan 5.7a), since a separator is the shortest prefix of
+    /// the right segment's first key exceeding the (now bounded) boundary key.
+    /// The branching parameter (`manifest.branch_factor`) sets the split
+    /// probability, i.e. the expected fanout.
+    fn rank(key: &[u8], manifest: &Manifest) -> Rank;
 
     /// The seam coin: computes the rank of a seam from its separator bytes.
     /// A child whose separator rank exceeds the level threshold starts a new
@@ -40,9 +49,10 @@ pub trait Distribution {
     /// The default applies the key coin to the separator bytes, which is the
     /// right choice for any hash-based distribution (the two coins stay
     /// independent because their inputs never collide: a separator sorts
-    /// strictly between two keys).
-    fn seam_rank(separator: &[u8]) -> Rank {
-        Self::rank(separator)
+    /// strictly between two keys). Separators are already bounded, so the
+    /// length guard never fires here.
+    fn seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
+        Self::rank(separator, manifest)
     }
 
     /// Derives the separator for a fresh seam from the two keys adjacent to
@@ -78,8 +88,13 @@ pub trait Distribution {
 pub struct Geometric;
 
 impl Distribution for Geometric {
-    fn rank(key: &[u8]) -> Rank {
-        geometric::rank(&Blake3Hash::hash(key))
+    fn rank(key: &[u8], manifest: &Manifest) -> Rank {
+        // Oversized keys never become boundaries (plan 5.7a), keeping every
+        // separator bounded by construction.
+        if key.len() as u32 > manifest.max_separator {
+            return 0;
+        }
+        geometric::compute_geometric_rank(&Blake3Hash::hash(key), manifest.branch_factor())
     }
 }
 

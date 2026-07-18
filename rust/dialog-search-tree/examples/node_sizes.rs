@@ -24,7 +24,7 @@ const SIZES: [usize; 2] = [10_000, 50_000];
 struct Threshold<const M: u64>;
 
 impl<const M: u64> Distribution for Threshold<M> {
-    fn rank(key: &[u8]) -> Rank {
+    fn rank(key: &[u8], _manifest: &dialog_search_tree::Manifest) -> Rank {
         let hash = Blake3Hash::hash(key);
         let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *hash.as_bytes();
         let prefix = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
