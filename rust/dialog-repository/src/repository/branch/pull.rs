@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::DialogArtifactsError;
+use dialog_artifacts::FromKey as _;
 use dialog_artifacts::history::Context;
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
@@ -283,12 +284,239 @@ impl<'a> Pull<'a> {
                     base,
                 })));
             }
-            // Reverse replay: we carry local novelty, but the upstream
-            // may still have seen everything else we have. Instead of
-            // screening their (arbitrarily large) delta onto our tree,
-            // adopt their tree as the substrate and replay our (small)
-            // delta onto it — reads proportional to OUR divergence and
-            // the seams it lands in, independent of their churn.
+            // The graft merge, for tracked pulls: partition the key
+            // space by each side's node-level divergence from the sync
+            // base, stitch the merged tree from whole subtrees of the
+            // unilaterally-changed spans (adopted by hash, unread), and
+            // do real merge work only where both sides changed. Cost is
+            // the intersection of the two change sets plus coverage and
+            // seams, independent of either side's bulk.
+            else if let Some(local) = &local_revision
+                && base != TreeReference::default()
+            {
+                let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
+                let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
+                let local_tree = Index::from_hash(NodeHash::from(local_tree_hash));
+                let upstream_tree =
+                    Index::from_hash(NodeHash::from(*upstream_revision.tree.hash()));
+
+                // Node-level divergence spans of each side against the
+                // base: conservative supersets read from the pruned diff
+                // frontiers, no entry enumeration.
+                let full = merge::full_scope();
+                let ours_spans = merge::spans_from_bounds(
+                    dialog_search_tree::TreeDifference::compute_within(
+                        &base_tree,
+                        &local_tree,
+                        &tree_store,
+                        &tree_store,
+                        &full,
+                    )
+                    .await?
+                    .divergent_bounds(),
+                );
+                let theirs_spans = merge::spans_from_bounds(
+                    dialog_search_tree::TreeDifference::compute_within(
+                        &base_tree,
+                        &upstream_tree,
+                        &tree_store,
+                        &tree_store,
+                        &full,
+                    )
+                    .await?
+                    .divergent_bounds(),
+                );
+                let pieces = merge::partition_spans(&ours_spans, &theirs_spans);
+                let contested: Vec<_> = pieces
+                    .iter()
+                    .filter(|(_, source)| *source == merge::SpanSource::Contested)
+                    .map(|(span, _)| span.clone())
+                    .collect();
+
+                // Stitch: each unilaterally-changed span adopts the
+                // changed side's subtree; unchanged space is identical
+                // in all three trees. Contested spans start from the
+                // BIGGER divergence's content and take the smaller
+                // side's screened changes below, so the entry-level work
+                // inside contested spans also tracks the smaller side.
+                let ours_smaller =
+                    local_context.divergence(theirs) <= theirs.divergence(&local_context);
+                let contested_substrate = if ours_smaller {
+                    &upstream_tree
+                } else {
+                    &local_tree
+                };
+                let stitch_pieces = pieces
+                    .iter()
+                    .map(|(span, source)| dialog_search_tree::Piece::Range {
+                        source: match source {
+                            merge::SpanSource::Ours => &local_tree,
+                            merge::SpanSource::Contested => contested_substrate,
+                            merge::SpanSource::Theirs => &upstream_tree,
+                        },
+                        range: span.clone(),
+                    })
+                    .collect();
+                let mut stitched =
+                    dialog_search_tree::TransientTree::stitch(stitch_pieces, &tree_store).await?;
+
+                // Contested spans: apply the smaller side's screened
+                // delta onto the substrate. Data adds screen by the
+                // SUBSTRATE side's watermark (an add it observed is
+                // either already present or was covered by its log);
+                // removes stay byte-guarded; history and coverage
+                // entries are append-only and observed copies are
+                // already in the substrate, so the same screen passes
+                // exactly the novel ones.
+                if !contested.is_empty() {
+                    let (changed_side, screen_context) = if ours_smaller {
+                        (&local_tree, theirs.clone())
+                    } else {
+                        (&upstream_tree, local_context.clone())
+                    };
+                    let changes = base_tree.differentiate_within(
+                        changed_side,
+                        &contested,
+                        &tree_store,
+                        &tree_store,
+                    );
+                    let screened = merge::screen_data(changes, screen_context);
+                    stitched = Box::pin(stitched.integrate(screened, &tree_store)).await?;
+                }
+
+                // Coverage repair: every covering record either side
+                // minted since the base retires the covered claims still
+                // live in the stitched tree. Both coverage deltas are
+                // scoped diffs over the compact coverage region, so this
+                // costs deletions-and-replacements, never churn. Repair
+                // is version-exact, so its order relative to the
+                // contested integrate is immaterial: a re-assert mints a
+                // fresh version no coverage names.
+                let coverage_scope = merge::coverage_scope();
+                for (from, to) in [(&base_tree, &local_tree), (&base_tree, &upstream_tree)] {
+                    let coverage =
+                        from.differentiate_within(to, &coverage_scope, &tree_store, &tree_store);
+                    futures_util::pin_mut!(coverage);
+                    while let Some(change) = futures_util::StreamExt::next(&mut coverage).await {
+                        let dialog_search_tree::Change::Add(entry) = change? else {
+                            continue;
+                        };
+                        let dialog_artifacts::State::Added(record) = &entry.value else {
+                            continue;
+                        };
+                        if record.supersedes.is_empty() {
+                            continue;
+                        }
+                        // Scan the covered slot in the stitched tree and
+                        // collect the claims whose versions the record
+                        // names; delete them at all three orderings.
+                        let mut retire = Vec::new();
+                        {
+                            let candidates =
+                                stitched.stream_range(merge::coverage_range(record)?, &tree_store);
+                            futures_util::pin_mut!(candidates);
+                            while let Some(candidate) =
+                                futures_util::StreamExt::next(&mut candidates).await
+                            {
+                                let candidate = candidate?;
+                                if let dialog_artifacts::State::Added(datum) = &candidate.value
+                                    && let Some(version) = datum.version
+                                    && record.supersedes.contains(&version)
+                                {
+                                    retire.push(candidate.key);
+                                }
+                            }
+                        }
+                        for key in retire {
+                            let entity_key =
+                                dialog_artifacts::EntityKey(dialog_artifacts::Key::from(key));
+                            let attribute_key =
+                                dialog_artifacts::AttributeKey::from_key(&entity_key);
+                            let value_key = dialog_artifacts::ValueKey::from_key(&entity_key);
+                            for key in [
+                                entity_key.into_key(),
+                                attribute_key.into_key(),
+                                value_key.into_key(),
+                            ] {
+                                stitched = stitched
+                                    .delete(&dialog_artifacts::KeyBytes::from(key), &tree_store)
+                                    .await?;
+                            }
+                        }
+                    }
+                }
+
+                let mut delta = Delta::zero();
+                let mut merged = stitched.persist(&mut delta)?;
+                let merged_tree = TreeReference::from(*merged.root().as_bytes());
+
+                // Head selection mirrors the other merge paths, so
+                // mutual pulls quiesce.
+                if merged_tree == upstream_revision.tree {
+                    contexts.insert(upstream_revision.version(), theirs.clone());
+                    return Ok(PreparedPull::Merged(Box::new(Merged {
+                        branch,
+                        head,
+                        new_revision: upstream_revision.clone(),
+                        sync: upstream.with_tree(upstream_revision.tree.clone()),
+                        base,
+                    })));
+                }
+                if merged_tree == local.tree {
+                    return Ok(PreparedPull::Merged(Box::new(Merged {
+                        branch,
+                        head,
+                        new_revision: local.clone(),
+                        sync: upstream.with_tree(upstream_revision.tree.clone()),
+                        base,
+                    })));
+                }
+
+                let authority = Identify.perform(env).await?;
+                let mut revision = local.merge(
+                    &upstream_revision,
+                    TreeReference::default(),
+                    branch.of().clone(),
+                    branch.name(),
+                    authority.did(),
+                    authority.profile().clone(),
+                );
+                let mut record = revision.record(
+                    vec![local.version(), upstream_revision.version()],
+                    Vec::new(),
+                );
+                record.signature = Attest::new(record.payload()?).perform(env).await?;
+                merged
+                    .record(&mut store, &mut delta, record.entries()?)
+                    .await?;
+                revision.tree = TreeReference::from(*merged.root().as_bytes());
+                let mut context = local_context.clone();
+                context.merge(theirs);
+                context.record(revision.version());
+                revision.context = Some(context.clone());
+                revision.signature = Attest::new(revision.payload()).perform(env).await?;
+                contexts.insert(revision.version(), context);
+
+                branch
+                    .archive()
+                    .index()
+                    .import(delta.flush().map(|(_, buffer)| buffer))
+                    .perform(env)
+                    .await
+                    .map_err(DialogArtifactsError::from)?;
+
+                return Ok(PreparedPull::Merged(Box::new(Merged {
+                    branch,
+                    head,
+                    new_revision: revision,
+                    sync: upstream.with_tree(upstream_revision.tree.clone()),
+                    base,
+                })));
+            }
+            // Reverse replay, for first contact when we are the smaller
+            // side: no sync base exists, so the graft has no third tree
+            // to partition against. Adopt their tree as the substrate
+            // and replay our (whole, but smaller) delta onto it.
             //
             // This is the same screened merge with the roles swapped,
             // which is what makes it exact in every case. The screen
@@ -2862,6 +3090,117 @@ mod history_tests {
             converged,
             "three replicas must converge within bounded all-pairs rounds: {roots:?}"
         );
+
+        Ok(())
+    }
+
+    /// The graft merge: a replica that adopted a bulky upstream AND
+    /// carries its own novelty pulls a small tracked upstream. Neither
+    /// replay direction serves this (either walks the bulk); the graft
+    /// partitions by divergence spans, adopts the bulk by subtree hash,
+    /// and does entry work only where the change sets meet. Reads must
+    /// track the small delta plus seams.
+    #[dialog_common::test]
+    async fn it_grafts_a_tracked_merge_without_walking_adopted_bulk() -> Result<()> {
+        use crate::RepositoryExt as _;
+        use crate::helpers::Counting;
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .repository(unique_name("repo"))
+            .open()
+            .perform(&env)
+            .await?;
+
+        let seed = repo.branch("seed").open().perform(&env).await?;
+        seed.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:0",
+            "seed",
+        )]))
+        .perform(&env)
+        .await?;
+
+        // Bob diverges from the seed while small; we sync him (tracked).
+        let bob = repo.branch("bob").open().perform(&env).await?;
+        bob.set_upstream(&seed).perform(&env).await?;
+        bob.pull().perform(&env).await?;
+
+        let us = repo.branch("us").open().perform(&env).await?;
+        us.set_upstream(&seed).perform(&env).await?;
+        us.pull().perform(&env).await?;
+        us.pull().from(&bob).perform(&env).await?;
+
+        // Alice's bulk lands on us (adopt-or-merge; either way we now
+        // carry two hundred commits Bob has never seen), plus one commit
+        // of our own so we are not a pure adoption.
+        let alice = repo.branch("alice").open().perform(&env).await?;
+        alice.set_upstream(&seed).perform(&env).await?;
+        alice.pull().perform(&env).await?;
+        for i in 0..200 {
+            alice
+                .commit(stream::iter(vec![assert_one(
+                    "user/name",
+                    &format!("user:{i}"),
+                    "resident",
+                )]))
+                .perform(&env)
+                .await?;
+        }
+        us.pull().from(&alice).perform(&env).await?;
+        us.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "ours",
+        )]))
+        .perform(&env)
+        .await?;
+
+        // Bob moves by three commits; we pull him. The old replay walked
+        // our whole divergence (the adopted bulk); the graft must not.
+        for i in 0..3 {
+            bob.commit(stream::iter(vec![assert_one(
+                "city/name",
+                &format!("city:{i}"),
+                "bobton",
+            )]))
+            .perform(&env)
+            .await?;
+        }
+        env.reset();
+        us.pull().from(&bob).perform(&env).await?.expect("merged");
+        let reads = env.block_reads();
+        assert!(
+            reads <= 80,
+            "a graft merge must not walk the adopted bulk (got {reads} reads): {:?}",
+            env.snapshot()
+        );
+
+        // Everything is present afterwards.
+        let count = |the: &str| {
+            let the: dialog_artifacts::Attribute = the.parse().unwrap();
+            let us = us.clone();
+            let env = &env;
+            async move {
+                anyhow::Ok(
+                    us.claims()
+                        .select(ArtifactSelector::new().the(the))
+                        .perform(env)
+                        .await?
+                        .collect::<Vec<_>>()
+                        .await
+                        .into_iter()
+                        .collect::<Result<Vec<_>, _>>()?
+                        .len(),
+                )
+            }
+        };
+        assert_eq!(count("user/name").await?, 200, "the adopted bulk survives");
+        assert_eq!(count("city/name").await?, 3, "bob's novelty lands");
+        assert_eq!(count("post/title").await?, 2, "seed and our own fact stand");
 
         Ok(())
     }

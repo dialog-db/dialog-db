@@ -81,6 +81,38 @@ pub fn history_scope() -> [RangeInclusive<KeyBytes>; 2] {
     [tag_span(HISTORY_KEY_TAG), tag_span(COVERAGE_KEY_TAG)]
 }
 
+/// The entire key space as one range, for computing an unscoped tree
+/// difference through the scoped API.
+pub fn full_scope() -> [RangeInclusive<KeyBytes>; 1] {
+    [[u8::MIN; KEY_LENGTH]..=[u8::MAX; KEY_LENGTH]]
+}
+
+/// The coverage region's key range: the compact mirror of covering
+/// records, enumerated by graft repair.
+pub fn coverage_scope() -> [RangeInclusive<KeyBytes>; 1] {
+    [tag_span(COVERAGE_KEY_TAG)]
+}
+
+/// Convert conservative divergence bounds (as reported by
+/// [`TreeDifference::divergent_bounds`](dialog_search_tree::TreeDifference::divergent_bounds))
+/// into inclusive spans: an absent lower bound starts at the bottom of
+/// the key space, and an exclusive lower bound becomes the successor
+/// key.
+pub fn spans_from_bounds(
+    bounds: Vec<(Option<KeyBytes>, KeyBytes)>,
+) -> Vec<RangeInclusive<KeyBytes>> {
+    bounds
+        .into_iter()
+        .filter_map(|(lower, upper)| {
+            let start = match lower {
+                None => [u8::MIN; KEY_LENGTH],
+                Some(bound) => key_successor(&bound)?,
+            };
+            (start <= upper).then_some(start..=upper)
+        })
+        .collect()
+}
+
 /// The data regions' key ranges (EAV/AEV/VAE and the blob index), for
 /// scoping the second merge pass.
 pub fn data_scope() -> [RangeInclusive<KeyBytes>; 2] {
@@ -98,7 +130,7 @@ pub fn data_scope() -> [RangeInclusive<KeyBytes>; 2] {
 /// a replace record supersedes claims of **other** values, and data keys
 /// embed the value hash, so the covered claims live at different keys
 /// than the record's. The whole slot must be scanned.
-fn coverage_range(record: &Datum) -> Result<RangeInclusive<KeyBytes>, DialogSearchTreeError> {
+pub fn coverage_range(record: &Datum) -> Result<RangeInclusive<KeyBytes>, DialogSearchTreeError> {
     let decode = |e: crate::DialogArtifactsError| {
         DialogSearchTreeError::Node(format!("history record: {e}"))
     };
@@ -290,6 +322,239 @@ where
                     .record(record.version());
             }
             yield change;
+        }
+    }
+}
+
+/// Which source a key span of a three-way merge is taken from.
+///
+/// The partition below classifies the whole key space against the two
+/// sides' divergence spans (the key ranges where each side's tree
+/// differs from the shared base). Spans only one side changed are
+/// adopted from that side wholesale; spans both sides changed need the
+/// screened merge; spans neither side changed are identical in all
+/// three trees, so either side serves (the partition says `Theirs` so
+/// unchanged space fuses with adopted upstream spans).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpanSource {
+    /// Only our side diverged from the base here: take our subtree.
+    Ours,
+    /// Only the upstream diverged, or neither did: take its subtree.
+    Theirs,
+    /// Both sides diverged: the span needs the screened merge.
+    Contested,
+}
+
+/// The immediate successor of a key, or `None` at the top of the key
+/// space.
+fn key_successor(key: &KeyBytes) -> Option<KeyBytes> {
+    let mut next = *key;
+    for byte in next.iter_mut().rev() {
+        if *byte == u8::MAX {
+            *byte = u8::MIN;
+        } else {
+            *byte += 1;
+            return Some(next);
+        }
+    }
+    None
+}
+
+/// Sort and coalesce a list of inclusive spans: overlapping or adjacent
+/// spans fuse into one.
+fn normalize_spans(spans: &[RangeInclusive<KeyBytes>]) -> Vec<RangeInclusive<KeyBytes>> {
+    let mut spans: Vec<_> = spans.to_vec();
+    spans.sort_by(|a, b| a.start().cmp(b.start()));
+    let mut normalized: Vec<RangeInclusive<KeyBytes>> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match normalized.last_mut() {
+            Some(last) if *span.start() <= key_successor(last.end()).unwrap_or(*last.end()) => {
+                if span.end() > last.end() {
+                    *last = *last.start()..=*span.end();
+                }
+            }
+            _ => normalized.push(span),
+        }
+    }
+    normalized
+}
+
+/// Partition the entire key space by the two sides' divergence spans,
+/// producing an ordered, gap-free, non-overlapping run of
+/// `(span, source)` pieces with adjacent same-source pieces coalesced.
+///
+/// The inputs are conservative divergence spans (a span that contains
+/// no real change is harmless: it only shifts work between the adopt
+/// and screen paths, never the outcome), typically derived from the
+/// divergent node bounds of two tree differentials.
+pub fn partition_spans(
+    ours: &[RangeInclusive<KeyBytes>],
+    theirs: &[RangeInclusive<KeyBytes>],
+) -> Vec<(RangeInclusive<KeyBytes>, SpanSource)> {
+    let ours = normalize_spans(ours);
+    let theirs = normalize_spans(theirs);
+
+    let mut pieces: Vec<(RangeInclusive<KeyBytes>, SpanSource)> = Vec::new();
+    let mut cursor = [u8::MIN; KEY_LENGTH];
+    let mut ours_at = 0;
+    let mut theirs_at = 0;
+
+    loop {
+        // Advance past spans that end before the cursor.
+        while ours_at < ours.len() && ours[ours_at].end() < &cursor {
+            ours_at += 1;
+        }
+        while theirs_at < theirs.len() && theirs[theirs_at].end() < &cursor {
+            theirs_at += 1;
+        }
+
+        let in_ours = ours_at < ours.len() && ours[ours_at].start() <= &cursor;
+        let in_theirs = theirs_at < theirs.len() && theirs[theirs_at].start() <= &cursor;
+        let source = match (in_ours, in_theirs) {
+            (true, true) => SpanSource::Contested,
+            (true, false) => SpanSource::Ours,
+            _ => SpanSource::Theirs,
+        };
+
+        // The current classification holds until the nearest boundary:
+        // the end of a span the cursor is inside, or the start of the
+        // next span ahead.
+        let mut until = [u8::MAX; KEY_LENGTH];
+        if in_ours {
+            until = until.min(*ours[ours_at].end());
+        } else if ours_at < ours.len() {
+            let before = predecessor_of(ours[ours_at].start());
+            until = until.min(before);
+        }
+        if in_theirs {
+            until = until.min(*theirs[theirs_at].end());
+        } else if theirs_at < theirs.len() {
+            let before = predecessor_of(theirs[theirs_at].start());
+            until = until.min(before);
+        }
+
+        match pieces.last_mut() {
+            Some((span, last_source)) if *last_source == source => {
+                *span = *span.start()..=until;
+            }
+            _ => pieces.push((cursor..=until, source)),
+        }
+
+        match key_successor(&until) {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
+
+    pieces
+}
+
+/// The immediate predecessor of a key. Only called for span starts that
+/// lie strictly ahead of the cursor, which is at least the minimum key,
+/// so the input is never the minimum.
+fn predecessor_of(key: &KeyBytes) -> KeyBytes {
+    let mut previous = *key;
+    for byte in previous.iter_mut().rev() {
+        if *byte == u8::MIN {
+            *byte = u8::MAX;
+        } else {
+            *byte -= 1;
+            break;
+        }
+    }
+    previous
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+
+    fn key(at: u8) -> KeyBytes {
+        let mut bytes = [u8::MIN; KEY_LENGTH];
+        bytes[0] = at;
+        bytes
+    }
+
+    const TOP: KeyBytes = [u8::MAX; KEY_LENGTH];
+    const BOTTOM: KeyBytes = [u8::MIN; KEY_LENGTH];
+
+    #[test]
+    fn it_defaults_the_whole_space_to_theirs() {
+        let pieces = partition_spans(&[], &[]);
+        assert_eq!(pieces, vec![(BOTTOM..=TOP, SpanSource::Theirs)]);
+    }
+
+    #[test]
+    fn it_carves_our_spans_out_of_their_space() {
+        let pieces = partition_spans(&[key(2)..=key(3)], &[]);
+        assert_eq!(
+            pieces,
+            vec![
+                (BOTTOM..=predecessor_of(&key(2)), SpanSource::Theirs),
+                (key(2)..=key(3), SpanSource::Ours),
+                (key_successor(&key(3)).unwrap()..=TOP, SpanSource::Theirs),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_marks_overlap_contested_and_splits_the_rest() {
+        let pieces = partition_spans(&[key(2)..=key(5)], &[key(4)..=key(8)]);
+        assert_eq!(
+            pieces,
+            vec![
+                (BOTTOM..=predecessor_of(&key(2)), SpanSource::Theirs),
+                (key(2)..=predecessor_of(&key(4)), SpanSource::Ours),
+                (key(4)..=key(5), SpanSource::Contested),
+                (key_successor(&key(5)).unwrap()..=TOP, SpanSource::Theirs),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_coalesces_their_spans_with_unchanged_space() {
+        // A theirs-divergence span fuses with the surrounding unchanged
+        // space into one piece.
+        let pieces = partition_spans(&[key(6)..=key(6)], &[key(1)..=key(2)]);
+        assert_eq!(
+            pieces,
+            vec![
+                (BOTTOM..=predecessor_of(&key(6)), SpanSource::Theirs),
+                (key(6)..=key(6), SpanSource::Ours),
+                (key_successor(&key(6)).unwrap()..=TOP, SpanSource::Theirs),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_normalizes_unsorted_and_overlapping_inputs() {
+        let pieces = partition_spans(&[key(5)..=key(6), key(2)..=key(4), key(4)..=key(5)], &[]);
+        assert_eq!(
+            pieces,
+            vec![
+                (BOTTOM..=predecessor_of(&key(2)), SpanSource::Theirs),
+                (key(2)..=key(6), SpanSource::Ours),
+                (key_successor(&key(6)).unwrap()..=TOP, SpanSource::Theirs),
+            ]
+        );
+    }
+
+    #[test]
+    fn it_partitions_gap_free_and_in_order() {
+        let pieces = partition_spans(
+            &[key(1)..=key(3), key(10)..=key(20)],
+            &[key(2)..=key(12), key(30)..=key(40)],
+        );
+        // Gap-free coverage in ascending order, alternating sources.
+        let mut cursor = BOTTOM;
+        for (span, _) in &pieces {
+            assert_eq!(*span.start(), cursor, "no gaps between pieces");
+            cursor = key_successor(span.end()).unwrap_or(TOP);
+        }
+        assert_eq!(*pieces.last().unwrap().0.end(), TOP);
+        // No two adjacent pieces share a source.
+        for window in pieces.windows(2) {
+            assert_ne!(window[0].1, window[1].1, "adjacent pieces coalesce");
         }
     }
 }
