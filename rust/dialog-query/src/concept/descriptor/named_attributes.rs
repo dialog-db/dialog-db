@@ -1,6 +1,7 @@
 use crate::Cardinality;
 use crate::artifact::Type;
 use crate::attribute::{AttributeDescriptor, The};
+use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
@@ -34,7 +35,7 @@ fn is_not_optional(optional: &bool) -> bool {
 ///
 /// A required field omits `optional`, so it is byte-identical to the
 /// pre-optionality encoding.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConceptFieldDescriptor {
     #[serde(flatten)]
     descriptor: AttributeDescriptor,
@@ -44,6 +45,18 @@ pub struct ConceptFieldDescriptor {
     /// the wire.
     #[serde(default, skip_serializing_if = "is_not_optional")]
     optional: bool,
+    /// The concept the field's target entity must conform to — a
+    /// *concept-typed* field. Only entity-valued attributes can
+    /// conform (validated at every construction path), and a
+    /// conforming field cannot be optional: the left-join over
+    /// "edge exists AND target conforms" is absence-over-IDB, which
+    /// stratification (M4) has to own first.
+    ///
+    /// Carried as the full target descriptor so rule lowering can
+    /// conjoin the target's premises without a registry; identity
+    /// hashing uses only the target's `concept:{hash}` URI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conforms: Option<Box<ConceptDescriptor>>,
 }
 
 impl ConceptFieldDescriptor {
@@ -52,6 +65,7 @@ impl ConceptFieldDescriptor {
         Self {
             descriptor,
             optional: false,
+            conforms: None,
         }
     }
 
@@ -61,7 +75,30 @@ impl ConceptFieldDescriptor {
         Self {
             descriptor,
             optional: true,
+            conforms: None,
         }
+    }
+
+    /// A *concept-typed* field: a required, entity-valued attribute
+    /// whose target entity must conform to `target`. Errors when the
+    /// attribute's value type is not `Entity` — only entities can
+    /// conform to a concept.
+    pub fn conforming(
+        descriptor: AttributeDescriptor,
+        target: ConceptDescriptor,
+    ) -> Result<Self, TypeError> {
+        if descriptor.content_type() != Some(Type::Entity) {
+            return Err(TypeError::NonEntityConformance {
+                the: descriptor.the().to_string(),
+                concept: target.this().to_string(),
+                actual: descriptor.content_type(),
+            });
+        }
+        Ok(Self {
+            descriptor,
+            optional: false,
+            conforms: Some(Box::new(target)),
+        })
     }
 
     /// The underlying attribute descriptor.
@@ -72,6 +109,12 @@ impl ConceptFieldDescriptor {
     /// Returns `true` iff this field is optional (set-widened).
     pub fn is_optional(&self) -> bool {
         self.optional
+    }
+
+    /// The concept this field's target entity must conform to, if
+    /// the field is concept-typed.
+    pub fn conforms(&self) -> Option<&ConceptDescriptor> {
+        self.conforms.as_deref()
     }
 
     /// Convenience: the attribute's relation identifier.
@@ -155,10 +198,29 @@ impl NamedAttributes {
 
     /// Fallible builder shared by the [`TryFrom`] impls: rejects an
     /// empty set, or a set with no required field, with
-    /// [`TypeError::EmptyConcept`].
+    /// [`TypeError::EmptyConcept`]; rejects malformed concept-typed
+    /// fields (non-entity value type, or optional conformance) so
+    /// the wire path enforces the same invariants
+    /// [`ConceptFieldDescriptor::conforming`] does.
     fn try_new(map: BTreeMap<String, ConceptFieldDescriptor>) -> Result<Self, TypeError> {
         if map.is_empty() || map.values().all(|field| field.is_optional()) {
             return Err(TypeError::EmptyConcept);
+        }
+        for field in map.values() {
+            if let Some(target) = field.conforms() {
+                if field.content_type() != Some(Type::Entity) {
+                    return Err(TypeError::NonEntityConformance {
+                        the: field.the().to_string(),
+                        concept: target.this().to_string(),
+                        actual: field.content_type(),
+                    });
+                }
+                if field.is_optional() {
+                    return Err(TypeError::OptionalConformance {
+                        the: field.the().to_string(),
+                    });
+                }
+            }
         }
         Ok(NamedAttributes(map))
     }

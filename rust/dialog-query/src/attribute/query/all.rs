@@ -360,8 +360,15 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
             Term::Variable { .. } => {
                 // A prefix refinement the planner stamped onto the
                 // attribute variable becomes an AEV range bound.
-                if let Some(refinement) = from.the.kind().as_ref().and_then(Kind::refinement) {
-                    let prefix = refinement.prefix.clone();
+                // Conformance-only refinements carry no prefix and
+                // produce no range bound.
+                if let Some(prefix) = from
+                    .the
+                    .kind()
+                    .as_ref()
+                    .and_then(Kind::refinement)
+                    .and_then(|refinement| refinement.prefix.clone())
+                {
                     selector = Some(match selector {
                         None => ArtifactSelector::new().the_starting_with(prefix),
                         Some(s) => s.the_starting_with(prefix),
@@ -383,8 +390,15 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
             Term::Variable { .. } => {
                 // A prefix refinement on the entity variable becomes
                 // an EAV range bound over the URI's raw head.
-                if let Some(refinement) = from.of.kind().as_ref().and_then(Kind::refinement) {
-                    let prefix = refinement.prefix.clone();
+                // Conformance-only refinements carry no prefix and
+                // produce no range bound.
+                if let Some(prefix) = from
+                    .of
+                    .kind()
+                    .as_ref()
+                    .and_then(Kind::refinement)
+                    .and_then(|refinement| refinement.prefix.clone())
+                {
                     selector = Some(match selector {
                         None => ArtifactSelector::new().of_starting_with(prefix),
                         Some(s) => s.of_starting_with(prefix),

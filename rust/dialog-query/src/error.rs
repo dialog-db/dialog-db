@@ -68,6 +68,37 @@ pub enum TypeError {
     #[error("Concept declares no required attributes; at least one `with` attribute is required")]
     EmptyConcept,
 
+    /// A concept-typed field's attribute is not entity-valued. Only
+    /// an entity can conform to a concept, so a field that declares
+    /// `conforms` must have `Entity` as its value type.
+    #[error(
+        "Attribute \"{the}\" declares conformance to {concept} but its value type is \
+         {actual:?}; a concept-typed field must be entity-valued"
+    )]
+    NonEntityConformance {
+        /// The offending attribute selector.
+        the: String,
+        /// The target concept's URI.
+        concept: String,
+        /// The attribute's declared value type.
+        actual: Option<Type>,
+    },
+
+    /// A concept-typed field is marked optional. An optional
+    /// concept-typed field is a left-join over "edge exists AND the
+    /// target conforms" — absence over a rule-derived (IDB)
+    /// predicate — which requires stratification to evaluate
+    /// soundly. Not supported yet; make the field required or drop
+    /// the conformance.
+    #[error(
+        "Attribute \"{the}\" is both optional and concept-typed; optional conformance \
+         (absence over a derived predicate) is not supported yet"
+    )]
+    OptionalConformance {
+        /// The offending attribute selector.
+        the: String,
+    },
+
     /// A rule declares a parameter that none of its premises use.
     #[error("Rule {rule} does not use parameter \"{parameter}\"")]
     UnusedParameter {
@@ -126,6 +157,19 @@ pub enum TypeError {
     NegatedOptional {
         /// The offending rule.
         rule: Box<Rule>,
+    },
+
+    /// A rule negates its own conclusion concept: a negative
+    /// self-loop no stratification can order (the rule would derive
+    /// a row exactly when it doesn't). Cycles through negation that
+    /// span multiple rules are the global stratification pass's
+    /// job; this is the local, always detectable case.
+    #[error("Rule {rule} negates its own conclusion {concept}")]
+    SelfNegation {
+        /// The offending rule.
+        rule: Box<Rule>,
+        /// The conclusion concept's URI.
+        concept: String,
     },
 
     /// Type inference over a rule's premises produced a
@@ -654,4 +698,14 @@ pub enum AnalysisError {
     /// be vacuously false.
     #[error("negation over an optional (maybe) premise is always false")]
     NegatedOptional,
+    /// A rule negates its own conclusion concept: a negative
+    /// self-loop no stratification can order. The local, always
+    /// detectable case of recursion through negation; cycles
+    /// spanning multiple rules are the global stratification
+    /// pass's job.
+    #[error("rule negates its own conclusion {concept}")]
+    SelfNegation {
+        /// The conclusion concept's URI.
+        concept: String,
+    },
 }

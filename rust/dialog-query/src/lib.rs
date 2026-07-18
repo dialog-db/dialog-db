@@ -77,7 +77,7 @@ pub mod stream;
 /// Term types for pattern matching with variables and constants.
 pub mod term;
 /// Unified schema-layer type system (`Type`, `Primitive`,
-/// `Composite`, set-operations).
+/// `Refinement`, set-operations).
 pub mod type_system;
 /// Type system utilities bridging Rust types to dialog-artifacts types.
 pub mod types;
@@ -88,7 +88,7 @@ pub use attribute::*;
 pub use claim::Claim;
 pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor, ConceptFieldDescriptor};
 pub use concept::query::{ConceptQuery, ConceptRules};
-pub use concept::{Concept, ConceptField, Conclusion};
+pub use concept::{Concept, ConceptField, Conclusion, ConformingField};
 pub use constraint::Constraint;
 pub use descriptor::Descriptor;
 pub use environment::*;

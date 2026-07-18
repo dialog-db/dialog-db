@@ -399,8 +399,8 @@ mod tests {
         });
         let kind = stamped.expect("the scan's entity term carries a kind");
         assert_eq!(
-            kind.refinement().expect("refined").prefix,
-            "did:key:",
+            kind.refinement().expect("refined").prefix.as_deref(),
+            Some("did:key:"),
             "the proved prefix reaches the scan boundary"
         );
     }
