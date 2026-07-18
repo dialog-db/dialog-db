@@ -126,7 +126,7 @@ Because records are ordinary facts, history is queryable: "who committed this", 
 
 ## One tree for data and history
 
-History entries are keyed edition-first, so scanning yields history in an order consistent with causality. Three consequences the design leans on:
+History entries are keyed origin-first (writer, then edition), so one writer's records form one contiguous span of the log, ordered by edition within it. Per-writer contiguity is what lets a merge adopt another replica's log wholesale by subtree hash: two sides' novel records cluster apart instead of interleaving. Causally ordered listings come from walking the revision DAG, not from scanning the region. Three consequences the design leans on:
 
 1. **History and data cannot drift apart**: one root covers both.
 2. **Pulling merges history for free**: entries ride the same tree diff as data, and every entry's key is unique to its version, so the log union is conflict-free.
