@@ -31,6 +31,7 @@ use dialog_search_tree::{
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
+use std::ops::RangeInclusive;
 
 use crate::{
     ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum,
@@ -375,46 +376,7 @@ impl ArtifactTreeExt for ArtifactTree {
         let tree = self;
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         try_stream! {
-            // Index choice: exact fields take priority (entity /
-            // value / attribute, as before); prefix bounds pick the
-            // index whose leading dimension they constrain when no
-            // exact field does. Every branch additionally tightens
-            // its key range with whatever prefix bounds the selector
-            // carries (sound on any dimension, tight on leading ones)
-            // via `apply_prefix_bounds`, and `matches_selector`
-            // re-checks per entry. The lower/upper bounds collapse to
-            // the same exact key when every component is constrained,
-            // and the inclusive range still selects it.
-            let range = if selector.entity().is_some()
-                || (selector.entity_prefix().is_some()
-                    && selector.value().is_none()
-                    && selector.attribute().is_none()
-                    && selector.attribute_prefix().is_none())
-            {
-                let (start, end) = apply_prefix_bounds(
-                    <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(&selector),
-                    <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(&selector),
-                    &selector,
-                );
-                KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
-            } else if selector.value().is_some() {
-                let (start, end) = apply_prefix_bounds(
-                    <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(&selector),
-                    <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(&selector),
-                    &selector,
-                );
-                KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
-            } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
-                let (start, end) = apply_prefix_bounds(
-                    <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(&selector),
-                    <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(&selector),
-                    &selector,
-                );
-                KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
-            } else {
-                // `Constrained` guarantees at least one field is set.
-                unreachable!("ArtifactSelector will always have at least one field specified")
-            };
+            let range = selector_range(&selector);
 
             let stream = tree.stream_range(range, &storage);
             tokio::pin!(stream);
@@ -431,5 +393,55 @@ impl ArtifactTreeExt for ArtifactTree {
                 }
             }
         }
+    }
+}
+
+/// The inclusive key range a selector's scan reads.
+///
+/// Index choice: exact fields take priority (entity / value /
+/// attribute); prefix bounds pick the index whose leading dimension
+/// they constrain when no exact field does. The range is additionally
+/// tightened with whatever prefix bounds the selector carries (sound
+/// on any dimension, tight on leading ones) via
+/// [`apply_prefix_bounds`]; per-entry re-checking against the full
+/// selector happens during the scan, not here. The lower/upper bounds
+/// collapse to the same exact key when every component is
+/// constrained, and the inclusive range still selects it.
+///
+/// This is the selector's *demanded range*: everything a scan for it
+/// would touch, whether or not entries exist there. Subscriptions use
+/// it as the unit of a demand cover — a range that came back empty is
+/// still demanded (the emptiness was read), so a later write into it
+/// must invalidate the reader.
+pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusive<KeyBytes> {
+    if selector.entity().is_some()
+        || (selector.entity_prefix().is_some()
+            && selector.value().is_none()
+            && selector.attribute().is_none()
+            && selector.attribute_prefix().is_none())
+    {
+        let (start, end) = apply_prefix_bounds(
+            <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
+            <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
+            selector,
+        );
+        KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
+    } else if selector.value().is_some() {
+        let (start, end) = apply_prefix_bounds(
+            <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
+            <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
+            selector,
+        );
+        KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
+    } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
+        let (start, end) = apply_prefix_bounds(
+            <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
+            <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
+            selector,
+        );
+        KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
+    } else {
+        // `Constrained` guarantees at least one field is set.
+        unreachable!("ArtifactSelector will always have at least one field specified")
     }
 }
