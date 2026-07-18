@@ -33,6 +33,8 @@
 //! afterwards.
 
 use super::ConceptQuery;
+use crate::artifact::Artifact;
+use crate::attribute::The;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
@@ -47,12 +49,14 @@ use crate::source::SelectRules;
 use crate::term::Term;
 use crate::types::Any;
 use crate::{Entity, Environment, Value};
+use core::fmt;
 use core::{iter, mem};
 use dialog_artifacts::Select;
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use futures_util::TryStreamExt;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
 /// Upper bound on fixpoint rounds before the query fails loudly. A
 /// round derives at least one new row (otherwise the fixpoint has
@@ -309,22 +313,19 @@ impl Iterator for Combinations {
     }
 }
 
-/// Compute the full fixpoint of the queried concept's strongly
-/// connected component and return the rows derived for the queried
-/// concept itself.
-pub async fn evaluate<'a, Env>(
+/// Discover the queried concept's strongly connected component:
+/// starting from the root, follow in-component premises (each embeds
+/// its target's full descriptor) and collect every member's rules,
+/// split into recursive occurrences and base premises.
+async fn discover<'a, Env>(
     root: &ConceptDescriptor,
     analysis: &ProgramAnalysis,
     env: &'a Env,
-) -> Result<Vec<Row>, EvaluationError>
+) -> Result<HashMap<Entity, Member>, EvaluationError>
 where
     Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
 {
     let root_entity = root.this();
-
-    // Discover the component: starting from the queried concept,
-    // follow in-component premises (each embeds its target's full
-    // descriptor) and collect every member's rules.
     let mut members: HashMap<Entity, Member> = HashMap::new();
     let mut queue = vec![root.clone()];
     while let Some(descriptor) = queue.pop() {
@@ -354,38 +355,61 @@ where
         }
         members.insert(entity, Member { descriptor, rules });
     }
+    Ok(members)
+}
 
-    let mut table = InMemoryAnswerTable::default();
-
-    // Seed round: rules with no recursive occurrence evaluate fully
-    // top-down.
-    for member in members.values() {
-        for split in &member.rules {
-            if !split.occurrences.is_empty() {
-                continue;
-            }
-            let plan = split.rule.plan(&Environment::new());
-            let results: Vec<Match> = plan
-                .evaluate(Match::new().seed(), env)
-                .try_collect()
-                .await?;
-            for matched in results {
-                table.insert(
-                    &member.descriptor.this(),
-                    project(&member.descriptor, &matched),
-                );
-            }
-        }
+/// Evaluate one rule with the given occurrence-and-source bindings:
+/// join the `rest` premises sideways and stage every projected
+/// conclusion row.
+async fn stage_rule_rows<'a, Env>(
+    member: &Member,
+    split: &SplitRule,
+    rest: Vec<Premise>,
+    matched: Match,
+    scope: &Environment,
+    table: &mut InMemoryAnswerTable,
+    env: &'a Env,
+) -> Result<(), EvaluationError>
+where
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+{
+    let results: Vec<Match> = if rest.is_empty() {
+        vec![matched]
+    } else {
+        let plan = Planner::with_types(rest, split.rule.analysis().types.clone())
+            .plan(scope)
+            .map_err(|error| EvaluationError::Planning {
+                message: error.to_string(),
+            })?;
+        plan.evaluate(matched.seed(), env).try_collect().await?
+    };
+    for result in results {
+        table.insert(
+            &member.descriptor.this(),
+            project(&member.descriptor, &result),
+        );
     }
+    Ok(())
+}
 
-    // Delta rounds: per rule and per recursive occurrence, that
-    // occurrence reads the delta while its siblings read the total.
+/// Run semi-naive delta rounds to convergence: per rule and per
+/// recursive occurrence, that occurrence reads the previous round's
+/// delta while its siblings read the running total.
+async fn delta_rounds<'a, Env>(
+    root: &Entity,
+    members: &HashMap<Entity, Member>,
+    table: &mut InMemoryAnswerTable,
+    env: &'a Env,
+) -> Result<(), EvaluationError>
+where
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+{
     let mut rounds = 0;
     while table.advance() {
         rounds += 1;
         if rounds > MAX_ROUNDS {
             return Err(EvaluationError::FixpointDivergence {
-                concept: root_entity.to_string(),
+                concept: root.to_string(),
                 rounds,
             });
         }
@@ -431,35 +455,411 @@ where
                         if !compatible {
                             continue;
                         }
+                        stage_rule_rows(
+                            member,
+                            split,
+                            split.base.clone(),
+                            matched,
+                            &scope,
+                            table,
+                            env,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
-                        let results: Vec<Match> = if split.base.is_empty() {
-                            vec![matched]
-                        } else {
-                            let plan = Planner::with_types(
-                                split.base.clone(),
-                                split.rule.analysis().types.clone(),
-                            )
-                            .plan(&scope)
-                            .map_err(|error| {
-                                EvaluationError::Planning {
-                                    message: error.to_string(),
-                                }
-                            })?;
-                            plan.evaluate(matched.seed(), env).try_collect().await?
-                        };
-                        for result in results {
-                            table.insert(
-                                &member.descriptor.this(),
-                                project(&member.descriptor, &result),
-                            );
+/// Compute the full fixpoint of the queried concept's strongly
+/// connected component into `table` and return the rows derived for
+/// the queried concept itself.
+pub async fn evaluate_table<'a, Env>(
+    root: &ConceptDescriptor,
+    analysis: &ProgramAnalysis,
+    env: &'a Env,
+    table: &mut InMemoryAnswerTable,
+) -> Result<Vec<Row>, EvaluationError>
+where
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+{
+    let root_entity = root.this();
+    let members = discover(root, analysis, env).await?;
+
+    // Seed round: rules with no recursive occurrence evaluate fully
+    // top-down.
+    for member in members.values() {
+        for split in &member.rules {
+            if !split.occurrences.is_empty() {
+                continue;
+            }
+            let plan = split.rule.plan(&Environment::new());
+            let results: Vec<Match> = plan
+                .evaluate(Match::new().seed(), env)
+                .try_collect()
+                .await?;
+            for matched in results {
+                table.insert(
+                    &member.descriptor.this(),
+                    project(&member.descriptor, &matched),
+                );
+            }
+        }
+    }
+
+    delta_rounds(&root_entity, &members, table, env).await?;
+    Ok(table.total(&root_entity))
+}
+
+/// Compute the full fixpoint of the queried concept's strongly
+/// connected component and return the rows derived for the queried
+/// concept itself.
+pub async fn evaluate<'a, Env>(
+    root: &ConceptDescriptor,
+    analysis: &ProgramAnalysis,
+    env: &'a Env,
+) -> Result<Vec<Row>, EvaluationError>
+where
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+{
+    let mut table = InMemoryAnswerTable::default();
+    evaluate_table(root, analysis, env, &mut table).await
+}
+
+/// How a base premise participates in addition-seeding.
+enum BaseSource {
+    /// A positive attribute premise: a matching new fact binds its
+    /// slots directly. Boxed to keep the variant sizes even.
+    Attribute(Box<(Term<The>, Term<Entity>, Term<Any>)>),
+    /// A positive out-of-component concept premise over an
+    /// entity-local target: a new fact's subject binds its `this`
+    /// slot (over-approximated; re-derivation settles truth).
+    LocalConcept { this: Term<Any> },
+    /// Never sourced by a fact (constraints, formulas).
+    Inert,
+    /// A shape additive seeding cannot handle soundly: a negated or
+    /// optional premise a new fact matches can *retract* derived
+    /// rows, and a non-local nested concept cannot bound its heads.
+    Unsupported,
+}
+
+/// Classify a base premise for addition-seeding, given the changed
+/// facts. Negated and optional premises are only `Unsupported` when
+/// an addition can actually match them.
+async fn classify_base<'a, Env>(
+    premise: &Premise,
+    additions: &[Artifact],
+    env: &'a Env,
+) -> Result<BaseSource, EvaluationError>
+where
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+{
+    fn slots(query: &crate::AttributeQuery) -> (Term<The>, Term<Entity>, Term<Any>) {
+        (query.the().clone(), query.of().clone(), query.is().clone())
+    }
+    fn any_match(the: &Term<The>, of: &Term<Entity>, is: &Term<Any>, facts: &[Artifact]) -> bool {
+        facts.iter().any(|fact| {
+            constant_admits(the.as_constant(), &Value::from(The::from(fact.the.clone())))
+                && constant_admits(of.as_constant(), &Value::Entity(fact.of.clone()))
+                && constant_admits(is.as_constant(), &fact.is)
+        })
+    }
+
+    Ok(match premise {
+        Premise::Assert(Proposition::Attribute(query)) => {
+            BaseSource::Attribute(Box::new(slots(query)))
+        }
+        Premise::Assert(Proposition::OptionalAttribute(query)) => {
+            // A new fact turning an Absent slot Present replaces the
+            // row rather than adding one: not additively seedable.
+            let (the, of, is) = (
+                query.query().the().clone(),
+                query.of().clone(),
+                query.is().clone(),
+            );
+            if any_match(&the, &of, &is, additions) {
+                BaseSource::Unsupported
+            } else {
+                BaseSource::Inert
+            }
+        }
+        Premise::Unless(Negation(Proposition::Attribute(query))) => {
+            let (the, of, is) = slots(query);
+            if any_match(&the, &of, &is, additions) {
+                BaseSource::Unsupported
+            } else {
+                BaseSource::Inert
+            }
+        }
+        Premise::Assert(Proposition::Concept(query)) => {
+            let bundle = Provider::<SelectRules>::execute(env, query.predicate.clone()).await?;
+            let local = bundle.recursion().is_none()
+                && bundle.rules().all(|rule| rule.analysis().is_entity_local());
+            let Some(this) = query.terms.get("this") else {
+                return Ok(BaseSource::Unsupported);
+            };
+            if local {
+                BaseSource::LocalConcept { this: this.clone() }
+            } else {
+                BaseSource::Unsupported
+            }
+        }
+        Premise::Unless(Negation(Proposition::Concept(_))) => {
+            if additions.is_empty() {
+                BaseSource::Inert
+            } else {
+                // An addition can grow the negated set and retract
+                // derived rows: not additively seedable.
+                BaseSource::Unsupported
+            }
+        }
+        _ => BaseSource::Inert,
+    })
+}
+
+/// Whether a constant slot admits the value (a variable or blank
+/// slot admits anything).
+fn constant_admits(constant: Option<&Value>, value: &Value) -> bool {
+    constant.map(|expected| expected == value).unwrap_or(true)
+}
+
+/// Bind one slot of a source premise from a changed value: a
+/// constant filters, a named variable binds, a blank matches.
+fn bind_source_slot(
+    matched: &mut Match,
+    scope: &mut Environment,
+    constant: Option<&Value>,
+    name: Option<&str>,
+    value: Value,
+) -> bool {
+    if let Some(expected) = constant {
+        return *expected == value;
+    }
+    match name {
+        Some(name) => {
+            if matched.bind(&Term::<Any>::var(name), value).is_err() {
+                return false;
+            }
+            scope.add(name);
+            true
+        }
+        None => true,
+    }
+}
+
+/// Extend a previously computed fixpoint with newly added base
+/// facts: semi-naive continuation. For every rule, each new fact is
+/// bound into the base premise it can match (or, for an
+/// out-of-component entity-local concept premise, the fact's
+/// subject binds the premise's `this` slot); recursive occurrences
+/// read the *retained totals*; the remaining base premises join
+/// sideways top-down. Newly staged rows then drive the ordinary
+/// delta rounds to convergence.
+///
+/// Returns `Ok(None)` when the rule set cannot be extended
+/// additively — a negated or optional premise a new fact matches
+/// (the addition could *retract* rows), or a non-local nested
+/// concept — in which case the caller rebuilds from scratch, which
+/// is always sound. Deletions must never reach this function; the
+/// caller rebuilds for those.
+pub async fn extend<'a, Env>(
+    root: &ConceptDescriptor,
+    analysis: &ProgramAnalysis,
+    env: &'a Env,
+    table: &mut InMemoryAnswerTable,
+    additions: &[Artifact],
+) -> Result<Option<Vec<Row>>, EvaluationError>
+where
+    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+{
+    let root_entity = root.this();
+    let members = discover(root, analysis, env).await?;
+    let subjects: BTreeSet<Entity> = additions.iter().map(|fact| fact.of.clone()).collect();
+
+    for member in members.values() {
+        for split in &member.rules {
+            // Classify every base premise first: any unsupported
+            // shape aborts the extension before rows are staged.
+            let mut classified = Vec::with_capacity(split.base.len());
+            for premise in &split.base {
+                match classify_base(premise, additions, env).await? {
+                    BaseSource::Unsupported => return Ok(None),
+                    source => classified.push(source),
+                }
+            }
+
+            for source in classified.iter() {
+                // The bindings each new fact contributes through
+                // this source premise.
+                let mut seeds: Vec<(Match, Environment)> = Vec::new();
+                match source {
+                    BaseSource::Attribute(slots) => {
+                        let (the, of, is) = slots.as_ref();
+                        for fact in additions {
+                            let mut matched = Match::new();
+                            let mut scope = Environment::new();
+                            if bind_source_slot(
+                                &mut matched,
+                                &mut scope,
+                                the.as_constant(),
+                                the.name(),
+                                Value::from(The::from(fact.the.clone())),
+                            ) && bind_source_slot(
+                                &mut matched,
+                                &mut scope,
+                                of.as_constant(),
+                                of.name(),
+                                Value::Entity(fact.of.clone()),
+                            ) && bind_source_slot(
+                                &mut matched,
+                                &mut scope,
+                                is.as_constant(),
+                                is.name(),
+                                fact.is.clone(),
+                            ) {
+                                seeds.push((matched, scope));
+                            }
                         }
+                    }
+                    BaseSource::LocalConcept { this } => {
+                        for entity in &subjects {
+                            let mut matched = Match::new();
+                            let mut scope = Environment::new();
+                            if bind_source_slot(
+                                &mut matched,
+                                &mut scope,
+                                this.as_constant(),
+                                this.name(),
+                                Value::Entity(entity.clone()),
+                            ) {
+                                seeds.push((matched, scope));
+                            }
+                        }
+                    }
+                    BaseSource::Inert | BaseSource::Unsupported => continue,
+                }
+
+                // The source premise stays in the sideways join: with
+                // its slots bound it re-verifies as a point lookup
+                // (preserving cardinality-one winner semantics), and
+                // a concept source's remaining fields bind from its
+                // goal-directed evaluation.
+                let rest: Vec<Premise> = split.base.clone();
+
+                for (seed_match, seed_scope) in seeds {
+                    // Occurrences read the retained totals: the new
+                    // fact is the delta position.
+                    let choices: Vec<Vec<Row>> = split
+                        .occurrences
+                        .iter()
+                        .map(|occurrence| table.total(&occurrence.predicate.this()))
+                        .collect();
+                    for combination in Combinations::new(choices.iter().map(Vec::len).collect()) {
+                        let mut matched = seed_match.clone();
+                        let mut scope = seed_scope.clone();
+                        let mut compatible = true;
+                        for (index, (occurrence, row_index)) in
+                            split.occurrences.iter().zip(&combination).enumerate()
+                        {
+                            let row = &choices[index][*row_index];
+                            if !bind_occurrence(&mut matched, occurrence, row) {
+                                compatible = false;
+                                break;
+                            }
+                            for (_, term) in occurrence.terms.iter() {
+                                if let Some(name) = term.name() {
+                                    scope.add(name);
+                                }
+                            }
+                        }
+                        if !compatible {
+                            continue;
+                        }
+                        stage_rule_rows(member, split, rest.clone(), matched, &scope, table, env)
+                            .await?;
                     }
                 }
             }
         }
     }
 
-    Ok(table.total(&root_entity))
+    delta_rounds(&root_entity, &members, table, env).await?;
+    Ok(Some(table.total(&root_entity)))
+}
+
+/// A retained fixpoint carried across evaluations by a standing
+/// subscription: the answer table handle plus, when the poll's
+/// changes were additions only, the new facts to seed a semi-naive
+/// continuation from. Attached to a concept's
+/// [`ConceptRules`](crate::ConceptRules) by the query environment;
+/// consumed by `ConceptQuery::evaluate`'s fixpoint branch.
+#[derive(Clone, Default)]
+pub struct Continuation {
+    table: Arc<Mutex<Option<InMemoryAnswerTable>>>,
+    additions: Option<Arc<Vec<Artifact>>>,
+}
+
+impl fmt::Debug for Continuation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Continuation")
+            .field(
+                "additions",
+                &self.additions.as_ref().map(|facts| facts.len()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl Continuation {
+    /// A continuation over the subscription-held `table`. With
+    /// `additions`, evaluation extends the retained fixpoint
+    /// semi-naively (falling back to a rebuild when the rule set
+    /// cannot extend additively); without, it rebuilds into the
+    /// handle (the first evaluation, or after deletions).
+    pub fn new(
+        table: Arc<Mutex<Option<InMemoryAnswerTable>>>,
+        additions: Option<Arc<Vec<Artifact>>>,
+    ) -> Self {
+        Continuation { table, additions }
+    }
+
+    /// The queried concept's fixpoint rows, reusing the retained
+    /// table when possible. The table is taken out of the handle
+    /// for the duration (an error mid-evaluation leaves the handle
+    /// empty, so the next evaluation rebuilds).
+    pub(crate) async fn rows<'a, Env>(
+        &self,
+        root: &ConceptDescriptor,
+        analysis: &ProgramAnalysis,
+        env: &'a Env,
+    ) -> Result<Vec<Row>, EvaluationError>
+    where
+        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    {
+        let prior = self.table.lock().expect("fixpoint table lock").take();
+        let (table, rows) = match (prior, &self.additions) {
+            (Some(mut table), Some(additions)) => {
+                match extend(root, analysis, env, &mut table, additions).await? {
+                    Some(rows) => (table, rows),
+                    None => {
+                        // Not additively extendable: rebuild.
+                        let mut table = InMemoryAnswerTable::default();
+                        let rows = evaluate_table(root, analysis, env, &mut table).await?;
+                        (table, rows)
+                    }
+                }
+            }
+            _ => {
+                let mut table = InMemoryAnswerTable::default();
+                let rows = evaluate_table(root, analysis, env, &mut table).await?;
+                (table, rows)
+            }
+        };
+        *self.table.lock().expect("fixpoint table lock") = Some(table);
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
