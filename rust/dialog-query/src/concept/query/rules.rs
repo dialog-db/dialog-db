@@ -17,6 +17,7 @@ use crate::concept::descriptor::ConceptDescriptor;
 use crate::parameters::Parameters;
 use crate::planner::Disjunction;
 use crate::selection::Match;
+use crate::session::ProgramAnalysis;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -36,6 +37,12 @@ pub struct ConceptRules {
     /// plans the previous query computed. A standalone instance gets a
     /// private one via [`PlanCache::default`].
     plan_cache: PlanCache,
+    /// Present when this concept participates in a dependency
+    /// cycle: the program analysis the fixpoint evaluator needs to
+    /// tell in-component premises from base ones. Attached by
+    /// [`RuleRegistry::acquire`](crate::session::RuleRegistry) and
+    /// read by `ConceptQuery::evaluate`.
+    recursion: Option<Arc<ProgramAnalysis>>,
 }
 
 impl ConceptRules {
@@ -57,7 +64,21 @@ impl ConceptRules {
             installed: Vec::new(),
             plans: Arc::new(RwLock::new(HashMap::new())),
             plan_cache,
+            recursion: None,
         }
+    }
+
+    /// Attach the program analysis marking this concept recursive.
+    /// Evaluation switches to the semi-naive fixpoint when present.
+    pub fn with_recursion(mut self, analysis: Arc<ProgramAnalysis>) -> Self {
+        self.recursion = Some(analysis);
+        self
+    }
+
+    /// The program analysis attached when this concept participates
+    /// in a dependency cycle; `None` for ordinary concepts.
+    pub fn recursion(&self) -> Option<&Arc<ProgramAnalysis>> {
+        self.recursion.as_ref()
     }
 
     /// Install a deductive rule, deduplicating by equality.

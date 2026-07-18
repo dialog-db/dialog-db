@@ -54,19 +54,29 @@ let
       };
     };
 
+  # Built with crane (rather than rustPlatform.buildRustPackage) so its
+  # vendored dependencies are cached in the shared binary cache alongside the
+  # rest of the workspace. buildRustPackage's cargoHash drives a vendor-staging
+  # fixed-output derivation that fetches crates live from crates.io on every
+  # cache miss, which fails intermittently when crates.io rate-limits CI
+  # runners (HTTP 403). Crane vendors from the crate's bundled Cargo.lock and
+  # the resulting artifacts substitute from cachix like everything else.
   enforce-workspace-deps =
-    with pkgs;
-    rustPlatform.buildRustPackage rec {
-      pname = "cargo-enforce-shared-workspace-deps";
-      version = "0.1.0";
-      buildInputs = [ rustToolchain ];
-
-      src = fetchCrate {
-        inherit pname version;
+    let
+      src = pkgs.fetchCrate {
+        pname = "cargo-enforce-shared-workspace-deps";
+        version = "0.1.0";
         sha256 = "sha256-XOdKeg9tNt/HT+WO9QKtdX3fUMUssVTlXRV0LOIMMzc=";
       };
-
-      cargoHash = "sha256-O6DQXK8/VVwTLuFlSyh8jtBJyAFMfAUNXnTeMWrXTCM=";
+    in
+    craneLib.buildPackage {
+      inherit src;
+      pname = "cargo-enforce-shared-workspace-deps";
+      version = "0.1.0";
+      strictDeps = true;
+      cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+      nativeBuildInputs = [ rustToolchain ];
+      doCheck = false;
     };
 
   nativeBuildInputs = buildInputs ++ [
