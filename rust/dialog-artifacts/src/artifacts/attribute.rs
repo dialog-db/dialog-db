@@ -28,6 +28,11 @@ impl Attribute {
     pub fn key_bytes(&self) -> &[u8; ATTRIBUTE_LENGTH] {
         &self.1
     }
+
+    /// The attribute's raw `namespace/predicate` string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl TryFrom<String> for Attribute {

@@ -27,7 +27,6 @@ pub trait KeyType:
 /// A value that may be stored against a key in an artifact index.
 pub trait ValueType: Debug + ConditionalSync + Clone + Serialize + DeserializeOwned {}
 use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 
 mod attribute;
 pub use attribute::*;
@@ -44,8 +43,7 @@ pub use blob::*;
 mod part;
 pub use part::*;
 
-mod varkey;
-pub use varkey::*;
+pub(crate) mod varkey;
 
 /// Tag byte reserved for the history index (the fourth index ordering).
 ///
@@ -53,10 +51,12 @@ pub use varkey::*;
 /// not yet implemented, so no key view is built on this tag.
 pub const HISTORY_KEY_TAG: u8 = 3;
 
+use crate::{ArtifactSelector, ValueDataType, selector::Constrained};
+
 /// Helper macro for creating mutable slices from byte arrays at compile time.
 ///
-/// This macro is used internally for efficient manipulation of key byte layouts
-/// without runtime bounds checking.
+/// Still used by the padded `[u8; N]` byte representations that [`Entity`] and
+/// [`Uri`](crate::Uri) carry alongside their string form.
 macro_rules! mutable_slice {
     ( $array:expr, $index:expr, $run:expr ) => {{
         const START: usize = $index;
@@ -67,69 +67,62 @@ macro_rules! mutable_slice {
 
 pub(crate) use mutable_slice;
 
-use crate::{ArtifactSelector, DialogArtifactsError, ValueDataType, selector::Constrained};
-
 /// Length of the key tag field in bytes
 pub(crate) const TAG_LENGTH: usize = 1;
-/// Length of the entity field in key bytes
+/// Length of the padded entity byte representation carried by [`Entity`].
+///
+/// Keys no longer pad entities (they are lossless and variable-length); this
+/// width only sizes the legacy `[u8; ENTITY_LENGTH]` companion buffer.
 pub(crate) const ENTITY_LENGTH: usize = 64;
-/// Number of leading entity-URI bytes stored *raw* (and therefore
-/// order-preserving) in the entity field; the remainder of the
-/// field is a hash of the URI's tail (see [`Uri::key_bytes`](crate::Uri::key_bytes)).
-/// Prefix scans can range over at most this many bytes of the URI;
-/// longer prefixes re-check against the stored datum.
-pub(crate) const ENTITY_RAW_HEAD: usize = 32;
-/// Length of the attribute field in key bytes
+/// Maximum attribute length in bytes (still capped for the dictionary column
+/// and for filler-based range bounds).
 pub(crate) const ATTRIBUTE_LENGTH: usize = 64;
 /// Length of the value data type field in key bytes
 pub(crate) const VALUE_DATA_TYPE_LENGTH: usize = 1;
 /// Length of the value reference field in key bytes
 pub(crate) const VALUE_REFERENCE_LENGTH: usize = 32;
 
-/// Total length of a complete key in bytes
-pub(crate) const KEY_LENGTH: usize =
-    TAG_LENGTH + ENTITY_LENGTH + ATTRIBUTE_LENGTH + VALUE_DATA_TYPE_LENGTH + VALUE_REFERENCE_LENGTH;
-
-pub(crate) const MINIMUM_KEY: [u8; KEY_LENGTH] = [u8::MIN; KEY_LENGTH];
-pub(crate) const MAXIMUM_KEY: [u8; KEY_LENGTH] = [u8::MAX; KEY_LENGTH];
-
-pub(crate) const MINIMUM_ENTITY: [u8; ENTITY_LENGTH] = [u8::MIN; ENTITY_LENGTH];
-pub(crate) const MAXIMUM_ENTITY: [u8; ENTITY_LENGTH] = [u8::MAX; ENTITY_LENGTH];
-pub(crate) const MINIMUM_ATTRIBUTE: [u8; ATTRIBUTE_LENGTH] = [u8::MIN; ATTRIBUTE_LENGTH];
-pub(crate) const MAXIMUM_ATTRIBUTE: [u8; ATTRIBUTE_LENGTH] = [u8::MAX; ATTRIBUTE_LENGTH];
 pub(crate) const MINIMUM_VALUE_REFERENCE: [u8; VALUE_REFERENCE_LENGTH] =
     [u8::MIN; VALUE_REFERENCE_LENGTH];
 pub(crate) const MAXIMUM_VALUE_REFERENCE: [u8; VALUE_REFERENCE_LENGTH] =
     [u8::MAX; VALUE_REFERENCE_LENGTH];
 
-/// Type alias for the raw byte representation of a key
-pub type KeyBytes = [u8; KEY_LENGTH];
-
-/// An opaque, generic [`KeyType`] that is used when constructing the subtrees
-/// of an [`Artifacts`] index.
+/// An opaque, generic [`KeyType`] backing the subtrees of an [`Artifacts`]
+/// index.
+///
+/// A key is a variable-length, lossless, order-preserving byte string built by
+/// [`varkey::build_key`]: a tag byte followed by the ordering's components,
+/// each encoded so byte order equals semantic order. The entity and attribute
+/// are stored at their true length (no 64-byte padding, no truncate-and-hash).
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct Key(#[serde(with = "BigArray")] KeyBytes);
+pub struct Key(Vec<u8>);
 
 impl Key {
-    /// Construct the lowest possible [`EntityKey`] (all bits are zero)
+    /// Construct the lowest possible [`Key`] (a single zero byte: the smallest
+    /// possible tag with an empty tail).
     pub fn min() -> Self {
-        Self(MINIMUM_KEY)
+        Self(vec![u8::MIN])
     }
 
-    /// Construct the highest possible [`EntityKey`] (all bits are one)
+    /// Construct the highest possible [`Key`] (a single `0xFF` byte: larger
+    /// than any real key, whose first byte is a tag `<= 0xFF`).
     pub fn max() -> Self {
-        Self(MAXIMUM_KEY)
+        Self(vec![u8::MAX])
     }
 
     /// Returns the tag byte that identifies the key type (entity, attribute, or value)
     pub fn tag(&self) -> u8 {
-        self.0[0]
+        self.0.first().copied().unwrap_or(u8::MIN)
     }
 
     /// Sets the tag byte and returns the modified key
     pub fn set_tag(mut self, tag: u8) -> Self {
-        self.0[0] = tag;
+        if self.0.is_empty() {
+            self.0.push(tag);
+        } else {
+            self.0[0] = tag;
+        }
         self
     }
 }
@@ -140,33 +133,20 @@ impl KeyType for Key {
     }
 }
 
-impl TryFrom<Vec<u8>> for Key {
-    type Error = DialogArtifactsError;
-
-    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
-        Ok(Self(value.try_into().map_err(|value: Vec<u8>| {
-            DialogArtifactsError::InvalidKey(format!(
-                "Wrong byte length for entity key: {}",
-                value.len()
-            ))
-        })?))
-    }
-}
-
-impl From<KeyBytes> for Key {
-    fn from(value: KeyBytes) -> Self {
+impl From<Vec<u8>> for Key {
+    fn from(value: Vec<u8>) -> Self {
         Key(value)
     }
 }
 
-impl From<Key> for KeyBytes {
+impl From<Key> for Vec<u8> {
     fn from(value: Key) -> Self {
         value.0
     }
 }
 
 impl Deref for Key {
-    type Target = KeyBytes;
+    type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -175,18 +155,6 @@ impl Deref for Key {
 
 impl DerefMut for Key {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl AsRef<KeyBytes> for Key {
-    fn as_ref(&self) -> &KeyBytes {
-        &self.0
-    }
-}
-
-impl AsMut<KeyBytes> for Key {
-    fn as_mut(&mut self) -> &mut KeyBytes {
         &mut self.0
     }
 }
@@ -201,11 +169,11 @@ impl AsRef<[u8]> for Key {
 /// value_type ‖ value_reference`). The entity and value reference are large
 /// and mostly distinct (arena); the tag, attribute, and value type are small
 /// and highly repeated, recurring non-adjacently across the leaf
-/// (dictionary).
+/// (dictionary). Entity and attribute are variable-length.
 const EAV_SCHEMA: &[TreeComponent] = &[
     TreeComponent::dictionary(TAG_LENGTH),
-    TreeComponent::arena(ENTITY_LENGTH),
-    TreeComponent::dictionary(ATTRIBUTE_LENGTH),
+    TreeComponent::arena_var(),
+    TreeComponent::dictionary_var(),
     TreeComponent::dictionary(VALUE_DATA_TYPE_LENGTH),
     TreeComponent::arena(VALUE_REFERENCE_LENGTH),
 ];
@@ -214,8 +182,8 @@ const EAV_SCHEMA: &[TreeComponent] = &[
 /// value_type ‖ value_reference`).
 const AEV_SCHEMA: &[TreeComponent] = &[
     TreeComponent::dictionary(TAG_LENGTH),
-    TreeComponent::dictionary(ATTRIBUTE_LENGTH),
-    TreeComponent::arena(ENTITY_LENGTH),
+    TreeComponent::dictionary_var(),
+    TreeComponent::arena_var(),
     TreeComponent::dictionary(VALUE_DATA_TYPE_LENGTH),
     TreeComponent::arena(VALUE_REFERENCE_LENGTH),
 ];
@@ -226,34 +194,28 @@ const VAE_SCHEMA: &[TreeComponent] = &[
     TreeComponent::dictionary(TAG_LENGTH),
     TreeComponent::dictionary(VALUE_DATA_TYPE_LENGTH),
     TreeComponent::arena(VALUE_REFERENCE_LENGTH),
-    TreeComponent::dictionary(ATTRIBUTE_LENGTH),
-    TreeComponent::arena(ENTITY_LENGTH),
+    TreeComponent::dictionary_var(),
+    TreeComponent::arena_var(),
 ];
 
 /// The blob index ordering (`BLOB_KEY_TAG ‖ blob_hash ‖ 0…`) has a single
-/// large distinct component after the tag; store it as one arena.
+/// large distinct component after the tag; store it as one variable arena.
 const BLOB_SCHEMA: &[TreeComponent] = &[
     TreeComponent::dictionary(TAG_LENGTH),
-    TreeComponent::arena(KEY_LENGTH - TAG_LENGTH),
+    TreeComponent::arena_var(),
 ];
 
 impl TreeKey for Key {
     fn try_from_bytes(bytes: &[u8]) -> Result<Self, DialogSearchTreeError> {
-        let array: KeyBytes = bytes.try_into().map_err(|_| {
-            DialogSearchTreeError::Encoding(format!(
-                "Expected a {KEY_LENGTH}-byte artifact key, got {} bytes",
-                bytes.len()
-            ))
-        })?;
-        Ok(Key(array))
+        Ok(Key(bytes.to_vec()))
     }
 
     fn min() -> Self {
-        Key(MINIMUM_KEY)
+        Key::min()
     }
 
     fn max() -> Self {
-        Key(MAXIMUM_KEY)
+        Key::max()
     }
 
     /// The layout id is the key's tag byte, which selects the ordering's
@@ -261,7 +223,7 @@ impl TreeKey for Key {
     /// first), so a leaf is single-layout except at the rare tag boundaries,
     /// which the codec handles by falling back to the opaque schema.
     fn layout(&self) -> u8 {
-        self.0[0]
+        self.0.first().copied().unwrap_or(u8::MIN)
     }
 
     fn schema(layout: u8) -> Schema {
@@ -276,40 +238,14 @@ impl TreeKey for Key {
     }
 
     fn components<'a>(&'a self, out: &mut Vec<&'a [u8]>) {
-        // Field widths in byte order for this key's tag. Must match the tag's
-        // schema in `schema`.
-        let widths: &[usize] = match self.0[0] {
-            ENTITY_KEY_TAG => &[
-                TAG_LENGTH,
-                ENTITY_LENGTH,
-                ATTRIBUTE_LENGTH,
-                VALUE_DATA_TYPE_LENGTH,
-                VALUE_REFERENCE_LENGTH,
-            ],
-            ATTRIBUTE_KEY_TAG => &[
-                TAG_LENGTH,
-                ATTRIBUTE_LENGTH,
-                ENTITY_LENGTH,
-                VALUE_DATA_TYPE_LENGTH,
-                VALUE_REFERENCE_LENGTH,
-            ],
-            VALUE_KEY_TAG => &[
-                TAG_LENGTH,
-                VALUE_DATA_TYPE_LENGTH,
-                VALUE_REFERENCE_LENGTH,
-                ATTRIBUTE_LENGTH,
-                ENTITY_LENGTH,
-            ],
-            BLOB_KEY_TAG => &[TAG_LENGTH, KEY_LENGTH - TAG_LENGTH],
-            _ => {
-                out.push(&self.0);
-                return;
-            }
-        };
-        let mut at = 0;
-        for &width in widths {
-            out.push(&self.0[at..at + width]);
-            at += width;
+        // Split the key into the *encoded* component slices for its ordering.
+        // Every slice borrows from `self`, and their concatenation is the key
+        // bytes exactly, matching the tag's schema. A key that does not split
+        // cleanly (an unknown tag, a `min`/`max` sentinel, or malformed bytes)
+        // falls back to the opaque whole-key component.
+        match varkey::split_components(&self.0) {
+            Some(slices) => out.extend(slices),
+            None => out.push(&self.0),
         }
     }
 }

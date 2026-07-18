@@ -31,13 +31,13 @@ use dialog_search_tree::{
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
+use std::iter::repeat_n;
 use std::ops::RangeInclusive;
 
 use crate::{
-    ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum,
-    DialogArtifactsError, ENTITY_LENGTH, ENTITY_RAW_HEAD, EntityKey, EntityKeyPart, FromKey,
-    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, MatchCandidate, State, ValueKey,
-    selector::Constrained,
+    Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum, DialogArtifactsError,
+    EntityKey, EntityKeyPart, FromKey, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut,
+    MatchCandidate, State, ValueKey, selector::Constrained,
 };
 
 /// The concrete search-tree type the artifact indexes use.
@@ -75,17 +75,31 @@ where
     }
 }
 
-/// A fixed-width key segment bounding a string prefix: the prefix's
-/// raw bytes (capped at `head` — the order-preserving span of the
-/// segment) followed by `fill`. With `fill = 0x00` this is the
-/// smallest segment any matching value can have, with `fill = 0xFF`
-/// the largest, so the pair brackets the prefix's key range.
-fn prefix_segment<const N: usize>(prefix: &str, head: usize, fill: u8) -> [u8; N] {
-    let mut segment = [fill; N];
-    let raw = prefix.as_bytes();
-    let take = raw.len().min(head).min(N);
-    segment[..take].copy_from_slice(&raw[..take]);
-    segment
+/// Filler length appended to a prefix to form its inclusive upper bound. Keys
+/// are lossless and order-preserving, so `prefix ‖ 0xFE…` dominates every
+/// UTF-8 continuation of `prefix` up to this many trailing bytes.
+// TODO(m3): like `KeyParts::max`, this bounds an unbounded field with a
+// generous but finite filler; exact for the 64-byte attribute cap,
+// best-effort for arbitrarily long entity URIs. Revisit with exclusive
+// (prefix-successor) range bounds.
+const PREFIX_FILLER: usize = 256;
+
+/// The lower key-segment bound for a string prefix: the prefix's raw bytes.
+/// Every value beginning with the prefix is >= this.
+fn prefix_lower(prefix: &str) -> Vec<u8> {
+    prefix.as_bytes().to_vec()
+}
+
+/// The upper key-segment bound for a string prefix: the prefix followed by a
+/// `0xFE` filler, >= every UTF-8 value beginning with the prefix (UTF-8 bytes
+/// are `<= 0xF4`). `0xFE` rather than `0xFF`: a field must never begin with
+/// the `ordkey` escape byte, or the preceding field's terminator misreads as
+/// an escaped zero (see `varkey::MAX_FILLER_BYTE`); with an empty prefix the
+/// filler's first byte IS the field's first byte.
+fn prefix_upper(prefix: &str) -> Vec<u8> {
+    let mut bytes = prefix.as_bytes().to_vec();
+    bytes.extend(repeat_n(0xFEu8, PREFIX_FILLER));
+    bytes
 }
 
 /// Tighten a scan's `(start, end)` key pair with the selector's
@@ -106,16 +120,16 @@ fn apply_prefix_bounds<K: KeyViewMut>(
     if selector.attribute().is_none()
         && let Some(prefix) = selector.attribute_prefix()
     {
-        let lo = prefix_segment::<ATTRIBUTE_LENGTH>(prefix, ATTRIBUTE_LENGTH, u8::MIN);
-        let hi = prefix_segment::<ATTRIBUTE_LENGTH>(prefix, ATTRIBUTE_LENGTH, u8::MAX);
+        let lo = prefix_lower(prefix);
+        let hi = prefix_upper(prefix);
         start = start.set_attribute(AttributeKeyPart(&lo));
         end = end.set_attribute(AttributeKeyPart(&hi));
     }
     if selector.entity().is_none()
         && let Some(prefix) = selector.entity_prefix()
     {
-        let lo = prefix_segment::<ENTITY_LENGTH>(prefix, ENTITY_RAW_HEAD, u8::MIN);
-        let hi = prefix_segment::<ENTITY_LENGTH>(prefix, ENTITY_RAW_HEAD, u8::MAX);
+        let lo = prefix_lower(prefix);
+        let hi = prefix_upper(prefix);
         start = start.set_entity(EntityKeyPart(&lo));
         end = end.set_entity(EntityKeyPart(&hi));
     }
@@ -261,6 +275,17 @@ impl ArtifactTreeExt for ArtifactTree {
                             let candidate = candidate?;
                             if let State::Added(current_element) = candidate.value {
                                 let current = Artifact::try_from(current_element)?;
+                                // Supersession is scoped to this exact
+                                // (entity, attribute). The range should already
+                                // guarantee that, but deleting is destructive
+                                // and unconditional across all three indexes,
+                                // so verify rather than trust the bounds: a
+                                // range-construction bug once widened this
+                                // scan to unrelated entities and erased their
+                                // facts.
+                                if current.of != artifact.of || current.the != artifact.the {
+                                    continue;
+                                }
                                 if current.is == artifact.is {
                                     found_same_value = true;
                                 } else {

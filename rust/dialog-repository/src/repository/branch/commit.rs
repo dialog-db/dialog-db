@@ -143,6 +143,58 @@ mod tests {
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use futures_util::{StreamExt, stream};
 
+    /// Two commits in sequence (no refresh between) with different entities on
+    /// the same attribute: both facts must survive.
+    ///
+    /// Regression for the variable-key `Replace` supersede-scan bug: the
+    /// scan's upper bound lost its entity (the max sentinel's `0xFF` filler
+    /// made the bound unparseable after `set_entity`, so `set_attribute`'s
+    /// rebuild fell back to max parts), widening the scan to every entity
+    /// sorting after the new one — here the first-committed `alice`, whose
+    /// fact was deleted as a "superseded prior".
+    #[dialog_common::test]
+    async fn it_keeps_both_facts_across_two_commits() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // alice sorts AFTER bob; alice is committed first, then bob.
+        let alice = "did:key:z6MkQmQKzPsjyUz49pvaxYdiiZEuQXyNqeBkS88GTrvqnov";
+        let bob = "did:key:z6MkDiL3ZaJ4V7VSdQruLenZLA4RNbu6cErR5m8K5Wj99wTF";
+
+        branch
+            .commit(stream::iter(vec![Instruction::Replace(Artifact {
+                the: "person/name".parse()?,
+                of: alice.parse()?,
+                is: Value::String("Alice".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        branch
+            .commit(stream::iter(vec![Instruction::Replace(Artifact {
+                the: "person/name".parse()?,
+                of: bob.parse()?,
+                is: Value::String("Bob".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let results: Vec<_> = branch
+            .claims()
+            .select(ArtifactSelector::new().the("person/name".parse()?))
+            .perform(&operator)
+            .await?
+            .filter_map(|r| async { r.ok() })
+            .collect()
+            .await;
+
+        assert_eq!(results.len(), 2, "both facts must survive two commits");
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_commits_and_selects() -> Result<()> {
         let (operator, profile) = test_operator_with_profile().await;

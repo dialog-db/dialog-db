@@ -18,7 +18,8 @@
 //! the `Key` type and `KeyView` traits are refactored onto it separately.
 
 use crate::{
-    ATTRIBUTE_KEY_TAG, ENTITY_KEY_TAG, VALUE_KEY_TAG, ValueDataType, decode_bytes, encode_bytes,
+    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, ENTITY_KEY_TAG, VALUE_KEY_TAG, ValueDataType, decode_bytes,
+    encode_bytes,
 };
 
 /// The decoded components of an artifact key, borrowed where possible.
@@ -34,6 +35,146 @@ pub struct KeyParts {
     pub value_type: ValueDataType,
     /// The 32-byte value reference.
     pub value_reference: Vec<u8>,
+}
+
+impl KeyParts {
+    /// The minimum components for an ordering: empty entity/attribute, the
+    /// minimum value type, and an all-zero value reference.
+    pub fn min(tag: u8) -> Self {
+        Self {
+            tag,
+            entity: Vec::new(),
+            attribute: Vec::new(),
+            value_type: ValueDataType::min(),
+            value_reference: vec![0u8; 32],
+        }
+    }
+
+    /// The maximum components for an ordering.
+    ///
+    /// The entity and attribute are variable-length, so there is no exact
+    /// maximum; a bounded [`MAX_FILLER_BYTE`] filler is used, which dominates
+    /// every UTF-8 byte and so every real entity URI and attribute name.
+    /// Attributes are capped at [`ATTRIBUTE_LENGTH`](crate::ATTRIBUTE_LENGTH)
+    /// (64) bytes, so the attribute filler is exact for them; entities are
+    /// unbounded, so an entity upper bound is only exact once its true value
+    /// or prefix is set.
+    // TODO(m3): a variable-length ordering has no representable inclusive
+    // maximum for an unbounded trailing field (a value- or attribute-only scan
+    // whose trailing entity is unconstrained). This filler dominates all
+    // realistic entities but a pathologically long entity could exceed it.
+    // Revisit once selector ranges can express an exclusive (prefix-successor)
+    // upper bound instead of `RangeInclusive<Key>`.
+    pub fn max(tag: u8) -> Self {
+        Self {
+            tag,
+            entity: vec![MAX_FILLER_BYTE; MAX_FILLER],
+            attribute: vec![MAX_FILLER_BYTE; MAX_FILLER],
+            value_type: ValueDataType::max(),
+            value_reference: vec![0xFFu8; 32],
+        }
+    }
+}
+
+/// Filler length for the maximum of a variable-length field. Comfortably
+/// exceeds the 64-byte attribute cap and any realistic entity URI.
+const MAX_FILLER: usize = 256;
+
+/// Filler byte for the maximum of a variable-length field.
+///
+/// `0xFE`, NOT `0xFF`: the `ordkey` byte-string encoding escapes a content
+/// zero as `0x00 0xFF`, so a field terminator (`0x00`) followed by a next
+/// field starting with `0xFF` reads back as an escaped zero and the key
+/// stops being parseable. A `0xFF` filler therefore poisons every key built
+/// from max parts: the first `set_*` on such a bound parses fine, but the
+/// key it builds cannot be re-parsed, so the next `set_*` falls back to the
+/// max parts and silently discards the previously-set fields. (This exact
+/// failure made a `Replace` supersede-scan's upper bound lose its entity,
+/// widening the scan to all entities and deleting unrelated facts.)
+///
+/// The general invariant: no field may begin with the escape byte `0xFF`.
+/// Real fields hold UTF-8 text (bytes `<= 0xF4`) or small tag bytes, so
+/// `0xFE` both respects the invariant and still dominates every real value.
+const MAX_FILLER_BYTE: u8 = 0xFE;
+
+/// One decodable field of a key, addressed by role rather than by byte offset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    /// The entity component.
+    Entity,
+    /// The attribute component.
+    Attribute,
+}
+
+/// Borrows a variable-length field's *raw* bytes (its encoded segment with the
+/// trailing terminator stripped) from a key.
+///
+/// Entities and attributes are NUL-free UTF-8, so their encoded segment never
+/// contains an escaped zero and the raw bytes are exactly the segment minus its
+/// terminator, a sub-slice of `bytes`. A key that does not split cleanly (a
+/// `min`/`max` sentinel) yields an empty slice.
+pub fn field(bytes: &[u8], _tag: u8, which: Field) -> &[u8] {
+    let index = match (bytes.first().copied(), which) {
+        (Some(ENTITY_KEY_TAG), Field::Entity) => 1,
+        (Some(ENTITY_KEY_TAG), Field::Attribute) => 2,
+        (Some(ATTRIBUTE_KEY_TAG), Field::Attribute) => 1,
+        (Some(ATTRIBUTE_KEY_TAG), Field::Entity) => 2,
+        (Some(VALUE_KEY_TAG), Field::Attribute) => 3,
+        (Some(VALUE_KEY_TAG), Field::Entity) => 4,
+        _ => return &[],
+    };
+    match split_components(bytes) {
+        Some(slices) => slices
+            .get(index)
+            .map(|s| strip_terminator(s))
+            .unwrap_or(&[]),
+        None => &[],
+    }
+}
+
+/// The value type byte of a key for the given ordering, or the minimum when the
+/// key does not split cleanly.
+pub fn value_type(bytes: &[u8], _tag: u8) -> ValueDataType {
+    let index = match bytes.first().copied() {
+        Some(ENTITY_KEY_TAG) | Some(ATTRIBUTE_KEY_TAG) => 3,
+        Some(VALUE_KEY_TAG) => 1,
+        _ => return ValueDataType::min(),
+    };
+    match split_components(bytes) {
+        Some(slices) => slices
+            .get(index)
+            .and_then(|s| s.first())
+            .map(|&b| ValueDataType::from(b))
+            .unwrap_or_else(ValueDataType::min),
+        None => ValueDataType::min(),
+    }
+}
+
+/// Borrows the 32-byte value reference of a key, or a zero array when the key
+/// does not split cleanly.
+pub fn value_reference(bytes: &[u8], _tag: u8) -> &[u8; 32] {
+    const ZERO: [u8; 32] = [0u8; 32];
+    let index = match bytes.first().copied() {
+        Some(ENTITY_KEY_TAG) | Some(ATTRIBUTE_KEY_TAG) => 4,
+        Some(VALUE_KEY_TAG) => 2,
+        _ => return &ZERO,
+    };
+    match split_components(bytes) {
+        Some(slices) => slices
+            .get(index)
+            .and_then(|s| <&[u8; 32]>::try_from(*s).ok())
+            .unwrap_or(&ZERO),
+        None => &ZERO,
+    }
+}
+
+/// Strips a lone trailing terminator from an encoded, escape-free byte-string
+/// segment.
+fn strip_terminator(segment: &[u8]) -> &[u8] {
+    match segment.split_last() {
+        Some((&0x00, head)) => head,
+        _ => segment,
+    }
 }
 
 /// Builds the key bytes for a given ordering tag from the components, encoding
@@ -73,6 +214,96 @@ pub fn build_key(parts: &KeyParts) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Splits raw key bytes into the *encoded* component slices for its ordering,
+/// in the order they contribute to key comparison. Every returned slice
+/// borrows from `bytes`, and their concatenation equals `bytes` exactly (the
+/// escaped/terminated form is preserved, nothing is decoded). This is what the
+/// columnar leaf codec consumes: it matches the ordering's [`Schema`] one slice
+/// per component (`tag`, then the ordering's fields).
+///
+/// Returns `None` on malformed input, in which case the caller falls back to
+/// the opaque whole-key component.
+pub fn split_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
+    let (tag, _) = bytes.split_first()?;
+
+    // The length of one order-preserving byte string starting at `at`,
+    // including its escapes and terminator. Mirrors `decode_bytes` scanning
+    // without allocating.
+    fn encoded_len(bytes: &[u8], mut at: usize) -> Option<usize> {
+        let start = at;
+        while at < bytes.len() {
+            if bytes[at] == 0x00 {
+                match bytes.get(at + 1) {
+                    // Escaped zero: `0x00 0xFF` is two bytes of content.
+                    Some(0xFF) => at += 2,
+                    // Lone terminator ends the string.
+                    _ => return Some(at + 1 - start),
+                }
+            } else {
+                at += 1;
+            }
+        }
+        None
+    }
+
+    // The one-byte value type plus the 32-byte value reference.
+    const VALUE_TAIL: usize = 1 + 32;
+
+    let mut out: Vec<&[u8]> = Vec::with_capacity(5);
+    out.push(&bytes[0..1]);
+    let mut at = 1;
+
+    // Push one variable-length encoded string component starting at `at`.
+    macro_rules! push_var {
+        () => {{
+            let len = encoded_len(bytes, at)?;
+            out.push(&bytes[at..at + len]);
+            at += len;
+        }};
+    }
+
+    // Push the fixed value tail (value type + value reference).
+    macro_rules! push_value_tail {
+        () => {{
+            let end = at.checked_add(VALUE_TAIL)?;
+            if end > bytes.len() {
+                return None;
+            }
+            out.push(&bytes[at..at + 1]);
+            out.push(&bytes[at + 1..end]);
+            at = end;
+        }};
+    }
+
+    match *tag {
+        ENTITY_KEY_TAG => {
+            push_var!(); // entity
+            push_var!(); // attribute
+            push_value_tail!();
+        }
+        ATTRIBUTE_KEY_TAG => {
+            push_var!(); // attribute
+            push_var!(); // entity
+            push_value_tail!();
+        }
+        VALUE_KEY_TAG => {
+            push_value_tail!();
+            push_var!(); // attribute
+            push_var!(); // entity
+        }
+        BLOB_KEY_TAG => {
+            // The blob index is `tag ++ 32-byte hash`: two components (tag
+            // dictionary, hash arena) matching BLOB_SCHEMA, so the columnar
+            // codec's component count agrees with the split.
+            out.push(&bytes[at..]);
+            at = bytes.len();
+        }
+        _ => return None,
+    }
+
+    if at == bytes.len() { Some(out) } else { None }
 }
 
 /// Parses key bytes back into components, dispatching on the tag. Returns
@@ -211,6 +442,113 @@ mod tests {
         let e1_a = build_key(&parts(ENTITY_KEY_TAG, b"e1", b"a/a", 0));
         let e1_b = build_key(&parts(ENTITY_KEY_TAG, b"e1", b"b/b", 0));
         assert!(e1_a < e1_b, "same entity sorts by attribute");
+        Ok(())
+    }
+
+    /// Repro: an AEV attribute-only scan range must contain every stored AEV
+    /// key for that attribute, regardless of the entity's bytes. The range end
+    /// uses the `max` entity filler; a stored key whose entity encoding sorts
+    /// above that filler would fall outside the range and be silently dropped.
+    #[dialog_common::test]
+    async fn it_contains_every_stored_aev_key_in_attribute_scan() -> anyhow::Result<()> {
+        use crate::ATTRIBUTE_KEY_TAG;
+
+        let attribute = b"person/name";
+
+        // The attribute-only scan range, as `selector_range` builds it: min/max
+        // parts with the attribute set. The max parts do not parse, so the mut
+        // path falls back to `max`; we build them directly here.
+        let mut start_parts = KeyParts::min(ATTRIBUTE_KEY_TAG);
+        start_parts.attribute = attribute.to_vec();
+        let start = build_key(&start_parts);
+
+        let mut end_parts = KeyParts::max(ATTRIBUTE_KEY_TAG);
+        end_parts.attribute = attribute.to_vec();
+        let end = build_key(&end_parts);
+
+        // A spread of entity byte patterns: ASCII DIDs plus the highest legal
+        // UTF-8 bytes (`0xF4 0x8F 0xBF 0xBF`, U+10FFFF) to probe the filler
+        // boundary. Entities are UTF-8 URIs, so `0xFE`/`0xFF` bytes cannot
+        // occur in real fields (the composition invariant `MAX_FILLER_BYTE`
+        // documents).
+        let entities: &[&[u8]] = &[
+            b"did:key:z6MkfrQf",
+            b"did:key:z6Mkzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+            b"\xf4\x8f\xbf\xbf",
+            b"a",
+        ];
+
+        for entity in entities {
+            let mut stored = KeyParts::min(ATTRIBUTE_KEY_TAG);
+            stored.attribute = attribute.to_vec();
+            stored.entity = entity.to_vec();
+            stored.value_type = ValueDataType::String;
+            stored.value_reference = vec![0x42u8; 32];
+            let key = build_key(&stored);
+
+            assert!(
+                start.as_slice() <= key.as_slice(),
+                "stored key sorts below range start for entity {entity:?}"
+            );
+            assert!(
+                key.as_slice() <= end.as_slice(),
+                "stored key sorts ABOVE range end for entity {entity:?}\n  end={end:02x?}\n  key={key:02x?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A key built from max parts must PARSE, and it must keep parsing as
+    /// fields are set one at a time. This is the `set_entity(..).set_attribute(..)`
+    /// chain that builds a `Replace` supersede-scan's upper bound: with an
+    /// unparseable sentinel, the second `set_*` falls back to max parts and
+    /// silently discards the entity, widening the scan to ALL entities — which
+    /// deleted unrelated facts (the two-commit data-loss bug).
+    #[dialog_common::test]
+    async fn it_keeps_set_fields_across_a_max_bound_chain() -> anyhow::Result<()> {
+        for tag in [ENTITY_KEY_TAG, ATTRIBUTE_KEY_TAG, VALUE_KEY_TAG] {
+            // The raw max sentinel parses.
+            let max = build_key(&KeyParts::max(tag));
+            let parsed = parse_key(&max).expect("max sentinel parses");
+            assert_eq!(parsed, KeyParts::max(tag), "tag {tag} max round-trip");
+
+            // Setting the entity then re-parsing preserves it.
+            let mut parts = parse_key(&max).unwrap();
+            parts.entity = b"did:key:z6MkExample".to_vec();
+            let with_entity = build_key(&parts);
+            let reparsed = parse_key(&with_entity).expect("entity-set max parses");
+            assert_eq!(reparsed.entity, parts.entity, "tag {tag} entity survives");
+
+            // Setting the attribute afterwards preserves the entity.
+            let mut parts = reparsed;
+            parts.attribute = b"person/name".to_vec();
+            let with_both = build_key(&parts);
+            let reparsed = parse_key(&with_both).expect("both-set max parses");
+            assert_eq!(
+                reparsed.entity, parts.entity,
+                "tag {tag} entity survives the attribute set"
+            );
+            assert_eq!(reparsed.attribute, parts.attribute);
+        }
+        Ok(())
+    }
+
+    /// The max filler dominates every real entity and attribute byte-wise:
+    /// scan upper bounds built from it sort at or above every stored key.
+    #[dialog_common::test]
+    async fn it_max_dominates_real_keys() -> anyhow::Result<()> {
+        let real = parts(
+            ATTRIBUTE_KEY_TAG,
+            b"did:key:z6MkQmQKzPsjyUz49pvaxYdiiZEuQXyNqeBkS88GTrvqnov",
+            b"person/name",
+            0xFF,
+        );
+        let mut end = KeyParts::max(ATTRIBUTE_KEY_TAG);
+        end.attribute = b"person/name".to_vec();
+        assert!(
+            build_key(&real) <= build_key(&end),
+            "attribute-scan end must dominate every same-attribute key"
+        );
         Ok(())
     }
 

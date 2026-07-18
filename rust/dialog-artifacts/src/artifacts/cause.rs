@@ -39,8 +39,8 @@ impl From<&Artifact> for Cause {
     fn from(artifact: &Artifact) -> Self {
         Cause(make_reference(
             [
-                artifact.the.key_bytes().to_vec(),
-                artifact.of.key_bytes().to_vec(),
+                artifact.the.as_str().as_bytes().to_vec(),
+                artifact.of.as_str().as_bytes().to_vec(),
                 artifact.is.to_bytes(),
                 (artifact.cause.as_ref())
                     .map(|cause| (*cause).to_vec())

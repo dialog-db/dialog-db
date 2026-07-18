@@ -258,8 +258,8 @@ pub type SortKey = (Vec<u8>, Vec<u8>, u8, [u8; 32]);
 /// is correct across all three scan modes.
 pub fn sort_key(artifact: &Artifact) -> SortKey {
     (
-        artifact.the.key_bytes().to_vec(),
-        artifact.of.key_bytes().to_vec(),
+        artifact.the.as_str().as_bytes().to_vec(),
+        artifact.of.as_str().as_bytes().to_vec(),
         artifact.is.data_type().into(),
         artifact.is.to_reference(),
     )

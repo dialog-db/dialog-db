@@ -29,6 +29,13 @@
 const TERMINATOR: u8 = 0x00;
 /// The escape suffix: a `0x00` byte in the payload is written as
 /// `0x00 0xFF` so it never looks like the terminator.
+///
+/// Composition invariant: within a key, the component FOLLOWING a
+/// terminated byte string must not begin with this escape byte, or the
+/// terminator followed by that first byte reads back as an escaped zero
+/// (and sorts wrong for the same reason). Real artifact keys satisfy this
+/// (UTF-8 fields and small tag bytes never start with `0xFF`); synthetic
+/// bounds must too, which is why `varkey`'s max filler byte is `0xFE`.
 const ESCAPE: u8 = 0xFF;
 
 /// Encodes a `u128` big-endian: byte order equals numeric order.

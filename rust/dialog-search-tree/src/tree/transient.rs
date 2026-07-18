@@ -2441,4 +2441,91 @@ mod tests {
 
         Ok(())
     }
+
+    /// A variable-length opaque key for exercising the variable-length insert
+    /// paths (the fixed `[u8; N]` keys never share a long common prefix, so
+    /// they cannot reproduce a new-minimum split within one leaf).
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct VarKey(Vec<u8>);
+
+    impl AsRef<[u8]> for VarKey {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    impl crate::Key for VarKey {
+        fn try_from_bytes(bytes: &[u8]) -> Result<Self, crate::DialogSearchTreeError> {
+            Ok(VarKey(bytes.to_vec()))
+        }
+        fn min() -> Self {
+            VarKey(Vec::new())
+        }
+        fn max() -> Self {
+            VarKey(vec![u8::MAX; 64])
+        }
+    }
+
+    type VarTree = PersistentTree<VarKey, Vec<u8>>;
+
+    /// The geometric rank of a variable-length key.
+    fn var_rank(key: &[u8]) -> Rank {
+        distribution::geometric::rank(&Blake3Hash::hash(key))
+    }
+
+    /// Regression: inserting a NEW MINIMUM variable-length key into a
+    /// single-entry tree must not drop the existing entry. Mirrors the
+    /// artifact two-commit bug where a second entity whose key sorts before
+    /// the first wiped the first. Fixed-width `[u8;4]` tests never exercise a
+    /// new-minimum split because equal-length keys share no long prefix.
+    #[dialog_common::test]
+    async fn it_keeps_prior_when_inserting_new_minimum_variable_key() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // Sweep suffixes so the new-minimum `low` lands on a boundary rank at
+        // least once (a boundary new-minimum insert is the trigger).
+        let prefix = b"prefix/shared/".to_vec();
+        let mut high_bytes = prefix.clone();
+        high_bytes.extend_from_slice(b"zzzzzzzzzzzzzzzzzzzz");
+        let high = VarKey(high_bytes);
+
+        for n in 0..300u32 {
+            let mut low_bytes = prefix.clone();
+            low_bytes.extend_from_slice(format!("aaaa-{n:04}").as_bytes());
+            let low = VarKey(low_bytes);
+            assert!(low < high, "low must sort before high");
+
+            // Commit 1: insert `high` and persist.
+            let mut delta = Delta::zero();
+            let tree = VarTree::empty()
+                .edit()
+                .insert(high.clone(), high.0.clone(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            flush_into(&mut delta, &mut storage).await?;
+
+            // Commit 2: insert `low` (the new minimum) over the persisted tree.
+            let mut delta = Delta::zero();
+            let tree = tree
+                .edit()
+                .insert(low.clone(), low.0.clone(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            flush_into(&mut delta, &mut storage).await?;
+
+            let got_high = tree.get(&high, &storage).await?;
+            let got_low = tree.get(&low, &storage).await?;
+            if got_low.is_none() || got_high.is_none() {
+                panic!(
+                    "n={n} rank(low)={} rank(high)={}: low_present={} high_present={}",
+                    var_rank(low.as_ref()),
+                    var_rank(high.as_ref()),
+                    got_low.is_some(),
+                    got_high.is_some(),
+                );
+            }
+        }
+
+        Ok(())
+    }
 }

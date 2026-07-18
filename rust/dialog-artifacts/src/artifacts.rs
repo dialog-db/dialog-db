@@ -34,6 +34,9 @@ pub use value::*;
 mod ordkey;
 pub use ordkey::*;
 
+mod ordvalue;
+pub use ordvalue::*;
+
 mod cause;
 pub use cause::*;
 
@@ -553,6 +556,54 @@ mod tests {
         Ok(())
     }
 
+    /// Regression: two separate commits (persist + reload between them) where
+    /// the second entity's keys sort BEFORE the first's must keep both facts.
+    /// This exact DID pair reproduced a drop of the first commit's fact.
+    #[dialog_common::test]
+    async fn it_keeps_prior_fact_when_second_commit_inserts_new_minimum() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        // alice sorts AFTER bob; alice is committed first, bob second.
+        let alice = Artifact {
+            the: Attribute::from_str("person/name")?,
+            of: "did:key:z6MkQmQKzPsjyUz49pvaxYdiiZEuQXyNqeBkS88GTrvqnov".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        };
+        let bob = Artifact {
+            the: Attribute::from_str("person/name")?,
+            of: "did:key:z6MkDiL3ZaJ4V7VSdQruLenZLA4RNbu6cErR5m8K5Wj99wTF".parse()?,
+            is: Value::String("Bob".into()),
+            cause: None,
+        };
+
+        facts
+            .commit(vec![alice.clone()].into_iter().map(Instruction::Replace))
+            .await?;
+        facts
+            .commit(vec![bob.clone()].into_iter().map(Instruction::Replace))
+            .await?;
+
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().the(Attribute::from_str("person/name")?))
+            .map(|fact| fact.unwrap())
+            .collect()
+            .await;
+
+        assert_eq!(
+            selected.len(),
+            2,
+            "both facts must survive two commits; got {:?}",
+            selected
+                .iter()
+                .map(|a| a.of.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
+
     /// Retracting a fact that was never asserted is a no-op: no tombstone is
     /// written, so the tree root (and therefore the branch revision) is
     /// unchanged. Otherwise an idle synced branch would push a revision whose
@@ -1047,11 +1098,10 @@ mod tests {
             )
         };
 
-        // The broad attribute scan walks far fewer blocks under the
-        // threshold-based geometric distribution: its exact 1/m split at
-        // every level keeps the tree flat, where the bit-batch distribution
-        // built taller upper levels that cost more reads to traverse.
-        assert_eq!(net_reads, 4);
+        // Cumulative reads across both queries in this test (the baseline is
+        // captured once, before the first). The broad attribute scan is a
+        // bounded descent, not a full-tree walk.
+        assert_eq!(net_reads, 3);
         assert_eq!(net_writes, 0);
 
         Ok(())
