@@ -9,7 +9,7 @@ use crate::attribute::{AttributeDescriptor, Attribution};
 use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
-use crate::query::Application;
+use crate::query::{Application, Restriction};
 use crate::selection::{Match, Selection};
 use crate::source::SelectRules;
 use crate::statement::Retraction;
@@ -551,6 +551,42 @@ impl Application for ConceptQuery {
         Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
     {
         ConceptQuery::evaluate(self, selection, env)
+    }
+
+    fn restrict(&self, entity: &Entity) -> Restriction<Self> {
+        match self.terms.get("this") {
+            Some(Term::Constant(Value::Entity(this))) if this == entity => {
+                Restriction::Scoped(self.clone())
+            }
+            Some(Term::Constant(_)) => Restriction::Unaffected,
+            Some(Term::Variable {
+                name: Some(name), ..
+            }) if self
+                .terms
+                .iter()
+                .any(|(param, term)| param != "this" && term.name() == Some(name)) =>
+            {
+                // `this` joins another field through a shared
+                // variable name; pinning it to a constant would
+                // sever the join.
+                Restriction::Unsupported
+            }
+            _ => {
+                let mut terms = self.terms.clone();
+                terms.insert(
+                    "this".to_string(),
+                    Term::Constant(Value::Entity(entity.clone())),
+                );
+                Restriction::Scoped(ConceptQuery {
+                    terms,
+                    predicate: self.predicate.clone(),
+                })
+            }
+        }
+    }
+
+    fn concept(&self) -> Option<&ConceptDescriptor> {
+        Some(&self.predicate)
     }
 
     fn realize(&self, source: Match) -> Result<Self::Conclusion, EvaluationError> {

@@ -1,14 +1,34 @@
 use async_stream::try_stream;
-use dialog_artifacts::Select;
+use dialog_artifacts::{Entity, Select};
 use dialog_capability::Provider;
 use dialog_common::{ConditionalSend, ConditionalSync};
 
+use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::EvaluationError;
 use crate::selection;
 use crate::selection::Match;
 use crate::source::SelectRules;
 
 use super::Output;
+
+/// The outcome of restricting an [`Application`] to a single subject
+/// entity — the goal-directed unit incremental maintenance
+/// re-derives with (DRed's delete/re-derive step, scoped to one
+/// entity).
+#[derive(Clone, Debug)]
+pub enum Restriction<Q> {
+    /// The query restricted to the entity: evaluating it yields
+    /// exactly the original query's rows whose subject is the
+    /// entity.
+    Scoped(Q),
+    /// The original query can never produce rows for this entity
+    /// (its subject is pinned to a different one); nothing to
+    /// re-derive.
+    Unaffected,
+    /// The query cannot be scoped to one subject; the maintainer
+    /// falls back to full re-evaluation.
+    Unsupported,
+}
 
 /// A query pattern that can be evaluated against a provider to produce
 /// typed results.
@@ -37,6 +57,25 @@ pub trait Application: Clone + ConditionalSend + 'static {
 
     /// Convert a match into a concrete result value.
     fn realize(&self, input: selection::Match) -> Result<Self::Conclusion, EvaluationError>;
+
+    /// Restrict this query to a single subject entity, when the
+    /// query type supports it. The default is
+    /// [`Restriction::Unsupported`]: incremental maintainers fall
+    /// back to full re-evaluation.
+    fn restrict(&self, _entity: &Entity) -> Restriction<Self>
+    where
+        Self: Sized,
+    {
+        Restriction::Unsupported
+    }
+
+    /// The concept this query applies, when it is a concept query.
+    /// Incremental maintainers use it to resolve the rule set and
+    /// decide whether per-entity restriction is sound (every rule
+    /// entity-local, no recursion).
+    fn concept(&self) -> Option<&ConceptDescriptor> {
+        None
+    }
 
     /// Execute this query against an environment, returning a stream of typed results.
     fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Self::Conclusion> + 'a
