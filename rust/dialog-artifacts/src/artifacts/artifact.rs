@@ -66,50 +66,134 @@ impl Display for Artifact {
 }
 
 impl Artifact {
-    /// Reconstructs a fact from an index `key` and its stored [`Datum`] payload.
+    /// Reconstructs a fact from an index `key` and its stored [`Datum`] payload,
+    /// for a key whose value is stored INLINE.
     ///
-    /// The entity, attribute, and value type come from the key (stored
-    /// losslessly and order-preservingly by [`EntityKey::from`] and friends).
-    /// The value is decoded from the key's inline order-preserving payload when
-    /// it fits inline, or taken from `datum.value` (the raw bytes carried
-    /// because the key holds only a 32-byte reference) when it spilled.
+    /// The entity, attribute, value type, and value all come from the key
+    /// (stored losslessly and order-preservingly by [`EntityKey::from`] and
+    /// friends). This is a convenience over
+    /// [`Artifact::from_key_datum_with_value`] with no spilled bytes; if the key
+    /// is spilled (`key.value_is_spilled()`) it errors, because the raw value
+    /// bytes live in a separate archive block the caller must fetch. Use
+    /// [`Artifact::from_key_datum_with_value`] for the general case.
     pub fn from_key_datum(key: &Key, datum: &Datum) -> Result<Self, DialogArtifactsError> {
+        Self::from_key_datum_with_value(key, datum, None)
+    }
+
+    /// Reconstructs a fact from an index `key`, its stored [`Datum`] payload,
+    /// and, for a *spilled* key, the raw value bytes fetched from the archive
+    /// block store.
+    ///
+    /// The entity, attribute, and value type come from the key. The value is
+    /// decoded from the key's inline order-preserving payload when it fits
+    /// inline (in which case `spilled` is ignored), or reconstructed from
+    /// `spilled` (the block fetched by the key's 32-byte reference) when the key
+    /// is spilled. Pass `spilled = None` for inline keys; pass `Some(bytes)` for
+    /// spilled keys (an inline key with `Some` bytes just ignores them, and a
+    /// spilled key with `None` errors).
+    pub fn from_key_datum_with_value(
+        key: &Key,
+        datum: &Datum,
+        spilled: Option<Vec<u8>>,
+    ) -> Result<Self, DialogArtifactsError> {
         // View the key under its own ordering so the accessors return the
         // right components regardless of which index this entry came from, and
         // reconstruct through the shared helper.
         match key.tag() {
-            ENTITY_KEY_TAG => reconstruct(EntityKey(key), datum),
-            ATTRIBUTE_KEY_TAG => reconstruct(AttributeKey(key), datum),
-            VALUE_KEY_TAG => reconstruct(ValueKey(key), datum),
+            ENTITY_KEY_TAG => reconstruct(EntityKey(key), datum, spilled),
+            ATTRIBUTE_KEY_TAG => reconstruct(AttributeKey(key), datum, spilled),
+            VALUE_KEY_TAG => reconstruct(ValueKey(key), datum, spilled),
             tag => Err(DialogArtifactsError::InvalidKey(format!(
                 "unknown index key tag {tag}"
             ))),
         }
     }
+
+    /// Reconstructs a fact for display when the raw value bytes are not
+    /// available: the entity, attribute, and cause come from the key and
+    /// payload, and a spilled value is stood in for by a `<spilled value>`
+    /// placeholder string. For a sync render path (the diagnose TUI) that has no
+    /// store to fetch the spilled block. An inline key reconstructs its real
+    /// value as usual.
+    pub fn from_key_datum_placeholder(
+        key: &Key,
+        datum: &Datum,
+    ) -> Result<Self, DialogArtifactsError> {
+        // Reconstruct entity/attribute from the key under its ordering; whether
+        // the value spilled is read from that same view. If it did not spill,
+        // fall through to the normal inline reconstruction.
+        let (of, the, spilled) = match key.tag() {
+            ENTITY_KEY_TAG => {
+                let view = EntityKey(key);
+                let (of, the) = entity_attribute(view.clone())?;
+                (of, the, view.value_is_spilled())
+            }
+            ATTRIBUTE_KEY_TAG => {
+                let view = AttributeKey(key);
+                let (of, the) = entity_attribute(view.clone())?;
+                (of, the, view.value_is_spilled())
+            }
+            VALUE_KEY_TAG => {
+                let view = ValueKey(key);
+                let (of, the) = entity_attribute(view.clone())?;
+                (of, the, view.value_is_spilled())
+            }
+            tag => {
+                return Err(DialogArtifactsError::InvalidKey(format!(
+                    "unknown index key tag {tag}"
+                )));
+            }
+        };
+        if !spilled {
+            return Self::from_key_datum(key, datum);
+        }
+        Ok(Artifact {
+            the,
+            of,
+            is: Value::String("<spilled value>".to_string()),
+            cause: datum.cause.clone(),
+        })
+    }
 }
 
-/// Reconstructs an [`Artifact`] from a key view and its payload. The entity,
-/// attribute, and value type come from the key; the value is decoded inline
-/// from the key or taken from `datum.value` when it spilled.
-fn reconstruct<K: KeyView>(key: K, datum: &Datum) -> Result<Artifact, DialogArtifactsError> {
+/// Extracts the entity and attribute from a key view, decoding the raw UTF-8
+/// key columns.
+fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Attribute), DialogArtifactsError> {
     let of = Entity::from_str(from_utf8(key.entity().raw()).map_err(|error| {
         DialogArtifactsError::InvalidEntity(format!("entity key is not UTF-8: {error}"))
     })?)?;
     let the = Attribute::from_str(from_utf8(key.attribute().raw()).map_err(|error| {
         DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
     })?)?;
-    let value_type = key.value_type();
+    Ok((of, the))
+}
 
-    let is = if key.value_is_spilled() {
-        // The key carries only a reference; the raw value bytes travel in the
-        // payload.
-        let bytes = datum.value.clone().ok_or_else(|| {
-            DialogArtifactsError::InvalidValue("spilled value key has no payload bytes".to_string())
+/// Reconstructs an [`Artifact`] from a key view and its payload. The entity,
+/// attribute, and value type come from the key; the value is decoded inline
+/// from the key or taken from `spilled` (the archive block bytes) when it
+/// spilled.
+fn reconstruct<K: KeyView>(
+    key: K,
+    datum: &Datum,
+    spilled: Option<Vec<u8>>,
+) -> Result<Artifact, DialogArtifactsError> {
+    let value_type = key.value_type();
+    let is_spilled = key.value_is_spilled();
+    let inline_payload = key.value_payload().to_vec();
+    let (of, the) = entity_attribute(key)?;
+
+    let is = if is_spilled {
+        // The key carries only a reference; the raw value bytes live in a
+        // content-addressed archive block the caller fetched and passed in.
+        let bytes = spilled.ok_or_else(|| {
+            DialogArtifactsError::InvalidValue(
+                "spilled value key has no fetched block bytes".to_string(),
+            )
         })?;
         Value::try_from((value_type, bytes))?
     } else {
         // Decode the inline order-preserving value from the key.
-        let (value, rest) = decode_value(value_type, key.value_payload()).ok_or_else(|| {
+        let (value, rest) = decode_value(value_type, &inline_payload).ok_or_else(|| {
             DialogArtifactsError::InvalidValue("inline value payload did not decode".to_string())
         })?;
         if !rest.is_empty() {

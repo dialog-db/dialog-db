@@ -255,6 +255,167 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
     Ok(())
 }
 
+/// Push ships a spilling scalar value's block to the remote before publishing.
+///
+/// A value larger than the tree's inline threshold does not travel in the key
+/// or the fact payload; its bytes are a content-addressed block in the archive,
+/// keyed by the value's 32-byte reference. The push spilled-ref differential
+/// must surface that block so it lands on the remote alongside the tree nodes.
+///
+/// Proven two ways: (1) the block is directly readable from the remote archive
+/// under its value reference, byte-equal to the value's bytes; and (2) a second
+/// site with an entirely separate local store pulls the revision and selects
+/// the fact back, reconstructing the exact `Value` it never wrote locally —
+/// only possible if the spilled block reached the remote. A same-store local
+/// select on site A confirms the round-trip end too.
+#[dialog_common::test]
+async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()> {
+    // A value comfortably larger than the inline threshold, so its key spills to
+    // a 32-byte reference and its bytes become a separate archive block.
+    let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+    let big = "x".repeat(inline_n + 1);
+    let value = Value::String(big.clone());
+    let reference = value.to_reference();
+
+    // --- Site A: commit a spilling fact, push. ---
+    let storage_a = Storage::temp();
+    let profile_a = Profile::open(unique_name("spill-ship-a"))
+        .perform(&storage_a)
+        .await?;
+    let operator_a = profile_a
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_a)
+        .await?;
+
+    let repo_a = profile_a
+        .repository(unique_name("spill-ship"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .credential()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_a)
+        .await?;
+
+    let origin_a = repo_a
+        .remote("origin")
+        .create(site_a)
+        .perform(&operator_a)
+        .await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+
+    let artifact = Artifact {
+        the: "doc/body".parse()?,
+        of: "doc:1".parse()?,
+        is: value.clone(),
+        cause: None,
+    };
+    branch_a
+        .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+        .perform(&operator_a)
+        .await?;
+
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // A same-store local select reconstructs the spilled value.
+    let local: Vec<_> = branch_a
+        .claims()
+        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .perform(&operator_a)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(local.len(), 1, "site A should read its own spilled fact");
+    assert_eq!(local[0].is, value, "local select reconstructs the value");
+
+    // The spilled block itself is present on the REMOTE archive, byte-equal to
+    // the value's bytes, under the value's 32-byte reference.
+    let remote_block = origin_a
+        .archive()
+        .index()
+        .get(reference)
+        .perform(&operator_a)
+        .await?;
+    assert_eq!(
+        remote_block,
+        Some(value.to_bytes()),
+        "the spilled value block must be on the remote after push"
+    );
+
+    // --- Site B: same remote subject, separate local store; pull then select. ---
+    let storage_b = Storage::temp();
+    let profile_b = Profile::open(unique_name("spill-ship-b"))
+        .perform(&storage_b)
+        .await?;
+    let operator_b = profile_b
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_b)
+        .await?;
+
+    let repo_b = profile_b
+        .repository(unique_name("spill-ship-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .credential()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_b)
+        .await?;
+
+    let origin_b = repo_b
+        .remote("origin")
+        .create(site_b)
+        .subject(repo_a.did())
+        .perform(&operator_b)
+        .await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+
+    branch_b.pull().perform(&operator_b).await?;
+
+    // Site B never wrote the value locally; reconstructing it from its own store
+    // proves the spilled block was shipped to the remote and hydrated on pull.
+    let remote_side: Vec<_> = branch_b
+        .claims()
+        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .perform(&operator_b)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(remote_side.len(), 1, "site B should read the pulled fact");
+    assert_eq!(
+        remote_side[0].is, value,
+        "site B reconstructs the spilled value from the remote-shipped block"
+    );
+
+    Ok(())
+}
+
 #[dialog_common::test]
 async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;

@@ -73,6 +73,9 @@ pub use state::*;
 mod blob_index;
 pub use blob_index::*;
 
+mod spill;
+pub use spill::*;
+
 mod constants;
 pub use constants::*;
 

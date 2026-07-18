@@ -57,11 +57,11 @@ impl BlobRecord {
         let mut value = Vec::with_capacity(BLOB_RECORD_V1_LEN);
         value.push(self.version);
         value.extend_from_slice(&self.size.to_be_bytes());
-        // Blob entries carry only the record in `value`; blob keys never reach
+        // Blob entries carry only the record in `blob`; blob keys never reach
         // the fact scan, so the reconstruction fields do not apply.
         State::Added(Datum {
-            value: Some(value),
             cause: None,
+            blob: Some(value),
         })
     }
 
@@ -72,7 +72,7 @@ impl BlobRecord {
             State::Added(datum) => datum,
             State::Removed => return Ok(None),
         };
-        let bytes = datum.value.as_deref().unwrap_or(&[]);
+        let bytes = datum.blob.as_deref().unwrap_or(&[]);
         match bytes.first().copied() {
             Some(BLOB_RECORD_VERSION) if bytes.len() == BLOB_RECORD_V1_LEN => {
                 let size = u64::from_be_bytes(

@@ -57,15 +57,21 @@ impl Widget for FactTable<'_> {
                         Row::new([Cell::from(Text::from("Loading fact...".to_string()))])
                     }
                     Promise::Resolved((key, State::Added(datum))) => {
-                        let (entity, attribute, value) = match Artifact::from_key_datum(key, datum)
-                        {
-                            Ok(artifact) => (
-                                artifact.of.to_string(),
-                                artifact.the.to_string(),
-                                artifact.is.to_utf8(),
-                            ),
-                            Err(error) => (String::new(), String::new(), format!("{error}")),
-                        };
+                        // A spilled value's bytes live in an archive block, not
+                        // in the key or payload; this sync render path has no
+                        // store to fetch it, so `from_key_datum_placeholder`
+                        // shows a `<spilled value>` stand-in for the value while
+                        // reconstructing the entity and attribute from the key.
+                        // An inline value reconstructs as usual.
+                        let (entity, attribute, value) =
+                            match Artifact::from_key_datum_placeholder(key, datum) {
+                                Ok(artifact) => (
+                                    artifact.of.to_string(),
+                                    artifact.the.to_string(),
+                                    artifact.is.to_utf8(),
+                                ),
+                                Err(error) => (String::new(), String::new(), format!("{error}")),
+                            };
 
                         Row::new(
                             [entity, attribute, value, format!("{:?}", datum.cause)]

@@ -420,6 +420,15 @@ pub enum PushError {
     /// Shipping a newly-referenced blob to the remote failed.
     #[error("Blob operation failed during push: {0}")]
     Blob(#[from] BlobError),
+
+    /// Reading a spilled value block from the local archive during push failed.
+    #[error("Storage operation failed during push: {0}")]
+    Storage(#[from] DialogStorageError),
+
+    /// A remote archive operation (e.g. writing a spilled value block) during
+    /// push failed.
+    #[error("Remote archive operation failed during push: {0}")]
+    Archive(#[from] ArchiveError),
 }
 
 /// Errors returned by cell resolve operations.

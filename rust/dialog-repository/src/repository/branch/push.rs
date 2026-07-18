@@ -1,14 +1,15 @@
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{BlobChange, BlobIndexExt as _, blob_changes};
+use dialog_artifacts::{BlobChange, BlobIndexExt as _, blob_changes, spilled_refs};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, TreeDifference};
+use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use crate::{
@@ -216,6 +217,32 @@ impl Push<'_> {
                         sink.write_all(&chunk).await?;
                     }
                     sink.finish().await?;
+                }
+
+                // Ship spilled value blocks newly referenced since the sync
+                // checkpoint. A value larger than the inline threshold lives as
+                // a content-addressed block (addressed by its 32-byte value
+                // reference) in the same store as the tree nodes, but the
+                // node-level differential above does not surface it — it is not
+                // a node. `spilled_refs` walks the same differential's entries,
+                // keeping the EAV-tagged spilled keys, and names each such block
+                // once. Local bytes -> remote block put, mirroring the novel
+                // node upload. Bytes must land on the remote before we publish a
+                // revision that references them.
+                let spill_store = LocalIndex::new(env, index.clone());
+                let mut refs = std::pin::pin!(spilled_refs(
+                    Index::from_hash(NodeHash::from(*base.hash())),
+                    Index::from_hash(NodeHash::from(*revision.tree.hash())),
+                    spill_store.clone(),
+                ));
+                while let Some(reference) = refs.next().await {
+                    let reference = reference?;
+                    let bytes = spill_store.get(&reference).await?.ok_or_else(|| {
+                        BlobError::ExecutionError(format!(
+                            "spilled value block {reference:?} referenced by the tree but absent from the local archive"
+                        ))
+                    })?;
+                    remote_index.put(Buffer::from(bytes)).perform(env).await?;
                 }
 
                 upstream.publish(revision.clone()).perform(env).await?;

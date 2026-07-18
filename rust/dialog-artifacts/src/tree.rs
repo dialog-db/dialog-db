@@ -35,9 +35,10 @@ use std::iter::repeat_n;
 use std::ops::RangeInclusive;
 
 use crate::{
-    Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum, DialogArtifactsError,
-    EntityKey, EntityKeyPart, FromKey, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut,
-    MatchCandidate, State, ValueKey, selector::Constrained,
+    ATTRIBUTE_KEY_TAG, Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum,
+    DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, FromKey, Instruction, Key,
+    KeyView, KeyViewConstruct, KeyViewMut, MatchCandidate, State, VALUE_KEY_TAG, ValueKey,
+    key::value_spills, selector::Constrained,
 };
 
 /// The concrete search-tree type the artifact indexes use.
@@ -73,6 +74,68 @@ where
     async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
         self.0.get(key.as_bytes()).await
     }
+}
+
+/// Writes a spilling value's raw bytes as a content-addressed block into the
+/// raw archive block `store`, keyed by the value's 32-byte reference. A no-op
+/// for a value that stays inline (its bytes live in the key). Idempotent:
+/// content-addressed, so the same value writes the same block.
+///
+/// This uses the raw backend directly, NOT the tree's `ContentAddressedStorage`
+/// bridge: a spilled value is a plain block addressed by its value reference,
+/// living in the same store the tree nodes do.
+async fn store_spilled_value<S>(
+    store: &mut S,
+    artifact: &Artifact,
+) -> Result<(), DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    if value_spills(&artifact.is) {
+        let reference = artifact.is.to_reference();
+        store.set(reference, artifact.is.to_bytes()).await?;
+    }
+    Ok(())
+}
+
+/// Fetches the raw bytes of a spilled value for `key` from the raw archive block
+/// `store`. Returns `None` for an inline key (its value lives in the key, no
+/// block to fetch), `Some(bytes)` for a spilled key. Errors if a spilled key's
+/// block is missing from the store.
+///
+/// Uses the raw backend directly (the value block is addressed by the key's
+/// 32-byte reference), not the tree node bridge.
+pub async fn fetch_spilled<S>(store: &S, key: &Key) -> Result<Option<Vec<u8>>, DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    // View the key under its own ordering so the spill accessors read the
+    // right columns regardless of which index this key came from.
+    let (spilled, payload) = match key.tag() {
+        ENTITY_KEY_TAG => {
+            let view = EntityKey(key);
+            (view.value_is_spilled(), view.value_payload().to_vec())
+        }
+        ATTRIBUTE_KEY_TAG => {
+            let view = AttributeKey(key);
+            (view.value_is_spilled(), view.value_payload().to_vec())
+        }
+        VALUE_KEY_TAG => {
+            let view = ValueKey(key);
+            (view.value_is_spilled(), view.value_payload().to_vec())
+        }
+        _ => (false, Vec::new()),
+    };
+    if !spilled {
+        return Ok(None);
+    }
+    let reference: Blake3Hash = payload.as_slice().try_into().map_err(|_| {
+        DialogArtifactsError::InvalidKey("spilled value reference is not 32 bytes".to_string())
+    })?;
+    let bytes = store.get(&reference).await?.ok_or_else(|| {
+        DialogArtifactsError::InvalidValue("spilled value block missing from store".to_string())
+    })?;
+    Ok(Some(bytes))
 }
 
 /// Filler length appended to a prefix to form its inclusive upper bound. Keys
@@ -235,6 +298,11 @@ impl ArtifactTreeExt for ArtifactTree {
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
 
+                    // Persist a spilling value's bytes as a content-addressed
+                    // block before recording the fact; the key holds only the
+                    // 32-byte reference to it.
+                    store_spilled_value(store, &artifact).await?;
+
                     let datum = Datum::for_artifact(&artifact);
                     let added = State::Added(datum);
                     transient = transient
@@ -274,8 +342,15 @@ impl ArtifactTreeExt for ArtifactTree {
                         while let Some(candidate) = search_stream.next().await {
                             let candidate = candidate?;
                             if let State::Added(current_element) = &candidate.value {
-                                let current =
-                                    Artifact::from_key_datum(&candidate.key, current_element)?;
+                                // A prior with a spilled value carries only a
+                                // reference in its key; fetch the block so the
+                                // value comparison below sees the real value.
+                                let spilled = fetch_spilled(store, &candidate.key).await?;
+                                let current = Artifact::from_key_datum_with_value(
+                                    &candidate.key,
+                                    current_element,
+                                    spilled,
+                                )?;
                                 // Supersession is scoped to this exact
                                 // (entity, attribute). The range should already
                                 // guarantee that, but deleting is destructive
@@ -315,6 +390,11 @@ impl ArtifactTreeExt for ArtifactTree {
                     let entity_key = EntityKey::from(&artifact);
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
+
+                    // Persist a spilling value's bytes as a content-addressed
+                    // block before recording the fact.
+                    store_spilled_value(store, &artifact).await?;
+
                     let datum = Datum::for_artifact(&artifact);
                     let added = State::Added(datum);
                     transient = transient
@@ -389,6 +469,9 @@ impl ArtifactTreeExt for ArtifactTree {
             + 's,
     {
         let tree = self;
+        // Keep the raw backend to fetch spilled value blocks by reference; the
+        // bridge below is only for reading tree nodes.
+        let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         try_stream! {
             let range = selector_range(&selector);
@@ -404,7 +487,8 @@ impl ArtifactTreeExt for ArtifactTree {
                 if entry.matches_selector(&selector)
                     && let Entry { key, value: State::Added(datum) } = &entry
                 {
-                    yield Artifact::from_key_datum(key, datum)?;
+                    let spilled = fetch_spilled(&raw_store, key).await?;
+                    yield Artifact::from_key_datum_with_value(key, datum, spilled)?;
                 }
             }
         }

@@ -67,7 +67,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "csv")]
 use crate::{EntityKey, KeyViewConstruct};
 
-use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge};
+use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge, fetch_spilled};
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
 };
@@ -211,7 +211,8 @@ where
 
         while let Some(entry) = entity_stream.try_next().await? {
             if let State::Added(datum) = &entry.value {
-                let artifact = Artifact::from_key_datum(&entry.key, datum)?;
+                let spilled = fetch_spilled(&self.storage, &entry.key).await?;
+                let artifact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)?;
 
                 csv.serialize(artifact)
                     .await
@@ -1628,6 +1629,50 @@ mod tests {
             before_value, after_value,
             "Storage value should not change when reset called with None"
         );
+
+        Ok(())
+    }
+
+    /// A value larger than the inline threshold spills: its key carries a
+    /// 32-byte reference, its bytes land as a content-addressed block in the
+    /// store (keyed by that reference), and a select reconstructs the exact
+    /// value by fetching the block. Inline values are unaffected.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_round_trips_a_spilled_value() -> Result<()> {
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let big = "s".repeat(inline_n + 1);
+        let value = Value::String(big.clone());
+        let reference = value.to_reference();
+
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let attribute = Attribute::from_str("doc/body")?;
+        let entity = Entity::new()?;
+
+        artifacts
+            .commit(vec![Instruction::Assert(Artifact {
+                the: attribute.clone(),
+                of: entity.clone(),
+                is: value.clone(),
+                cause: None,
+            })])
+            .await?;
+
+        // The value bytes live as a block keyed by the value reference.
+        assert_eq!(
+            artifacts.storage.get(&reference).await?,
+            Some(value.to_bytes()),
+            "spilled value bytes are stored as a block under the value reference"
+        );
+
+        // A select reconstructs the exact value by fetching the block.
+        let results = artifacts
+            .select(ArtifactSelector::new().the(attribute))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].is, value, "spilled value reconstructs exactly");
 
         Ok(())
     }

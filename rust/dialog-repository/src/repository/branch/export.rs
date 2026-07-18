@@ -1,4 +1,4 @@
-use dialog_artifacts::tree::TreeStorageBridge;
+use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled};
 use dialog_artifacts::{
     Artifact, DialogArtifactsError, EntityKey, Exporter, Key, KeyViewConstruct, State,
 };
@@ -64,13 +64,17 @@ impl<E: Exporter> Export<'_, E> {
         let range = <EntityKey<Key> as KeyViewConstruct>::min().into_key()
             ..=<EntityKey<Key> as KeyViewConstruct>::max().into_key();
 
+        // Keep the raw backend to fetch spilled value blocks by reference; the
+        // bridge below only reads tree nodes.
+        let raw_store = store.clone();
         let tree_store = TreeStorage::new(TreeStorageBridge(store));
         let stream = tree.stream_range(range, &tree_store);
         tokio::pin!(stream);
 
         while let Some(entry) = stream.try_next().await? {
             if let State::Added(datum) = &entry.value {
-                let artifact = Artifact::from_key_datum(&entry.key, datum)?;
+                let spilled = fetch_spilled(&raw_store, &entry.key).await?;
+                let artifact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)?;
                 exporter.write(&artifact).await?;
             }
         }

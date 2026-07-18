@@ -67,7 +67,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
+use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled, selector_range};
 use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Key, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -481,6 +481,8 @@ where
         }
 
         let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), None);
+        // Keep the raw backend to fetch spilled value blocks by reference.
+        let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         let previous =
             Index::from_hash_with_cache(NodeHash::from(pinned), self.branch.node_cache());
@@ -513,7 +515,10 @@ where
             // at the same key.
             let arriving = matches!(&change, Change::Add(_));
             if let State::Added(datum) = &entry.value {
-                let fact = Artifact::from_key_datum(&entry.key, datum)
+                let spilled = fetch_spilled(&raw_store, &entry.key)
+                    .await
+                    .map_err(|error| EvaluationError::Store(format!("spilled fetch: {error:?}")))?;
+                let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
                     .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
                 // Dedup on the fact's identity (entity, attribute, value), all
                 // now reconstructed from the key.
