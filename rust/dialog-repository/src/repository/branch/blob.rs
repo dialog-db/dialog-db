@@ -405,7 +405,8 @@ where
                     &base_tree_hash,
                     store.clone(),
                     branch.node_cache(),
-                );
+                )
+                .with_record_cache(branch.records());
                 extend_skips(&history, parent).await?
             }
             None => Vec::new(),
@@ -459,7 +460,8 @@ where
                             &base_tree_hash,
                             store.clone(),
                             branch.node_cache(),
-                        );
+                        )
+                        .with_record_cache(branch.records());
                         context_of(parent, &history).await?
                     }
                 },

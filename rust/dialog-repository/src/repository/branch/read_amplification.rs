@@ -25,6 +25,7 @@ use dialog_artifacts::{Artifact, Instruction, Value};
 
 use crate::RepositoryExt as _;
 use crate::helpers::{Counting, test_operator_with_profile, unique_name};
+use dialog_artifacts::tree::TreeStorageBridge;
 
 fn assert_fact(entity: usize, value: &str) -> Instruction {
     Instruction::Assert(Artifact {
@@ -251,9 +252,7 @@ async fn measure_shape(depth: usize) -> Result<()> {
     let root = main.revision().expect("committed").tree;
     let store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
     let tree = crate::Index::from_hash(dialog_common::Blake3Hash::from(*root.hash()));
-    let tree_store = dialog_search_tree::ContentAddressedStorage::new(
-        dialog_artifacts::tree::TreeStorageBridge(store),
-    );
+    let tree_store = dialog_search_tree::ContentAddressedStorage::new(TreeStorageBridge(store));
 
     let entries = {
         use futures_util::StreamExt as _;

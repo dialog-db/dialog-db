@@ -248,6 +248,19 @@ pub trait ArtifactTreeExt {
             + Clone
             + ConditionalSync;
 
+    /// Look up data at `(the, of)` through the attribute-ordered index,
+    /// the ordering revision records are stored in.
+    async fn select_record<S>(
+        &self,
+        store: S,
+        of: &crate::Entity,
+        the: &crate::Attribute,
+    ) -> Result<Vec<Datum>, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync;
+
     /// Write pre-built entries (e.g. revision lineage records — see
     /// [`Record::into_entry`](crate::history::Record::into_entry)) into the
     /// tree as one edit batch, accumulating new nodes in `delta`
@@ -586,6 +599,44 @@ impl ArtifactTreeExt for ArtifactTree {
         let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
             .set_entity(EntityKeyPart::from(of))
             .set_attribute(AttributeKeyPart::from(the))
+            .into_key();
+
+        let stream = self.stream_range(
+            KeyBytes::from(search_start)..=KeyBytes::from(search_end),
+            &storage,
+        );
+        tokio::pin!(stream);
+
+        let mut data = Vec::new();
+        while let Some(entry) = stream.next().await {
+            if let State::Added(datum) = entry?.value {
+                data.push(datum);
+            }
+        }
+
+        Ok(data)
+    }
+
+    async fn select_record<S>(
+        &self,
+        store: S,
+        of: &crate::Entity,
+        the: &crate::Attribute,
+    ) -> Result<Vec<Datum>, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+
+        let search_start = <AttributeKey<Key> as KeyViewConstruct>::min()
+            .set_attribute(AttributeKeyPart::from(the))
+            .set_entity(EntityKeyPart::from(of))
+            .into_key();
+        let search_end = <AttributeKey<Key> as KeyViewConstruct>::max()
+            .set_attribute(AttributeKeyPart::from(the))
+            .set_entity(EntityKeyPart::from(of))
             .into_key();
 
         let stream = self.stream_range(

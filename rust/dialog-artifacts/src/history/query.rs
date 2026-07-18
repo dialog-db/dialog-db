@@ -29,6 +29,13 @@ where
     tree: ArtifactTree,
     store: S,
     storage: NodeStorage<TreeStorageBridge<S>>,
+    /// Memoized verified records, keyed by version. A version's record
+    /// is immutable (two records claiming one version is protocol
+    /// corruption), so entries never invalidate; a hit skips the tree
+    /// read, the decode, and the signature verification. Share one
+    /// cache across readers with
+    /// [`with_record_cache`](TreeHistory::with_record_cache).
+    records: dialog_search_tree::Cache<Version, RevisionRecord>,
 }
 
 impl<S> TreeHistory<S>
@@ -42,6 +49,7 @@ where
         S: Clone,
     {
         Self {
+            records: dialog_search_tree::Cache::new(),
             tree,
             store: store.clone(),
             storage: NodeStorage::new(TreeStorageBridge(store)),
@@ -51,6 +59,15 @@ where
     /// Read history from the artifact tree rooted at `root`
     pub fn from_root(root: &Blake3Hash, store: S) -> Self {
         Self::new(ArtifactTree::from_hash(NodeHash::from(*root)), store)
+    }
+
+    /// Attach a shared verified-record memo (see the `records` field).
+    pub fn with_record_cache(
+        mut self,
+        records: dialog_search_tree::Cache<Version, RevisionRecord>,
+    ) -> Self {
+        self.records = records;
+        self
     }
 
     /// Read history from the artifact tree rooted at `root`, sharing the
@@ -133,12 +150,33 @@ where
         &self,
         version: &Version,
     ) -> Result<Option<RevisionRecord>, DialogArtifactsError> {
-        // The record is an ordinary fact in the EAV index: entity derived
-        // from the version, reserved attribute, `Value::Record` payload.
-        // One exact lookup per traversal step.
+        // A version's record is immutable, so a memoized hit needs no
+        // read and no re-verification.
+        if let Some(record) = self
+            .records
+            .get_or_fetch::<_, DialogArtifactsError>(version, async |_| Ok(None))
+            .await?
+        {
+            return Ok(Some(record));
+        }
+
+        // The record is a fact on the version-derived entity under the
+        // reserved attribute, stored in the attribute-ordered index
+        // only (the one ordering the query layer's projection rules
+        // scan). Scan the (attribute, entity) prefix there; fall back
+        // to the entity-ordered index for trees written before records
+        // were single-ordered.
         let of = version.entity();
         let the = Attribute::from_str(REVISION_ATTRIBUTE)?;
-        for datum in self.tree.select_data(self.store.clone(), &of, &the).await? {
+        let mut candidates = self
+            .tree
+            .clone()
+            .select_record(self.store.clone(), &of, &the)
+            .await?;
+        if candidates.is_empty() {
+            candidates = self.tree.select_data(self.store.clone(), &of, &the).await?;
+        }
+        for datum in candidates {
             if ValueDataType::from(datum.value_type) == ValueDataType::Record {
                 let record = RevisionRecord::try_from_bytes(&datum.value)?;
                 // Tree blocks may have arrived from an untrusted peer;
@@ -146,6 +184,7 @@ where
                 // signature valid, and derived version matching the slot
                 // it was found at.
                 record.verify(version)?;
+                self.records.insert(*version, record.clone());
                 return Ok(Some(record));
             }
         }

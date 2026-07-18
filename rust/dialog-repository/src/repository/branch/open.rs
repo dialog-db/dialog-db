@@ -41,6 +41,7 @@ impl OpenBranch {
             plan_cache: PlanCache::default(),
             causality_cache: CausalityCache::new(),
             context_cache: ContextCache::new(),
+            record_cache: dialog_search_tree::Cache::new(),
             overlay: Overlay::default(),
         })
     }

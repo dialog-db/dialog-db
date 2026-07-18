@@ -118,7 +118,7 @@ A test pins that all three agree (`it_publishes_the_watermark_with_the_head`, `i
 - The record cannot contain the tree root, because it lives inside that tree and a hash cannot contain itself. The head carries the root; that is why both exist.
 - The record defends itself: its signature covers its fields, and the version it is filed under is recomputable from its own contents, so a tampered record, or a valid one copied to another slot, fails the check every reader performs.
 
-Because records are ordinary facts, history is queryable: "who committed this", "is X an ancestor of Y", "show the log" are normal queries over built-in derived relations, and records that do not verify are simply not projected.
+Records are stored in two of the three index orderings (by entity and by attribute, the two shapes queries take); the value ordering is skipped, since a record blob is unique to its revision and nothing looks one up by value. Readers memoize verified records by version (a version's record is immutable, so the memo never invalidates), which spares the tree read, the decode, and the signature verification on the repeated ancestry steps of skip extension, context walks, and causality. Because records are ordinary facts, history is queryable: "who committed this", "is X an ancestor of Y", "show the log" are normal queries over built-in derived relations, and records that do not verify are simply not projected.
 
 **Skip links**: besides its parent, a revision records shortcuts jumping 2, 4, 8, ... revisions back, so ancestor search takes logarithmically many steps. A shortcut never jumps across a merge (it would skip the ancestry entering through the other parent), and searches never jump below the edition they seek.
 
@@ -373,20 +373,20 @@ Pinned by the read-amplification harness (`dialog-repository`, module `read_ampl
 
 ```text
 depth   scenario                        block reads   wall ms
-10000   tree shape: 70000 entries in 279 nodes
+10000   tree shape: 60000 entries in 249 nodes
   100   no-op sync tick                           0         0
   100   fast-forward (1 commit)                   0         0
   100   merge, both sides moved                  19         2
- 1000   merge, both sides moved                  29        14
+ 1000   merge, both sides moved                  24         5
 10000   initial pull (adopt all)                  0         0
 10000   no-op sync tick                           0         0
 10000   fast-forward (1 commit)                   0         0
-10000   merge, both sides moved                  37        17
-10000   tracked pull after adopting bulk         25        17
+10000   merge, both sides moved                  32         9
+10000   tracked pull after adopting bulk         22        10
 10000   watermark walk (legacy heads)            22       578
 ```
 
-Reading it: every path is free except a genuine both-sides merge, whose reads sit at the write-amplification floor of the key layout and are independent of either side's bulk. The floor: a one-fact commit touches about seven keys (three data orderings, its claim record, and the revision record's three orderings), each content-hashed into a different leaf, so merging two such deltas legitimately reads both sides' scattered leaves plus index and write paths, 19 to 37 nodes of a 279-node tree at any depth. Merge strategy is chosen by size: tiny deltas (divergence mass at or below a small threshold) take the direct replay or screen in the cheaper direction, since the graft's per-piece seam lifts exceed walking a handful of entries; anything bulkier takes the graft, whose cost is the intersection plus coverage plus seams. Remaining levers live below the merge: the revision record needs only one ordering (not three) and could cluster like the log region, roughly halving the floor, and roundtrip structure is the latency lever since walks currently fetch sequentially: level-parallel frontier expansion bounds fetch rounds by tree height, and a pull-side analogue of push's novel-node batch (the upstream streams its delta closure in one response) makes any merge one or two roundtrips. The last row is the ancestry walk paid only for pre-watermark heads.
+Reading it: every path is free except a genuine both-sides merge, whose reads sit at the write-amplification floor of the key layout and are independent of either side's bulk. The floor: a one-fact commit touches six keys (three data orderings, its claim record, and the revision record's two orderings), each content-hashed into a different leaf, so merging two such deltas legitimately reads both sides' scattered leaves plus index and write paths, 19 to 32 nodes of a 249-node tree at any depth. Merge strategy is chosen by size: tiny deltas (divergence mass at or below a small threshold) take the direct replay or screen in the cheaper direction, since the graft's per-piece seam lifts exceed walking a handful of entries; anything bulkier takes the graft, whose cost is the intersection plus coverage plus seams. Remaining levers live below the merge: the revision record needs only one ordering (not three) and could cluster like the log region, roughly halving the floor, and roundtrip structure is the latency lever since walks currently fetch sequentially: level-parallel frontier expansion bounds fetch rounds by tree height, and a pull-side analogue of push's novel-node batch (the upstream streams its delta closure in one response) makes any merge one or two roundtrips. The last row is the ancestry walk paid only for pre-watermark heads.
 
 To observe these numbers in an embedder: wrap the environment in the `Counting` provider (`dialog-repository`, `helpers` feature) and log `block_reads()` plus a clock around `pull()`.
 

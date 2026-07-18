@@ -135,6 +135,12 @@ pub struct Branch {
     /// incrementally — so steady-state sync never re-walks the DAG.
     /// See [`ContextCache`].
     context_cache: ContextCache,
+    /// Shared memo of verified revision records, keyed by version. A
+    /// version's record is immutable, so entries never invalidate; a
+    /// hit spares the tree read, the decode, and the Ed25519
+    /// verification that otherwise run on every ancestry step (skip
+    /// extension, context walks, causality).
+    record_cache: dialog_search_tree::Cache<Version, RevisionRecord>,
 }
 
 impl Branch {
@@ -220,6 +226,7 @@ impl Branch {
             .map(|revision| *revision.tree.hash())
             .unwrap_or(crate::EMPTY_TREE_HASH);
         TreeHistory::from_root_with_cache(&root, store, self.node_cache())
+            .with_record_cache(self.records())
     }
 
     /// The branch's committed history, newest first — at most `limit`
@@ -292,5 +299,10 @@ impl Branch {
     /// incrementally — so steady-state sync never re-walks the DAG.
     pub fn contexts(&self) -> ContextCache {
         self.context_cache.clone()
+    }
+
+    /// A shared handle to this branch's verified-record memo.
+    pub(crate) fn records(&self) -> dialog_search_tree::Cache<Version, RevisionRecord> {
+        self.record_cache.clone()
     }
 }

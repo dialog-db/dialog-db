@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Artifact, Attribute, AttributeKey, Datum, DialogArtifactsError, Entity, EntityKey,
-    FromKey as _, Key, State, Value, ValueKey,
+    FromKey as _, Key, State, Value,
 };
 
 use super::{Edition, Origin, REVISION_ATTRIBUTE, Version, verify_issuer_signature};
@@ -138,15 +138,21 @@ impl RevisionRecord {
     }
 
     /// The tree entries carrying this record: one fact on the revision
-    /// entity under the reserved revision attribute, keyed into all three
-    /// (entity / attribute / value) indexes so it is queryable like any
-    /// other fact
+    /// entity under the reserved revision attribute, keyed into the
+    /// entity- and attribute-ordered indexes. Those are the two shapes
+    /// queries take (entity bound: the planner scans EAV; entity free:
+    /// AEV), and the durable history reader uses the attribute
+    /// ordering. The value ordering is deliberately skipped: a record
+    /// blob is unique to its revision and nothing ever looks one up by
+    /// value, and skipping it cuts a commit's record write from three
+    /// large-leaf rebuilds to two. (Collapsing to one ordering needs
+    /// the query planner to learn per-attribute index availability;
+    /// until then both query shapes must be served.)
     pub fn entries(&self) -> Result<Vec<(Key, State<Datum>)>, DialogArtifactsError> {
         let version = self.version();
         let artifact = self.to_artifact(&version)?;
 
         let entity_key = EntityKey::from(&artifact);
-        let value_key = ValueKey::from_key(&entity_key);
         let attribute_key = AttributeKey::from_key(&entity_key);
         let mut datum = Datum::from(artifact);
         datum.version = Some(version);
@@ -154,8 +160,7 @@ impl RevisionRecord {
 
         Ok(vec![
             (entity_key.into_key(), added.clone()),
-            (attribute_key.into_key(), added.clone()),
-            (value_key.into_key(), added),
+            (attribute_key.into_key(), added),
         ])
     }
 }
