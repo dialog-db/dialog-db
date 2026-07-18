@@ -44,6 +44,9 @@ pub use blob::*;
 mod part;
 pub use part::*;
 
+mod varkey;
+pub use varkey::*;
+
 /// Tag byte reserved for the history index (the fourth index ordering).
 ///
 /// Allocated so the blob index lands at tag `4`; the history index itself is
