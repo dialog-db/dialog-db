@@ -39,6 +39,9 @@ flowchart LR
         history["history region
         append-only log: every write's claim record
         + every revision's metadata record"]
+        coverage["coverage region
+        compact mirror of deletions/replacements
+        (no value bytes; exists to be enumerable)"]
     end
     root(("root hash")) --> tree
 ```
@@ -135,7 +138,7 @@ Every commit tags its facts with its version and appends one **claim record** pe
 
 - **Assert** adds a fact; supersedes nothing.
 - **Replace** sets the value at `(entity, attribute)`, deleting different-valued priors from the indexes and listing their versions in its record. An identical value already in place is a full no-op.
-- **Retract** deletes the fact's index entries and records the withdrawn claim's version. **No marker is left behind**: after a retract, the data regions look as if the fact never existed. What makes that safe across sync is the watermark, as the scenarios below show. (Same-batch assert+retract cancels to nothing; retracting a nonexistent fact is a no-op.)
+- **Retract** deletes the fact's index entries and records the withdrawn claim's version. Covering writes (retractions, and replacements that superseded something) additionally mirror a compact entry into the **coverage region**: same key layout under its own tag, carrying the entity, attribute, covered versions, and polarity, but no value bytes. Its only purpose is enumerability: "every deletion or replacement since the sync base" becomes a scoped tree diff over this small region, without streaming the value-bearing assert records interleaved in the history log. It rides merges as ordinary append-only entries and is the repair source for the graft merge below. **No marker is left behind**: after a retract, the data regions look as if the fact never existed. What makes that safe across sync is the watermark, as the scenarios below show. (Same-batch assert+retract cancels to nothing; retracting a nonexistent fact is a no-op.)
 
 ## Pulling changes: every scenario
 
@@ -421,7 +424,7 @@ To observe these numbers in an embedder: wrap the environment in the `Counting` 
 
 ## Not done yet
 
-1. **Structural three-way merge**: graft adopted subtrees inside a contested merge so even the replica's own delta replay skips untouched spans. Residual value only, now that every steady-state path is already proportional to the replica's divergence; needs a canonical-shape-preserving merge operation in the search tree.
+1. **The graft merge** (designed, landing next; the coverage region it depends on is in place). Today's reverse replay walks and re-materializes the replica's whole delta, which composes badly across upstreams: after adopting Alice's large novelty by root, merging with Bob replays it all into Bob's tree, downloading content nobody queried. The graft merge replaces the replay with a three-way walk over tree *nodes* by hash, with base B = Bob's tree at last sync, L = ours, U = Bob's current: where L == B (only Bob changed) take U's subtree by hash, unread; where U == B (only we changed, including everything adopted from Alice) take our subtree by hash, unread, which works even for content held only by reference; where both differ, descend, and screen at the leaves exactly as today. Two repair passes make grafting sound where naive grafting resurrects deletions: each side's *coverage delta* (the scoped diff of the coverage region since base, complete by construction because the delta is "every record the other side lacks" regardless of age) is enumerated and applied as targeted guarded removes against the other side's grafted regions. Resulting cost: the intersection of the two change sets, plus the coverage since base on both sides, plus seam paths where grafted subtrees join; the non-overlapping bulk of data *and* assert records transfers by hash on both sides. Prerequisite still open: a canonical-shape-preserving graft operation in the search tree (interior spans of untouched keys keep identical node structure under the rank-based shape; seam nodes rebuild), to be developed with property tests pinning graft-merge == screened-integrate on randomized tree triples.
 2. **Mesh sync planning**: with watermarks on every head, choosing the pull order across N peers is greedy set cover over version vectors (pull the peer covering the most of what you lack; peers whose watermark you include are skipped by scenario 2). No new protocol is needed; this is client policy.
 3. **Content erasure** (GDPR): the log retains value bytes in claim records indefinitely, in any merge design. The fix is value indirection (records and index entries carry the content hash; bytes live outside the merkle structure) plus a replicated, grow-only erasure set peers honor by dropping bytes. Hashes of low-entropy values are brute-forceable, so strict erasure of such fields needs app-layer salting or encryption.
 4. **Authority binding**: a time-anchoring story for delegation proofs in revision records (see the known gap above).

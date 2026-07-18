@@ -3,8 +3,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value, ValueDataType, history_key,
-    make_reference,
+    Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value, ValueDataType, coverage_key,
+    history_key, make_reference,
 };
 
 use super::{Cause, Claim, Version};
@@ -66,6 +66,42 @@ impl Record {
             retraction,
         };
         (key, State::Added(datum))
+    }
+
+    /// The compact coverage entry mirroring this record, when it covers
+    /// anything: the [`coverage_key`] for the claim at `version`, and a
+    /// [`Datum`] carrying only what a repair pass needs — the entity, the
+    /// attribute, the superseded versions, and the polarity. No value
+    /// bytes: coverage matches claims by version, never by content, and
+    /// keeping the region value-free is what makes "every deletion or
+    /// replacement since the sync base" a cheap scoped diff. `None` for
+    /// records that cover nothing (plain assertions, genesis
+    /// retractions).
+    pub fn coverage_entry(&self, version: &Version) -> Option<(Key, State<Datum>)> {
+        let claim = self.claim();
+        if claim.cause.versions().is_empty() {
+            return None;
+        }
+        let value_type = claim.is.data_type();
+        let value = claim.is.to_bytes();
+        let key = coverage_key(
+            version,
+            &claim.of,
+            &claim.the,
+            value_type,
+            &make_reference(&value),
+        );
+        let datum = Datum {
+            entity: claim.of.to_string(),
+            attribute: claim.the.to_string(),
+            value_type: value_type.into(),
+            value: Vec::new(),
+            cause: None,
+            version: Some(*version),
+            supersedes: claim.cause.versions().to_vec(),
+            retraction: !self.is_assertion(),
+        };
+        Some((key, State::Added(datum)))
     }
 
     /// Reconstruct a record from its stored [`Datum`] form

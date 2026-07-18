@@ -55,9 +55,9 @@ use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord};
 use crate::key::KEY_LENGTH;
 use crate::tree::ArtifactTree;
 use crate::{
-    Attribute, AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, Datum, ENTITY_KEY_TAG, Entity,
-    EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key, KeyBytes, KeyViewConstruct,
-    KeyViewMut as _, State, VALUE_KEY_TAG, ValueKey,
+    Attribute, AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
+    ENTITY_KEY_TAG, Entity, EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key, KeyBytes,
+    KeyViewConstruct, KeyViewMut as _, State, VALUE_KEY_TAG, ValueKey,
 };
 
 /// The full key span of one region tag.
@@ -69,9 +69,16 @@ fn tag_span(tag: u8) -> RangeInclusive<KeyBytes> {
     lo..=hi
 }
 
-/// The history region's key range, for scoping the first merge pass.
-pub fn history_scope() -> [RangeInclusive<KeyBytes>; 1] {
-    [tag_span(HISTORY_KEY_TAG)]
+/// The history-side key ranges for the first merge pass: the history
+/// region itself plus the coverage region that mirrors its covering
+/// records (compact, value-free entries whose only purpose is to make
+/// "every deletion or replacement since the sync base" enumerable as a
+/// scoped diff, without streaming the value-bearing assert records).
+/// Coverage entries screen like any append-only records; the R3 slot
+/// scans fire from the history records, so the mirror never doubles the
+/// coverage work.
+pub fn history_scope() -> [RangeInclusive<KeyBytes>; 2] {
+    [tag_span(HISTORY_KEY_TAG), tag_span(COVERAGE_KEY_TAG)]
 }
 
 /// The data regions' key ranges (EAV/AEV/VAE and the blob index), for
@@ -137,7 +144,10 @@ where
                     // `Record::into_entry`). A genesis retraction covers
                     // nothing and needs no scan.
                     let covering = match &entry.value {
-                        State::Added(datum) if !datum.supersedes.is_empty() => {
+                        State::Added(datum)
+                            if entry.key[0] == HISTORY_KEY_TAG
+                                && !datum.supersedes.is_empty() =>
+                        {
                             Some(datum.clone())
                         }
                         _ => None,

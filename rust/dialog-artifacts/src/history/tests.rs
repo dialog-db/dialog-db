@@ -1418,3 +1418,91 @@ async fn it_does_not_memoize_incomplete_history() -> Result<()> {
 
     Ok(())
 }
+
+/// Covering writes mirror themselves into the coverage region: a
+/// compact, value-free entry per retraction or replacement, none for
+/// plain assertions. This is what makes "every deletion or replacement
+/// since the sync base" enumerable as a scoped diff without streaming
+/// the value-bearing assert records — the repair source for graft
+/// merges.
+#[dialog_common::test]
+async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
+    use dialog_search_tree::{ContentAddressedStorage, Delta};
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::{StreamExt as _, stream};
+
+    use crate::tree::TreeStorageBridge;
+    use crate::{COVERAGE_KEY_TAG, KEY_LENGTH, KeyBytes, State};
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let entity = Entity::new()?;
+    let the: Attribute = "post/title".parse()?;
+    let title = |value: &str| Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::String(value.into()),
+        cause: None,
+    };
+
+    let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+    let second = Version::new(Origin::from([8u8; 32]), Edition::new(1));
+    let third = Version::new(Origin::from([8u8; 32]), Edition::new(2));
+
+    let mut tree = ArtifactTree::empty();
+    for (version, instruction) in [
+        (first, Instruction::Assert(title("Hej"))),
+        (second, Instruction::Replace(title("Hi"))),
+        (third, Instruction::Retract(title("Hi"))),
+    ] {
+        let mut delta = Delta::zero();
+        tree.apply_versioned(
+            &mut store,
+            &mut delta,
+            Some(version),
+            stream::iter(vec![instruction]),
+        )
+        .await?;
+        for (digest, buffer) in delta.flush() {
+            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+        }
+    }
+
+    let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let mut lo = [u8::MIN; KEY_LENGTH];
+    let mut hi = [u8::MAX; KEY_LENGTH];
+    lo[0] = COVERAGE_KEY_TAG;
+    hi[0] = COVERAGE_KEY_TAG;
+    let entries: Vec<_> = tree
+        .stream_range(KeyBytes::from(lo)..=KeyBytes::from(hi), &storage)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // The assert mirrors nothing; the replace and the retract each
+    // mirror one entry carrying the covered versions and no value bytes.
+    assert_eq!(entries.len(), 2, "one coverage entry per covering write");
+    for entry in &entries {
+        let State::Added(datum) = &entry.value else {
+            panic!("coverage entries are plain adds");
+        };
+        assert!(datum.value.is_empty(), "coverage carries no value bytes");
+        assert!(!datum.supersedes.is_empty(), "coverage names its versions");
+    }
+    let State::Added(replace) = &entries[0].value else {
+        unreachable!()
+    };
+    let State::Added(retract) = &entries[1].value else {
+        unreachable!()
+    };
+    assert_eq!(replace.supersedes, vec![first]);
+    assert!(!replace.retraction);
+    assert_eq!(retract.supersedes, vec![second]);
+    assert!(retract.retraction);
+
+    Ok(())
+}

@@ -52,6 +52,17 @@ use crate::{
 /// The leading tag byte of history region keys
 pub const HISTORY_KEY_TAG: u8 = 3;
 
+/// The leading tag byte of the coverage region: a compact mirror of the
+/// history region holding one entry per *covering* record (a retraction,
+/// or a replacement with a non-empty supersedes set), with the same key
+/// layout under its own tag and no value bytes in the entry. Its purpose
+/// is enumerability: "every deletion or replacement since the sync base"
+/// is a scoped tree diff over this region alone, without streaming the
+/// (value-bearing) assert records interleaved in the history region.
+/// This is what lets a graft merge repair adopted subtrees at a cost
+/// proportional to the coverage since base, not the write churn.
+pub const COVERAGE_KEY_TAG: u8 = 5;
+
 const EDITION_OFFSET: usize = TAG_LENGTH;
 const ORIGIN_OFFSET: usize = EDITION_OFFSET + EDITION_LENGTH;
 const ENTITY_OFFSET: usize = ORIGIN_OFFSET + ORIGIN_LENGTH;
@@ -81,6 +92,43 @@ pub fn history_key(
     value_type: ValueDataType,
     value_reference: &Blake3Hash,
 ) -> Key {
+    tagged_key(
+        HISTORY_KEY_TAG,
+        version,
+        of,
+        the,
+        value_type,
+        value_reference,
+    )
+}
+
+/// The key at which the coverage entry mirroring a covering record is
+/// stored: the same layout as [`history_key`] under [`COVERAGE_KEY_TAG`].
+pub fn coverage_key(
+    version: &Version,
+    of: &Entity,
+    the: &Attribute,
+    value_type: ValueDataType,
+    value_reference: &Blake3Hash,
+) -> Key {
+    tagged_key(
+        COVERAGE_KEY_TAG,
+        version,
+        of,
+        the,
+        value_type,
+        value_reference,
+    )
+}
+
+fn tagged_key(
+    tag: u8,
+    version: &Version,
+    of: &Entity,
+    the: &Attribute,
+    value_type: ValueDataType,
+    value_reference: &Blake3Hash,
+) -> Key {
     let entity = of.key_bytes();
     let attribute = the.key_bytes();
     let version_bytes = version.key_bytes();
@@ -89,7 +137,7 @@ pub fn history_key(
     // cannot distinguish (entity tails, long attribute tails, the value)
     // still yields a unique stored key.
     let mut preimage = [0u8; PREIMAGE_LENGTH];
-    preimage[0] = HISTORY_KEY_TAG;
+    preimage[0] = tag;
     let mut at = TAG_LENGTH;
     preimage[at..at + VERSION_LENGTH].copy_from_slice(&version_bytes);
     at += VERSION_LENGTH;
@@ -102,7 +150,7 @@ pub fn history_key(
     preimage[at..at + HASH_SIZE].copy_from_slice(value_reference);
 
     let mut bytes = MINIMUM_KEY;
-    bytes[0] = HISTORY_KEY_TAG;
+    bytes[0] = tag;
     bytes[EDITION_OFFSET..ENTITY_OFFSET].copy_from_slice(&version_bytes);
     bytes[ENTITY_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&entity[..ENTITY_RAW_HEAD]);
     bytes[ATTRIBUTE_OFFSET..HASH_OFFSET].copy_from_slice(&attribute[..HISTORY_ATTRIBUTE_HEAD]);

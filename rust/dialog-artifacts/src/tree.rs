@@ -366,6 +366,9 @@ impl ArtifactTreeExt for ArtifactTree {
                             is: artifact.is.clone(),
                             cause: HistoryCause::genesis(),
                         });
+                        if let Some(coverage) = record.coverage_entry(version) {
+                            history_entries.push(coverage);
+                        }
                         history_entries.push(record.into_entry(version));
                     }
 
@@ -470,6 +473,9 @@ impl ArtifactTreeExt for ArtifactTree {
                             is: artifact.is.clone(),
                             cause: HistoryCause::new(superseded_versions),
                         });
+                        if let Some(coverage) = record.coverage_entry(version) {
+                            history_entries.push(coverage);
+                        }
                         history_entries.push(record.into_entry(version));
                     }
 
@@ -521,6 +527,9 @@ impl ArtifactTreeExt for ArtifactTree {
                             is: artifact.is.clone(),
                             cause: withdrawn.into_iter().collect(),
                         });
+                        if let Some(coverage) = record.coverage_entry(version) {
+                            history_entries.push(coverage);
+                        }
                         history_entries.push(record.into_entry(version));
                     }
 
