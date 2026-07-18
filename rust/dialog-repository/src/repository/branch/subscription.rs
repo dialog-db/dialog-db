@@ -105,11 +105,26 @@ pub struct Demand {
     rules: Arc<Mutex<Vec<RangeInclusive<KeyBytes>>>>,
 }
 
+/// Insert a range into a cover, merging overlaps: the cover stays a
+/// sorted list of disjoint intervals, so it cannot grow beyond the
+/// number of genuinely distinct demanded regions no matter how many
+/// (nested, repeated) selectors record into it.
 fn record_range(ranges: &Mutex<Vec<RangeInclusive<KeyBytes>>>, range: RangeInclusive<KeyBytes>) {
     let mut ranges = ranges.lock().expect("demand lock");
-    if !ranges.contains(&range) {
-        ranges.push(range);
+    let (mut start, mut end) = range.into_inner();
+    // Absorb every existing interval the new one overlaps.
+    let mut merged = Vec::with_capacity(ranges.len() + 1);
+    for existing in ranges.drain(..) {
+        if *existing.start() > end || *existing.end() < start {
+            merged.push(existing);
+        } else {
+            start = start.min(*existing.start());
+            end = end.max(*existing.end());
+        }
     }
+    merged.push(start..=end);
+    merged.sort_by(|a, b| a.start().cmp(b.start()));
+    *ranges = merged;
 }
 
 impl Demand {
@@ -243,12 +258,13 @@ enum Touched {
     Facts {
         /// Subjects of the changed facts.
         subjects: BTreeSet<Entity>,
-        /// The changed facts themselves, for delta-join discovery.
+        /// Every changed fact (asserted and retracted alike), for
+        /// delta-join discovery.
         facts: Vec<Artifact>,
-        /// Whether every change was an addition (no fact left the
-        /// index and no tombstone was written): the precondition
-        /// for semi-naive fixpoint continuation.
-        additions_only: bool,
+        /// Facts that became readable.
+        asserted: Vec<Artifact>,
+        /// Facts that stopped being readable.
+        retracted: Vec<Artifact>,
     },
 }
 
@@ -330,10 +346,11 @@ where
                 Touched::Facts {
                     subjects,
                     facts,
-                    additions_only,
+                    asserted,
+                    retracted,
                 } => {
                     if let Some(delta) = self
-                        .maintain(env, &subjects, &facts, additions_only)
+                        .maintain(env, &subjects, &facts, &asserted, &retracted)
                         .await?
                     {
                         self.maintenances += 1;
@@ -426,10 +443,10 @@ where
         let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
         let mut changes = Box::pin(changes);
         let mut subjects = BTreeSet::new();
-        let mut facts = Vec::new();
-        let mut additions_only = true;
+        let mut asserted = Vec::new();
+        let mut retracted = Vec::new();
         // A fact change surfaces once per index order; dedup on the
-        // datum triple.
+        // datum triple, per direction.
         let mut seen = BTreeSet::new();
         while let Some(change) = changes
             .try_next()
@@ -443,15 +460,15 @@ where
             if self.demand.covers_rules(&entry.key) {
                 return Ok(Touched::Rules);
             }
-            // An entry leaving the index, or a tombstone arriving,
-            // means a fact stopped being readable: not an addition.
-            match (&change, &entry.value) {
-                (Change::Remove(_), State::Added(_)) => additions_only = false,
-                (Change::Add(_), State::Removed) => additions_only = false,
-                _ => {}
-            }
+            // An entry arriving with a datum became readable; an
+            // entry leaving with a datum stopped being readable.
+            // Tombstone-valued entries carry no datum: their effect
+            // (if any) surfaces as the paired datum-bearing change
+            // at the same key.
+            let arriving = matches!(&change, Change::Add(_));
             if let State::Added(datum) = &entry.value {
                 if !seen.insert((
+                    arriving,
                     datum.entity.clone(),
                     datum.attribute.clone(),
                     datum.value.clone(),
@@ -461,17 +478,23 @@ where
                 let fact = Artifact::try_from(datum.clone())
                     .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
                 subjects.insert(fact.of.clone());
-                facts.push(fact);
+                if arriving {
+                    asserted.push(fact);
+                } else {
+                    retracted.push(fact);
+                }
             }
         }
 
         if subjects.is_empty() {
             Ok(Touched::Nothing)
         } else {
+            let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
             Ok(Touched::Facts {
                 subjects,
                 facts,
-                additions_only,
+                asserted,
+                retracted,
             })
         }
     }
@@ -494,7 +517,8 @@ where
         env: &Env,
         subjects: &BTreeSet<Entity>,
         facts: &[Artifact],
-        additions_only: bool,
+        asserted: &[Artifact],
+        retracted: &[Artifact],
     ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
     where
         Env: Provider<Get>
@@ -530,17 +554,16 @@ where
                 .with_demand(self.demand.clone());
             let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
             if rules.recursion().is_some() {
-                // Fixpoint continuation: additions extend the
-                // retained answer table semi-naively (rebuilding
-                // when the rule set is not additively extendable);
-                // deletions fall back to a recompute, which rebuilds
-                // the table.
-                if !additions_only {
-                    return Ok(None);
-                }
+                // Fixpoint continuation: deletions retract via DRed,
+                // additions extend semi-naively — rebuilding into
+                // the retained table when either phase declines.
                 drop(query_env);
                 let results = self
-                    .evaluate_with_continuation(env, Some(Arc::new(facts.to_vec())))
+                    .evaluate_with_continuation(
+                        env,
+                        Arc::new(asserted.to_vec()),
+                        Arc::new(retracted.to_vec()),
+                    )
                     .await?;
                 let delta = Delta {
                     asserted: results
@@ -637,10 +660,8 @@ where
         // across polls: a recompute rebuilds into the retained
         // table so a later additions-only poll can extend it.
         if let Some(concept) = query.concept() {
-            query_env = query_env.with_fixpoint(
-                concept.this(),
-                Continuation::new(self.fixpoint.clone(), None),
-            );
+            query_env =
+                query_env.with_fixpoint(concept.this(), Continuation::new(self.fixpoint.clone()));
         }
         query.clone().perform(&query_env).try_vec().await
     }
@@ -652,7 +673,8 @@ where
     async fn evaluate_with_continuation<Env>(
         &self,
         env: &Env,
-        additions: Option<Arc<Vec<Artifact>>>,
+        additions: Arc<Vec<Artifact>>,
+        deletions: Arc<Vec<Artifact>>,
     ) -> Result<Vec<Q::Conclusion>, EvaluationError>
     where
         Env: Provider<Get>
@@ -679,7 +701,7 @@ where
             .with_demand(self.demand.clone())
             .with_fixpoint(
                 concept.this(),
-                Continuation::new(self.fixpoint.clone(), additions),
+                Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
             );
         self.query.clone().perform(&query_env).try_vec().await
     }
@@ -1151,6 +1173,29 @@ mod tests {
             /// Their manager, who must hold a badge.
             #[dialog(conforms = BadgeHolder)]
             pub manager: Manager,
+        }
+
+        /// The chief's deputy (`chief/deputy`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("chief")]
+        pub struct Deputy(pub Entity);
+
+        /// The chief's title (`chief/title`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("chief")]
+        pub struct Title(pub String);
+
+        /// Someone whose deputy is a valid report — two conformance
+        /// layers deep (Chief -> Report -> BadgeHolder).
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Chief {
+            /// The chief entity.
+            pub this: Entity,
+            /// Their title.
+            pub title: Title,
+            /// Their deputy, who must be a valid report.
+            #[dialog(conforms = Report)]
+            pub deputy: Deputy,
         }
 
         /// An email handle (`comm/email`).
@@ -1628,10 +1673,10 @@ mod tests {
         assert_eq!(subscription.recomputes(), 1);
         assert_eq!(subscription.maintenances(), 2);
 
-        // A deletion shrinks the closure: not additively
-        // extendable, so the poll rebuilds the fixpoint (and the
-        // retained table), retracting everything derived through
-        // the removed edge.
+        // A deletion shrinks the closure: DRed over the retained
+        // table — over-delete forward from the removed edge,
+        // re-derive survivors — retracting exactly what was
+        // derivable through it, still without a recompute.
         branch
             .transaction()
             .retract(Parent::of(c.clone()).is(b.clone()))
@@ -1646,9 +1691,14 @@ mod tests {
             "everything derived through the removed edge goes: \
              (c,b), (c,a), (d,b), (d,a); (d,c) survives"
         );
-        assert_eq!(subscription.recomputes(), 2, "deletions rebuild");
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "the deletion was retracted via DRed, not a rebuild"
+        );
+        assert_eq!(subscription.maintenances(), 3);
 
-        // And the rebuilt table continues extending afterwards.
+        // And the retracted table continues extending afterwards.
         let e = Entity::new()?;
         branch
             .transaction()
@@ -1674,8 +1724,88 @@ mod tests {
             asserted, expected,
             "e's ancestors follow the surviving chain"
         );
-        assert_eq!(subscription.recomputes(), 2);
-        assert_eq!(subscription.maintenances(), 3);
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "never recomputed after the first poll"
+        );
+        assert_eq!(subscription.maintenances(), 4);
+        Ok(())
+    }
+
+    /// Deep nesting: a badge change three derivation layers away
+    /// (badge -> BadgeHolder -> Report -> Chief) propagates through
+    /// the bottom-up affected discovery and maintains without a
+    /// recompute.
+    #[dialog_common::test]
+    async fn it_maintains_deeply_nested_conformance() -> anyhow::Result<()> {
+        use concepts::{Badge, Chief, Deputy, Manager, Name, Title};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let carol = Entity::new()?; // manager, unbadged (yet)
+        let mallory = Entity::new()?; // reports to carol
+        let frank = Entity::new()?; // chief whose deputy is mallory
+
+        branch
+            .transaction()
+            .assert(Name::of(mallory.clone()).is("Mallory"))
+            .assert(Manager::of(mallory.clone()).is(carol.clone()))
+            .assert(Title::of(frank.clone()).is("Frank"))
+            .assert(Deputy::of(frank.clone()).is(mallory.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<Chief>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(
+            initial.asserted.is_empty(),
+            "mallory is not a valid report while carol is unbadged"
+        );
+
+        // Badge carol: mallory becomes a Report, so frank becomes a
+        // Chief — two layers above the changed fact's subject.
+        branch
+            .transaction()
+            .assert(Badge::of(carol.clone()).is("C-3"))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("deeply nested effect");
+        assert_eq!(
+            delta.asserted,
+            vec![Chief {
+                this: frank.clone(),
+                title: Title("Frank".into()),
+                deputy: Deputy(mallory.clone()),
+            }]
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "discovered through two conformance layers, not recomputed"
+        );
+        assert_eq!(subscription.maintenances(), 1);
+
+        // And back out again.
+        branch
+            .transaction()
+            .retract(Badge::of(carol.clone()).is("C-3"))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("retraction");
+        assert_eq!(delta.retracted.len(), 1);
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 2);
         Ok(())
     }
 }
