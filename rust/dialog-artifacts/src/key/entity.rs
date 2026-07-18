@@ -4,7 +4,8 @@ use crate::KeyType;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, key::varkey, key::varkey::KeyParts,
+    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, key::inline_threshold,
+    key::value_payload, key::varkey, key::varkey::KeyParts, key::varkey::ValuePayload,
 };
 
 use super::{Key, KeyView, KeyViewConstruct, KeyViewMut, ValueReferenceKeyPart};
@@ -43,8 +44,10 @@ impl KeyViewConstruct for EntityKey<Key> {
         Self::default()
             .set_entity(entity)
             .set_attribute(attribute)
-            .set_value_type(value_type)
-            .set_value_reference(value_reference)
+            .set_value(
+                value_type,
+                ValuePayload::Reference(value_reference.0.to_vec()),
+            )
     }
 }
 
@@ -72,8 +75,12 @@ where
         varkey::value_type(self.0.as_ref(), ENTITY_KEY_TAG)
     }
 
-    fn value_reference(&self) -> ValueReferenceKeyPart<'_> {
-        ValueReferenceKeyPart(varkey::value_reference(self.0.as_ref(), ENTITY_KEY_TAG))
+    fn value_payload(&self) -> &[u8] {
+        varkey::value_payload(self.0.as_ref(), ENTITY_KEY_TAG)
+    }
+
+    fn value_is_spilled(&self) -> bool {
+        varkey::value_is_spilled(self.0.as_ref(), ENTITY_KEY_TAG)
     }
 }
 
@@ -88,13 +95,10 @@ impl KeyViewMut for EntityKey<Key> {
         }))
     }
 
-    fn set_value_type(self, value_type: ValueDataType) -> Self {
-        Self(rebuild(self.0, |parts| parts.value_type = value_type))
-    }
-
-    fn set_value_reference(self, value_reference: ValueReferenceKeyPart) -> Self {
+    fn set_value(self, value_type: ValueDataType, value: ValuePayload) -> Self {
         Self(rebuild(self.0, |parts| {
-            parts.value_reference = value_reference.0.to_vec()
+            parts.value_type = value_type;
+            parts.value = value;
         }))
     }
 }
@@ -147,8 +151,10 @@ impl From<&Artifact> for EntityKey<Key> {
         EntityKey::<Key>::default()
             .set_entity(EntityKeyPart::from(&fact.of))
             .set_attribute(AttributeKeyPart::from(&fact.the))
-            .set_value_type(fact.is.data_type())
-            .set_value_reference(ValueReferenceKeyPart(&fact.is.to_reference()))
+            .set_value(
+                fact.is.data_type(),
+                value_payload(&fact.is, inline_threshold()),
+            )
     }
 }
 

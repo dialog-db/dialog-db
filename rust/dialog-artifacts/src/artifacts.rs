@@ -1100,8 +1100,12 @@ mod tests {
 
         // Cumulative reads across both queries in this test (the baseline is
         // captured once, before the first). The broad attribute scan is a
-        // bounded descent, not a full-tree walk.
-        assert_eq!(net_reads, 3);
+        // bounded descent, not a full-tree walk. Small values now inline in the
+        // key as their order-preserving form rather than a fixed 32-byte
+        // reference, which changes leaf boundaries and the tree's shape, so the
+        // scan's bounded descent touches a few more blocks than the reference
+        // layout did.
+        assert_eq!(net_reads, 5);
         assert_eq!(net_writes, 0);
 
         Ok(())

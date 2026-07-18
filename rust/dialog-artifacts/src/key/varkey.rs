@@ -22,6 +22,46 @@ use crate::{
     encode_bytes,
 };
 
+/// The length of a spilled value's content-addressed reference.
+pub const VALUE_REFERENCE_LENGTH: usize = 32;
+
+/// The high bit of a key's value-type byte, marking that the value SPILLED:
+/// its payload is a [`VALUE_REFERENCE_LENGTH`]-byte reference rather than the
+/// inline order-preserving value. The low seven bits still hold the
+/// [`ValueDataType`] discriminant (which is `0..=8`), so a reader knows a
+/// spilled value's type without touching the blob. Spilled values are
+/// equality-only: they only occur above the tree's inline threshold, where
+/// range queries are meaningless, so the broken type-band ordering (all
+/// spilled tails sort above all inline ones) costs nothing.
+pub(crate) const SPILL_FLAG: u8 = 0x80;
+
+/// The payload a key carries for its value: either the inline
+/// order-preserving encoding (range-queryable) or a spilled reference
+/// (equality-only). Which one is chosen is the caller's inline-threshold
+/// decision; the built type byte records it via [`SPILL_FLAG`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValuePayload {
+    /// The value's order-preserving bytes, inline in the key.
+    Inline(Vec<u8>),
+    /// A content-addressed reference to a spilled value.
+    Reference(Vec<u8>),
+}
+
+impl ValuePayload {
+    /// The raw payload bytes (inline encoding or reference), for the columnar
+    /// value column and for equality comparison.
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            ValuePayload::Inline(bytes) | ValuePayload::Reference(bytes) => bytes,
+        }
+    }
+
+    /// Whether this payload spilled (is a reference).
+    pub fn is_reference(&self) -> bool {
+        matches!(self, ValuePayload::Reference(_))
+    }
+}
+
 /// The decoded components of an artifact key, borrowed where possible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyParts {
@@ -33,20 +73,30 @@ pub struct KeyParts {
     pub attribute: Vec<u8>,
     /// The value type.
     pub value_type: ValueDataType,
-    /// The 32-byte value reference.
-    pub value_reference: Vec<u8>,
+    /// The value payload: inline order-preserving bytes or a spilled reference.
+    pub value: ValuePayload,
 }
 
 impl KeyParts {
     /// The minimum components for an ordering: empty entity/attribute, the
-    /// minimum value type, and an all-zero value reference.
+    /// minimum value type, and the minimum inline value of that type.
+    ///
+    /// The minimum value type ([`ValueDataType::min`], `Bytes`) is a
+    /// terminated-string type, whose minimum value is the empty byte string.
+    /// That encodes to a lone terminator, NOT zero bytes: an inline payload
+    /// must be self-delimiting so the key round-trips (and so a `set_*` on this
+    /// sentinel re-parses instead of falling back to the max parts). An empty
+    /// `Vec` here would leave the value tail without a terminator and corrupt
+    /// the parse of the fields that follow in the VAE ordering.
     pub fn min(tag: u8) -> Self {
+        let mut value = Vec::new();
+        encode_bytes(&[], &mut value);
         Self {
             tag,
             entity: Vec::new(),
             attribute: Vec::new(),
             value_type: ValueDataType::min(),
-            value_reference: vec![0u8; 32],
+            value: ValuePayload::Inline(value),
         }
     }
 
@@ -71,7 +121,11 @@ impl KeyParts {
             entity: vec![MAX_FILLER_BYTE; MAX_FILLER],
             attribute: vec![MAX_FILLER_BYTE; MAX_FILLER],
             value_type: ValueDataType::max(),
-            value_reference: vec![0xFFu8; 32],
+            // The spilled band (the `SPILL_FLAG` type byte) sorts above every
+            // inline value, and an all-`0xFF` reference is the top of it, so
+            // this dominates every value of the maximum type. `set_value_*`
+            // replaces it with a real payload; this is only the unset bound.
+            value: ValuePayload::Reference(vec![0xFFu8; VALUE_REFERENCE_LENGTH]),
         }
     }
 }
@@ -132,39 +186,61 @@ pub fn field(bytes: &[u8], _tag: u8, which: Field) -> &[u8] {
     }
 }
 
-/// The value type byte of a key for the given ordering, or the minimum when the
-/// key does not split cleanly.
+/// The index of the value type-byte component in a split key, by tag.
+fn value_type_index(tag: u8) -> Option<usize> {
+    match tag {
+        ENTITY_KEY_TAG | ATTRIBUTE_KEY_TAG => Some(3),
+        VALUE_KEY_TAG => Some(1),
+        _ => None,
+    }
+}
+
+/// The value type of a key for the given ordering (with the spill flag masked
+/// off), or the minimum when the key does not split cleanly.
 pub fn value_type(bytes: &[u8], _tag: u8) -> ValueDataType {
-    let index = match bytes.first().copied() {
-        Some(ENTITY_KEY_TAG) | Some(ATTRIBUTE_KEY_TAG) => 3,
-        Some(VALUE_KEY_TAG) => 1,
-        _ => return ValueDataType::min(),
+    let Some(index) = bytes.first().copied().and_then(value_type_index) else {
+        return ValueDataType::min();
     };
     match split_components(bytes) {
         Some(slices) => slices
             .get(index)
             .and_then(|s| s.first())
-            .map(|&b| ValueDataType::from(b))
+            .map(|&b| ValueDataType::from(b & !SPILL_FLAG))
             .unwrap_or_else(ValueDataType::min),
         None => ValueDataType::min(),
     }
 }
 
-/// Borrows the 32-byte value reference of a key, or a zero array when the key
-/// does not split cleanly.
-pub fn value_reference(bytes: &[u8], _tag: u8) -> &[u8; 32] {
-    const ZERO: [u8; 32] = [0u8; 32];
-    let index = match bytes.first().copied() {
-        Some(ENTITY_KEY_TAG) | Some(ATTRIBUTE_KEY_TAG) => 4,
-        Some(VALUE_KEY_TAG) => 2,
-        _ => return &ZERO,
+/// Whether a key's value spilled (its payload is a reference, not an inline
+/// order-preserving value).
+pub fn value_is_spilled(bytes: &[u8], _tag: u8) -> bool {
+    let Some(index) = bytes.first().copied().and_then(value_type_index) else {
+        return false;
     };
     match split_components(bytes) {
         Some(slices) => slices
             .get(index)
-            .and_then(|s| <&[u8; 32]>::try_from(*s).ok())
-            .unwrap_or(&ZERO),
-        None => &ZERO,
+            .and_then(|s| s.first())
+            .map(|&b| b & SPILL_FLAG != 0)
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Borrows a key's value payload bytes (the inline order-preserving value, or
+/// the spilled reference), or an empty slice when the key does not split
+/// cleanly. The type byte (via [`value_type`]/[`value_is_spilled`]) says how
+/// to interpret them.
+pub fn value_payload(bytes: &[u8], _tag: u8) -> &[u8] {
+    // The payload sits immediately after the type byte.
+    let index = match bytes.first().copied() {
+        Some(ENTITY_KEY_TAG) | Some(ATTRIBUTE_KEY_TAG) => 4,
+        Some(VALUE_KEY_TAG) => 2,
+        _ => return &[],
+    };
+    match split_components(bytes) {
+        Some(slices) => slices.get(index).copied().unwrap_or(&[]),
+        None => &[],
     }
 }
 
@@ -177,6 +253,23 @@ fn strip_terminator(segment: &[u8]) -> &[u8] {
     }
 }
 
+/// Writes the value tail: the type byte (with [`SPILL_FLAG`] set when the
+/// payload is a reference) followed by the payload bytes.
+///
+/// The tail is self-delimiting for a reader that reads the type byte first:
+/// a spilled payload is a fixed [`VALUE_REFERENCE_LENGTH`] bytes; an inline
+/// payload is the order-preserving value encoding, which is itself
+/// self-delimiting (fixed width for numerics, terminated for strings/bytes).
+/// So the tail may sit in a non-terminal key position (the VAE ordering).
+fn write_value_tail(parts: &KeyParts, out: &mut Vec<u8>) {
+    let mut type_byte: u8 = parts.value_type.into();
+    if parts.value.is_reference() {
+        type_byte |= SPILL_FLAG;
+    }
+    out.push(type_byte);
+    out.extend_from_slice(parts.value.as_bytes());
+}
+
 /// Builds the key bytes for a given ordering tag from the components, encoding
 /// each in the ordering's byte order.
 pub fn build_key(parts: &KeyParts) -> Vec<u8> {
@@ -184,23 +277,22 @@ pub fn build_key(parts: &KeyParts) -> Vec<u8> {
     out.push(parts.tag);
     match parts.tag {
         ENTITY_KEY_TAG => {
-            // EAV: entity, attribute, value_type, value_reference
+            // EAV: entity, attribute, value tail
             encode_bytes(&parts.entity, &mut out);
             encode_bytes(&parts.attribute, &mut out);
-            out.push(parts.value_type.into());
-            out.extend_from_slice(&parts.value_reference);
+            write_value_tail(parts, &mut out);
         }
         ATTRIBUTE_KEY_TAG => {
-            // AEV: attribute, entity, value_type, value_reference
+            // AEV: attribute, entity, value tail
             encode_bytes(&parts.attribute, &mut out);
             encode_bytes(&parts.entity, &mut out);
-            out.push(parts.value_type.into());
-            out.extend_from_slice(&parts.value_reference);
+            write_value_tail(parts, &mut out);
         }
         VALUE_KEY_TAG => {
-            // VAE: value_type, value_reference, attribute, entity
-            out.push(parts.value_type.into());
-            out.extend_from_slice(&parts.value_reference);
+            // VAE: value tail, attribute, entity. The value tail leads so the
+            // ordering sorts by value; it is self-delimiting, so the attribute
+            // and entity that follow are still recoverable.
+            write_value_tail(parts, &mut out);
             encode_bytes(&parts.attribute, &mut out);
             encode_bytes(&parts.entity, &mut out);
         }
@@ -209,11 +301,50 @@ pub fn build_key(parts: &KeyParts) -> Vec<u8> {
             // safe default that stays self-delimiting.
             encode_bytes(&parts.entity, &mut out);
             encode_bytes(&parts.attribute, &mut out);
-            out.push(parts.value_type.into());
-            out.extend_from_slice(&parts.value_reference);
+            write_value_tail(parts, &mut out);
         }
     }
     out
+}
+
+/// The length of a value payload starting at `at`, given its (possibly
+/// spill-flagged) `type_byte`. A spilled payload is a fixed reference; an
+/// inline payload is self-delimited by the order-preserving value encoding:
+/// numerics are fixed-width and strings/bytes are `0x00`-terminated, mirroring
+/// the [`ordvalue`](crate::artifacts::ordvalue) decoders without allocating.
+fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
+    if type_byte & SPILL_FLAG != 0 {
+        return Some(VALUE_REFERENCE_LENGTH);
+    }
+    match ValueDataType::from(type_byte & !SPILL_FLAG) {
+        // 128-bit numerics: 16 big-endian bytes.
+        ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float => Some(16),
+        // A single byte.
+        ValueDataType::Boolean => Some(1),
+        // `0x00`-escaped, `0x00`-terminated byte strings.
+        ValueDataType::String
+        | ValueDataType::Bytes
+        | ValueDataType::Record
+        | ValueDataType::Entity
+        | ValueDataType::Symbol => terminated_len(bytes, at),
+    }
+}
+
+/// The length of one `0x00`-escaped, `0x00`-terminated byte string starting at
+/// `at`, including its escapes and terminator.
+fn terminated_len(bytes: &[u8], mut at: usize) -> Option<usize> {
+    let start = at;
+    while at < bytes.len() {
+        if bytes[at] == 0x00 {
+            match bytes.get(at + 1) {
+                Some(0xFF) => at += 2,
+                _ => return Some(at + 1 - start),
+            }
+        } else {
+            at += 1;
+        }
+    }
+    None
 }
 
 /// Splits raw key bytes into the *encoded* component slices for its ordering,
@@ -228,29 +359,6 @@ pub fn build_key(parts: &KeyParts) -> Vec<u8> {
 pub fn split_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
     let (tag, _) = bytes.split_first()?;
 
-    // The length of one order-preserving byte string starting at `at`,
-    // including its escapes and terminator. Mirrors `decode_bytes` scanning
-    // without allocating.
-    fn encoded_len(bytes: &[u8], mut at: usize) -> Option<usize> {
-        let start = at;
-        while at < bytes.len() {
-            if bytes[at] == 0x00 {
-                match bytes.get(at + 1) {
-                    // Escaped zero: `0x00 0xFF` is two bytes of content.
-                    Some(0xFF) => at += 2,
-                    // Lone terminator ends the string.
-                    _ => return Some(at + 1 - start),
-                }
-            } else {
-                at += 1;
-            }
-        }
-        None
-    }
-
-    // The one-byte value type plus the 32-byte value reference.
-    const VALUE_TAIL: usize = 1 + 32;
-
     let mut out: Vec<&[u8]> = Vec::with_capacity(5);
     out.push(&bytes[0..1]);
     let mut at = 1;
@@ -258,16 +366,20 @@ pub fn split_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
     // Push one variable-length encoded string component starting at `at`.
     macro_rules! push_var {
         () => {{
-            let len = encoded_len(bytes, at)?;
+            let len = terminated_len(bytes, at)?;
             out.push(&bytes[at..at + len]);
             at += len;
         }};
     }
 
-    // Push the fixed value tail (value type + value reference).
+    // Push the value tail as two components (type byte, then payload). The
+    // payload length is read from the type byte: a spilled payload is a fixed
+    // reference; an inline payload is self-delimited by its value encoding.
     macro_rules! push_value_tail {
         () => {{
-            let end = at.checked_add(VALUE_TAIL)?;
+            let &type_byte = bytes.get(at)?;
+            let payload_len = value_payload_len(type_byte, bytes, at + 1)?;
+            let end = (at + 1).checked_add(payload_len)?;
             if end > bytes.len() {
                 return None;
             }
@@ -311,61 +423,70 @@ pub fn split_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
 pub fn parse_key(bytes: &[u8]) -> Option<KeyParts> {
     let (&tag, rest) = bytes.split_first()?;
 
-    // Reads a fixed value tail: one type byte plus a 32-byte reference.
-    fn value_tail(bytes: &[u8]) -> Option<(ValueDataType, Vec<u8>, &[u8])> {
+    // Reads a variable value tail: one (possibly spill-flagged) type byte plus
+    // its payload (inline order-preserving value, or a fixed reference). The
+    // type byte's low seven bits are the `ValueDataType`; its high bit records
+    // whether the payload spilled.
+    fn value_tail(bytes: &[u8]) -> Option<(ValueDataType, ValuePayload, &[u8])> {
         let (&type_byte, rest) = bytes.split_first()?;
-        let (reference, rest) = rest.split_at_checked(32)?;
-        Some((ValueDataType::from(type_byte), reference.to_vec(), rest))
+        let payload_len = value_payload_len(type_byte, bytes, 1)?;
+        let (payload, rest) = rest.split_at_checked(payload_len)?;
+        let value_type = ValueDataType::from(type_byte & !SPILL_FLAG);
+        let value = if type_byte & SPILL_FLAG != 0 {
+            ValuePayload::Reference(payload.to_vec())
+        } else {
+            ValuePayload::Inline(payload.to_vec())
+        };
+        Some((value_type, value, rest))
     }
 
     let parts = match tag {
         ENTITY_KEY_TAG => {
             let (entity, rest) = decode_bytes(rest)?;
             let (attribute, rest) = decode_bytes(rest)?;
-            let (value_type, value_reference, _rest) = value_tail(rest)?;
+            let (value_type, value, _rest) = value_tail(rest)?;
             KeyParts {
                 tag,
                 entity,
                 attribute,
                 value_type,
-                value_reference,
+                value,
             }
         }
         ATTRIBUTE_KEY_TAG => {
             let (attribute, rest) = decode_bytes(rest)?;
             let (entity, rest) = decode_bytes(rest)?;
-            let (value_type, value_reference, _rest) = value_tail(rest)?;
+            let (value_type, value, _rest) = value_tail(rest)?;
             KeyParts {
                 tag,
                 entity,
                 attribute,
                 value_type,
-                value_reference,
+                value,
             }
         }
         VALUE_KEY_TAG => {
-            let (&type_byte, rest) = rest.split_first()?;
-            let (reference, rest) = rest.split_at_checked(32)?;
+            let (value_type, value, rest) = value_tail(rest)?;
             let (attribute, rest) = decode_bytes(rest)?;
             let (entity, _rest) = decode_bytes(rest)?;
             KeyParts {
                 tag,
                 entity,
                 attribute,
-                value_type: ValueDataType::from(type_byte),
-                value_reference: reference.to_vec(),
+                value_type,
+                value,
             }
         }
         _ => {
             let (entity, rest) = decode_bytes(rest)?;
             let (attribute, rest) = decode_bytes(rest)?;
-            let (value_type, value_reference, _rest) = value_tail(rest)?;
+            let (value_type, value, _rest) = value_tail(rest)?;
             KeyParts {
                 tag,
                 entity,
                 attribute,
                 value_type,
-                value_reference,
+                value,
             }
         }
     };
@@ -385,13 +506,21 @@ mod tests {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    /// An inline order-preserving String payload, so a round-trip through
+    /// `build_key`/`parse_key` reproduces it exactly.
+    fn inline_string(text: &str) -> ValuePayload {
+        let mut bytes = Vec::new();
+        crate::encode_bytes(text.as_bytes(), &mut bytes);
+        ValuePayload::Inline(bytes)
+    }
+
     fn parts(tag: u8, entity: &[u8], attribute: &[u8], value: u8) -> KeyParts {
         KeyParts {
             tag,
             entity: entity.to_vec(),
             attribute: attribute.to_vec(),
             value_type: ValueDataType::String,
-            value_reference: vec![value; 32],
+            value: inline_string(&format!("v{value}")),
         }
     }
 
@@ -413,6 +542,22 @@ mod tests {
                 let parsed = parse_key(&bytes).expect("parses");
                 assert_eq!(parsed, original, "tag {tag} round-trip");
             }
+        }
+        Ok(())
+    }
+
+    /// The min sentinel round-trips build -> parse for every ordering. Its
+    /// value tail is an empty *inline* value, which must be self-delimiting (a
+    /// lone terminator) so the fields after it in the VAE ordering still parse;
+    /// an empty payload would corrupt the parse and drop a `set_*` back to the
+    /// max parts, silently widening a value-scan's lower bound.
+    #[dialog_common::test]
+    async fn it_round_trips_the_min_sentinel() -> anyhow::Result<()> {
+        for tag in [ENTITY_KEY_TAG, ATTRIBUTE_KEY_TAG, VALUE_KEY_TAG] {
+            let min = KeyParts::min(tag);
+            let bytes = build_key(&min);
+            let parsed = parse_key(&bytes).expect("min sentinel parses");
+            assert_eq!(parsed, min, "tag {tag} min round-trip");
         }
         Ok(())
     }
@@ -483,7 +628,7 @@ mod tests {
             stored.attribute = attribute.to_vec();
             stored.entity = entity.to_vec();
             stored.value_type = ValueDataType::String;
-            stored.value_reference = vec![0x42u8; 32];
+            stored.value = inline_string("Alice");
             let key = build_key(&stored);
 
             assert!(

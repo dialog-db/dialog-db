@@ -115,16 +115,27 @@ pub fn common_prefix(left: &[u8], right: &[u8]) -> usize {
     left.iter().zip(right).take_while(|(l, r)| l == r).count()
 }
 
-/// Encodes sorted `keys` into a `(prefix, stream, restarts)` triple: the
-/// node-level prefix stored once, the front-coded stream, and the byte
-/// offset of each restart record within the stream.
+/// Encodes `keys` into a `(prefix, stream, restarts)` triple: the node-level
+/// prefix stored once, the front-coded stream, and the byte offset of each
+/// restart record within the stream.
+///
+/// The node prefix is the common prefix of *every* key, not just the first and
+/// last. For a sorted whole-key stream those coincide, but this also encodes
+/// arena *columns*, whose values are in key order (so unsorted): a value
+/// component (an inline order-preserving value) can be shorter than, or diverge
+/// earlier than, the first/last pair, so a first/last prefix could exceed a
+/// middle value's length. Folding over all keys keeps the stored prefix a true
+/// prefix of each.
 pub fn encode_keys<K: AsRef<[u8]>>(keys: &[K]) -> (Vec<u8>, Vec<u8>, Vec<u32>) {
-    let prefix = match (keys.first(), keys.last()) {
-        (Some(first), Some(last)) => {
-            let length = common_prefix(first.as_ref(), last.as_ref());
+    let prefix = match keys.first() {
+        Some(first) => {
+            let mut length = first.as_ref().len();
+            for key in &keys[1..] {
+                length = common_prefix(&first.as_ref()[..length], key.as_ref());
+            }
             first.as_ref()[..length].to_vec()
         }
-        _ => Vec::new(),
+        None => Vec::new(),
     };
 
     let mut stream = Vec::new();
@@ -268,6 +279,33 @@ mod tests {
             }
             assert!(cursor.is_done());
         }
+        Ok(())
+    }
+
+    /// A column's values are in key order, not value-sorted, so a short value
+    /// can sit between two longer ones whose shared prefix is longer than it.
+    /// The node prefix must be the common prefix of every value (not just the
+    /// first and last), or slicing it off a shorter middle value would panic.
+    /// This reproduces the variable-length inline value column.
+    #[dialog_common::test]
+    async fn it_round_trips_an_unsorted_column_with_a_short_middle() -> Result<()> {
+        let keys: Vec<Vec<u8>> = vec![
+            b"value-aaaa".to_vec(),
+            b"v".to_vec(),
+            b"value-aaaz".to_vec(),
+        ];
+        let (prefix, stream, restarts) = encode_keys(&keys);
+        assert!(
+            prefix.len() <= keys.iter().map(|k| k.len()).min().unwrap(),
+            "node prefix never exceeds the shortest value"
+        );
+
+        let mut cursor = KeyCursor::new(&prefix, &stream, restarts[0] as usize);
+        for expected in &keys {
+            cursor.advance()?;
+            assert_eq!(cursor.key(), expected.as_slice());
+        }
+        assert!(cursor.is_done());
         Ok(())
     }
 

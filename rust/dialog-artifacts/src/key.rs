@@ -51,7 +51,10 @@ pub(crate) mod varkey;
 /// not yet implemented, so no key view is built on this tag.
 pub const HISTORY_KEY_TAG: u8 = 3;
 
-use crate::{ArtifactSelector, ValueDataType, selector::Constrained};
+use crate::{
+    ArtifactSelector, Value, ValueDataType, encode_value_owned, key::varkey::ValuePayload,
+    selector::Constrained,
+};
 
 /// Helper macro for creating mutable slices from byte arrays at compile time.
 ///
@@ -86,6 +89,49 @@ pub(crate) const MINIMUM_VALUE_REFERENCE: [u8; VALUE_REFERENCE_LENGTH] =
     [u8::MIN; VALUE_REFERENCE_LENGTH];
 pub(crate) const MAXIMUM_VALUE_REFERENCE: [u8; VALUE_REFERENCE_LENGTH] =
     [u8::MAX; VALUE_REFERENCE_LENGTH];
+
+/// Decides how a [`Value`] is carried in a key: a small value is encoded inline
+/// in its order-preserving form (and stays range-queryable); a value whose
+/// encoded form exceeds `inline_n` spills to its 32-byte content-addressed
+/// reference (equality-only). This is the single place the inline-vs-spill
+/// decision is made, so the fact-building path and the selector path agree.
+pub(crate) fn value_payload(value: &Value, inline_n: usize) -> ValuePayload {
+    let encoded = encode_value_owned(value);
+    if encoded.len() <= inline_n {
+        ValuePayload::Inline(encoded)
+    } else {
+        ValuePayload::Reference(value.to_reference().to_vec())
+    }
+}
+
+/// The inline-vs-spill threshold for value payloads in keys.
+///
+// TODO(m3.2c): the manifest is read from `Manifest::default()` here. A later
+// stage persists the manifest into node bytes and threads it down to the key
+// builders; until then this mirrors the default note in the search tree's
+// distribution/transient reshape path.
+pub(crate) fn inline_threshold() -> usize {
+    dialog_search_tree::Manifest::default().inline_n as usize
+}
+
+/// The exact value-tail bytes a key carries for `value`: the value-type byte
+/// (with the spill flag set when the value spilled) followed by the payload
+/// (inline order-preserving encoding, or the 32-byte spilled reference).
+///
+/// This is what makes a [`SortKey`](crate::SortKey) reproduce the tree's byte
+/// order: same-`(the, of, type)` facts sort by this tail exactly as the
+/// EAV/AEV/VAE keys do.
+pub(crate) fn value_tail_bytes(value: &Value) -> Vec<u8> {
+    let payload = value_payload(value, inline_threshold());
+    let mut type_byte: u8 = value.data_type().into();
+    if payload.is_reference() {
+        type_byte |= varkey::SPILL_FLAG;
+    }
+    let mut tail = Vec::with_capacity(1 + payload.as_bytes().len());
+    tail.push(type_byte);
+    tail.extend_from_slice(payload.as_bytes());
+    tail
+}
 
 /// An opaque, generic [`KeyType`] backing the subtrees of an [`Artifacts`]
 /// index.
@@ -166,34 +212,36 @@ impl AsRef<[u8]> for Key {
 }
 
 /// Column schema for the EAV ordering (`tag ‖ entity ‖ attribute ‖
-/// value_type ‖ value_reference`). The entity and value reference are large
+/// value_type ‖ value_payload`). The entity and value payload are large
 /// and mostly distinct (arena); the tag, attribute, and value type are small
 /// and highly repeated, recurring non-adjacently across the leaf
-/// (dictionary). Entity and attribute are variable-length.
+/// (dictionary). Entity, attribute, and the value payload are variable-length
+/// (the payload is an inline order-preserving value or a spilled 32-byte
+/// reference).
 const EAV_SCHEMA: &[TreeComponent] = &[
     TreeComponent::dictionary(TAG_LENGTH),
     TreeComponent::arena_var(),
     TreeComponent::dictionary_var(),
     TreeComponent::dictionary(VALUE_DATA_TYPE_LENGTH),
-    TreeComponent::arena(VALUE_REFERENCE_LENGTH),
+    TreeComponent::arena_var(),
 ];
 
 /// Column schema for the AEV ordering (`tag ‖ attribute ‖ entity ‖
-/// value_type ‖ value_reference`).
+/// value_type ‖ value_payload`).
 const AEV_SCHEMA: &[TreeComponent] = &[
     TreeComponent::dictionary(TAG_LENGTH),
     TreeComponent::dictionary_var(),
     TreeComponent::arena_var(),
     TreeComponent::dictionary(VALUE_DATA_TYPE_LENGTH),
-    TreeComponent::arena(VALUE_REFERENCE_LENGTH),
+    TreeComponent::arena_var(),
 ];
 
-/// Column schema for the VAE ordering (`tag ‖ value_type ‖ value_reference ‖
+/// Column schema for the VAE ordering (`tag ‖ value_type ‖ value_payload ‖
 /// attribute ‖ entity`).
 const VAE_SCHEMA: &[TreeComponent] = &[
     TreeComponent::dictionary(TAG_LENGTH),
     TreeComponent::dictionary(VALUE_DATA_TYPE_LENGTH),
-    TreeComponent::arena(VALUE_REFERENCE_LENGTH),
+    TreeComponent::arena_var(),
     TreeComponent::dictionary_var(),
     TreeComponent::arena_var(),
 ];
@@ -283,12 +331,15 @@ pub trait KeyViewMut: KeyView {
     /// [`KeyView`].
     fn set_attribute(self, attribute: AttributeKeyPart) -> Self;
 
-    /// Set the [`ValueDataType`] that is represented by this [`KeyView`].
-    fn set_value_type(self, value_type: ValueDataType) -> Self;
-
-    /// Set the [`ValueReferenceKeyPart`], altering the [`Value`] part of this
-    /// [`KeyView`].
-    fn set_value_reference(self, value_reference: ValueReferenceKeyPart) -> Self;
+    /// Set the value slot: the [`ValueDataType`] and the payload (an inline
+    /// order-preserving value or a spilled reference), together.
+    ///
+    /// The type and payload are set atomically because a payload's byte length
+    /// depends on the type (fixed-width numerics, a terminated string, or a
+    /// 32-byte spilled reference): setting one without the other would leave a
+    /// value tail that no longer self-delimits, so the next parse-and-rebuild
+    /// would fail and silently drop back to the bound's fallback parts.
+    fn set_value(self, value_type: ValueDataType, value: ValuePayload) -> Self;
 
     /// Sets the constrained parts of the given [`ArtifactSelector`] to the associated
     /// components of this [`KeyView`]
@@ -303,12 +354,12 @@ pub trait KeyViewMut: KeyView {
             key = key.set_attribute(attribute.into());
         }
 
-        if let Some(value_type) = selector.value().map(|value| value.data_type()) {
-            key = key.set_value_type(value_type);
-        }
-
-        if let Some(value_reference) = selector.value_reference() {
-            key = key.set_value_reference(ValueReferenceKeyPart(value_reference));
+        // A value-constrained (equality) selector collapses the value slot to
+        // the value's payload, encoded with the same inline-vs-spill decision
+        // the fact-building path uses, so a value range narrows to the exact
+        // value. The type and payload (with its spill flag) are set together.
+        if let Some(value) = selector.value() {
+            key = key.set_value(value.data_type(), value_payload(value, inline_threshold()));
         }
 
         key
@@ -331,9 +382,14 @@ pub trait KeyView: Sized + Clone {
     /// Get the [`ValueDataType`] that is represented by this [`KeyView`].
     fn value_type(&self) -> ValueDataType;
 
-    /// Get a [`ValueReferenceKeyPart`] that refers to the [`Value`] part of
-    /// this [`KeyView`].
-    fn value_reference(&self) -> ValueReferenceKeyPart<'_>;
+    /// Borrow the raw value payload bytes of this [`KeyView`]: the inline
+    /// order-preserving value encoding, or a spilled 32-byte reference.
+    /// [`value_is_spilled`](KeyView::value_is_spilled) says which.
+    fn value_payload(&self) -> &[u8];
+
+    /// Whether this [`KeyView`]'s value spilled (its payload is a reference
+    /// rather than the inline order-preserving value).
+    fn value_is_spilled(&self) -> bool;
 }
 
 /// Trait for constructing key views from artifact selectors.
@@ -367,11 +423,18 @@ where
     Kb: KeyViewConstruct,
 {
     fn from_key(key: &Ka) -> Self {
+        // Copy the value payload faithfully so all three orderings (EAV/AEV/VAE)
+        // for one fact carry the identical value slot: an inline payload stays
+        // inline, a spilled reference stays spilled.
+        let payload = if key.value_is_spilled() {
+            ValuePayload::Reference(key.value_payload().to_vec())
+        } else {
+            ValuePayload::Inline(key.value_payload().to_vec())
+        };
         Kb::default()
             .set_entity(key.entity())
             .set_attribute(key.attribute())
-            .set_value_type(key.value_type())
-            .set_value_reference(key.value_reference())
+            .set_value(key.value_type(), payload)
     }
 }
 
@@ -394,3 +457,105 @@ where
 //         Self::min()
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    #![allow(unexpected_cfgs)]
+    // The dialog_common::test macro requires async test fns; these pure tests
+    // await nothing.
+    #![allow(clippy::unused_async)]
+
+    use std::str::FromStr;
+
+    use super::{
+        AttributeKey, EntityKey, FromKey, KeyView, ValueKey, inline_threshold, value_payload,
+    };
+    use crate::{Artifact, Attribute, Entity, Value, decode_value, key::varkey::ValuePayload};
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    fn fact(value: Value) -> Artifact {
+        Artifact {
+            the: Attribute::from_str("person/name").unwrap(),
+            of: Entity::from_str("did:key:z6MkExample").unwrap(),
+            is: value,
+            cause: None,
+        }
+    }
+
+    /// A small value round-trips through a key inline: the key carries the
+    /// value's order-preserving bytes (not spilled), and decoding the payload
+    /// by its type reproduces the original [`Value`].
+    #[dialog_common::test]
+    async fn it_round_trips_a_small_value_inline() -> anyhow::Result<()> {
+        let value = Value::String("Alice".into());
+        let key = EntityKey::from(&fact(value.clone()));
+
+        assert!(!key.value_is_spilled(), "a small value stays inline");
+        assert_eq!(key.value_type(), value.data_type());
+
+        let (decoded, rest) =
+            decode_value(key.value_type(), key.value_payload()).expect("decodes inline payload");
+        assert!(rest.is_empty(), "payload is exactly one value encoding");
+        assert_eq!(decoded, value, "inline value round-trips");
+        Ok(())
+    }
+
+    /// All three orderings (EAV/AEV/VAE) for one fact carry the identical value
+    /// payload, and `from_key` preserves it across a re-projection.
+    #[dialog_common::test]
+    async fn it_carries_one_payload_across_orderings() -> anyhow::Result<()> {
+        let value = Value::UnsignedInt(1234);
+        let fact = fact(value.clone());
+
+        let eav = EntityKey::from(&fact);
+        let aev = AttributeKey::from(&fact);
+        let vae = ValueKey::from(&fact);
+
+        assert_eq!(eav.value_payload(), aev.value_payload());
+        assert_eq!(eav.value_payload(), vae.value_payload());
+        assert_eq!(eav.value_is_spilled(), vae.value_is_spilled());
+
+        // Re-projecting EAV onto VAE preserves the exact payload and spill flag.
+        let projected: ValueKey<crate::Key> = FromKey::from_key(&eav);
+        assert_eq!(projected.value_payload(), vae.value_payload());
+        assert_eq!(projected.value_is_spilled(), vae.value_is_spilled());
+        assert_eq!(projected.value_type(), value.data_type());
+        Ok(())
+    }
+
+    /// The inline-vs-spill decision spills a value whose encoded form exceeds
+    /// the threshold to its 32-byte reference; a value within the threshold
+    /// stays inline.
+    #[dialog_common::test]
+    async fn it_spills_above_the_inline_threshold() -> anyhow::Result<()> {
+        // A tiny threshold forces even a short string to spill to its reference.
+        let value = Value::String("this-string-exceeds-a-tiny-threshold".into());
+        let spilled = value_payload(&value, 4);
+        assert!(spilled.is_reference(), "oversized value spills");
+        assert_eq!(spilled.as_bytes(), value.to_reference().to_vec());
+
+        // Under a generous threshold the same value stays inline.
+        let inline = value_payload(&value, 4096);
+        assert!(matches!(inline, ValuePayload::Inline(_)), "fits inline");
+        Ok(())
+    }
+
+    /// A value that spills builds a key whose value-type byte has the spill bit
+    /// set and whose payload is the 32-byte reference.
+    #[dialog_common::test]
+    async fn it_builds_a_spilled_key_with_the_spill_flag() -> anyhow::Result<()> {
+        let value = Value::String("x".repeat(inline_threshold() + 1));
+        let key = EntityKey::from(&fact(value.clone()));
+
+        assert!(key.value_is_spilled(), "an oversized value spills the key");
+        assert_eq!(
+            key.value_type(),
+            value.data_type(),
+            "type survives spilling"
+        );
+        assert_eq!(key.value_payload(), value.to_reference().to_vec());
+        Ok(())
+    }
+}

@@ -8,6 +8,7 @@ use dialog_search_tree::Entry;
 use crate::{
     ATTRIBUTE_KEY_TAG, ArtifactSelector, AttributeKey, Datum, ENTITY_KEY_TAG, EntityKey, Key,
     KeyView, State, VALUE_KEY_TAG, ValueKey, artifacts::selector::Constrained,
+    key::inline_threshold, key::value_payload,
 };
 
 /// Checks if a key view matches the constraints in an artifact selector.
@@ -33,16 +34,21 @@ where
         return false;
     }
 
-    if let Some(value) = selector.value()
-        && value.data_type() != key.value_type()
-    {
-        return false;
-    }
-
-    if let Some(value_reference) = selector.value_reference()
-        && value_reference != key.value_reference().raw()
-    {
-        return false;
+    if let Some(value) = selector.value() {
+        if value.data_type() != key.value_type() {
+            return false;
+        }
+        // Compare by the same inline-vs-spill encoding the key was built with,
+        // so the filter is exact for both an inline value (its order-preserving
+        // bytes) and a spilled one (its 32-byte reference). The spill flag must
+        // also agree: an inline payload and a reference of equal bytes would
+        // otherwise falsely match.
+        let expected = value_payload(value, inline_threshold());
+        if expected.is_reference() != key.value_is_spilled()
+            || expected.as_bytes() != key.value_payload()
+        {
+            return false;
+        }
     }
 
     if let Some(prefix) = selector.attribute_prefix() {

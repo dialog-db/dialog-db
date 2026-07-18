@@ -1,4 +1,5 @@
 use crate::artifacts::query::Select;
+use crate::key::value_tail_bytes;
 use crate::selector::Constrained;
 use crate::{
     Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Entity,
@@ -222,12 +223,12 @@ impl Stream for ChangeStream {
 ///   .is(value)     → VAE → residual (attribute, entity)
 /// ```
 ///
-/// `SortKey = (attribute, entity, value_type, value_reference)` is the
+/// `SortKey = (attribute, entity, value_type, value_tail)` is the
 /// **unique** total order whose restriction (delete the pinned
 /// component) reproduces every one of those residuals:
 ///
 /// - lock `entity`  → `attribute` is the next live component ✓ (EAV)
-/// - lock `value`   → `value_type`+`value_reference` drop out,
+/// - lock `value`   → `value_type`+`value_tail` drop out,
 ///   `attribute` is next ✓ (VAE)
 /// - lock `attribute` → `attribute` itself drops out, `entity` is
 ///   next ✓ (AEV)
@@ -244,24 +245,31 @@ impl Stream for ChangeStream {
 ///
 /// The four-component key (vs. the bare `(the, of)` group key) also
 /// fixes interleaving *within* a cardinality-many group: same-`(the,
-/// of)` items from different streams order by `value_reference`
-/// rather than by stream index.
-pub type SortKey = (Vec<u8>, Vec<u8>, u8, [u8; 32]);
+/// of)` items from different streams order by their value tail rather
+/// than by stream index.
+///
+/// The fourth component is the key's *value tail* (the spill-flagged type
+/// byte followed by the inline order-preserving value or the spilled
+/// reference), not the bare value reference: the tree now orders same-`(the,
+/// of, type)` facts by their inline value bytes, so a `SortKey` must too.
+pub type SortKey = (Vec<u8>, Vec<u8>, u8, Vec<u8>);
 
 /// Compute the [`SortKey`] for an artifact.
 ///
-/// Uses the same `key_bytes()` / `data_type()` / `to_reference()`
-/// the tree's own index keys are built from
-/// (`EntityKey::from(&Artifact)` and friends), so a `SortKey` sort
-/// reproduces the tree's byte order exactly — not just an
-/// approximation of it. See [`SortKey`] for why the component order
-/// is correct across all three scan modes.
+/// Uses the same entity/attribute bytes and value tail the tree's own index
+/// keys are built from (`EntityKey::from(&Artifact)` and friends), so a
+/// `SortKey` sort reproduces the tree's byte order exactly, not just an
+/// approximation of it. In particular the value component is the inline
+/// order-preserving encoding (or spilled reference) the key carries, so
+/// same-`(the, of, type)` facts order by value exactly as the tree does. See
+/// [`SortKey`] for why the component order is correct across all three scan
+/// modes.
 pub fn sort_key(artifact: &Artifact) -> SortKey {
     (
         artifact.the.as_str().as_bytes().to_vec(),
         artifact.of.as_str().as_bytes().to_vec(),
         artifact.is.data_type().into(),
-        artifact.is.to_reference(),
+        value_tail_bytes(&artifact.is),
     )
 }
 
