@@ -33,6 +33,7 @@ use crate::error::AnalysisError;
 use crate::planner::categorize;
 use crate::premise::Negation;
 use crate::proposition::Proposition;
+use crate::rule::RuleKind;
 use crate::rule::types::TypeEnv;
 use crate::type_system::Type as Kind;
 use crate::type_system::unifier::Context;
@@ -221,10 +222,13 @@ impl AnalyzedRule {
 
     /// The concepts this rule negates: its *negative IDB edges*.
     /// One entry per `unless` premise over a concept, identified by
-    /// the concept's content-addressed URI. Self-negation is
-    /// rejected at analysis, so none of these is the rule's own
-    /// conclusion; the global stratification pass consumes these
-    /// edges to order (or reject) cycles that span multiple rules.
+    /// the concept's content-addressed URI. Deductive self-negation
+    /// is rejected at analysis, so for a deductive rule none of
+    /// these is its own conclusion; the global stratification pass
+    /// consumes these edges to order (or reject) cycles that span
+    /// multiple rules. (An inductive rule may negate its own
+    /// conclusion — the idempotence guard — but inductive rules
+    /// never feed that pass.)
     pub fn negated_concepts(&self) -> impl Iterator<Item = Entity> + '_ {
         self.premises.iter().filter_map(|premise| match premise {
             Premise::Unless(Negation(Proposition::Concept(query))) => Some(query.predicate.this()),
@@ -276,6 +280,7 @@ impl AnalyzedRule {
 pub fn analyze(
     conclusion: ConceptDescriptor,
     premises: Vec<Premise>,
+    kind: RuleKind,
 ) -> Result<AnalyzedRule, AnalysisError> {
     let types = Arc::new(
         TypeEnv::infer(&premises).map_err(|err| AnalysisError::Inference {
@@ -319,20 +324,30 @@ pub fn analyze(
         }
     }
 
-    // A rule that negates its own conclusion is a negative
-    // self-loop: it would derive a row exactly when it doesn't, and
-    // no stratification can order it. This is the local, always
-    // detectable case; negation over *other* derived concepts is a
-    // negative IDB edge, surfaced per rule by
+    // A *deductive* rule that negates its own conclusion is a
+    // negative self-loop: it would derive a row exactly when it
+    // doesn't, and no stratification can order it. This is the
+    // local, always detectable case; negation over *other* derived
+    // concepts is a negative IDB edge, surfaced per rule by
     // [`AnalyzedRule::negated_concepts`] for the global
     // stratification pass to consume.
-    for premise in &premises {
-        if let Premise::Unless(Negation(Proposition::Concept(query))) = premise
-            && query.predicate.this() == conclusion.this()
-        {
-            return Err(AnalysisError::SelfNegation {
-                concept: conclusion.this().to_string(),
-            });
+    //
+    // An *inductive* rule is exempt: its `unless` reads the
+    // pre-transition state while its head asserts into the next one,
+    // so "assert P unless P exists" is the standard idempotence
+    // guard (Dedalus `P@next :- body, not P@now`), stratified by the
+    // time step rather than paradoxical. Inductive rules never join
+    // deductive resolution, so the head is base data to the same-
+    // instant program and no global negative edge arises either.
+    if kind == RuleKind::Deductive {
+        for premise in &premises {
+            if let Premise::Unless(Negation(Proposition::Concept(query))) = premise
+                && query.predicate.this() == conclusion.this()
+            {
+                return Err(AnalysisError::SelfNegation {
+                    concept: conclusion.this().to_string(),
+                });
+            }
         }
     }
 
@@ -389,7 +404,7 @@ mod tests {
             )
             .into(),
         ];
-        let analyzed = analyze(person_with_name(), premises).unwrap();
+        let analyzed = analyze(person_with_name(), premises, RuleKind::Deductive).unwrap();
 
         assert_eq!(analyzed.premises.len(), 1);
         let name_kind = analyzed.type_of("name").expect("name has an inferred type");
@@ -417,7 +432,7 @@ mod tests {
             Some(Cardinality::One),
         );
         let premises = vec![q1.into(), q2.into()];
-        let analyzed = analyze(person_with_name(), premises).unwrap();
+        let analyzed = analyze(person_with_name(), premises, RuleKind::Deductive).unwrap();
 
         assert_eq!(analyzed.graph.len(), 2);
 
@@ -451,7 +466,7 @@ mod tests {
         let length = Length::apply(params).unwrap();
 
         let premises: Vec<Premise> = vec![attr.into(), Premise::from(length)];
-        let analyzed = analyze(person_with_name(), premises).unwrap();
+        let analyzed = analyze(person_with_name(), premises, RuleKind::Deductive).unwrap();
 
         assert_eq!(analyzed.graph.len(), 2);
 
@@ -501,7 +516,7 @@ mod tests {
             )
             .into(),
         ];
-        let err = analyze(person_with_name(), premises).unwrap_err();
+        let err = analyze(person_with_name(), premises, RuleKind::Deductive).unwrap_err();
         match err {
             AnalysisError::RequiredHeadFromOptional { variable } => {
                 assert_eq!(variable, "name");
@@ -534,7 +549,7 @@ mod tests {
             Premise::Unless(Negation(Proposition::OptionalAttribute(Box::new(maybe)))),
         ];
 
-        let err = analyze(person_with_name(), premises).unwrap_err();
+        let err = analyze(person_with_name(), premises, RuleKind::Deductive).unwrap_err();
         assert!(
             matches!(err, AnalysisError::NegatedOptional),
             "negating a maybe premise is vacuously false, got {err:?}"

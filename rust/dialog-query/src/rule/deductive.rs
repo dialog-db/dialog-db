@@ -11,7 +11,7 @@ pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 use crate::rule::analyzer::AnalyzedRule;
-use crate::rule::{Compile, fmt_rule_schema};
+use crate::rule::{Compile, RuleKind, fmt_rule_schema};
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
@@ -34,6 +34,8 @@ pub struct DeductiveRule {
     analysis: AnalyzedRule,
 }
 impl Compile for DeductiveRule {
+    const KIND: RuleKind = RuleKind::Deductive;
+
     fn from_analysis(analysis: AnalyzedRule) -> Self {
         DeductiveRule { analysis }
     }

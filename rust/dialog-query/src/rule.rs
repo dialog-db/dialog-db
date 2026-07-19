@@ -90,6 +90,27 @@ impl From<InductiveRule> for Rule {
     }
 }
 
+/// Which of the two rule kinds is being compiled — equivalently,
+/// *when* the conclusion takes effect relative to the state the body
+/// reads.
+///
+/// A deductive rule concludes at the same instant its body is
+/// evaluated: the head is a derived view of the current state. An
+/// inductive rule's body (including its `unless` premises) reads the
+/// current state while its head is *asserted into the next one* — a
+/// committed transaction, since facts persist in the store until
+/// retracted (there are no Dedalus-style frame rules to encode).
+/// From the deductive program's perspective an inductive head is
+/// base data, not a derived predicate, which is why the two kinds
+/// stratify differently (see [`analyze`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleKind {
+    /// Concludes at the same instant: a derived view.
+    Deductive,
+    /// Concludes at the next state: a transaction generator.
+    Inductive,
+}
+
 /// Common construction surface for both rule kinds.
 ///
 /// Implementors are constructible from a head + planned body via
@@ -98,6 +119,14 @@ impl From<InductiveRule> for Rule {
 /// uniformly. The default [`compile`](Compile::compile) runs the
 /// shared analysis pipeline (planner + unbound-variable check).
 pub trait Compile: Sized + Into<Rule> {
+    /// Which rule kind this type compiles as. Analysis is shared
+    /// except where the kinds genuinely differ: a deductive rule may
+    /// not negate its own conclusion (a same-instant paradox), while
+    /// for an inductive rule that same shape is the standard
+    /// idempotence guard ("create one unless one exists") because the
+    /// negation reads the pre-transition state.
+    const KIND: RuleKind;
+
     /// Build the rule from its analysis. Called by
     /// [`analyze`](Self::analyze) once analysis passes: the
     /// [`AnalyzedRule`] holds the narrowed premises, dependency graph
@@ -112,9 +141,10 @@ pub trait Compile: Sized + Into<Rule> {
     fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self;
 
     /// Analyze a rule's conclusion and premises into a verified,
-    /// plannable rule. Default impl is identical for deductive and
-    /// inductive rules; the only difference between the kinds lives at
-    /// evaluation time, not compile time.
+    /// plannable rule. The default impl is shared by both kinds;
+    /// [`Self::KIND`] parameterizes the one structural check where
+    /// they differ (self-negation), and evaluation semantics differ
+    /// at runtime.
     ///
     /// Runs type inference + narrowing, the required-head and Coalesce
     /// contract checks, and the dependency-graph build (all in
@@ -134,7 +164,7 @@ pub trait Compile: Sized + Into<Rule> {
         // before any execution order is chosen. The original premises
         // are kept for the error-path display rule.
         let display_premises = premises.clone();
-        let analysis = match analyzer::analyze(conclusion.clone(), premises) {
+        let analysis = match analyzer::analyze(conclusion.clone(), premises, Self::KIND) {
             Ok(analysis) => analysis,
             Err(err) => {
                 let rule = Self::in_progress(conclusion, display_premises);
