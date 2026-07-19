@@ -734,7 +734,9 @@ mod tests {
         let measured = Arc::new(tokio::sync::Mutex::new(
             dialog_storage::JournaledStorage::new(dialog_storage::MeasuredStorage::new(backend)),
         ));
-        let mut facts = Artifacts::anonymous(measured.clone()).await?;
+        // Fixed identifier so the tree can be reopened for cold per-query
+        // reads (see the query loop below).
+        let mut facts = Artifacts::open("bench".to_owned(), measured.clone()).await?;
 
         // Commit incrementally so a malformed key names the artifact that
         // produced it (set DIALOG_IMPORT_BISECT to enable; otherwise commit in
@@ -836,6 +838,11 @@ mod tests {
 
         for (attribute, count) in ranked.into_iter().take(3) {
             let the = Attribute::from_str(&attribute)?;
+            // Reopen from the same on-disk storage so each query runs with a
+            // COLD in-memory tree cache (only the persisted blocks are shared).
+            // Otherwise the first scan warms the cache and later scans report
+            // reads=0, making per-query attribution order-dependent.
+            let facts = Artifacts::open("bench".to_owned(), measured.clone()).await?;
             {
                 let storage = measured.lock().await;
                 storage.clear_journal();
