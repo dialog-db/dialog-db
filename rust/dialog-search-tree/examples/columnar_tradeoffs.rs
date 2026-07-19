@@ -12,7 +12,10 @@
 //! ```sh
 //! cargo run --release --package dialog-search-tree --example columnar_tradeoffs
 //! ```
-#![cfg(not(target_arch = "wasm32"))]
+//!
+//! Native-only (uses the tokio current-thread runtime); a wasm build gets an
+//! empty `main` so the example still has an entry point on every target.
+#![cfg_attr(target_arch = "wasm32", allow(unused))]
 
 use std::hash::Hash;
 
@@ -228,6 +231,10 @@ async fn live_footprint(tree: &Tree, storage: &Storage) -> Footprint {
     footprint
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let facts = workload();

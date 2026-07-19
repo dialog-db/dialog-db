@@ -10,8 +10,11 @@
 //! ```sh
 //! cargo run --release --package dialog-search-tree --example tradeoffs
 //! ```
-#![cfg(not(target_arch = "wasm32"))]
+//! Native-only (uses `std::time::Instant` and the tokio runtime); a wasm build
+//! gets an empty `main` so the example has an entry point on every target.
+#![cfg_attr(target_arch = "wasm32", allow(unused))]
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 use dialog_common::Blake3Hash;
@@ -224,6 +227,10 @@ fn reads(storage: &Storage) -> usize {
     storage.backend().get_reads().len()
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let Workload { facts } = workload();
