@@ -61,7 +61,9 @@
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::ops::RangeInclusive;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
@@ -210,6 +212,14 @@ pub struct Subscription<Q: Application> {
     /// The revision the retained results were evaluated at. `None`
     /// until the first poll.
     revision: Option<Revision>,
+    /// The [`Overlay`](crate::Overlay) epoch the retained results
+    /// were evaluated at. The branch's session overlay is off-tree,
+    /// so a change to it is invisible to the poll's tree-diff gate;
+    /// the epoch is the signal that re-triggers evaluation (the
+    /// overlay delta is not derivable from the tree, so an epoch
+    /// move recomputes, reporting the change as a delta against the
+    /// retained results).
+    overlay_epoch: u64,
     /// The demand cover recorded during the last evaluation.
     demand: Demand,
     /// The last evaluation's full result, retained to compute the
@@ -230,11 +240,18 @@ impl Branch {
     /// Register a standing query over this branch. The subscription
     /// evaluates on its first [`poll`](Subscription::poll) and is
     /// incrementally gated afterwards.
+    ///
+    /// Reads observe the branch's transient session overlay
+    /// ([`Branch::overlay`]) like every other read path, and a poll
+    /// picks up overlay changes: asserting an ephemeral fact into
+    /// the overlay propagates to the branch's subscriptions as a
+    /// result delta on their next poll.
     pub fn subscribe<Q: Application>(&self, query: Q) -> Subscription<Q> {
         Subscription {
             branch: self.clone(),
             query,
             revision: None,
+            overlay_epoch: 0,
             demand: Demand::new(),
             results: Vec::new(),
             fixpoint: Arc::new(Mutex::new(None)),
@@ -268,6 +285,23 @@ enum Touched {
     },
 }
 
+/// A boxed evaluation future. The poll chain's inner evaluations are
+/// boxed (rather than returned as `impl Future`) deliberately: an
+/// opaque future carries its defining function's `Env:
+/// Provider<Select<'s>>` where-clauses, and re-proving those during
+/// the *caller's* `Send` check erases every lifetime into
+/// independent placeholders — rustc's #100013 limitation, which
+/// would make the poll future `!Send` on native. Boxing to `dyn
+/// Future + Send` proves `Send` eagerly at the definition site,
+/// where the lifetime relations are still known.
+#[cfg(not(target_arch = "wasm32"))]
+type EvaluationFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, EvaluationError>> + Send + 'a>>;
+
+/// A boxed evaluation future (see the native alias for why).
+#[cfg(target_arch = "wasm32")]
+type EvaluationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EvaluationError>> + 'a>>;
+
 /// The index root a revision pins, or the empty tree for an
 /// unborn branch.
 fn tree_hash(revision: &Option<Revision>) -> Blake3Hash {
@@ -279,8 +313,8 @@ fn tree_hash(revision: &Option<Revision>) -> Blake3Hash {
 
 impl<Q> Subscription<Q>
 where
-    Q: Application + Clone,
-    Q::Conclusion: Conclusion + PartialEq + Clone,
+    Q: Application + Clone + ConditionalSync,
+    Q::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
 {
     /// The retained result of the last evaluation.
     pub fn results(&self) -> &[Q::Conclusion] {
@@ -309,19 +343,24 @@ where
     /// Poll the subscription against the branch's current state.
     ///
     /// Returns `Ok(None)` when the result is known unchanged: the
-    /// branch is at the pinned revision, or it moved but no change
-    /// intersects the demand cover (the pin advances silently).
-    /// Returns `Ok(Some(delta))` after a (re-)evaluation — the first
-    /// poll always evaluates, reporting the initial result as
-    /// `asserted` rows.
+    /// branch is at the pinned revision with the session overlay at
+    /// the pinned epoch, or the tree moved but no change intersects
+    /// the demand cover (the pin advances silently). Returns
+    /// `Ok(Some(delta))` after a (re-)evaluation — the first poll
+    /// always evaluates, reporting the initial result as `asserted`
+    /// rows.
     ///
-    /// The revision is snapshotted before evaluating; a commit that
-    /// lands mid-evaluation re-triggers on the next poll (the diff
-    /// from the pinned root is a superset), so changes are never
-    /// missed, at worst re-checked.
-    pub async fn poll<Env>(
-        &mut self,
-        env: &Env,
+    /// The revision and overlay epoch are snapshotted before
+    /// evaluating; a commit or overlay mutation that lands
+    /// mid-evaluation re-triggers on the next poll, so changes are
+    /// never missed, at worst re-checked.
+    // The `self` and `env` lifetimes are deliberately unified into
+    // one named `'a`: the poll future must stay `Send` on native (an
+    // axum handler drains subscription polls), and its inner
+    // evaluations are boxed `EvaluationFuture`s for the same reason.
+    pub async fn poll<'a, Env>(
+        &'a mut self,
+        env: &'a Env,
     ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
     where
         Env: Provider<Get>
@@ -334,7 +373,13 @@ where
             + 'static,
     {
         let current = self.branch.revision();
-        if self.initialized {
+        let epoch = self.branch.overlay().epoch();
+        // The session overlay is off-tree: an epoch move is invisible
+        // to the tree-diff gate below and its delta is not derivable
+        // from the tree, so it routes straight to a re-evaluation
+        // (reported against the retained results). The incremental
+        // path only serves polls where the tree alone moved.
+        if self.initialized && epoch == self.overlay_epoch {
             if current == self.revision {
                 return Ok(None);
             }
@@ -387,6 +432,7 @@ where
         self.results = results;
         self.demand = demand;
         self.revision = current;
+        self.overlay_epoch = epoch;
         self.initialized = true;
         Ok(Some(delta))
     }
@@ -410,10 +456,10 @@ where
     /// and are skipped.
     ///
     /// [`differentiate_within`]: dialog_search_tree::PersistentTree::differentiate_within
-    async fn touched<Env>(
-        &self,
-        env: &Env,
-        current: &Option<Revision>,
+    async fn touched<'a, Env>(
+        &'a self,
+        env: &'a Env,
+        current: &'a Option<Revision>,
     ) -> Result<Touched, EvaluationError>
     where
         Env: Provider<Get>
@@ -512,14 +558,14 @@ where
     /// the query is not restrictable, the concept is recursive, or
     /// the delta-join discovery hit a shape it does not handle — in
     /// which case the caller falls back to a full recompute.
-    async fn maintain<Env>(
-        &mut self,
-        env: &Env,
-        subjects: &BTreeSet<Entity>,
-        facts: &[Artifact],
-        asserted: &[Artifact],
-        retracted: &[Artifact],
-    ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
+    fn maintain<'a, Env>(
+        &'a mut self,
+        env: &'a Env,
+        subjects: &'a BTreeSet<Entity>,
+        facts: &'a [Artifact],
+        asserted: &'a [Artifact],
+        retracted: &'a [Artifact],
+    ) -> EvaluationFuture<'a, Option<Delta<Q::Conclusion>>>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -530,19 +576,131 @@ where
             + ConditionalSync
             + 'static,
     {
-        // For a concept query the affected heads are discovered
-        // against the resolved rule set: entity-local rules
-        // contribute the changed subjects, non-local rules (concept
-        // premises: conformance checks, variant negations)
-        // contribute delta-join heads — the changed fact bound into
-        // the premise it matches, remaining premises joined
-        // sideways, head projected. `None` (recursion, unhandled
-        // shape) falls back to full recompute. For a plain attribute
-        // query the affected heads are just the changed subjects.
-        //
-        // The discovery evaluates against the demand-recording
-        // environment, so the reads it depends on join the cover.
-        let entities: BTreeSet<Entity> = if let Some(concept) = self.query.concept() {
+        Box::pin(async move {
+            // For a concept query the affected heads are discovered
+            // against the resolved rule set: entity-local rules
+            // contribute the changed subjects, non-local rules (concept
+            // premises: conformance checks, variant negations)
+            // contribute delta-join heads — the changed fact bound into
+            // the premise it matches, remaining premises joined
+            // sideways, head projected. `None` (recursion, unhandled
+            // shape) falls back to full recompute. For a plain attribute
+            // query the affected heads are just the changed subjects.
+            //
+            // The discovery evaluates against the demand-recording
+            // environment, so the reads it depends on join the cover.
+            let entities: BTreeSet<Entity> = if let Some(concept) = self.query.concept() {
+                let operator = Identify
+                    .perform(env)
+                    .await
+                    .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
+                let layer = QueryLayer::from(&self.branch);
+                let overlay = layer.overlay(&operator);
+                let tombstones = tombstones_from(&overlay);
+                // Typed with the *named* env lifetime (owned branch
+                // clone, no generator-local borrows) so the poll
+                // future stays Send-general on native — see the note
+                // on `QueryEnv::branches`.
+                let query_env: QueryEnv<'a, Env> =
+                    QueryEnv::new(vec![self.branch.clone()], overlay, tombstones, env)
+                        .with_demand(self.demand.clone());
+                let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
+                if rules.recursion().is_some() {
+                    // Fixpoint continuation: deletions retract via DRed,
+                    // additions extend semi-naively — rebuilding into
+                    // the retained table when either phase declines.
+                    drop(query_env);
+                    let results = self
+                        .evaluate_with_continuation(
+                            env,
+                            Arc::new(asserted.to_vec()),
+                            Arc::new(retracted.to_vec()),
+                        )
+                        .await?;
+                    let delta = Delta {
+                        asserted: results
+                            .iter()
+                            .filter(|row| !self.results.contains(row))
+                            .cloned()
+                            .collect(),
+                        retracted: self
+                            .results
+                            .iter()
+                            .filter(|row| !results.contains(row))
+                            .cloned()
+                            .collect(),
+                    };
+                    self.results = results;
+                    return Ok(Some(delta));
+                }
+                match affected_entities(concept, facts, &query_env).await? {
+                    Some(entities) => entities,
+                    None => return Ok(None),
+                }
+            } else {
+                subjects.clone()
+            };
+
+            let mut asserted = Vec::new();
+            let mut retracted = Vec::new();
+            for entity in &entities {
+                let scoped = match self.query.restrict(entity) {
+                    Restriction::Scoped(query) => query,
+                    Restriction::Unaffected => continue,
+                    Restriction::Unsupported => return Ok(None),
+                };
+                // Over-delete: every retained row for this entity...
+                let before: Vec<Q::Conclusion> = self
+                    .results
+                    .iter()
+                    .filter(|row| row.this() == entity)
+                    .cloned()
+                    .collect();
+                // ...re-derive + insert: goal-directed re-evaluation,
+                // recording into the existing cover (the standing
+                // demand only ever grows between recomputes).
+                let after = self.evaluate(env, &self.demand.clone(), &scoped).await?;
+                for row in &after {
+                    if !before.contains(row) {
+                        asserted.push(row.clone());
+                    }
+                }
+                for row in &before {
+                    if !after.contains(row) {
+                        retracted.push(row.clone());
+                    }
+                }
+                self.results.retain(|row| row.this() != entity);
+                self.results.extend(after);
+            }
+            Ok(Some(Delta {
+                asserted,
+                retracted,
+            }))
+        })
+    }
+
+    /// Evaluate the query against the branch, recording every
+    /// demanded range into `demand`. Mirrors the ordinary
+    /// `branch.select(query).perform(env)` path with a
+    /// demand-recording environment.
+    fn evaluate<'a, Env>(
+        &'a self,
+        env: &'a Env,
+        demand: &'a Demand,
+        query: &'a Q,
+    ) -> EvaluationFuture<'a, Vec<Q::Conclusion>>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        Box::pin(async move {
             let operator = Identify
                 .perform(env)
                 .await
@@ -550,132 +708,32 @@ where
             let layer = QueryLayer::from(&self.branch);
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
-            let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
-                .with_demand(self.demand.clone());
-            let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
-            if rules.recursion().is_some() {
-                // Fixpoint continuation: deletions retract via DRed,
-                // additions extend semi-naively — rebuilding into
-                // the retained table when either phase declines.
-                drop(query_env);
-                let results = self
-                    .evaluate_with_continuation(
-                        env,
-                        Arc::new(asserted.to_vec()),
-                        Arc::new(retracted.to_vec()),
-                    )
-                    .await?;
-                let delta = Delta {
-                    asserted: results
-                        .iter()
-                        .filter(|row| !self.results.contains(row))
-                        .cloned()
-                        .collect(),
-                    retracted: self
-                        .results
-                        .iter()
-                        .filter(|row| !results.contains(row))
-                        .cloned()
-                        .collect(),
-                };
-                self.results = results;
-                return Ok(Some(delta));
+            // Named env lifetime: keeps the poll future Send-general
+            // on native — see the note on `QueryEnv::branches`.
+            let mut query_env: QueryEnv<'a, Env> =
+                QueryEnv::new(vec![self.branch.clone()], overlay, tombstones, env)
+                    .with_demand(demand.clone());
+            // Recursive concept subscriptions retain their fixpoint
+            // across polls: a recompute rebuilds into the retained
+            // table so a later additions-only poll can extend it.
+            if let Some(concept) = query.concept() {
+                query_env = query_env
+                    .with_fixpoint(concept.this(), Continuation::new(self.fixpoint.clone()));
             }
-            match affected_entities(concept, facts, &query_env).await? {
-                Some(entities) => entities,
-                None => return Ok(None),
-            }
-        } else {
-            subjects.clone()
-        };
-
-        let mut asserted = Vec::new();
-        let mut retracted = Vec::new();
-        for entity in &entities {
-            let scoped = match self.query.restrict(entity) {
-                Restriction::Scoped(query) => query,
-                Restriction::Unaffected => continue,
-                Restriction::Unsupported => return Ok(None),
-            };
-            // Over-delete: every retained row for this entity...
-            let before: Vec<Q::Conclusion> = self
-                .results
-                .iter()
-                .filter(|row| row.this() == entity)
-                .cloned()
-                .collect();
-            // ...re-derive + insert: goal-directed re-evaluation,
-            // recording into the existing cover (the standing
-            // demand only ever grows between recomputes).
-            let after = self.evaluate(env, &self.demand.clone(), &scoped).await?;
-            for row in &after {
-                if !before.contains(row) {
-                    asserted.push(row.clone());
-                }
-            }
-            for row in &before {
-                if !after.contains(row) {
-                    retracted.push(row.clone());
-                }
-            }
-            self.results.retain(|row| row.this() != entity);
-            self.results.extend(after);
-        }
-        Ok(Some(Delta {
-            asserted,
-            retracted,
-        }))
-    }
-
-    /// Evaluate the query against the branch, recording every
-    /// demanded range into `demand`. Mirrors the ordinary
-    /// `branch.select(query).perform(env)` path with a
-    /// demand-recording environment.
-    async fn evaluate<Env>(
-        &self,
-        env: &Env,
-        demand: &Demand,
-        query: &Q,
-    ) -> Result<Vec<Q::Conclusion>, EvaluationError>
-    where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + ConditionalSync
-            + 'static,
-    {
-        let operator = Identify
-            .perform(env)
-            .await
-            .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-        let layer = QueryLayer::from(&self.branch);
-        let overlay = layer.overlay(&operator);
-        let tombstones = tombstones_from(&overlay);
-        let mut query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
-            .with_demand(demand.clone());
-        // Recursive concept subscriptions retain their fixpoint
-        // across polls: a recompute rebuilds into the retained
-        // table so a later additions-only poll can extend it.
-        if let Some(concept) = query.concept() {
-            query_env =
-                query_env.with_fixpoint(concept.this(), Continuation::new(self.fixpoint.clone()));
-        }
-        query.clone().perform(&query_env).try_vec().await
+            query.clone().perform(&query_env).try_vec().await
+        })
     }
 
     /// Evaluate the standing query with the retained fixpoint
     /// attached, seeding a semi-naive continuation from `additions`
     /// when present. Demand keeps recording into the standing
     /// cover.
-    async fn evaluate_with_continuation<Env>(
-        &self,
-        env: &Env,
+    fn evaluate_with_continuation<'a, Env>(
+        &'a self,
+        env: &'a Env,
         additions: Arc<Vec<Artifact>>,
         deletions: Arc<Vec<Artifact>>,
-    ) -> Result<Vec<Q::Conclusion>, EvaluationError>
+    ) -> EvaluationFuture<'a, Vec<Q::Conclusion>>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -686,24 +744,29 @@ where
             + ConditionalSync
             + 'static,
     {
-        let concept = self
-            .query
-            .concept()
-            .expect("continuation evaluation requires a concept query");
-        let operator = Identify
-            .perform(env)
-            .await
-            .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
-        let layer = QueryLayer::from(&self.branch);
-        let overlay = layer.overlay(&operator);
-        let tombstones = tombstones_from(&overlay);
-        let query_env = QueryEnv::new(layer.branches().to_vec(), overlay, tombstones, env)
-            .with_demand(self.demand.clone())
-            .with_fixpoint(
-                concept.this(),
-                Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
-            );
-        self.query.clone().perform(&query_env).try_vec().await
+        Box::pin(async move {
+            let concept = self
+                .query
+                .concept()
+                .expect("continuation evaluation requires a concept query");
+            let operator = Identify
+                .perform(env)
+                .await
+                .map_err(|error| EvaluationError::Store(format!("identify: {error}")))?;
+            let layer = QueryLayer::from(&self.branch);
+            let overlay = layer.overlay(&operator);
+            let tombstones = tombstones_from(&overlay);
+            // Named env lifetime: keeps the poll future Send-general
+            // on native — see the note on `QueryEnv::branches`.
+            let query_env: QueryEnv<'a, Env> =
+                QueryEnv::new(vec![self.branch.clone()], overlay, tombstones, env)
+                    .with_demand(self.demand.clone())
+                    .with_fixpoint(
+                        concept.this(),
+                        Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
+                    );
+            self.query.clone().perform(&query_env).try_vec().await
+        })
     }
 }
 
@@ -712,11 +775,75 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use crate::RemoteSite;
     use crate::helpers::{test_operator_with_profile, test_repo};
     use dialog_artifacts::{Entity, Value};
+    use dialog_capability::{Fork, Provider};
+    use dialog_common::{ConditionalSend, ConditionalSync};
+    use dialog_effects::archive::{Get, Put};
+    use dialog_effects::authority::Identify;
+    use dialog_effects::memory::Resolve;
     use dialog_query::attribute::The;
     use dialog_query::types::Any;
     use dialog_query::{AttributeQuery, Claim, Term, the};
+
+    /// Compile-time proof that the poll future is `Send` on native
+    /// (`ConditionalSend` = `Send` there, nothing on wasm): the
+    /// consumer drains subscription polls from axum handlers, whose
+    /// futures must be `Send`. Generic over the env so the guarantee
+    /// holds for any consumer's environment, not just the test
+    /// operator. Exercised by
+    /// [`it_keeps_the_poll_future_send_general`].
+    fn require_send_poll<Env>(subscription: &mut super::Subscription<AttributeQuery>, env: &Env)
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSend
+            + ConditionalSync
+            + 'static,
+    {
+        fn assert_send<T: ConditionalSend>(_: T) {}
+        assert_send(subscription.poll(env));
+    }
+
+    /// The poll future stays `Send`-general: the reactor's native
+    /// build drives polls from axum handlers, so a regression here
+    /// is a compile error in [`require_send_poll`], and the
+    /// subscription still evaluates normally afterwards.
+    #[dialog_common::test]
+    async fn it_keeps_the_poll_future_send_general() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        // Builds (and drops) a poll future through the Send-requiring
+        // bound; the compile is the assertion.
+        require_send_poll(&mut subscription, &operator);
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("first poll evaluates");
+        assert_eq!(names(&delta.asserted), vec![(alice, "Alice".to_string())]);
+        Ok(())
+    }
 
     /// A standing query over every `person/name` fact.
     fn names_query() -> AttributeQuery {
@@ -740,6 +867,267 @@ mod tests {
                 (claim.of.clone(), name)
             })
             .collect()
+    }
+
+    /// The branch's session overlay participates in subscription
+    /// results: ephemeral facts surface alongside tree facts from
+    /// the first poll, without ever being committed.
+    #[dialog_common::test]
+    async fn it_folds_the_overlay_into_subscription_results() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // An ephemeral fact: participates in reads, never committed.
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+
+        let mut subscription = branch.subscribe(names_query());
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("first poll evaluates");
+        let mut asserted = names(&delta.asserted);
+        asserted.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(
+            asserted, expected,
+            "overlay facts surface alongside tree facts"
+        );
+        Ok(())
+    }
+
+    /// Asserting into the branch overlay propagates to the branch's
+    /// subscriptions: every standing query the ephemeral fact
+    /// affects reports it as a delta on its next poll, with no tree
+    /// movement at all — and clearing the overlay retracts exactly
+    /// the ephemeral rows.
+    #[dialog_common::test]
+    async fn it_propagates_overlay_updates_to_subscriptions() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        let mut sibling = branch.subscribe(names_query());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            names(&initial.asserted),
+            vec![(alice.clone(), "Alice".to_string())]
+        );
+        sibling.poll(&operator).await?.expect("sibling initial");
+
+        // An ephemeral fact lands in the branch overlay: both
+        // standing queries report it against their retained results.
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("overlay change propagates");
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(bob.clone(), "Bob".to_string())]
+        );
+        assert!(delta.retracted.is_empty());
+        let sibling_delta = sibling
+            .poll(&operator)
+            .await?
+            .expect("every subscription on the branch observes the overlay");
+        assert_eq!(
+            names(&sibling_delta.asserted),
+            vec![(bob.clone(), "Bob".to_string())]
+        );
+
+        let mut retained = names(subscription.results());
+        retained.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(retained, expected);
+
+        // Clearing the overlay retracts exactly the ephemeral rows.
+        branch.overlay().clear();
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("overlay removal propagates");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(
+            names(&delta.retracted),
+            vec![(bob.clone(), "Bob".to_string())]
+        );
+        assert_eq!(
+            names(subscription.results()),
+            vec![(alice.clone(), "Alice".to_string())],
+            "tree facts persist through overlay changes"
+        );
+
+        // With the overlay quiet the gates still hold: polling again
+        // is a revision + epoch no-op.
+        assert!(subscription.poll(&operator).await?.is_none());
+        Ok(())
+    }
+
+    /// Retracting into the branch overlay tombstones matching tree
+    /// facts for readers — the subscription retracts the row on its
+    /// next poll while the tree keeps the fact.
+    #[dialog_common::test]
+    async fn it_tombstones_tree_facts_retracted_in_the_overlay() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(names_query());
+        subscription.poll(&operator).await?.expect("initial");
+
+        branch.overlay().retract(
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("overlay retract propagates");
+        assert!(delta.asserted.is_empty());
+        assert_eq!(
+            names(&delta.retracted),
+            vec![(alice.clone(), "Alice".to_string())]
+        );
+        assert!(subscription.results().is_empty());
+
+        // The tree is untouched: dropping the session retract brings
+        // the fact back.
+        branch.overlay().clear();
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("clearing the session retract restores the row");
+        assert_eq!(
+            names(&delta.asserted),
+            vec![(alice.clone(), "Alice".to_string())]
+        );
+        Ok(())
+    }
+
+    /// One-shot reads see the session overlay too: `branch.select`
+    /// and a transaction's as-if-committed view both fold it, so
+    /// every read path of the branch agrees on what exists.
+    #[dialog_common::test]
+    async fn it_folds_the_overlay_into_queries_and_transactions() -> anyhow::Result<()> {
+        use dialog_query::query::Output as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let bob = Entity::new()?;
+        branch
+            .overlay()
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()));
+
+        let mut read = names(
+            &branch
+                .select(names_query())
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        );
+        read.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(read, expected, "plain queries fold the session overlay");
+
+        let carol = Entity::new()?;
+        let transaction = branch.transaction().assert(
+            the!("person/name")
+                .of(carol.clone())
+                .is("Carol".to_string()),
+        );
+        let mut staged = names(
+            &transaction
+                .query()
+                .select(names_query())
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        );
+        staged.sort();
+        let mut expected = vec![
+            (alice.clone(), "Alice".to_string()),
+            (bob.clone(), "Bob".to_string()),
+            (carol.clone(), "Carol".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(
+            staged, expected,
+            "a transaction's view folds the session overlay under its pending changes"
+        );
+        Ok(())
     }
 
     /// The first poll evaluates and reports the initial result;

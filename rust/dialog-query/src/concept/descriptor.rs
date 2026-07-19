@@ -473,7 +473,7 @@ impl<'a> Builder<'a> {
 /// Field values are accessed by the term bindings from the query.
 /// The `terms` map provides the mapping from field names to variable terms
 /// used in the match.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConceptConclusion {
     this: Entity,
     terms: Parameters,

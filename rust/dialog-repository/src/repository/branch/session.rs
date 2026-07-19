@@ -165,11 +165,16 @@ impl<'a> QueryLayer<'a> {
     }
 }
 
+// Folds the branch's transient session overlay
+// ([`Branch::overlay`]): every read path — `branch.select`,
+// `branch.query`, transaction queries, subscription evaluations —
+// constructs through here, so session facts participate in all of
+// them with no per-path wiring.
 impl<'a> From<&'a Branch> for QueryLayer<'a> {
     fn from(branch: &'a Branch) -> Self {
         Self {
             branches: vec![branch],
-            changes: Changes::new(),
+            changes: branch.overlay().changes(),
         }
     }
 }
@@ -227,8 +232,8 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
 
-            let query_env =
-                QueryEnv::new(layer.branches, overlay, tombstones, env);
+            let branches = layer.branches.iter().map(|&branch| branch.clone()).collect();
+            let query_env = QueryEnv::new(branches, overlay, tombstones, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
@@ -243,7 +248,14 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
 /// Built fresh on each `.perform(env)`; the environment reference
 /// is never captured on the layer itself.
 pub(crate) struct QueryEnv<'a, Env> {
-    branches: Vec<&'a Branch>,
+    /// Owned (cheaply cloned: shared caches) so the env's only
+    /// lifetime is the underlying `env` reference. A poll/evaluation
+    /// can then type its `QueryEnv` with the *named* env lifetime
+    /// instead of a generator-local borrow — which is what keeps the
+    /// enclosing future `Send`-general on native (two independent
+    /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
+    /// rustc's #100013 limitation; a named lifetime does not).
+    branches: Vec<Branch>,
     /// All overlay facts — caller-asserted + auto-injected metadata —
     /// merged into one batch. Queried via `Provider<Select> for Changes`.
     changes: Changes,
@@ -275,7 +287,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
     /// resolution is built in (a durable layer per branch + the overlay
     /// as a transient layer), so the two paths can never diverge on it.
     pub(crate) fn new(
-        branches: Vec<&'a Branch>,
+        branches: Vec<Branch>,
         changes: Changes,
         tombstones: HashSet<SortKey>,
         env: &'a Env,
@@ -331,11 +343,15 @@ impl<Env> Clone for QueryEnv<'_, Env> {
 /// the branch's remote upstream when configured. Extracted as a freestanding
 /// helper so every branch in a [`QueryEnv`] shares the exact same branch-read
 /// path (a transaction query is itself a single-branch `QueryEnv`).
-pub(crate) async fn select_from_branch<'a, Env>(
-    branch: &'a Branch,
+///
+/// Takes the branch by value (a cheap clone: shared caches) and moves
+/// it into the returned stream, so the stream borrows only the env —
+/// errors surface as the stream's first item.
+pub(crate) fn select_from_branch<'a, Env>(
+    branch: Branch,
     env: &'a Env,
     input: ArtifactSelector<Constrained>,
-) -> Result<ArtifactStream<'a>, DialogArtifactsError>
+) -> ArtifactStream<'a>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -345,22 +361,39 @@ where
         + ConditionalSync
         + 'static,
 {
-    let select = branch.claims().select(input);
+    Box::pin(async_stream::try_stream! {
+        let select = branch.claims().select(input);
 
-    let remote = match branch.upstream() {
-        Some(Upstream::Remote { remote: name, .. }) => {
-            branch.subject().remote(name).load().perform(env).await.ok()
+        let remote = match branch.upstream() {
+            Some(Upstream::Remote { remote: name, .. }) => {
+                branch.subject().remote(name).load().perform(env).await.ok()
+            }
+            _ => None,
+        };
+
+        let store = NetworkedIndex::new(env, select.catalog(), remote);
+        let stream = select.execute(store).await?;
+        for await artifact in stream {
+            yield artifact?;
         }
-        _ => None,
-    };
-
-    let store = NetworkedIndex::new(env, select.catalog(), remote);
-    let stream = select.execute(store).await?;
-    Ok(Box::pin(stream))
+    })
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+// Deliberately implemented for the *same* lifetime on both sides
+// (`QueryEnv<'a>: Provider<Select<'a>>`), never a decoupled pair
+// (`impl<'a, 's> ... where 'a: 's`). Auto-trait (`Send`) checking of
+// a future that holds `&query_env` across an `await` erases every
+// region, so the obligation resurfaces higher-ranked: a single
+// erased lifetime (`for<'0> QueryEnv<'0>: Provider<Select<'0>>`)
+// is provable by this impl, while a decoupled pair
+// (`for<'0, '1> QueryEnv<'0>: Provider<Select<'1>>`) hits rustc's
+// #100013 limitation and the poll future stops being `Send` on
+// native. `QueryEnv` is covariant in `'a`, so call sites shrink
+// `&QueryEnv<'a>` to `&QueryEnv<'s>` implicitly — the strict impl
+// is what forces region inference to unify the two into one
+// variable.
 impl<'a, Env> Provider<Select<'a>> for QueryEnv<'a, Env>
 where
     Env: Provider<Get>
@@ -380,9 +413,10 @@ where
 
         // Branch streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
-        // retract in `with(..)`) suppresses matching source facts.
+        // retract in `with(..)`) suppresses matching source facts. Each
+        // owns its branch clone and borrows only `self.env`.
         for branch in &self.branches {
-            let raw = select_from_branch(branch, self.env, input.clone()).await?;
+            let raw = select_from_branch(branch.clone(), self.env, input.clone());
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
@@ -410,7 +444,7 @@ where
     /// separately, fresh, by the transient layer.
     async fn select_tree(
         &self,
-        branch: &'a Branch,
+        branch: &Branch,
         selector: ArtifactSelector<Constrained>,
     ) -> Result<Vec<Artifact>, DialogArtifactsError> {
         // Rule-discovery reads are demand too: a rule committed
@@ -421,8 +455,9 @@ where
         if let Some(demand) = &self.demand {
             demand.record_rules(&selector);
         }
-        let stream = select_from_branch(branch, self.env, selector).await?;
-        stream.try_collect().await
+        select_from_branch(branch.clone(), self.env, selector)
+            .try_collect()
+            .await
     }
 
     /// The durable rules concluding `concept` on `branch`: the committed
@@ -431,7 +466,7 @@ where
     /// cached by content-addressed rule entity.
     async fn durable_rules(
         &self,
-        branch: &'a Branch,
+        branch: &Branch,
         concept: &Entity,
     ) -> Result<Vec<DeductiveRule>, EvaluationError> {
         let cache = branch.rule_cache();

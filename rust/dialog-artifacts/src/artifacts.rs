@@ -221,6 +221,7 @@ where
     /// [`Artifacts::export`]
     pub async fn import<Read>(&mut self, read: &mut Read) -> Result<(), DialogArtifactsError>
     where
+        // bare-send-ok: csv_async bounds its readers on real Send on every target
         Read: AsyncRead + Unpin + Send,
     {
         let instructions = stream! {

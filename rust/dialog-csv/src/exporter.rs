@@ -29,6 +29,7 @@ impl<W: AsyncWrite + Unpin> From<W> for CsvExporter<W> {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+// bare-send-ok: csv_async bounds its writers on real Send on every target
 impl<W: AsyncWrite + Unpin + Send> Exporter for CsvExporter<W> {
     async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogArtifactsError> {
         let row = CsvRow::from(artifact);
