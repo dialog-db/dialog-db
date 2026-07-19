@@ -70,6 +70,11 @@ default = []
 # dev-dependencies (dialog-repository depends on dialog-query, so those
 # crates can only appear as a dev-dependency cycle, never a normal dep).
 helpers = []
+# Opt-in marker for the on-demand browser (IndexedDB) benchmark in
+# `src/helpers.rs`, so it is NOT part of the default `test:web:debug`
+# suite (which would run it on every commit). Enable explicitly to run it:
+# `wasm-pack test --headless --chrome --lib --features helpers,browser-bench`.
+browser-bench = []
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

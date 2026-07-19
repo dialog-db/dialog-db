@@ -361,6 +361,18 @@ impl BenchEnv<Operator<NativeTempSpace>> {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
+impl BenchEnv<Operator<::dialog_storage::provider::storage::WebSpace>> {
+    /// Build an IndexedDB-backed benchmark environment (the real browser
+    /// backend). Reads are async IndexedDB round-trips, so this is the wasm
+    /// analogue of the on-disk backend — the read-count reduction shows up as
+    /// fewer store round-trips.
+    pub async fn web() -> Result<Self> {
+        let storage = Storage::<::dialog_storage::provider::storage::WebSpace>::default();
+        Self::with_storage(storage).await
+    }
+}
+
 impl<Env> BenchEnv<Env>
 where
     Env: Provider<Get>
@@ -774,9 +786,66 @@ impl BenchEnv<Operator<NativeTempSpace>> {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
+impl BenchEnv<Operator<::dialog_storage::provider::storage::WebSpace>> {
+    async fn with_storage(
+        storage: Storage<::dialog_storage::provider::storage::WebSpace>,
+    ) -> Result<Self> {
+        let profile = Profile::open(unique_name("bench"))
+            .perform(&storage)
+            .await?;
+        let operator = profile
+            .derive(b"bench")
+            .allow(Subject::any())
+            .network(Network::default())
+            .build(storage)
+            .await?;
+        Self::assemble(operator, &profile).await
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// Bug-tracker concept queries over the real browser backend
+    /// (IndexedDB). Reads are async IndexedDB round-trips, so this reports the
+    /// block-read counts — the deterministic signal the format change moves
+    /// (each avoided read is an avoided store round-trip). A smaller bug count
+    /// keeps the headless-browser run quick.
+    ///
+    /// Behind the `browser-bench` feature (and wasm only), so it is NOT part of
+    /// the default web test suite / CI. Run it on demand:
+    /// `wasm-pack test --headless --chrome --lib --features helpers,browser-bench`.
+    #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
+    #[dialog_common::test]
+    async fn it_queries_bugs_on_indexeddb() -> Result<()> {
+        let env = BenchEnv::web().await?;
+        env.seed_bugs(60).await?;
+
+        let all = env.query_bugs_by_status(None).await?;
+        assert_eq!(all.results_len, 60, "every bug joins over IndexedDB");
+        assert!(all.reads > 0);
+        assert_eq!(all.reads, all.unique_reads, "no redundant reads");
+        wasm_bindgen_test::console_log!(
+            "IDBBENCH all-bugs results={} reads={} unique_reads={}",
+            all.results_len,
+            all.reads,
+            all.unique_reads
+        );
+
+        let done = env.query_bugs_by_status(Some("done")).await?;
+        wasm_bindgen_test::console_log!(
+            "IDBBENCH status=done results={} reads={} unique_reads={}",
+            done.results_len,
+            done.reads,
+            done.unique_reads
+        );
+        Ok(())
+    }
 
     #[dialog_common::test]
     async fn it_runs_attribute_query_with_non_zero_reads() -> Result<()> {
