@@ -17,9 +17,11 @@
 //! and no fixed offsets. This module owns only the byte layout per ordering;
 //! the `Key` type and `KeyView` traits are refactored onto it separately.
 
+use std::borrow::Cow;
+
 use crate::{
     ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, ENTITY_KEY_TAG, VALUE_KEY_TAG, ValueDataType, decode_bytes,
-    encode_bytes,
+    decode_bytes_cow, encode_bytes,
 };
 
 /// The length of a spilled value's content-addressed reference.
@@ -482,6 +484,129 @@ pub fn parse_key(bytes: &[u8]) -> Option<KeyParts> {
             let (attribute, rest) = decode_bytes(rest)?;
             let (value_type, value, _rest) = value_tail(rest)?;
             KeyParts {
+                tag,
+                entity,
+                attribute,
+                value_type,
+                value,
+            }
+        }
+    };
+    Some(parts)
+}
+
+/// A key's value payload, borrowed from the key bytes where possible. The
+/// borrowed analogue of [`ValuePayload`] for the read/scan path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueRef<'a> {
+    /// The value's inline order-preserving bytes, borrowed from the key.
+    Inline(&'a [u8]),
+    /// A content-addressed reference to a spilled value, borrowed from the key.
+    Reference(&'a [u8]),
+}
+
+impl ValueRef<'_> {
+    /// The raw payload bytes (inline encoding or reference).
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            ValueRef::Inline(bytes) | ValueRef::Reference(bytes) => bytes,
+        }
+    }
+
+    /// Whether this payload spilled (is a reference).
+    pub fn is_reference(&self) -> bool {
+        matches!(self, ValueRef::Reference(_))
+    }
+}
+
+/// The components of an artifact key, borrowed from the key bytes where
+/// possible. The borrowed, allocation-light analogue of [`KeyParts`] for the
+/// read/scan path: entity and attribute are [`Cow`]s that borrow the key bytes
+/// when escape-free (the norm for UTF-8 entities/attributes) and own only when
+/// a `0x00 0xFF` escape had to be resolved; the value payload always borrows.
+///
+/// A scan parses each key ONCE into a `KeyRef` and threads it through matching,
+/// spill resolution, and reconstruction, so the whole per-entry key handling is
+/// a single walk with no intermediate copies (contrast the owned [`KeyParts`],
+/// used for key *construction*).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRef<'a> {
+    /// The index ordering tag.
+    pub tag: u8,
+    /// The entity bytes (the full URI, losslessly).
+    pub entity: Cow<'a, [u8]>,
+    /// The attribute bytes (`namespace/predicate`).
+    pub attribute: Cow<'a, [u8]>,
+    /// The value type.
+    pub value_type: ValueDataType,
+    /// The value payload: inline order-preserving bytes or a spilled reference.
+    pub value: ValueRef<'a>,
+}
+
+/// Parses key bytes into borrowed components, dispatching on the tag. Like
+/// [`parse_key`] but borrows the entity/attribute/value bytes from `bytes`
+/// (owning only an escaped entity/attribute), so a scan reconstructs entries
+/// without per-field allocation. Returns `None` on malformed input.
+pub fn parse_key_ref(bytes: &[u8]) -> Option<KeyRef<'_>> {
+    let (&tag, rest) = bytes.split_first()?;
+
+    // Reads a variable value tail borrowed from the key: one (possibly
+    // spill-flagged) type byte plus its payload slice.
+    fn value_tail(bytes: &[u8]) -> Option<(ValueDataType, ValueRef<'_>, &[u8])> {
+        let (&type_byte, rest) = bytes.split_first()?;
+        let payload_len = value_payload_len(type_byte, bytes, 1)?;
+        let (payload, rest) = rest.split_at_checked(payload_len)?;
+        let value_type = ValueDataType::from(type_byte & !SPILL_FLAG);
+        let value = if type_byte & SPILL_FLAG != 0 {
+            ValueRef::Reference(payload)
+        } else {
+            ValueRef::Inline(payload)
+        };
+        Some((value_type, value, rest))
+    }
+
+    let parts = match tag {
+        ENTITY_KEY_TAG => {
+            let (entity, rest) = decode_bytes_cow(rest)?;
+            let (attribute, rest) = decode_bytes_cow(rest)?;
+            let (value_type, value, _rest) = value_tail(rest)?;
+            KeyRef {
+                tag,
+                entity,
+                attribute,
+                value_type,
+                value,
+            }
+        }
+        ATTRIBUTE_KEY_TAG => {
+            let (attribute, rest) = decode_bytes_cow(rest)?;
+            let (entity, rest) = decode_bytes_cow(rest)?;
+            let (value_type, value, _rest) = value_tail(rest)?;
+            KeyRef {
+                tag,
+                entity,
+                attribute,
+                value_type,
+                value,
+            }
+        }
+        VALUE_KEY_TAG => {
+            let (value_type, value, rest) = value_tail(rest)?;
+            let (attribute, rest) = decode_bytes_cow(rest)?;
+            let (entity, _rest) = decode_bytes_cow(rest)?;
+            KeyRef {
+                tag,
+                entity,
+                attribute,
+                value_type,
+                value,
+            }
+        }
+        _ => {
+            let (entity, rest) = decode_bytes_cow(rest)?;
+            let (attribute, rest) = decode_bytes_cow(rest)?;
+            let (value_type, value, _rest) = value_tail(rest)?;
+            KeyRef {
                 tag,
                 entity,
                 attribute,

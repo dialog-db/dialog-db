@@ -25,6 +25,8 @@
 //! terminated), so components concatenate into a key and a reader can split
 //! them back out without a separate length table.
 
+use std::borrow::Cow;
+
 /// The terminator byte for escaped variable-length components.
 const TERMINATOR: u8 = 0x00;
 /// The escape suffix: a `0x00` byte in the payload is written as
@@ -114,6 +116,35 @@ pub fn encode_bytes(value: &[u8], out: &mut Vec<u8>) {
         }
     }
     out.push(TERMINATOR);
+}
+
+/// Decodes a terminated, escaped byte string *without copying when it has no
+/// escapes*. Returns the decoded bytes (borrowed from `bytes` when escape-free,
+/// owned only when a `0x00 0xFF` escape had to be resolved) and the bytes past
+/// the terminator. `None` on a missing terminator or malformed escape.
+///
+/// Entities and attributes are UTF-8 (URIs, `namespace/predicate`) and so never
+/// contain a `0x00` byte, so the escape-free borrow is the norm on the scan
+/// path; the owned branch exists only for correctness on `0x00`-bearing bytes.
+pub fn decode_bytes_cow(bytes: &[u8]) -> Option<(Cow<'_, [u8]>, &[u8])> {
+    let mut at = 0usize;
+    while at < bytes.len() {
+        match bytes[at] {
+            TERMINATOR => match bytes.get(at + 1) {
+                // An escaped zero: fall back to the owned, un-escaping decoder
+                // from the start (rare; only for `0x00`-bearing components).
+                Some(&ESCAPE) => {
+                    let (owned, rest) = decode_bytes(bytes)?;
+                    return Some((Cow::Owned(owned), rest));
+                }
+                // A lone terminator: the component is escape-free, so borrow it.
+                _ => return Some((Cow::Borrowed(&bytes[..at]), &bytes[at + 1..])),
+            },
+            _ => at += 1,
+        }
+    }
+    // Ran off the end without a terminator.
+    None
 }
 
 /// Decodes a terminated, escaped byte string, returning it and the bytes past

@@ -27,7 +27,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_search_tree::{
-    Buffer, Cache, ContentAddressedStorage, Delta, Entry, PersistentTree, Value as TreeValue,
+    Buffer, Cache, ContentAddressedStorage, Delta, PersistentTree, Value as TreeValue,
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
@@ -37,9 +37,9 @@ use std::ops::RangeInclusive;
 use crate::{
     Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum, DialogArtifactsError,
     EntityKey, EntityKeyPart, FromKey, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut,
-    MatchCandidate, State, ValueKey,
+    State, ValueKey, match_selector_and_key_ref,
     key::value_spills,
-    key::varkey::{self, ValuePayload},
+    key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
     selector::Constrained,
 };
 
@@ -171,7 +171,27 @@ where
     let Some(reference) = spilled_reference(key)? else {
         return Ok(None);
     };
-    let bytes = cache
+    fetch_spilled_reference(store, cache, reference.as_ref())
+        .await
+        .map(Some)
+}
+
+/// Fetches (and caches) the bytes of a spilled value block by its raw 32-byte
+/// content-addressed reference. The scan path holds the reference already
+/// (parsed from the key), so it fetches directly rather than re-deriving the
+/// reference from the key. Errors if the block is missing.
+pub async fn fetch_spilled_reference<S>(
+    store: &S,
+    cache: &SpillCache,
+    reference: &[u8],
+) -> Result<Vec<u8>, DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    let reference: Blake3Hash = reference.try_into().map_err(|_| {
+        DialogArtifactsError::InvalidKey("spilled value reference is not 32 bytes".to_string())
+    })?;
+    cache
         .get_or_fetch(&reference, async |reference: &Blake3Hash| {
             store.get(reference).await
         })
@@ -179,8 +199,7 @@ where
         .map_err(DialogArtifactsError::from)?
         .ok_or_else(|| {
             DialogArtifactsError::InvalidValue("spilled value block missing from store".to_string())
-        })?;
-    Ok(Some(bytes))
+        })
 }
 
 /// Filler length appended to a prefix to form its inclusive upper bound. Keys
@@ -529,16 +548,29 @@ impl ArtifactTreeExt for ArtifactTree {
             tokio::pin!(stream);
             for await item in stream {
                 let raw = item?;
-                let entry = Entry {
-                    key: raw.key,
-                    value: raw.value,
+                // Parse each entry's key ONCE into borrowed components, and reuse
+                // that single parse for matching, spill resolution, and
+                // reconstruction. The previous flow re-split the key many times
+                // per entry (once per `KeyView` accessor in `matches_selector`,
+                // again in the spill lookup, again in reconstruction); on the
+                // variable-length M3 key that per-entry re-splitting dominated
+                // scan cost.
+                let Some(parts) = parse_key_ref(raw.key.as_ref()) else {
+                    continue;
                 };
-                if entry.matches_selector(&selector)
-                    && let Entry { key, value: State::Added(datum) } = &entry
-                {
-                    let spilled = fetch_spilled_cached(&raw_store, &cache, key).await?;
-                    yield Artifact::from_key_datum_with_value(key, datum, spilled)?;
+                if !match_selector_and_key_ref(&selector, &parts) {
+                    continue;
                 }
+                let State::Added(datum) = &raw.value else {
+                    continue;
+                };
+                let spilled = match &parts.value {
+                    ValueRef::Reference(reference) => {
+                        Some(fetch_spilled_reference(&raw_store, &cache, reference).await?)
+                    }
+                    ValueRef::Inline(_) => None,
+                };
+                yield Artifact::from_key_ref_datum_value(&parts, datum, spilled)?;
             }
         }
     }
