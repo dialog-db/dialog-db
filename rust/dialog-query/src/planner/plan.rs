@@ -405,6 +405,37 @@ mod tests {
         );
     }
 
+    /// The same prefix pipeline pushes a `starts-with` on the scan's *value*
+    /// variable down to the scan's value term, so the VAE value-range bound
+    /// (`ArtifactSelector::is_starting_with`) is driven by the constraint.
+    #[dialog_common::test]
+    fn it_stamps_prefix_refinements_onto_scan_values() {
+        let scan: Premise = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("e"),
+            Term::<String>::var("name").into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+        .into();
+        let predicate = Term::<Any>::var("name").starts_with("ali");
+
+        let plan = Planner::from(vec![scan, predicate])
+            .plan(&crate::Environment::new())
+            .unwrap();
+
+        let stamped = plan.steps.iter().find_map(|step| match step.as_premise() {
+            Premise::Assert(Proposition::Attribute(boxed)) => boxed.is().kind(),
+            _ => None,
+        });
+        let kind = stamped.expect("the scan's value term carries a kind");
+        assert_eq!(
+            kind.refinement().expect("refined").prefix.as_deref(),
+            Some("ali"),
+            "the proved value prefix reaches the scan boundary"
+        );
+    }
+
     /// A standalone `Maybe` premise cannot be planned at empty
     /// scope: set-widening needs a known entity ("absent for
     /// whom?"), so its schema hard-requires `?this` and the planner

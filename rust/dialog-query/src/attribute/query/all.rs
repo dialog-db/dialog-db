@@ -414,7 +414,26 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     Some(s) => s.is(value.clone()),
                 });
             }
-            Term::Variable { .. } => {}
+            Term::Variable { .. } => {
+                // A prefix refinement the planner stamped onto the value
+                // variable (e.g. from a `text/starts-with` constraint on it)
+                // becomes a VAE range bound over the inline value. The M3
+                // value-in-key format sorts values order-preservingly, so this
+                // narrows the scan; a spilled value is re-checked per entry.
+                // Conformance-only refinements carry no prefix and add no bound.
+                if let Some(prefix) = from
+                    .is
+                    .kind()
+                    .as_ref()
+                    .and_then(Kind::refinement)
+                    .and_then(|refinement| refinement.prefix.clone())
+                {
+                    selector = Some(match selector {
+                        None => ArtifactSelector::new().is_starting_with(prefix),
+                        Some(s) => s.is_starting_with(prefix),
+                    });
+                }
+            }
         }
 
         selector.ok_or_else(|| EvaluationError::EmptySelector {
@@ -475,6 +494,20 @@ mod tests {
         let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
         assert_eq!(selector.attribute_prefix(), Some("person/"));
 
+        // A prefix refinement on the value variable (e.g. from a
+        // `text/starts-with` constraint) becomes a VAE value-range bound.
+        let value_kind = Kind::from(Type::String)
+            .with_prefix("alice")
+            .expect("string is textual");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(value_kind),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert_eq!(selector.value_prefix(), Some("alice"));
+
         // An unrefined variable contributes nothing, as before.
         let query = AttributeQueryAll::new(
             Term::from(the!("person/name")),
@@ -485,6 +518,7 @@ mod tests {
         let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
         assert_eq!(selector.entity_prefix(), None);
         assert_eq!(selector.attribute_prefix(), None);
+        assert_eq!(selector.value_prefix(), None);
         Ok(())
     }
 
