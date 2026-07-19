@@ -14,6 +14,44 @@ use crate::{
     node::columnar::{ColumnData, encode_columns},
 };
 use std::marker::PhantomData;
+use std::sync::Arc;
+
+/// A leaf segment's decoded keys in entry order, stored as one flat arena with
+/// per-entry end offsets rather than a `Vec<Vec<u8>>`.
+///
+/// Decoding a leaf then costs two allocations (arena + offsets), not one per
+/// key, so memoizing the decode (see [`PersistentNode::decoded_keys`]) stays as
+/// allocation-frugal as the streaming decoder on the common single-touch scan
+/// while letting a re-touched leaf reuse the decode.
+#[derive(Debug)]
+pub struct DecodedKeys {
+    arena: Vec<u8>,
+    ends: Vec<usize>,
+}
+
+impl DecodedKeys {
+    /// The number of keys.
+    pub fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    /// Whether there are no keys.
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+
+    /// The key at `index`, borrowed from the arena.
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        let end = *self.ends.get(index)?;
+        let start = if index == 0 { 0 } else { self.ends[index - 1] };
+        self.arena.get(start..end)
+    }
+
+    /// Iterates the keys in entry order, each borrowed from the arena.
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        (0..self.len()).map(|index| self.get(index).expect("index in range"))
+    }
+}
 
 /// A tree node in its serialized, content-addressed form.
 ///
@@ -85,6 +123,62 @@ where
     pub fn body(&self) -> Result<&ArchivedNodeBody<Value>, DialogSearchTreeError> {
         rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
             .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
+    }
+
+    /// This segment's fully decoded keys, in entry order.
+    ///
+    /// The columnar leaf must be decoded (front-decode + dictionary resolve)
+    /// before its keys can be compared against a scan range. Decoding is pure
+    /// over the immutable, content-addressed bytes, so on a leaf that is
+    /// *re-touched* — a join re-selects the same branch once per outer binding
+    /// and lands on the same few leaves each time — the decode is memoized on
+    /// the node's [`Buffer`] and every later touch reuses the shared `Arc`,
+    /// instead of re-decoding the leaf once per select.
+    ///
+    /// A leaf touched only once (a single range scan visits each leaf once)
+    /// gains nothing from a cached decode and would only pay to materialize it,
+    /// so the *first* touch decodes transiently (streaming, no owned
+    /// materialization) and the caller iterates that; only from the *second*
+    /// touch on is the decode memoized. The memoized form is one flat arena plus
+    /// per-entry end offsets (two allocations, not one per key). Errors if the
+    /// node is an index (no full keys) or the buffer is malformed.
+    /// Whether a scan over this leaf should reuse a memoized decode
+    /// ([`memoized_keys`](Self::memoized_keys)) rather than stream it fresh.
+    /// `true` from the second touch of the buffer on; see the type-level note.
+    pub fn should_memoize_keys(&self) -> bool {
+        self.buffer.should_memoize()
+    }
+
+    /// This segment's keys as a memoized flat-arena decode, shared via `Arc`.
+    /// Populates the memo on the first call and reuses it thereafter. Use only
+    /// once [`should_memoize_keys`](Self::should_memoize_keys) has returned
+    /// `true`; a single-touch scan streams instead (see the walker).
+    pub fn memoized_keys(&self) -> Result<Arc<DecodedKeys>, DialogSearchTreeError> {
+        self.buffer
+            .memoize_decode(|| self.materialize_keys())?
+            .ok_or_else(|| {
+                DialogSearchTreeError::Access("node buffer memoized a different decode".to_string())
+            })
+    }
+
+    /// Decodes this segment's keys into the flat-arena form. Used both to
+    /// populate the memo and, on a first (un-memoized) touch, transiently.
+    fn materialize_keys(&self) -> Result<DecodedKeys, DialogSearchTreeError> {
+        match self.body()? {
+            ArchivedNodeBody::Segment(segment) => {
+                let mut keys = segment.keys::<Key>()?;
+                let mut arena = Vec::new();
+                let mut ends = Vec::new();
+                while let Some((_, key)) = keys.next_key()? {
+                    arena.extend_from_slice(key);
+                    ends.push(arena.len());
+                }
+                Ok(DecodedKeys { arena, ends })
+            }
+            ArchivedNodeBody::Index(_) => Err(DialogSearchTreeError::Access(
+                "decoded_keys called on an index node".to_string(),
+            )),
+        }
     }
 
     /// The tree's format header carried by this node.

@@ -87,40 +87,65 @@ where
             let mut entered_range = false;
 
             while let Some((node, maybe_index)) = search_path.pop() {
-                match node.body()? {
-                    ArchivedNodeBody::Index(index) => {
-                        let child_index = if let Some(index) = maybe_index {
-                            index + 1
-                        } else {
-                            0
-                        };
+                let body = node.body()?;
+                let is_segment = matches!(body, ArchivedNodeBody::Segment(_));
+                if !is_segment {
+                    let ArchivedNodeBody::Index(index) = body else {
+                        unreachable!("checked above")
+                    };
+                    let child_index = if let Some(index) = maybe_index {
+                        index + 1
+                    } else {
+                        0
+                    };
 
-                        if child_index < index.len() {
-                            let next_node = accessor.get_node(index.hash_at(child_index)?).await?;
-                            search_path.push((node, Some(child_index)));
-                            search_path.push((next_node, None));
-                        } else {
-                            // Parent needs to check next sibling
-                            continue;
+                    if child_index < index.len() {
+                        let next_node = accessor.get_node(index.hash_at(child_index)?).await?;
+                        search_path.push((node, Some(child_index)));
+                        search_path.push((next_node, None));
+                    } else {
+                        // Parent needs to check next sibling
+                        continue;
+                    }
+                    continue;
+                }
+
+                // A leaf re-touched across selects (a join re-selects the same
+                // branch once per outer binding, landing on the same leaves)
+                // reuses a decode memoized on the node buffer; a leaf touched
+                // once (a single range scan) streams its keys without paying to
+                // materialize a cache it would never reuse. `should_memoize_keys`
+                // returns `false` on the first touch, `true` from the second on.
+                if node.should_memoize_keys() {
+                    let keys = node.memoized_keys()?;
+                    for (at, key) in keys.iter().enumerate() {
+                        let entry_key = Key::try_from_bytes(key)?;
+                        if range.contains(&entry_key) {
+                            entered_range = true;
+                            let ArchivedNodeBody::Segment(segment) = node.body()? else {
+                                unreachable!("segment checked above")
+                            };
+                            let value = into_owned(segment.value_at(at)?)?;
+                            yield Entry { key: entry_key, value };
+                        } else if entered_range {
+                            return;
                         }
-                    },
-                    ArchivedNodeBody::Segment(segment) => {
-                        let mut keys = segment.keys::<Key>()?;
-                        while let Some((at, key)) = keys.next_key()? {
-                            // `key` borrows the decoder's reused buffer, so the
-                            // owned key is this scan's single copy (the decoder
-                            // itself allocates nothing per entry).
-                            let entry_key = Key::try_from_bytes(key)?;
-                            if range.contains(&entry_key) {
-                                entered_range = true;
-                                let value = into_owned(segment.value_at(at)?)?;
-                                yield Entry { key: entry_key, value };
-                            } else if entered_range {
-                                // We've surpassed the range; abort.
-                                return;
-                            }
+                    }
+                } else {
+                    let ArchivedNodeBody::Segment(segment) = node.body()? else {
+                        unreachable!("segment checked above")
+                    };
+                    let mut keys = segment.keys::<Key>()?;
+                    while let Some((at, key)) = keys.next_key()? {
+                        let entry_key = Key::try_from_bytes(key)?;
+                        if range.contains(&entry_key) {
+                            entered_range = true;
+                            let value = into_owned(segment.value_at(at)?)?;
+                            yield Entry { key: entry_key, value };
+                        } else if entered_range {
+                            return;
                         }
-                    },
+                    }
                 }
             }
         }
