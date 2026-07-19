@@ -43,30 +43,40 @@ let
     buildWasmBindgenCli rec {
       src = fetchCrate {
         pname = "wasm-bindgen-cli";
-        version = "0.2.108";
-        hash = "sha256-UsuxILm1G6PkmVw0I/JF12CRltAfCJQFOaT4hFwvR8E=";
+        version = "0.2.126";
+        hash = "sha256-H6Is3fiZVxZCfOMWK5dWMSrtn50VGv0sfdnsT+cTtyk=";
       };
 
       cargoDeps = rustPlatform.fetchCargoVendor {
         inherit src;
         inherit (src) pname version;
-        hash = "sha256-iqQiWbsKlLBiJFeqIYiXo3cqxGLSjNM8SOWXGM9u43E=";
+        hash = "sha256-VucqkXbCi4qtQzY/HrXiDnbSURsagPsdNVMn1Tw3UiY=";
       };
     };
 
+  # Built with crane (rather than rustPlatform.buildRustPackage) so its
+  # vendored dependencies are cached in the shared binary cache alongside the
+  # rest of the workspace. buildRustPackage's cargoHash drives a vendor-staging
+  # fixed-output derivation that fetches crates live from crates.io on every
+  # cache miss, which fails intermittently when crates.io rate-limits CI
+  # runners (HTTP 403). Crane vendors from the crate's bundled Cargo.lock and
+  # the resulting artifacts substitute from cachix like everything else.
   enforce-workspace-deps =
-    with pkgs;
-    rustPlatform.buildRustPackage rec {
-      pname = "cargo-enforce-shared-workspace-deps";
-      version = "0.1.0";
-      buildInputs = [ rustToolchain ];
-
-      src = fetchCrate {
-        inherit pname version;
+    let
+      src = pkgs.fetchCrate {
+        pname = "cargo-enforce-shared-workspace-deps";
+        version = "0.1.0";
         sha256 = "sha256-XOdKeg9tNt/HT+WO9QKtdX3fUMUssVTlXRV0LOIMMzc=";
       };
-
-      cargoHash = "sha256-O6DQXK8/VVwTLuFlSyh8jtBJyAFMfAUNXnTeMWrXTCM=";
+    in
+    craneLib.buildPackage {
+      inherit src;
+      pname = "cargo-enforce-shared-workspace-deps";
+      version = "0.1.0";
+      strictDeps = true;
+      cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+      nativeBuildInputs = [ rustToolchain ];
+      doCheck = false;
     };
 
   nativeBuildInputs = buildInputs ++ [

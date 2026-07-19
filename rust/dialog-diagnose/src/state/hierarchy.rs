@@ -89,7 +89,7 @@ impl ArtifactsHierarchy {
                     let mut keys = segment.keys::<Key>()?;
                     while let Some((at, key)) = keys.next_key()? {
                         entries.push(Entry {
-                            key: <Key as TreeKey>::try_from_bytes(&key)?,
+                            key: <Key as TreeKey>::try_from_bytes(key)?,
                             value: into_owned::<State<Datum>>(segment.value_at(at)?)?,
                         });
                     }

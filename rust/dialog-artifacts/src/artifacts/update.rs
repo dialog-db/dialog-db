@@ -88,6 +88,19 @@ impl Changes {
         ChangeStream::from(self)
     }
 
+    /// Drop every change recorded for entities that fail `keep`,
+    /// asserts and retracts alike. Returns `true` when anything was
+    /// removed. Unlike [`retract`](Self::retract), which records a
+    /// tombstone alongside the prior changes, this removes the
+    /// entity's entries from the batch outright — the primitive a
+    /// session overlay needs to garbage-collect per-client facts
+    /// without growing.
+    pub fn retain_entities<F: FnMut(&Entity) -> bool>(&mut self, mut keep: F) -> bool {
+        let before = self.0.len();
+        self.0.retain(|entity, _| keep(entity));
+        self.0.len() != before
+    }
+
     /// Borrowing iterator over every recorded `(entity, attribute,
     /// change)` triple. Use this when you need to inspect the batch
     /// without consuming it — e.g. to extract tombstones from

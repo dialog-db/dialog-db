@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use dialog_artifacts::{Changes, Statement};
+use dialog_artifacts::{Changes, Entity, Statement};
 
 use crate::Branch;
 
@@ -48,6 +48,27 @@ impl Overlay {
         statement.retract(&mut state.changes);
         state.epoch += 1;
         self
+    }
+
+    /// Drop every session fact recorded for entities that fail
+    /// `keep` — asserts and retracts alike, removed outright rather
+    /// than tombstoned. Bumps the epoch only when something was
+    /// removed, so subscriptions re-evaluate exactly when the
+    /// overlay's readable contents changed. Returns whether anything
+    /// was removed.
+    ///
+    /// This is the garbage-collection primitive for per-session
+    /// facts keyed by short-lived entities (e.g. a service worker's
+    /// per-client `site:` stamps): retracting them would grow the
+    /// overlay with tombstones, clearing would drop unrelated
+    /// sessions' facts.
+    pub fn retain_entities<F: FnMut(&Entity) -> bool>(&self, keep: F) -> bool {
+        let mut state = self.state.lock().expect("overlay lock");
+        let changed = state.changes.retain_entities(keep);
+        if changed {
+            state.epoch += 1;
+        }
+        changed
     }
 
     /// Drop every session fact.

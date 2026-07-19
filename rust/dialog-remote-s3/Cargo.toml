@@ -52,6 +52,10 @@ anyhow = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `stream` for `bytes_stream()` in the blob provider — native only. The wasm arm
+# reads the whole body with `bytes()`, and enabling `stream` there would pull in
+# `wasm-streams` (see the note on the workspace `reqwest`).
+reqwest = { workspace = true, features = ["stream"] }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net"], optional = true }
 s3s = { workspace = true, optional = true }
