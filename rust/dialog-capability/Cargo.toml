@@ -13,6 +13,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 ] }
 
 [dependencies]
+base58 = { workspace = true }
 convert_case = { workspace = true }
 dialog-common = { workspace = true }
 dialog-macros = { workspace = true }

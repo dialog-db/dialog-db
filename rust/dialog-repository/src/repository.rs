@@ -37,11 +37,12 @@ pub use open::*;
 mod remote;
 pub use remote::*;
 
-mod revision;
-pub use revision::*;
-
-mod tree;
-pub use tree::*;
+// `Revision` and `TreeReference` moved to `dialog-capability` (the
+// light crate that owns `Did`) so engine-free clients can name them
+// without linking `dialog-query` or the storage/transport stack.
+// Re-exported here at their historical
+// `dialog_repository::{Revision, TreeReference}` paths.
+pub use dialog_capability::{EMPTY_TREE_HASH, Revision, TreeReference};
 
 /// A repository scoped to a specific subject.
 ///
