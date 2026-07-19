@@ -60,10 +60,20 @@ where
     K: Eq + Hash + Clone + ConditionalSend + ConditionalSync,
     V: Clone + ConditionalSend + ConditionalSync,
 {
-    /// Creates a new cache with a fixed capacity.
+    /// Creates a new cache with the default capacity ([`CACHE_CAPACITY`]).
     pub fn new() -> Self {
-        // SAFETY: `SieveCache` only returns an error if the cache capacity is 0.
-        let cache = SieveCache::new(CACHE_CAPACITY).unwrap();
+        Self::with_capacity(CACHE_CAPACITY)
+    }
+
+    /// Creates a new cache holding at most `capacity` entries.
+    ///
+    /// Prefer a small capacity when the cached values are large (e.g. spilled
+    /// value blocks), since the cache bounds entry COUNT, not total bytes: a
+    /// large count cap over large values can hold a lot of memory.
+    pub fn with_capacity(capacity: usize) -> Self {
+        // SAFETY: `SieveCache` only returns an error if the capacity is 0; a
+        // zero capacity is coerced to 1 so this never panics.
+        let cache = SieveCache::new(capacity.max(1)).unwrap();
 
         Self {
             #[cfg(not(target_arch = "wasm32"))]

@@ -6,6 +6,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
+use dialog_artifacts::tree::SpillCache;
 use dialog_artifacts::{Exporter, Importer};
 use dialog_capability::{Capability, Did, Subject};
 use dialog_common::Blake3Hash;
@@ -93,6 +94,11 @@ pub struct Branch {
     /// by one query stay warm for the next instead of being re-fetched from
     /// storage. Content-addressed keys make sharing across revisions safe.
     node_cache: Cache<Blake3Hash, Buffer>,
+    /// Shared cache of spilled value blocks, keyed by their 32-byte content
+    /// reference. Like `node_cache`, created once per opened branch and carried
+    /// into every select so a repeated read of the same large (spilled) value
+    /// skips the store fetch. Content-addressed, so it never serves stale bytes.
+    spill_cache: SpillCache,
     /// Shared deductive-rule cache (discovery by head + hydrated bodies).
     /// Like `node_cache`, created once per opened branch and carried into
     /// every query's durable rule resolution, so the `db.rule/*` scan is
@@ -183,6 +189,12 @@ impl Branch {
     /// A shared handle to this branch's node cache, for seeding a read tree.
     pub(crate) fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
         self.node_cache.clone()
+    }
+
+    /// A shared handle to this branch's spilled-value block cache, handed to
+    /// each select so spilled reads stay warm across queries.
+    pub(crate) fn spill_cache(&self) -> SpillCache {
+        self.spill_cache.clone()
     }
 
     /// A shared handle to this branch's deductive-rule cache.

@@ -27,7 +27,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, Entry, PersistentTree, Value as TreeValue,
+    Buffer, Cache, ContentAddressedStorage, Delta, Entry, PersistentTree, Value as TreeValue,
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
@@ -98,20 +98,30 @@ where
     Ok(())
 }
 
-/// Fetches the raw bytes of a spilled value for `key` from the raw archive block
-/// `store`. Returns `None` for an inline key (its value lives in the key, no
-/// block to fetch), `Some(bytes)` for a spilled key. Errors if a spilled key's
-/// block is missing from the store.
+/// A cache of spilled value blocks, keyed by their 32-byte content reference.
 ///
-/// Uses the raw backend directly (the value block is addressed by the key's
-/// 32-byte reference), not the tree node bridge.
-pub async fn fetch_spilled<S>(store: &S, key: &Key) -> Result<Option<Vec<u8>>, DialogArtifactsError>
-where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
-{
+/// Spilled blocks are content-addressed, so a reference always maps to the
+/// same bytes: cached entries never go stale and need no invalidation. The
+/// cache is small by entry count because the values are large (each above the
+/// tree's inline threshold); see [`Cache::with_capacity`] and
+/// [`SPILL_CACHE_CAPACITY`].
+pub type SpillCache = Cache<Blake3Hash, Vec<u8>>;
+
+/// Entry-count cap for a [`SpillCache`]. Small because spilled values are
+/// large (kilobytes and up), so a large count would pin a lot of memory.
+pub const SPILL_CACHE_CAPACITY: usize = 128;
+
+/// Creates a [`SpillCache`] with the default [`SPILL_CACHE_CAPACITY`].
+pub fn spill_cache() -> SpillCache {
+    Cache::with_capacity(SPILL_CACHE_CAPACITY)
+}
+
+/// The spilled value reference a key carries, or `None` for an inline key.
+fn spilled_reference(key: &Key) -> Result<Option<Blake3Hash>, DialogArtifactsError> {
     // View the key under its own ordering so the spill accessors read the
-    // right columns regardless of which index this key came from.
-    let (spilled, payload) = match key.tag() {
+    // right columns regardless of which index this key came from. Copy the
+    // payload out before the borrowed view drops.
+    let (spilled, payload): (bool, Vec<u8>) = match key.tag() {
         ENTITY_KEY_TAG => {
             let view = EntityKey(key);
             (view.value_is_spilled(), view.value_payload().to_vec())
@@ -132,9 +142,53 @@ where
     let reference: Blake3Hash = payload.as_slice().try_into().map_err(|_| {
         DialogArtifactsError::InvalidKey("spilled value reference is not 32 bytes".to_string())
     })?;
+    Ok(Some(reference))
+}
+
+/// Fetches the raw bytes of a spilled value for `key` from the raw archive block
+/// `store`. Returns `None` for an inline key (its value lives in the key, no
+/// block to fetch), `Some(bytes)` for a spilled key. Errors if a spilled key's
+/// block is missing from the store.
+///
+/// Uses the raw backend directly (the value block is addressed by the key's
+/// 32-byte reference), not the tree node bridge.
+pub async fn fetch_spilled<S>(store: &S, key: &Key) -> Result<Option<Vec<u8>>, DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    let Some(reference) = spilled_reference(key)? else {
+        return Ok(None);
+    };
     let bytes = store.get(&reference).await?.ok_or_else(|| {
         DialogArtifactsError::InvalidValue("spilled value block missing from store".to_string())
     })?;
+    Ok(Some(bytes))
+}
+
+/// Like [`fetch_spilled`], but serves and populates a [`SpillCache`]: a hit
+/// returns the cached bytes without touching `store`; a miss fetches from
+/// `store` and inserts. Because spilled blocks are content-addressed the cache
+/// never serves stale bytes.
+pub async fn fetch_spilled_cached<S>(
+    store: &S,
+    cache: &SpillCache,
+    key: &Key,
+) -> Result<Option<Vec<u8>>, DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    let Some(reference) = spilled_reference(key)? else {
+        return Ok(None);
+    };
+    let bytes = cache
+        .get_or_fetch(&reference, async |reference: &Blake3Hash| {
+            store.get(reference).await
+        })
+        .await
+        .map_err(DialogArtifactsError::from)?
+        .ok_or_else(|| {
+            DialogArtifactsError::InvalidValue("spilled value block missing from store".to_string())
+        })?;
     Ok(Some(bytes))
 }
 
@@ -246,10 +300,13 @@ pub trait ArtifactTreeExt {
     /// the `Removed` state are filtered out.
     ///
     /// Consumes `self` (the tree is moved into the returned stream to
-    /// pin its root); `store` is the storage backing it.
+    /// pin its root); `store` is the storage backing it, and `cache` serves
+    /// spilled value blocks across scans so a repeated read of the same large
+    /// value skips the store fetch.
     fn scan<'s, S>(
         self,
         store: S,
+        cache: SpillCache,
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
     where
@@ -460,6 +517,7 @@ impl ArtifactTreeExt for ArtifactTree {
     fn scan<'s, S>(
         self,
         store: S,
+        cache: SpillCache,
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
     where
@@ -487,7 +545,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 if entry.matches_selector(&selector)
                     && let Entry { key, value: State::Added(datum) } = &entry
                 {
-                    let spilled = fetch_spilled(&raw_store, key).await?;
+                    let spilled = fetch_spilled_cached(&raw_store, &cache, key).await?;
                     yield Artifact::from_key_datum_with_value(key, datum, spilled)?;
                 }
             }
@@ -542,5 +600,114 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
     } else {
         // `Constrained` guarantees at least one field is set.
         unreachable!("ArtifactSelector will always have at least one field specified")
+    }
+}
+
+#[cfg(test)]
+mod spill_cache_tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{ArtifactTree, ArtifactTreeExt, fetch_spilled, fetch_spilled_cached, spill_cache};
+    use crate::{Artifact, EntityKey, Instruction, KeyView, Value};
+    use dialog_search_tree::Delta;
+    use dialog_storage::{Blake3Hash, MeasuredStorage, MemoryStorageBackend, StorageBackend};
+    use futures_util::stream;
+
+    /// Commits one spilling fact and returns the store (with the spilled block
+    /// written) plus the EAV key that references it.
+    async fn spilled_setup() -> (
+        MeasuredStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+        crate::Key,
+        Value,
+    ) {
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let value = Value::String("q".repeat(inline_n + 1));
+        let mut store = MeasuredStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+        let mut tree = ArtifactTree::empty();
+        let artifact = Artifact {
+            the: "doc/body".parse().unwrap(),
+            of: "doc:1".parse().unwrap(),
+            is: value.clone(),
+            cause: None,
+        };
+        tree.apply(
+            &mut store,
+            &mut delta,
+            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+        )
+        .await
+        .unwrap();
+        for (_, buffer) in delta.flush() {
+            store
+                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                .await
+                .unwrap();
+        }
+        let key = EntityKey::from(&artifact).into_key();
+        assert!(EntityKey(&key).value_is_spilled(), "value must spill");
+        (store, key, value)
+    }
+
+    /// A cached fetch of the same spilled block reads the store once: the
+    /// second fetch is a cache hit that touches no storage.
+    #[dialog_common::test]
+    async fn it_serves_a_cached_spilled_block_without_a_store_read() -> anyhow::Result<()> {
+        let (store, key, value) = spilled_setup().await;
+        let cache = spill_cache();
+
+        let before = store.reads();
+        let first = fetch_spilled_cached(&store, &cache, &key).await?;
+        let after_miss = store.reads();
+        let second = fetch_spilled_cached(&store, &cache, &key).await?;
+        let after_hit = store.reads();
+
+        assert_eq!(first, Some(value.to_bytes()), "miss returns the block");
+        assert_eq!(second, first, "hit returns the same bytes");
+        assert!(after_miss > before, "the miss reads the store");
+        assert_eq!(
+            after_hit, after_miss,
+            "the hit reads nothing from the store"
+        );
+        Ok(())
+    }
+
+    /// The cached fetch and the uncached fetch return identical bytes.
+    #[dialog_common::test]
+    async fn it_matches_the_uncached_fetch() -> anyhow::Result<()> {
+        let (store, key, _value) = spilled_setup().await;
+        let cache = spill_cache();
+        let cached = fetch_spilled_cached(&store, &cache, &key).await?;
+        let uncached = fetch_spilled(&store, &key).await?;
+        assert_eq!(cached, uncached);
+        assert!(cached.is_some());
+        Ok(())
+    }
+
+    /// An inline key spills nothing: both fetches return `None` and read no
+    /// block regardless of the cache.
+    #[dialog_common::test]
+    async fn it_returns_none_for_an_inline_key() -> anyhow::Result<()> {
+        let mut store = MeasuredStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+        let mut tree = ArtifactTree::empty();
+        let artifact = Artifact {
+            the: "user/name".parse().unwrap(),
+            of: "user:1".parse().unwrap(),
+            is: Value::String("Alice".to_string()),
+            cause: None,
+        };
+        tree.apply(
+            &mut store,
+            &mut delta,
+            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+        )
+        .await?;
+        let key = EntityKey::from(&artifact).into_key();
+        let cache = spill_cache();
+        assert_eq!(fetch_spilled_cached(&store, &cache, &key).await?, None);
+        assert_eq!(fetch_spilled(&store, &key).await?, None);
+        Ok(())
     }
 }

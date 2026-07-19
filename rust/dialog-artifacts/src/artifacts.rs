@@ -67,7 +67,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(feature = "csv")]
 use crate::{EntityKey, KeyViewConstruct};
 
-use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge, fetch_spilled};
+use crate::tree::{
+    ArtifactTree, ArtifactTreeExt, SpillCache, TreeStorageBridge, fetch_spilled_cached, spill_cache,
+};
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
 };
@@ -106,6 +108,10 @@ where
     identifier: String,
     storage: Storage<CborEncoder, Backend>,
     index: Arc<RwLock<Index>>,
+    /// Caches spilled value blocks across selects so a repeated read of the
+    /// same large value skips the store fetch. Content-addressed, so it never
+    /// serves stale bytes.
+    spill_cache: SpillCache,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -174,6 +180,7 @@ where
             identifier,
             storage,
             index: Arc::new(RwLock::new(index)),
+            spill_cache: spill_cache(),
         })
     }
 
@@ -211,7 +218,8 @@ where
 
         while let Some(entry) = entity_stream.try_next().await? {
             if let State::Added(datum) = &entry.value {
-                let spilled = fetch_spilled(&self.storage, &entry.key).await?;
+                let spilled =
+                    fetch_spilled_cached(&self.storage, &self.spill_cache, &entry.key).await?;
                 let artifact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)?;
 
                 csv.serialize(artifact)
@@ -364,13 +372,14 @@ where
     {
         let index = self.index.clone();
         let storage = self.storage.clone();
+        let cache = self.spill_cache.clone();
 
         try_stream! {
             // Clone the tree under the read lock to "pin" it at a
             // version for the stream's lifetime, then hand off to the
             // shared `ArtifactTreeExt::scan` for EAV/AEV/VAE dispatch.
             let tree = index.read().await.clone();
-            let scanned = tree.scan(storage, selector);
+            let scanned = tree.scan(storage, cache, selector);
             tokio::pin!(scanned);
             for await artifact in scanned {
                 yield artifact?;
@@ -1674,6 +1683,276 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].is, value, "spilled value reconstructs exactly");
 
+        Ok(())
+    }
+
+    /// The inline threshold is inclusive: a value whose encoded form is exactly
+    /// `inline_n` bytes stays inline (no block written); one byte larger spills.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_spills_exactly_above_the_threshold() -> Result<()> {
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        // `encode_value` of a String is the 0x00-escaped bytes plus a
+        // terminator; for an all-ASCII string with no NULs that is len + 1. So
+        // a string of `inline_n - 1` ASCII bytes encodes to exactly `inline_n`.
+        let at = Value::String("a".repeat(inline_n - 1));
+        let over = Value::String("a".repeat(inline_n));
+        assert_eq!(
+            crate::encode_value_owned(&at).len(),
+            inline_n,
+            "at boundary"
+        );
+        assert!(
+            crate::encode_value_owned(&over).len() > inline_n,
+            "over boundary"
+        );
+
+        for (value, should_spill) in [(at, false), (over, true)] {
+            let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+            let entity = Entity::new()?;
+            artifacts
+                .commit(vec![Instruction::Assert(Artifact {
+                    the: Attribute::from_str("doc/body")?,
+                    of: entity.clone(),
+                    is: value.clone(),
+                    cause: None,
+                })])
+                .await?;
+            let block = artifacts.storage.get(&value.to_reference()).await?;
+            assert_eq!(
+                block.is_some(),
+                should_spill,
+                "spill decision at the exact boundary is inclusive"
+            );
+            // Either way the value reconstructs.
+            let results = artifacts
+                .select(ArtifactSelector::new().of(entity))
+                .map(|r| r.unwrap())
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].is, value);
+        }
+        Ok(())
+    }
+
+    /// Every reconstructable spillable value type round-trips through a spill:
+    /// String and Bytes (including a `0x00`-escape case) reconstruct exactly.
+    /// `Record` reconstruction from raw bytes is unimplemented workspace-wide
+    /// (see `Value::try_from`), which is orthogonal to spilling; it is not
+    /// exercised here.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_spills_and_round_trips_every_value_type() -> Result<()> {
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 64;
+        let values = vec![
+            Value::String("s".repeat(n)),
+            Value::Bytes(vec![0xABu8; n]),
+            Value::Bytes({
+                let mut v = vec![0u8; n];
+                v[0] = 0x00; // exercise the 0x00-escape in the encoding
+                v
+            }),
+        ];
+        for value in values {
+            assert!(
+                crate::encode_value_owned(&value).len()
+                    > dialog_search_tree::Manifest::default().inline_n as usize,
+                "value must spill: {value:?}"
+            );
+            let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+            let entity = Entity::new()?;
+            artifacts
+                .commit(vec![Instruction::Assert(Artifact {
+                    the: Attribute::from_str("doc/body")?,
+                    of: entity.clone(),
+                    is: value.clone(),
+                    cause: None,
+                })])
+                .await?;
+            let results = artifacts
+                .select(ArtifactSelector::new().of(entity))
+                .map(|r| r.unwrap())
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].is, value, "{value:?} round-trips through spill");
+        }
+        Ok(())
+    }
+
+    /// Replacing a fact whose prior value was spilled supersedes the prior
+    /// (reconstructed via the block) and leaves exactly the new value, whether
+    /// the new value is itself spilled or inline.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_replaces_a_spilled_prior() -> Result<()> {
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
+        let spilled_prior = Value::String("p".repeat(n));
+
+        for new_value in [Value::String("r".repeat(n)), Value::String("small".into())] {
+            let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+            let entity = Entity::new()?;
+            let attribute = Attribute::from_str("doc/body")?;
+            let of_the = |is: Value| Artifact {
+                the: attribute.clone(),
+                of: entity.clone(),
+                is,
+                cause: None,
+            };
+            artifacts
+                .commit(vec![Instruction::Replace(of_the(spilled_prior.clone()))])
+                .await?;
+            artifacts
+                .commit(vec![Instruction::Replace(of_the(new_value.clone()))])
+                .await?;
+
+            let results = artifacts
+                .select(ArtifactSelector::new().of(entity).the(attribute.clone()))
+                .map(|r| r.unwrap())
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(results.len(), 1, "cardinality-one keeps one value");
+            assert_eq!(
+                results[0].is, new_value,
+                "the new value supersedes the spilled prior"
+            );
+        }
+        Ok(())
+    }
+
+    /// Retracting a fact whose value spilled removes it from the scan (a
+    /// tombstone), and no fact is returned.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_retracts_a_spilled_fact() -> Result<()> {
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
+        let value = Value::String("t".repeat(n));
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let entity = Entity::new()?;
+        let fact = Artifact {
+            the: Attribute::from_str("doc/body")?,
+            of: entity.clone(),
+            is: value.clone(),
+            cause: None,
+        };
+        artifacts
+            .commit(vec![Instruction::Assert(fact.clone())])
+            .await?;
+        artifacts.commit(vec![Instruction::Retract(fact)]).await?;
+
+        let results = artifacts
+            .select(ArtifactSelector::new().of(entity))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            results.is_empty(),
+            "a retracted spilled fact is not returned"
+        );
+        Ok(())
+    }
+
+    /// Two facts with the same large value share one content-addressed block:
+    /// the block is stored once under the shared reference, and both facts
+    /// reconstruct it.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_dedups_a_shared_spilled_block() -> Result<()> {
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
+        let value = Value::String("d".repeat(n));
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let attribute = Attribute::from_str("doc/body")?;
+        let a = Entity::new()?;
+        let b = Entity::new()?;
+        artifacts
+            .commit(vec![
+                Instruction::Assert(Artifact {
+                    the: attribute.clone(),
+                    of: a,
+                    is: value.clone(),
+                    cause: None,
+                }),
+                Instruction::Assert(Artifact {
+                    the: attribute.clone(),
+                    of: b,
+                    is: value.clone(),
+                    cause: None,
+                }),
+            ])
+            .await?;
+
+        // One block under the shared reference; both facts read it.
+        assert_eq!(
+            artifacts.storage.get(&value.to_reference()).await?,
+            Some(value.to_bytes())
+        );
+        let results = artifacts
+            .select(ArtifactSelector::new().the(attribute))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(results.len(), 2, "two facts share one spilled block");
+        assert!(results.iter().all(|r| r.is == value));
+        Ok(())
+    }
+
+    /// A missing spilled block surfaces a clean error (not a panic) on read.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_errors_when_a_spilled_block_is_missing() -> Result<()> {
+        use crate::EntityKey;
+        use crate::tree::fetch_spilled;
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
+        let value = Value::String("m".repeat(n));
+        let artifact = Artifact {
+            the: Attribute::from_str("doc/body")?,
+            of: Entity::new()?,
+            is: value.clone(),
+            cause: None,
+        };
+        let key = EntityKey::from(&artifact).into_key();
+        // A store that never had the block written.
+        let empty = MemoryStorageBackend::<dialog_storage::Blake3Hash, Vec<u8>>::default();
+        let result = fetch_spilled(&empty, &key).await;
+        assert!(
+            matches!(result, Err(DialogArtifactsError::InvalidValue(_))),
+            "a missing spilled block is a clean error, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// A value-equality select on a spilled value returns exactly that fact:
+    /// the selector's value reference matches the spilled key's reference.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    async fn it_selects_by_a_spilled_value() -> Result<()> {
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
+        let wanted = Value::String("w".repeat(n));
+        let other = Value::String("o".repeat(n));
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let attribute = Attribute::from_str("doc/body")?;
+        for value in [wanted.clone(), other.clone()] {
+            artifacts
+                .commit(vec![Instruction::Assert(Artifact {
+                    the: attribute.clone(),
+                    of: Entity::new()?,
+                    is: value,
+                    cause: None,
+                })])
+                .await?;
+        }
+        let results = artifacts
+            .select(ArtifactSelector::new().is(wanted.clone()))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            results.len(),
+            1,
+            "equality-by-spilled-value returns one fact"
+        );
+        assert_eq!(results[0].is, wanted);
         Ok(())
     }
 }

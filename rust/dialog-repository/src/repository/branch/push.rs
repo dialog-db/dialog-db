@@ -270,7 +270,7 @@ mod tests {
     use anyhow::Result;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
-    use futures_util::stream;
+    use futures_util::{StreamExt as _, stream};
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> Result<()> {
@@ -303,6 +303,76 @@ mod tests {
             .revision()
             .expect("main should have a revision after push");
         assert_eq!(main_rev.tree, feature_revision.tree);
+
+        Ok(())
+    }
+
+    /// Pushing a spilling value ships its block to the local upstream, a
+    /// spilled value shared by many facts ships once, and a re-push with
+    /// nothing new is a no-op (no re-upload).
+    #[dialog_common::test]
+    async fn it_pushes_spilled_value_blocks_once() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let big = "z".repeat(inline_n + 1);
+        let value = Value::String(big);
+
+        // Two facts share the same large value -> one spilled block.
+        feature
+            .commit(stream::iter(vec![
+                Instruction::Assert(Artifact {
+                    the: "doc/body".parse()?,
+                    of: "doc:a".parse()?,
+                    is: value.clone(),
+                    cause: None,
+                }),
+                Instruction::Assert(Artifact {
+                    the: "doc/body".parse()?,
+                    of: "doc:b".parse()?,
+                    is: value.clone(),
+                    cause: None,
+                }),
+            ]))
+            .perform(&operator)
+            .await?;
+
+        let first = feature.push().perform(&operator).await?;
+        assert!(first.is_some(), "the first push lands the commit");
+
+        // The main branch (the upstream) can now read both facts back,
+        // reconstructing the shared spilled value from the shipped block.
+        let main_reloaded = repo.branch("main").load().perform(&operator).await?;
+        let results: Vec<_> = main_reloaded
+            .claims()
+            .select(dialog_artifacts::ArtifactSelector::new().the("doc/body".parse()?))
+            .perform(&operator)
+            .await?
+            .filter_map(|r| async { r.ok() })
+            .collect()
+            .await;
+        assert_eq!(
+            results.len(),
+            2,
+            "both facts hydrate from the shipped block"
+        );
+        assert!(
+            results.iter().all(|r| r.is == value),
+            "the shared spilled value reconstructs for both facts"
+        );
+
+        // A re-push with nothing new is a no-op.
+        let second = feature.push().perform(&operator).await?;
+        assert_eq!(
+            second.map(|r| r.tree),
+            first.map(|r| r.tree),
+            "a re-push with nothing new returns the same revision"
+        );
 
         Ok(())
     }
