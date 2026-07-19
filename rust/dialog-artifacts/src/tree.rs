@@ -37,7 +37,7 @@ use std::ops::RangeInclusive;
 use crate::{
     Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum, DialogArtifactsError,
     EntityKey, EntityKeyPart, FromKey, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut,
-    State, ValueDataType, ValueKey,
+    State, ValueDataType, ValueKey, encode_value_owned,
     key::value_spills,
     key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
     match_selector_and_key_ref,
@@ -276,7 +276,60 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         start = start.set_value(ValueDataType::String, ValuePayload::Inline(lo));
         end = end.set_value(ValueDataType::String, ValuePayload::Inline(hi));
     }
+    // A numeric value range bounds the value tail to a sub-band. A bound value
+    // encodes order-preservingly, so its bytes are a key range edge; the open
+    // side is the band edge of the bound's type (its lowest/highest inline
+    // value). Exclusive bounds (`>`/`<`) still set the key edge at the bound
+    // value — the range stays a superset and the per-entry re-check drops the
+    // boundary value. An exact value takes precedence and skips this.
+    if selector.value().is_none()
+        && (selector.value_lower().is_some() || selector.value_upper().is_some())
+    {
+        // Both edges must sit in the same type band, so derive the band type
+        // from whichever bound is present (they share a type when both are).
+        let band = selector
+            .value_lower()
+            .or(selector.value_upper())
+            .map(|bound| bound.value.data_type())
+            .unwrap_or_else(ValueDataType::min);
+        let lo = match selector.value_lower() {
+            Some(bound) => encode_value_owned(&bound.value),
+            None => value_band_min(band),
+        };
+        let hi = match selector.value_upper() {
+            Some(bound) => encode_value_owned(&bound.value),
+            None => value_band_max(band),
+        };
+        start = start.set_value(band, ValuePayload::Inline(lo));
+        end = end.set_value(band, ValuePayload::Inline(hi));
+    }
     (start, end)
+}
+
+/// The lowest inline value byte-encoding of a numeric type's band: all-zero
+/// bytes of the type's fixed width. Order-preserving encodings put the type's
+/// minimum at the bottom of its band, so this is the lower edge when only an
+/// upper value bound is set.
+fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
+    vec![0x00; numeric_width(value_type)]
+}
+
+/// The highest inline value byte-encoding of a numeric type's band: all-`0xFF`
+/// bytes of the type's fixed width, the upper edge when only a lower bound is
+/// set.
+fn value_band_max(value_type: ValueDataType) -> Vec<u8> {
+    vec![0xFF; numeric_width(value_type)]
+}
+
+/// The fixed inline width of a numeric value type's order-preserving encoding.
+/// Non-numeric types have no fixed width; they return 0 (a value range over a
+/// non-numeric type is not expressible and the caller never constructs one).
+fn numeric_width(value_type: ValueDataType) -> usize {
+    match value_type {
+        ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float => 16,
+        ValueDataType::Boolean => 1,
+        _ => 0,
+    }
 }
 
 /// Shared mutation + scan operations on an [`ArtifactTree`].
@@ -622,7 +675,11 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
             selector,
         );
         start.into_key()..=end.into_key()
-    } else if selector.value().is_some() || selector.value_prefix().is_some() {
+    } else if selector.value().is_some()
+        || selector.value_prefix().is_some()
+        || selector.value_lower().is_some()
+        || selector.value_upper().is_some()
+    {
         let (start, end) = apply_prefix_bounds(
             <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
             <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector),

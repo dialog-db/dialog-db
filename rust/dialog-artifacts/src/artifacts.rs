@@ -11,7 +11,7 @@ mod instruction;
 pub use instruction::*;
 
 pub mod selector;
-pub use selector::ArtifactSelector;
+pub use selector::{ArtifactSelector, ValueBound};
 
 mod query;
 pub use query::{ArtifactStream, Select};
@@ -932,6 +932,92 @@ mod tests {
             .try_collect()
             .await?;
         assert!(selected.is_empty(), "no value begins with Zzz");
+
+        Ok(())
+    }
+
+    /// Numeric value range scans over the VAE index. The M3 value-in-key
+    /// format sorts numeric values order-preservingly within their type band,
+    /// so `is_at_least`/`is_at_most`/`is_between` (and their exclusive
+    /// variants) bracket the value dimension; exclusivity and the type band are
+    /// enforced by the per-entry re-check.
+    #[dialog_common::test]
+    async fn it_selects_by_value_range() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        let age = Attribute::from_str("person/age")?;
+        let fact = |value: u128| -> anyhow::Result<Artifact> {
+            Ok(Artifact {
+                the: age.clone(),
+                of: Entity::new()?,
+                is: Value::UnsignedInt(value),
+                cause: None,
+            })
+        };
+        let mut data = Vec::new();
+        for value in [10u128, 20, 30, 40, 50] {
+            data.push(fact(value)?);
+        }
+        // A string value on the same attribute must never match a numeric range.
+        data.push(Artifact {
+            the: age.clone(),
+            of: Entity::new()?,
+            is: Value::String("not a number".into()),
+            cause: None,
+        });
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let values = |facts: &[Artifact]| -> Vec<u128> {
+            let mut out: Vec<u128> = facts
+                .iter()
+                .map(|fact| match fact.is {
+                    Value::UnsignedInt(value) => value,
+                    ref other => panic!("unexpected non-numeric match: {other:?}"),
+                })
+                .collect();
+            out.sort_unstable();
+            out
+        };
+
+        // Inclusive lower bound.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(30)))
+            .try_collect()
+            .await?;
+        assert_eq!(values(&selected), vec![30, 40, 50], ">= 30");
+
+        // Exclusive lower bound drops the boundary value.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_greater_than(Value::UnsignedInt(30)))
+            .try_collect()
+            .await?;
+        assert_eq!(values(&selected), vec![40, 50], "> 30");
+
+        // Inclusive upper bound.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_at_most(Value::UnsignedInt(20)))
+            .try_collect()
+            .await?;
+        assert_eq!(values(&selected), vec![10, 20], "<= 20");
+
+        // A closed interval.
+        let selected: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new().is_between(Value::UnsignedInt(20), Value::UnsignedInt(40)),
+            )
+            .try_collect()
+            .await?;
+        assert_eq!(values(&selected), vec![20, 30, 40], "[20, 40]");
+
+        // A range that spans nothing.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(1000)))
+            .try_collect()
+            .await?;
+        assert!(selected.is_empty(), ">= 1000 matches nothing");
 
         Ok(())
     }

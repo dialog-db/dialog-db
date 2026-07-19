@@ -3,11 +3,13 @@
 //! This module provides functionality for matching artifacts and index entries
 //! against artifact selectors during query operations.
 
+use std::cmp::Ordering;
+
 use dialog_search_tree::Entry;
 
 use crate::{
     ATTRIBUTE_KEY_TAG, ArtifactSelector, AttributeKey, Datum, ENTITY_KEY_TAG, EntityKey, Key,
-    KeyView, State, VALUE_KEY_TAG, ValueKey, artifacts::selector::Constrained,
+    KeyView, State, VALUE_KEY_TAG, ValueKey, artifacts::selector::Constrained, decode_value,
     key::inline_threshold, key::value_payload, key::varkey::KeyRef,
 };
 
@@ -80,6 +82,44 @@ pub fn match_selector_and_key_ref(
             let payload = key.value.as_bytes();
             if bytes.len() > payload.len() || &payload[..bytes.len()] != bytes {
                 return false;
+            }
+        }
+    }
+
+    // Value range bounds compare against the decoded value semantically, so
+    // exclusivity (`>`/`<`) and the exact bound value are handled precisely
+    // (the key range is a superset that includes the boundary; this drops it
+    // when the bound is exclusive). A spilled value carries only a reference,
+    // so it cannot be range-checked from the key; it stays in the result for
+    // the caller to re-check, as with exact and prefix value matches.
+    if (selector.value_lower().is_some() || selector.value_upper().is_some())
+        && !key.value.is_reference()
+        && let Some((value, rest)) = decode_value(key.value_type, key.value.as_bytes())
+        && rest.is_empty()
+    {
+        // Compare only within the bound's type: `Value`'s derived `PartialOrd`
+        // orders across variants by declaration order, not semantically, so a
+        // cross-type value must be excluded rather than variant-ordered. The key
+        // range already brackets the bound's band, so a differing type here is a
+        // spurious neighbor at the band edge.
+        if let Some(bound) = selector.value_lower() {
+            if value.data_type() != bound.value.data_type() {
+                return false;
+            }
+            match value.partial_cmp(&bound.value) {
+                Some(Ordering::Greater) => {}
+                Some(Ordering::Equal) if bound.inclusive => {}
+                _ => return false,
+            }
+        }
+        if let Some(bound) = selector.value_upper() {
+            if value.data_type() != bound.value.data_type() {
+                return false;
+            }
+            match value.partial_cmp(&bound.value) {
+                Some(Ordering::Less) => {}
+                Some(Ordering::Equal) if bound.inclusive => {}
+                _ => return false,
             }
         }
     }
