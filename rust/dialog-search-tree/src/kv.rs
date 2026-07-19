@@ -37,15 +37,6 @@ pub trait Key:
     /// key (for a fixed-size key, a length mismatch).
     fn try_from_bytes(bytes: &[u8]) -> Result<Self, DialogSearchTreeError>;
 
-    /// Reconstructs a key from an owned byte buffer. The scan reconstructs each
-    /// key by concatenating its columns into a fresh `Vec`; a variable-length
-    /// key backed by a `Vec<u8>` can then take ownership of that buffer instead
-    /// of copying it again. Defaults to [`try_from_bytes`](Self::try_from_bytes)
-    /// (a copy) for fixed-size keys, which cannot adopt the buffer.
-    fn try_from_bytes_owned(bytes: Vec<u8>) -> Result<Self, DialogSearchTreeError> {
-        Self::try_from_bytes(&bytes)
-    }
-
     /// Returns the minimum possible value for this key type.
     fn min() -> Self;
 

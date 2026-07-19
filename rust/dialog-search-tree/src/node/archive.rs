@@ -5,7 +5,7 @@ use rkyv::{Deserialize, rancor::Strategy};
 
 use crate::{
     ArchivedIndex, ArchivedSegment, ColumnData, DialogSearchTreeError, Key, Link, Value,
-    node::columnar::ColumnarLeaf,
+    node::columnar::{ColumnarLeaf, StreamingLeaf, archived_column_slices},
 };
 
 fn malformed(message: &str) -> DialogSearchTreeError {
@@ -162,13 +162,19 @@ where
         ColumnarLeaf::decode(&schema, &columns, self.count.to_native() as usize)
     }
 
-    /// An iterator over this segment's full keys, in entry order, for a given
-    /// key schema. Decodes all columns once.
-    pub fn keys<Key: self::Key>(&self) -> Result<SegmentKeys, DialogSearchTreeError> {
-        Ok(SegmentKeys {
-            leaf: self.decode::<Key>()?,
-            index: 0,
-        })
+    /// A streaming decoder over this segment's full keys, in entry order, for a
+    /// given key schema. Borrows the archived columns and reconstructs each key
+    /// into a single reused buffer — no owned-column deserialize, no row-major
+    /// materialization, no per-entry allocation. This is the scan hot path; see
+    /// [`StreamingLeaf`].
+    pub fn keys<Key: self::Key>(&self) -> Result<StreamingLeaf<'_>, DialogSearchTreeError> {
+        let schema = if self.layout == crate::MIXED_LAYOUT {
+            crate::Schema::opaque()
+        } else {
+            Key::schema(self.layout)
+        };
+        let columns: Vec<_> = self.columns.iter().map(archived_column_slices).collect();
+        StreamingLeaf::new(&schema, &columns, self.count.to_native() as usize)
     }
 
     /// The first (minimum) key of this segment, decoded to its bytes.
@@ -190,29 +196,6 @@ where
     /// search via component comparison, no key reconstruction.
     pub fn find<Key: self::Key>(&self, key: &[u8]) -> Result<Option<usize>, DialogSearchTreeError> {
         self.decode::<Key>()?.find(key)
-    }
-}
-
-/// An iterator over a segment's full keys, backed by a decoded columnar leaf.
-///
-/// Yields `(entry index, key bytes)` pairs in order; the caller pairs the
-/// index with [`ArchivedSegment::value_at`] as needed. Each key is
-/// reconstructed by concatenating its components on demand.
-pub struct SegmentKeys {
-    leaf: ColumnarLeaf,
-    index: usize,
-}
-
-impl SegmentKeys {
-    /// Reconstructs the next key, or returns `None` past the last entry.
-    pub fn next_key(&mut self) -> Result<Option<(usize, Vec<u8>)>, DialogSearchTreeError> {
-        if self.index >= self.leaf.len() {
-            return Ok(None);
-        }
-        let at = self.index;
-        let key = self.leaf.key(at)?;
-        self.index += 1;
-        Ok(Some((at, key)))
     }
 }
 

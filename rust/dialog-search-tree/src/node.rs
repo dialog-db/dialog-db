@@ -2,7 +2,6 @@ mod persistent;
 pub use persistent::*;
 
 mod archive;
-pub use archive::*;
 
 pub(crate) mod codec;
 
@@ -13,7 +12,7 @@ pub fn encode_keys_public<K: AsRef<[u8]>>(keys: &[K]) -> (Vec<u8>, Vec<u8>, Vec<
 }
 
 pub(crate) mod columnar;
-pub use columnar::{ArchivedColumnData, ColumnData};
+pub use columnar::{ArchivedColumnData, ColumnData, ColumnSlices, StreamingLeaf};
 
 mod transient;
 pub use transient::*;

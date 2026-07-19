@@ -317,6 +317,186 @@ fn resolve_dictionary<'a>(
     Ok(values)
 }
 
+/// The borrowed byte slices of one archived column, carrying exactly the fields
+/// its class needs. Borrows straight from the archived buffer with no copy.
+pub enum ColumnSlices<'a> {
+    /// A front-coded arena column: its shared prefix and per-entry stream.
+    Arena {
+        /// The column's shared front-coding prefix.
+        prefix: &'a [u8],
+        /// The front-coded per-entry stream.
+        stream: &'a [u8],
+    },
+    /// A dictionary column: its value table, the table's end offsets, and the
+    /// per-entry table indices.
+    Dictionary {
+        /// The concatenated distinct values, each varint-length-prefixed.
+        table: &'a [u8],
+        /// The end offset of each table entry, varint-packed.
+        table_ends: &'a [u8],
+        /// The per-entry index into the table, varint-packed.
+        indices: &'a [u8],
+    },
+}
+
+/// Borrows the byte slices of an archived column for streaming decode.
+pub fn archived_column_slices(column: &ArchivedColumnData) -> ColumnSlices<'_> {
+    match column {
+        ArchivedColumnData::Arena {
+            prefix,
+            stream,
+            restarts: _,
+        } => ColumnSlices::Arena {
+            prefix: prefix.as_ref(),
+            stream: stream.as_ref(),
+        },
+        ArchivedColumnData::Dictionary {
+            table,
+            table_ends,
+            indices,
+        } => ColumnSlices::Dictionary {
+            table: table.as_ref(),
+            table_ends: table_ends.as_ref(),
+            indices: indices.as_ref(),
+        },
+    }
+}
+
+/// A per-column reader that yields each entry's component bytes in order,
+/// borrowing from the archived column with no per-entry allocation.
+///
+/// An arena column front-codes its bytes, so a component is `prefix ++ suffix`
+/// where `prefix` is shared; the reader reconstructs it into a single reused
+/// buffer ([`KeyCursor`]) and hands out a borrow of it. A dictionary column
+/// stores each distinct value once; the reader resolves the table to borrowed
+/// slices up front (one small `Vec` of `&[u8]`, not one per entry) and indexes
+/// into it per entry, so each component is a pure borrow of the archived table.
+enum ColumnReader<'a> {
+    Arena {
+        cursor: KeyCursor<'a>,
+    },
+    Dictionary {
+        values: Vec<&'a [u8]>,
+        indices: &'a [u8],
+        position: usize,
+    },
+}
+
+impl<'a> ColumnReader<'a> {
+    /// Builds a reader for one column against its schema component. The
+    /// component's class must agree with the column's slices.
+    fn new(
+        component: &Component,
+        slices: &ColumnSlices<'a>,
+    ) -> Result<Self, DialogSearchTreeError> {
+        Ok(match (component.column, slices) {
+            (Column::Arena, ColumnSlices::Arena { prefix, stream }) => ColumnReader::Arena {
+                cursor: KeyCursor::new(prefix, stream, 0),
+            },
+            (
+                Column::Dictionary,
+                ColumnSlices::Dictionary {
+                    table,
+                    table_ends,
+                    indices,
+                },
+            ) => ColumnReader::Dictionary {
+                values: resolve_dictionary(table, table_ends)?,
+                indices,
+                position: 0,
+            },
+            _ => {
+                return Err(malformed(
+                    "Column class does not match the schema component",
+                ));
+            }
+        })
+    }
+
+    /// Appends the next entry's component bytes onto `out`. One append per
+    /// component; the only reconstruction cost is the arena cursor's in-place
+    /// front-decode, reused across entries.
+    fn append_next(&mut self, out: &mut Vec<u8>) -> Result<(), DialogSearchTreeError> {
+        match self {
+            ColumnReader::Arena { cursor } => {
+                cursor.advance()?;
+                out.extend_from_slice(cursor.key());
+            }
+            ColumnReader::Dictionary {
+                values,
+                indices,
+                position,
+            } => {
+                let (index, next) = read_varint(indices, *position)?;
+                *position = next;
+                let value = values
+                    .get(index as usize)
+                    .ok_or_else(|| malformed("Dictionary index out of range"))?;
+                out.extend_from_slice(value);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A streaming decoder over a columnar leaf that reconstructs each entry's full
+/// key into a single reused buffer, borrowing the archived columns.
+///
+/// This is the scan hot path. Unlike [`ColumnarLeaf`] it never materializes the
+/// row-major `Vec<Vec<Vec<u8>>>` nor deserializes the columns to owned form: it
+/// borrows the archived arena/dictionary bytes and assembles one key at a time
+/// into `key_buf`, which is cleared and reused per entry. So a full scan of a
+/// leaf allocates one buffer (plus the small per-dictionary-column table of
+/// borrowed slices), not `entries × components` vectors.
+pub struct StreamingLeaf<'a> {
+    readers: Vec<ColumnReader<'a>>,
+    key_buf: Vec<u8>,
+    entry_count: usize,
+    index: usize,
+}
+
+impl<'a> StreamingLeaf<'a> {
+    /// Builds a streaming decoder from the schema and the borrowed archived
+    /// column slices (one [`ColumnSlices`] per component, in schema order).
+    pub fn new(
+        schema: &Schema,
+        columns: &[ColumnSlices<'a>],
+        entry_count: usize,
+    ) -> Result<Self, DialogSearchTreeError> {
+        let components = schema.components();
+        if columns.len() != components.len() {
+            return Err(malformed("Column count does not match the key schema"));
+        }
+        let readers = components
+            .iter()
+            .zip(columns)
+            .map(|(component, slices)| ColumnReader::new(component, slices))
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            readers,
+            key_buf: Vec::new(),
+            entry_count,
+            index: 0,
+        })
+    }
+
+    /// Reconstructs the next entry's full key into the reused buffer and returns
+    /// its index paired with a borrow of the buffer, or `None` past the last
+    /// entry. The borrow is valid until the next call.
+    pub fn next_key(&mut self) -> Result<Option<(usize, &[u8])>, DialogSearchTreeError> {
+        if self.index >= self.entry_count {
+            return Ok(None);
+        }
+        let at = self.index;
+        self.key_buf.clear();
+        for reader in &mut self.readers {
+            reader.append_next(&mut self.key_buf)?;
+        }
+        self.index += 1;
+        Ok(Some((at, &self.key_buf)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(unexpected_cfgs)]

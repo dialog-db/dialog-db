@@ -270,12 +270,6 @@ impl TreeKey for Key {
         Ok(Key(bytes.to_vec()))
     }
 
-    fn try_from_bytes_owned(bytes: Vec<u8>) -> Result<Self, DialogSearchTreeError> {
-        // The key is a `Vec<u8>`, so adopt the scan's concatenated buffer
-        // directly rather than copying it a second time.
-        Ok(Key(bytes))
-    }
-
     fn min() -> Self {
         Key::min()
     }
