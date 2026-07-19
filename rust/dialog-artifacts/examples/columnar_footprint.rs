@@ -103,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut keys = segment.keys::<Key>()?;
                 let mut whole: Vec<Vec<u8>> = Vec::new();
                 while let Some((_, key)) = keys.next_key()? {
-                    whole.push(key);
+                    whole.push(key.to_vec());
                 }
                 let refs: Vec<&[u8]> = whole.iter().map(|k| k.as_slice()).collect();
                 let (prefix, stream, restarts) = dialog_search_tree::encode_keys_public(&refs);

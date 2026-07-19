@@ -67,6 +67,23 @@ pub fn match_selector_and_key_ref(
         }
     }
 
+    if let Some(prefix) = selector.value_prefix() {
+        // The inline value payload for a string/bytes value is the raw bytes
+        // (the order-preserving encoding of a byte string is the bytes
+        // themselves), so the prefix compares directly. A spilled value carries
+        // a reference rather than its bytes, so its prefix cannot be checked
+        // from the key; it stays in the result (the caller re-checks against the
+        // fetched block if it needs an exact filter), matching how a spilled
+        // value is handled for exact value matches.
+        if !key.value.is_reference() {
+            let bytes = prefix.as_bytes();
+            let payload = key.value.as_bytes();
+            if bytes.len() > payload.len() || &payload[..bytes.len()] != bytes {
+                return false;
+            }
+        }
+    }
+
     true
 }
 

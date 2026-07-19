@@ -37,7 +37,7 @@ use std::ops::RangeInclusive;
 use crate::{
     Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum, DialogArtifactsError,
     EntityKey, EntityKeyPart, FromKey, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut,
-    State, ValueKey,
+    State, ValueDataType, ValueKey,
     key::value_spills,
     key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
     match_selector_and_key_ref,
@@ -260,6 +260,21 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         let hi = prefix_upper(prefix);
         start = start.set_entity(EntityKeyPart(&lo));
         end = end.set_entity(EntityKeyPart(&hi));
+    }
+    // A value prefix bounds the value tail directly: the payload's inline
+    // order-preserving bytes for a string are the raw UTF-8, so the prefix's
+    // raw bytes are the lower bound and `prefix ‖ 0xFE…` the upper (mirroring
+    // the entity/attribute prefixes, but on the value slot). An exact value
+    // takes precedence and skips this. Only sound on the VAE ordering, where
+    // the value tail leads the key; on EAV/AEV the value is trailing, so
+    // `selector_range` routes a value-prefix scan to `ValueKey`.
+    if selector.value().is_none()
+        && let Some(prefix) = selector.value_prefix()
+    {
+        let lo = prefix_lower(prefix);
+        let hi = prefix_upper(prefix);
+        start = start.set_value(ValueDataType::String, ValuePayload::Inline(lo));
+        end = end.set_value(ValueDataType::String, ValuePayload::Inline(hi));
     }
     (start, end)
 }
@@ -607,7 +622,7 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
             selector,
         );
         start.into_key()..=end.into_key()
-    } else if selector.value().is_some() {
+    } else if selector.value().is_some() || selector.value_prefix().is_some() {
         let (start, end) = apply_prefix_bounds(
             <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
             <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector),

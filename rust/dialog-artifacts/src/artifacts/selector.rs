@@ -59,6 +59,13 @@ where
     /// attribute key stores the full (64-byte-capped) name raw, so
     /// this bound is an exact key range.
     attribute_prefix: Option<String>,
+    /// Prefix bound on the value: selected [`Artifact`]s' values must
+    /// be textual (string/bytes) and begin with this string. The M3
+    /// value-in-key format stores the value order-preservingly in the
+    /// VAE index, so this is an exact key range over the value dimension
+    /// (subject to per-entry re-checking for spilled values, whose key
+    /// carries a reference rather than the inline prefix).
+    value_prefix: Option<String>,
     state_type: PhantomData<State>,
 }
 
@@ -80,6 +87,7 @@ impl ArtifactSelector<Unconstrained> {
             value_reference: None,
             entity_prefix: None,
             attribute_prefix: None,
+            value_prefix: None,
             state_type: PhantomData,
         }
     }
@@ -119,6 +127,11 @@ where
         self.attribute_prefix.as_deref()
     }
 
+    /// The prefix bound on values, if any
+    pub fn value_prefix(&self) -> Option<&str> {
+        self.value_prefix.as_deref()
+    }
+
     /// Set the [`Attribute`] field (the predicate) of the [`ArtifactSelector`]
     pub fn the(self, attribute: Attribute) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
@@ -128,6 +141,7 @@ where
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            value_prefix: self.value_prefix,
             state_type: PhantomData,
         }
     }
@@ -141,6 +155,7 @@ where
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            value_prefix: self.value_prefix,
             state_type: PhantomData,
         }
     }
@@ -154,6 +169,7 @@ where
             value: Some(value),
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            value_prefix: self.value_prefix,
             state_type: PhantomData,
         }
     }
@@ -170,6 +186,7 @@ where
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: Some(prefix.into()),
+            value_prefix: self.value_prefix,
             state_type: PhantomData,
         }
     }
@@ -186,6 +203,29 @@ where
             value: self.value,
             entity_prefix: Some(prefix.into()),
             attribute_prefix: self.attribute_prefix,
+            value_prefix: self.value_prefix,
+            state_type: PhantomData,
+        }
+    }
+
+    /// Constrain selected [`Artifact`]s to textual values (string/bytes)
+    /// beginning with `prefix`. A prefix is a constraint, so the resulting
+    /// selector is [`Constrained`]; an exact value set via
+    /// [`ArtifactSelector::is`] takes precedence during scans.
+    ///
+    /// The M3 value-in-key format stores the value order-preservingly in the
+    /// VAE index, so this narrows the scan to the value sub-range whose keys
+    /// begin with `prefix` (a spilled value, whose key carries a reference
+    /// rather than the inline bytes, is re-checked per entry).
+    pub fn is_starting_with(self, prefix: impl Into<String>) -> ArtifactSelector<Constrained> {
+        ArtifactSelector::<Constrained> {
+            attribute: self.attribute,
+            entity: self.entity,
+            value_reference: self.value_reference,
+            value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
+            value_prefix: Some(prefix.into()),
             state_type: PhantomData,
         }
     }

@@ -860,6 +860,82 @@ mod tests {
         Ok(())
     }
 
+    /// A value-prefix selector ranges over the VAE index. The M3
+    /// value-in-key format stores a string value's bytes inline and
+    /// order-preservingly, so a prefix scan brackets the value dimension
+    /// directly and returns exactly the string values beginning with the
+    /// prefix — across different attributes and entities, and excluding
+    /// non-string values that cannot carry the prefix.
+    #[dialog_common::test]
+    async fn it_selects_by_value_prefix() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let data = vec![
+            Artifact {
+                the: Attribute::from_str("person/name")?,
+                of: alice.clone(),
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            Artifact {
+                the: Attribute::from_str("person/city")?,
+                of: alice.clone(),
+                is: Value::String("Albuquerque".into()),
+                cause: None,
+            },
+            Artifact {
+                the: Attribute::from_str("person/name")?,
+                of: bob.clone(),
+                is: Value::String("Bob".into()),
+                cause: None,
+            },
+            // A non-string value that must never match a string prefix.
+            Artifact {
+                the: Attribute::from_str("person/age")?,
+                of: alice,
+                is: Value::UnsignedInt(40),
+                cause: None,
+            },
+        ];
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        // "Al" spans two attributes (name + city) on the same entity.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_starting_with("Al"))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), 2, "two values begin with Al");
+        assert!(
+            selected.iter().all(|fact| match &fact.is {
+                Value::String(string) => string.starts_with("Al"),
+                other => panic!("unexpected non-string match: {other:?}"),
+            }),
+            "every selected value carries the prefix"
+        );
+
+        // A narrower prefix isolates one value.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_starting_with("Ali"))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].is, Value::String("Alice".into()));
+
+        // A prefix that matches nothing returns nothing.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_starting_with("Zzz"))
+            .try_collect()
+            .await?;
+        assert!(selected.is_empty(), "no value begins with Zzz");
+
+        Ok(())
+    }
+
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     async fn it_pins_a_stream_at_the_version_where_iteration_begins() -> Result<()> {
