@@ -126,6 +126,28 @@ pub struct Bug {
     pub ordering: bug::Ordering,
 }
 
+/// The fields of a brand-new issue for [`BenchEnv::create_bug`] — the
+/// queryable concept fields plus the free-text `detail` description and the
+/// human-facing `ident` label. Grouped into one struct so the create-issue
+/// transaction reads like the record it commits.
+#[derive(Clone, Debug)]
+pub struct NewBug<'a> {
+    /// Initial status (e.g. `triage`).
+    pub status: &'a str,
+    /// Priority (e.g. `high`).
+    pub priority: &'a str,
+    /// Assignee DID, or empty for unassigned.
+    pub assignee: &'a str,
+    /// Issue title.
+    pub title: &'a str,
+    /// Ordering key.
+    pub ordering: f64,
+    /// Human-facing label (e.g. `BUG-42`).
+    pub ident: &'a str,
+    /// The specific free-text description.
+    pub detail: &'a str,
+}
+
 /// The source concept seeded into the branch and queried in the join
 /// benchmark: each entity carries a `stuff/name` and a `stuff/role`.
 ///
@@ -671,6 +693,239 @@ where
         Ok(())
     }
 
+    /// Import the real bug records from a `tonk export` CSV (the
+    /// `the,of,as,is,cause` layout) into the branch, asserting every
+    /// `squash.bug/*` fact — including `detail` (the long free-text
+    /// description) and `ident`, which the [`Bug`] concept join does not read
+    /// but which are real facts that shape the tree. Returns each bug entity
+    /// alongside its status and assignee so the query benchmarks can pin real
+    /// values. Off the measured path.
+    ///
+    /// Only rows whose attribute begins with `squash.bug/` are imported; the
+    /// CSV parser handles quoted multi-line fields (the `detail` column holds
+    /// multi-line text).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::absolute_paths)]
+    pub async fn import_bugs_from_csv(
+        &self,
+        csv_path: &str,
+    ) -> Result<Vec<(Entity, String, String)>> {
+        fn parse_csv(text: &str) -> Vec<Vec<String>> {
+            let mut records = Vec::new();
+            let mut record = Vec::new();
+            let mut field = String::new();
+            let mut in_quotes = false;
+            let mut chars = text.chars().peekable();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '"' if in_quotes && chars.peek() == Some(&'"') => {
+                        field.push('"');
+                        chars.next();
+                    }
+                    '"' => in_quotes = !in_quotes,
+                    ',' if !in_quotes => record.push(std::mem::take(&mut field)),
+                    '\n' if !in_quotes => {
+                        record.push(std::mem::take(&mut field));
+                        records.push(std::mem::take(&mut record));
+                    }
+                    '\r' if !in_quotes => {}
+                    _ => field.push(ch),
+                }
+            }
+            if !field.is_empty() || !record.is_empty() {
+                record.push(field);
+                records.push(record);
+            }
+            records
+        }
+
+        let text = std::fs::read_to_string(csv_path)?;
+        // Group the flat (the, of, is) rows by entity DID so each bug is a
+        // record. The DID strings map to fresh Entities (stable per DID within
+        // this import) so the concept join has real, distinct entities.
+        let mut by_did: std::collections::BTreeMap<
+            String,
+            std::collections::HashMap<String, String>,
+        > = std::collections::BTreeMap::new();
+        for row in parse_csv(&text).into_iter().skip(1) {
+            if row.len() < 4 {
+                continue;
+            }
+            let the = &row[0];
+            if !the.starts_with("squash.bug/") {
+                continue;
+            }
+            let did = row[1].clone();
+            let value = row[3].clone();
+            by_did.entry(did).or_default().insert(the.clone(), value);
+        }
+
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .open()
+            .perform(&self.operator)
+            .await?;
+
+        let mut transaction = branch.transaction();
+        let mut index = Vec::new();
+        for fields in by_did.values() {
+            let entity = Entity::new()?;
+            let status = fields.get("squash.bug/status").cloned().unwrap_or_default();
+            let assignee = fields
+                .get("squash.bug/assignee")
+                .cloned()
+                .unwrap_or_default();
+            let priority = fields
+                .get("squash.bug/priority")
+                .cloned()
+                .unwrap_or_default();
+            let title = fields.get("squash.bug/title").cloned().unwrap_or_default();
+            let ordering = fields
+                .get("squash.bug/ordering")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let ident = fields.get("squash.bug/ident").cloned().unwrap_or_default();
+            let detail = fields.get("squash.bug/detail").cloned().unwrap_or_default();
+
+            // The queryable concept fields.
+            transaction = transaction.assert(Bug {
+                this: entity.clone(),
+                status: bug::Status(status.clone()),
+                priority: bug::Priority(priority),
+                assignee: bug::Assignee(assignee.clone()),
+                title: bug::Title(title),
+                ordering: bug::Ordering(ordering),
+            });
+            // The extra real facts (detail is the long description; ident the
+            // human-facing BUG-N label). Not part of the join, but real bytes.
+            transaction = transaction
+                .assert(
+                    ::dialog_query::the!("squash.bug/detail")
+                        .of(entity.clone())
+                        .is(detail),
+                )
+                .assert(
+                    ::dialog_query::the!("squash.bug/ident")
+                        .of(entity.clone())
+                        .is(ident),
+                );
+
+            index.push((entity, status, assignee));
+        }
+        transaction.commit().perform(&self.operator).await?;
+        Ok(index)
+    }
+
+    /// Run the [`Bug`] concept join, optionally pinning `status` and/or
+    /// `assignee` to constants; any field left `None` stays a free variable.
+    /// This is the exact query surface the app issues for the board views
+    /// (all bugs, bugs of a given status) and the "assigned to member X"
+    /// filter. Reports the join's aggregate block reads.
+    pub async fn query_bugs(
+        &self,
+        status: Option<&str>,
+        assignee: Option<&str>,
+    ) -> Result<JoinRun> {
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .load()
+            .perform(&self.operator)
+            .await?;
+
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules: RuleRegistry::new(),
+            journal: ReadJournal::default(),
+        };
+
+        let status_term = match status {
+            Some(value) => Term::from(value.to_string()),
+            None => Term::var("status"),
+        };
+        let assignee_term = match assignee {
+            Some(value) => Term::from(value.to_string()),
+            None => Term::var("assignee"),
+        };
+
+        env.journal().clear();
+        let results = Query::<Bug> {
+            this: Term::var("this"),
+            status: status_term,
+            priority: Term::var("priority"),
+            assignee: assignee_term,
+            title: Term::var("title"),
+            ordering: Term::var("ordering"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
+
+        Ok(JoinRun {
+            results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+
+    /// The "open issues" board query: the union of the not-closed statuses.
+    /// The concept query pins one value per field, so an open/closed *set*
+    /// is the union of the per-status joins — the same way the app renders a
+    /// board column per status. Returns the summed results and reads.
+    pub async fn query_bugs_in_statuses(&self, statuses: &[&str]) -> Result<JoinRun> {
+        let mut total = JoinRun {
+            results_len: 0,
+            reads: 0,
+            unique_reads: 0,
+        };
+        for status in statuses {
+            let run = self.query_bugs(Some(status), None).await?;
+            total.results_len += run.results_len;
+            total.reads += run.reads;
+            total.unique_reads += run.unique_reads;
+        }
+        Ok(total)
+    }
+
+    /// Create a brand-new issue in a single transaction: the full concept
+    /// record plus a specific free-text `detail` description and a `ident`
+    /// label — the "file a bug with a specific description" flow.
+    pub async fn create_bug(&self, new: NewBug<'_>) -> Result<Entity> {
+        let entity = Entity::new()?;
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .open()
+            .perform(&self.operator)
+            .await?;
+        branch
+            .transaction()
+            .assert(Bug {
+                this: entity.clone(),
+                status: bug::Status(new.status.to_string()),
+                priority: bug::Priority(new.priority.to_string()),
+                assignee: bug::Assignee(new.assignee.to_string()),
+                title: bug::Title(new.title.to_string()),
+                ordering: bug::Ordering(new.ordering),
+            })
+            .assert(
+                ::dialog_query::the!("squash.bug/ident")
+                    .of(entity.clone())
+                    .is(new.ident.to_string()),
+            )
+            .assert(
+                ::dialog_query::the!("squash.bug/detail")
+                    .of(entity.clone())
+                    .is(new.detail.to_string()),
+            )
+            .commit()
+            .perform(&self.operator)
+            .await?;
+        Ok(entity)
+    }
+
     /// Run the realistic bug-tracker benchmark against this environment
     /// (in-memory or on-disk, whichever it was built with): seed `count` bugs,
     /// then time the board queries and the file/close/reassign transactions,
@@ -934,6 +1189,111 @@ mod test {
             eprintln!("BUGBENCH backend=memory");
             BenchEnv::volatile().await?.run_bug_bench(count).await
         }
+    }
+
+    /// On-demand benchmark of the real bug-tracker workload against the
+    /// **imported** tonk data on the **disk** backend. Skipped unless
+    /// `DIALOG_BUG_CSV` points at a `tonk export` CSV. Imports every real
+    /// `squash.bug/*` record, then times and reports (`REALBUG` lines) the
+    /// exact query and transaction shapes the app issues:
+    ///
+    /// Queries: open issues (todo+triage+in-progress), closed issues
+    /// (done+canceled), and issues assigned to a specific member (a join
+    /// pinning the assignee). Transactions: change a bug's status, assign a
+    /// bug to a member, and create a new issue with a specific description.
+    ///
+    /// Run on this revision and on `main` to compare formats on the real
+    /// data. Native only (reads a file, uses the disk backend).
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::absolute_paths)]
+    async fn it_benchmarks_real_bug_workload() -> Result<()> {
+        let Ok(csv_path) = std::env::var("DIALOG_BUG_CSV") else {
+            eprintln!("DIALOG_BUG_CSV not set; skipping real bug workload benchmark");
+            return Ok(());
+        };
+
+        let env = BenchEnv::temp().await?;
+        let index = env.import_bugs_from_csv(&csv_path).await?;
+        eprintln!("REALBUG imported {} bugs (disk backend)", index.len());
+
+        // Pick the member with the most assigned bugs for the assignee join.
+        let mut per_assignee: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (_, _, assignee) in &index {
+            if !assignee.is_empty() {
+                *per_assignee.entry(assignee.clone()).or_default() += 1;
+            }
+        }
+        let top_assignee = per_assignee
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(did, _)| did)
+            .unwrap_or_default();
+
+        let report = |label: &str, run: &JoinRun, elapsed: std::time::Duration| {
+            eprintln!(
+                "REALBUG {label:<28} results={:<4} reads={:<5} unique_reads={:<4} time={elapsed:?}",
+                run.results_len, run.reads, run.unique_reads
+            );
+        };
+
+        // Query: open issues.
+        let start = std::time::Instant::now();
+        let open = env
+            .query_bugs_in_statuses(&["todo", "triage", "in-progress"])
+            .await?;
+        report("open-issues", &open, start.elapsed());
+
+        // Query: closed issues.
+        let start = std::time::Instant::now();
+        let closed = env.query_bugs_in_statuses(&["done", "canceled"]).await?;
+        report("closed-issues", &closed, start.elapsed());
+
+        // Query: issues assigned to member X (join pinning the assignee).
+        let start = std::time::Instant::now();
+        let assigned = env.query_bugs(None, Some(&top_assignee)).await?;
+        report("assigned-to-member", &assigned, start.elapsed());
+
+        // Transaction: change a bug's status (close it).
+        let target = index[3].0.clone();
+        let start = std::time::Instant::now();
+        env.update_bug_status(&target, "done").await?;
+        eprintln!(
+            "REALBUG {:<28} time={:?}",
+            "txn-change-status",
+            start.elapsed()
+        );
+
+        // Transaction: assign a bug to a member.
+        let start = std::time::Instant::now();
+        env.reassign_bug(&index[5].0, &top_assignee, "in-progress")
+            .await?;
+        eprintln!("REALBUG {:<28} time={:?}", "txn-assign", start.elapsed());
+
+        // Transaction: create a new issue with a specific description.
+        let detail = "A newly filed issue with a specific, realistic multi-sentence \
+             description that spells out the reproduction steps, the expected \
+             behavior, and the observed behavior in enough detail to be useful."
+            .to_string();
+        let start = std::time::Instant::now();
+        env.create_bug(NewBug {
+            status: "triage",
+            priority: "high",
+            assignee: &top_assignee,
+            title: "Newly created issue",
+            ordering: 999_000.0,
+            ident: "BUG-NEW",
+            detail: &detail,
+        })
+        .await?;
+        eprintln!(
+            "REALBUG {:<28} time={:?}",
+            "txn-create-issue",
+            start.elapsed()
+        );
+
+        Ok(())
     }
 
     /// The bug-tracker transactions round-trip: file a bug (a whole [`Bug`]
