@@ -35,10 +35,12 @@ use std::iter::repeat_n;
 use std::ops::RangeInclusive;
 
 use crate::{
-    ATTRIBUTE_KEY_TAG, Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum,
-    DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, FromKey, Instruction, Key,
-    KeyView, KeyViewConstruct, KeyViewMut, MatchCandidate, State, VALUE_KEY_TAG, ValueKey,
-    key::value_spills, selector::Constrained,
+    Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum, DialogArtifactsError,
+    EntityKey, EntityKeyPart, FromKey, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut,
+    MatchCandidate, State, ValueKey,
+    key::value_spills,
+    key::varkey::{self, ValuePayload},
+    selector::Constrained,
 };
 
 /// The concrete search-tree type the artifact indexes use.
@@ -117,28 +119,17 @@ pub fn spill_cache() -> SpillCache {
 }
 
 /// The spilled value reference a key carries, or `None` for an inline key.
+///
+/// A single `parse_key` walk yields the value payload as an already-classified
+/// [`ValuePayload`] (inline vs reference), so this reads the spill flag and the
+/// reference bytes from one parse rather than re-splitting the key per accessor.
 fn spilled_reference(key: &Key) -> Result<Option<Blake3Hash>, DialogArtifactsError> {
-    // View the key under its own ordering so the spill accessors read the
-    // right columns regardless of which index this key came from. Copy the
-    // payload out before the borrowed view drops.
-    let (spilled, payload): (bool, Vec<u8>) = match key.tag() {
-        ENTITY_KEY_TAG => {
-            let view = EntityKey(key);
-            (view.value_is_spilled(), view.value_payload().to_vec())
-        }
-        ATTRIBUTE_KEY_TAG => {
-            let view = AttributeKey(key);
-            (view.value_is_spilled(), view.value_payload().to_vec())
-        }
-        VALUE_KEY_TAG => {
-            let view = ValueKey(key);
-            (view.value_is_spilled(), view.value_payload().to_vec())
-        }
-        _ => (false, Vec::new()),
-    };
-    if !spilled {
+    let Some(parts) = varkey::parse_key(key.as_ref()) else {
         return Ok(None);
-    }
+    };
+    let ValuePayload::Reference(payload) = parts.value else {
+        return Ok(None);
+    };
     let reference: Blake3Hash = payload.as_slice().try_into().map_err(|_| {
         DialogArtifactsError::InvalidKey("spilled value reference is not 32 bytes".to_string())
     })?;

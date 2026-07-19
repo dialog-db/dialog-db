@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ATTRIBUTE_KEY_TAG, AttributeKey, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, Key,
     KeyView, VALUE_KEY_TAG, ValueKey, decode_value,
+    key::varkey::{self, KeyParts, ValuePayload},
 };
 
 use super::{Attribute, Cause, Entity, Value};
@@ -96,17 +97,17 @@ impl Artifact {
         datum: &Datum,
         spilled: Option<Vec<u8>>,
     ) -> Result<Self, DialogArtifactsError> {
-        // View the key under its own ordering so the accessors return the
-        // right components regardless of which index this entry came from, and
-        // reconstruct through the shared helper.
-        match key.tag() {
-            ENTITY_KEY_TAG => reconstruct(EntityKey(key), datum, spilled),
-            ATTRIBUTE_KEY_TAG => reconstruct(AttributeKey(key), datum, spilled),
-            VALUE_KEY_TAG => reconstruct(ValueKey(key), datum, spilled),
-            tag => Err(DialogArtifactsError::InvalidKey(format!(
-                "unknown index key tag {tag}"
-            ))),
-        }
+        // Parse the key ONCE into its components. Every ordering (EAV/AEV/VAE)
+        // decodes to the same logical entity/attribute/value_type/payload, so a
+        // single `parse_key` walk yields all fields the reconstruction needs.
+        // This replaces the previous per-field `KeyView` accessors, each of
+        // which re-ran `split_components` (a fresh alloc + full key walk) — a
+        // scan reconstructing N facts paid ~6 such walks per fact, which
+        // dominated the scan cost on the variable-length M3 key format.
+        let parts = varkey::parse_key(key.as_ref()).ok_or_else(|| {
+            DialogArtifactsError::InvalidKey("key did not parse into components".to_string())
+        })?;
+        reconstruct(&parts, datum, spilled)
     }
 
     /// Reconstructs a fact for display when the raw value bytes are not
@@ -168,40 +169,51 @@ fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Attribute), DialogArt
     Ok((of, the))
 }
 
-/// Reconstructs an [`Artifact`] from a key view and its payload. The entity,
-/// attribute, and value type come from the key; the value is decoded inline
-/// from the key or taken from `spilled` (the archive block bytes) when it
-/// spilled.
-fn reconstruct<K: KeyView>(
-    key: K,
+/// Reconstructs an [`Artifact`] from a single parse of the key's components and
+/// its payload. The entity, attribute, and value type come from the parsed key;
+/// the value is decoded inline from the key's payload or taken from `spilled`
+/// (the archive block bytes) when it spilled.
+///
+/// Takes the already-parsed [`KeyParts`] so the whole reconstruction is a single
+/// key walk; see [`Artifact::from_key_datum_with_value`] for why.
+fn reconstruct(
+    parts: &KeyParts,
     datum: &Datum,
     spilled: Option<Vec<u8>>,
 ) -> Result<Artifact, DialogArtifactsError> {
-    let value_type = key.value_type();
-    let is_spilled = key.value_is_spilled();
-    let inline_payload = key.value_payload().to_vec();
-    let (of, the) = entity_attribute(key)?;
+    let of = Entity::from_str(from_utf8(&parts.entity).map_err(|error| {
+        DialogArtifactsError::InvalidEntity(format!("entity key is not UTF-8: {error}"))
+    })?)?;
+    let the = Attribute::from_str(from_utf8(&parts.attribute).map_err(|error| {
+        DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
+    })?)?;
 
-    let is = if is_spilled {
+    let is = match &parts.value {
         // The key carries only a reference; the raw value bytes live in a
         // content-addressed archive block the caller fetched and passed in.
-        let bytes = spilled.ok_or_else(|| {
-            DialogArtifactsError::InvalidValue(
-                "spilled value key has no fetched block bytes".to_string(),
-            )
-        })?;
-        Value::try_from((value_type, bytes))?
-    } else {
-        // Decode the inline order-preserving value from the key.
-        let (value, rest) = decode_value(value_type, &inline_payload).ok_or_else(|| {
-            DialogArtifactsError::InvalidValue("inline value payload did not decode".to_string())
-        })?;
-        if !rest.is_empty() {
-            return Err(DialogArtifactsError::InvalidValue(
-                "inline value payload had trailing bytes".to_string(),
-            ));
+        ValuePayload::Reference(_) => {
+            let bytes = spilled.ok_or_else(|| {
+                DialogArtifactsError::InvalidValue(
+                    "spilled value key has no fetched block bytes".to_string(),
+                )
+            })?;
+            Value::try_from((parts.value_type, bytes))?
         }
-        value
+        // Decode the inline order-preserving value from the key.
+        ValuePayload::Inline(inline_payload) => {
+            let (value, rest) =
+                decode_value(parts.value_type, inline_payload).ok_or_else(|| {
+                    DialogArtifactsError::InvalidValue(
+                        "inline value payload did not decode".to_string(),
+                    )
+                })?;
+            if !rest.is_empty() {
+                return Err(DialogArtifactsError::InvalidValue(
+                    "inline value payload had trailing bytes".to_string(),
+                ));
+            }
+            value
+        }
     };
 
     Ok(Artifact {
