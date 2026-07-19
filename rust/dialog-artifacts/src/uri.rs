@@ -104,6 +104,25 @@ impl FromStr for Uri {
     type Err = DialogArtifactsError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Reject strings that only *look* URI-ish because they carry
+        // whitespace. `url::Url::parse` is lenient: it silently strips
+        // ASCII whitespace — spaces, tabs, and crucially `\r`/`\n` — and
+        // lowercases the scheme, so an arbitrary text value like
+        // `"Tonk-Prose-Version: 1\r\n…"` parses "successfully" into a
+        // mangled URL (newlines gone, first token lowercased). Because
+        // `Value` deserializes untagged and tries `Entity` before
+        // `String`, that mangled parse would win and a plain multi-line
+        // text value stored in an entity-less field would be corrupted.
+        // A canonical URI never contains raw whitespace or control
+        // characters, so their presence marks the value as text, not a
+        // URI. (We deliberately don't require full round-trip stability:
+        // `url` legitimately normalizes some real URLs, e.g. adding a
+        // trailing slash to `https://host`, and those are valid entities.)
+        if s.chars().any(|c| c.is_ascii_whitespace() || c.is_control()) {
+            return Err(DialogArtifactsError::InvalidUri(format!(
+                "URI must not contain whitespace or control characters: {s:?}"
+            )));
+        }
         Ok(Self(s.parse().map_err(|error| {
             DialogArtifactsError::InvalidUri(format!("{error}"))
         })?))

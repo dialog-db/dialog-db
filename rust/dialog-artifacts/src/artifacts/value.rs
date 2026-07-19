@@ -946,3 +946,60 @@ impl From<ValueDataType> for PhantomData<ValueDataType> {
         PhantomData
     }
 }
+
+#[cfg(test)]
+mod deserialize_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+
+    /// A multi-line text value must deserialize as `Value::String`, byte
+    /// for byte — NOT be captured by the untagged enum's `Entity` variant
+    /// and mangled through `url::Url` (which strips newlines and
+    /// lowercases the leading token). Regression for a corruption where a
+    /// text value beginning with a `scheme:`-shaped token (e.g. the
+    /// `Tonk-Prose-Version: 1\r\n…` envelope) round-tripped as a broken
+    /// entity.
+    #[dialog_common::test]
+    fn it_deserializes_a_multiline_text_value_as_string() {
+        let text = "Tonk-Prose-Version: 1\r\nETag: \"999\"\r\n\r\n# Hello\n\nbody";
+        let json = serde_json::to_string(text).expect("serialize");
+        let value: Value = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            value,
+            Value::String(text.to_string()),
+            "a multi-line text value must decode as a byte-exact String, not a mangled Entity",
+        );
+    }
+
+    /// A plain text value with a colon and a space is text, not an entity.
+    #[dialog_common::test]
+    fn it_deserializes_colon_text_as_string() {
+        for text in ["note: buy milk", "value: with colon", "http status: 200"] {
+            let json = serde_json::to_string(text).expect("serialize");
+            let value: Value = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(value, Value::String(text.to_string()), "{text:?}");
+        }
+    }
+
+    /// Real entity URIs still deserialize as `Value::Entity` — the fix
+    /// only excludes whitespace-bearing strings, which no canonical URI
+    /// contains.
+    #[dialog_common::test]
+    fn it_still_deserializes_entity_uris_as_entity() {
+        for uri in [
+            "did:key:z6MkhcqMSivySW3g74SchZQBgEUHHR3EQ1uUp4exY9cev6Ug",
+            "did:web:cdata.earth",
+            "id:prose/doc",
+            "db:transient",
+        ] {
+            let json = serde_json::to_string(uri).expect("serialize");
+            let value: Value = serde_json::from_str(&json).expect("deserialize");
+            assert!(
+                matches!(value, Value::Entity(_)),
+                "{uri:?} should decode as an Entity, got {value:?}",
+            );
+        }
+    }
+}
