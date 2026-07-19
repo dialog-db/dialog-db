@@ -125,26 +125,18 @@ where
             .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
     }
 
-    /// This segment's fully decoded keys, in entry order.
-    ///
-    /// The columnar leaf must be decoded (front-decode + dictionary resolve)
-    /// before its keys can be compared against a scan range. Decoding is pure
-    /// over the immutable, content-addressed bytes, so on a leaf that is
-    /// *re-touched* — a join re-selects the same branch once per outer binding
-    /// and lands on the same few leaves each time — the decode is memoized on
-    /// the node's [`Buffer`] and every later touch reuses the shared `Arc`,
-    /// instead of re-decoding the leaf once per select.
-    ///
-    /// A leaf touched only once (a single range scan visits each leaf once)
-    /// gains nothing from a cached decode and would only pay to materialize it,
-    /// so the *first* touch decodes transiently (streaming, no owned
-    /// materialization) and the caller iterates that; only from the *second*
-    /// touch on is the decode memoized. The memoized form is one flat arena plus
-    /// per-entry end offsets (two allocations, not one per key). Errors if the
-    /// node is an index (no full keys) or the buffer is malformed.
     /// Whether a scan over this leaf should reuse a memoized decode
     /// ([`memoized_keys`](Self::memoized_keys)) rather than stream it fresh.
-    /// `true` from the second touch of the buffer on; see the type-level note.
+    ///
+    /// The columnar leaf must be decoded (front-decode + dictionary resolve)
+    /// before its keys can be compared against a scan range. A leaf touched only
+    /// once (a single range scan visits each leaf once) gains nothing from a
+    /// cached decode and would only pay to materialize it, so the first touch
+    /// returns `false` (the walker streams the keys) and only from the second
+    /// touch on does this return `true` — a join re-selects the same branch once
+    /// per outer binding and lands on the same few leaves each time, and those
+    /// repeat touches reuse one decode memoized on the node's [`Buffer`] instead
+    /// of re-decoding the leaf once per select.
     pub fn should_memoize_keys(&self) -> bool {
         self.buffer.should_memoize()
     }
