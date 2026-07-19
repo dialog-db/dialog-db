@@ -659,6 +659,75 @@ where
         Ok(())
     }
 
+    /// Run the realistic bug-tracker benchmark against this environment
+    /// (in-memory or on-disk, whichever it was built with): seed `count` bugs,
+    /// then time the board queries and the file/close/reassign transactions,
+    /// printing `BUGBENCH` lines. Generic over the backend so the same workload
+    /// runs on both.
+    #[allow(clippy::absolute_paths)]
+    pub async fn run_bug_bench(&self, count: usize) -> Result<()> {
+        let seed_start = std::time::Instant::now();
+        let entities = self.seed_bugs(count).await?;
+        let seed_elapsed = seed_start.elapsed();
+
+        let bench = |label: &'static str, run: JoinRun, elapsed: std::time::Duration| {
+            eprintln!(
+                "BUGBENCH {label:<22} results={:<5} reads={:<6} unique_reads={:<5} time={elapsed:?}",
+                run.results_len, run.reads, run.unique_reads
+            );
+        };
+
+        let start = std::time::Instant::now();
+        let all = self.query_bugs_by_status(None).await?;
+        bench("all-bugs", all, start.elapsed());
+
+        let start = std::time::Instant::now();
+        let done = self.query_bugs_by_status(Some("done")).await?;
+        bench("status=done", done, start.elapsed());
+
+        let start = std::time::Instant::now();
+        let triage = self.query_bugs_by_status(Some("triage")).await?;
+        bench("status=triage", triage, start.elapsed());
+
+        // File a new bug (a whole record).
+        let start = std::time::Instant::now();
+        let filed = Entity::new()?;
+        {
+            let branch = self
+                .repo
+                .branch(&self.branch)
+                .open()
+                .perform(&self.operator)
+                .await?;
+            branch
+                .transaction()
+                .assert(Bug {
+                    this: filed,
+                    status: bug::Status("triage".to_string()),
+                    priority: bug::Priority("high".to_string()),
+                    assignee: bug::Assignee(String::new()),
+                    title: bug::Title("A newly filed bug".to_string()),
+                    ordering: bug::Ordering(count as f64 * 1000.0),
+                })
+                .commit()
+                .perform(&self.operator)
+                .await?;
+        }
+        eprintln!("BUGBENCH {:<22} time={:?}", "file-bug", start.elapsed());
+
+        let start = std::time::Instant::now();
+        self.update_bug_status(&entities[3], "done").await?;
+        eprintln!("BUGBENCH {:<22} time={:?}", "close-bug", start.elapsed());
+
+        let start = std::time::Instant::now();
+        self.reassign_bug(&entities[5], "did:key:zNewAssignee", "in-progress")
+            .await?;
+        eprintln!("BUGBENCH {:<22} time={:?}", "reassign-bug", start.elapsed());
+
+        eprintln!("BUGBENCH seeded {count} bugs in {seed_elapsed:?}");
+        Ok(())
+    }
+
     /// Open the repository under `profile` and assemble the environment.
     async fn assemble(operator: Env, profile: &Profile) -> Result<Self> {
         let repo = profile
@@ -786,72 +855,16 @@ mod test {
             .and_then(|value| value.parse().ok())
             .unwrap_or(300);
 
-        let env = BenchEnv::volatile().await?;
-        let seed_start = std::time::Instant::now();
-        let entities = env.seed_bugs(count).await?;
-        let seed_elapsed = seed_start.elapsed();
-
-        let bench = |label: &'static str, run: JoinRun, elapsed: std::time::Duration| {
-            eprintln!(
-                "BUGBENCH {label:<22} results={:<5} reads={:<6} unique_reads={:<5} time={elapsed:?}",
-                run.results_len, run.reads, run.unique_reads
-            );
-        };
-
-        // Query: all bugs (the board view — a full six-field concept join).
-        let start = std::time::Instant::now();
-        let all = env.query_bugs_by_status(None).await?;
-        bench("all-bugs", all, start.elapsed());
-
-        // Query: bugs with status = done (a common filter).
-        let start = std::time::Instant::now();
-        let done = env.query_bugs_by_status(Some("done")).await?;
-        bench("status=done", done, start.elapsed());
-
-        // Query: bugs with status = triage (the "open" board column).
-        let start = std::time::Instant::now();
-        let triage = env.query_bugs_by_status(Some("triage")).await?;
-        bench("status=triage", triage, start.elapsed());
-
-        // Transaction: file a new bug (a whole seven-fact record).
-        let start = std::time::Instant::now();
-        let filed = Entity::new()?;
-        {
-            let branch = env
-                .repo
-                .branch(&env.branch)
-                .open()
-                .perform(&env.operator)
-                .await?;
-            branch
-                .transaction()
-                .assert(Bug {
-                    this: filed.clone(),
-                    status: bug::Status("triage".to_string()),
-                    priority: bug::Priority("high".to_string()),
-                    assignee: bug::Assignee(String::new()),
-                    title: bug::Title("A newly filed bug".to_string()),
-                    ordering: bug::Ordering(count as f64 * 1000.0),
-                })
-                .commit()
-                .perform(&env.operator)
-                .await?;
+        // `DIALOG_BUG_DISK=1` runs against a real on-disk filesystem backend
+        // (the realistic case: reads are actual I/O); the default is the
+        // in-memory backend (engine-CPU isolation).
+        if std::env::var("DIALOG_BUG_DISK").is_ok() {
+            eprintln!("BUGBENCH backend=disk");
+            BenchEnv::temp().await?.run_bug_bench(count).await
+        } else {
+            eprintln!("BUGBENCH backend=memory");
+            BenchEnv::volatile().await?.run_bug_bench(count).await
         }
-        eprintln!("BUGBENCH {:<22} time={:?}", "file-bug", start.elapsed());
-
-        // Transaction: close a bug (supersede its status).
-        let start = std::time::Instant::now();
-        env.update_bug_status(&entities[3], "done").await?;
-        eprintln!("BUGBENCH {:<22} time={:?}", "close-bug", start.elapsed());
-
-        // Transaction: reassign + set status.
-        let start = std::time::Instant::now();
-        env.reassign_bug(&entities[5], "did:key:zNewAssignee", "in-progress")
-            .await?;
-        eprintln!("BUGBENCH {:<22} time={:?}", "reassign-bug", start.elapsed());
-
-        eprintln!("BUGBENCH seeded {count} bugs in {seed_elapsed:?}");
-        Ok(())
     }
 
     /// The bug-tracker transactions round-trip: file a bug (a whole [`Bug`]
