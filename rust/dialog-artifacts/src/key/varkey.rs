@@ -319,8 +319,12 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
         return Some(VALUE_REFERENCE_LENGTH);
     }
     match ValueDataType::from(type_byte & !SPILL_FLAG) {
-        // 128-bit numerics: 16 big-endian bytes.
-        ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float => Some(16),
+        // 128-bit integers: 16 big-endian bytes.
+        ValueDataType::UnsignedInt | ValueDataType::SignedInt => Some(16),
+        // `f64`: 8 big-endian bytes (the order-preserving `encode_f64`), NOT 16
+        // — reading 16 here over-runs the value tail into the following key
+        // components, so the key splits into fewer parts than its schema.
+        ValueDataType::Float => Some(8),
         // A single byte.
         ValueDataType::Boolean => Some(1),
         // `0x00`-escaped, `0x00`-terminated byte strings.

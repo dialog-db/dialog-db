@@ -492,6 +492,168 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    /// On-demand real-data footprint + query harness. Skipped unless
+    /// `DIALOG_IMPORT_CSV` points at a `the,of,as,is,cause` CSV (produced by
+    /// `tonk export`). Imports every row into a disk-backed store wrapped in a
+    /// byte counter, reports the persisted size, and times an attribute scan —
+    /// run it on this revision and on the old tag to compare formats on real
+    /// data. Native only (it reads a file).
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    // A gated, on-demand measurement harness: fully-qualified std/storage paths
+    // keep it self-contained without cluttering the test module's imports.
+    #[allow(clippy::absolute_paths)]
+    async fn it_reports_real_data_footprint() -> anyhow::Result<()> {
+        use std::str::FromStr;
+        use std::sync::Arc;
+
+        let Ok(csv_path) = std::env::var("DIALOG_IMPORT_CSV") else {
+            eprintln!("DIALOG_IMPORT_CSV not set; skipping real-data footprint harness");
+            return Ok(());
+        };
+
+        // Parse the CSV into artifacts (the columns are the,of,as,is,cause;
+        // `as` is the value type). A minimal RFC-4180 parser handling quoted
+        // fields with embedded commas, doubled quotes, and newlines (the tonk
+        // export puts multi-line HTML/CSS in the `is` column), so the harness
+        // has no CSV dependency and runs unchanged on the old tag.
+        fn parse_csv(text: &str) -> Vec<Vec<String>> {
+            let mut records = Vec::new();
+            let mut record = Vec::new();
+            let mut field = String::new();
+            let mut in_quotes = false;
+            let mut chars = text.chars().peekable();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '"' if in_quotes && chars.peek() == Some(&'"') => {
+                        field.push('"');
+                        chars.next();
+                    }
+                    '"' => in_quotes = !in_quotes,
+                    ',' if !in_quotes => record.push(std::mem::take(&mut field)),
+                    '\n' if !in_quotes => {
+                        record.push(std::mem::take(&mut field));
+                        records.push(std::mem::take(&mut record));
+                    }
+                    '\r' if !in_quotes => {}
+                    _ => field.push(ch),
+                }
+            }
+            if !field.is_empty() || !record.is_empty() {
+                record.push(field);
+                records.push(record);
+            }
+            records
+        }
+
+        let text = std::fs::read_to_string(&csv_path)?;
+        let mut artifacts_in = Vec::new();
+        for record in parse_csv(&text).into_iter().skip(1) {
+            if record.len() < 4 {
+                continue;
+            }
+            let Ok(the) = Attribute::from_str(&record[0]) else {
+                continue;
+            };
+            let Ok(of) = Entity::from_str(&record[1]) else {
+                continue;
+            };
+            let value_type = record[2].as_str();
+            let raw = record[3].as_str();
+            let parsed = match value_type {
+                "text" => Some(Value::String(raw.to_owned())),
+                "entity" => Entity::from_str(raw).ok().map(Value::Entity),
+                "natural" => raw.parse().ok().map(Value::UnsignedInt),
+                "integer" => raw.parse().ok().map(Value::SignedInt),
+                "float" => raw.parse().ok().map(Value::Float),
+                "boolean" => bool::from_str(raw).ok().map(Value::Boolean),
+                "attribute" => Attribute::from_str(raw).ok().map(Value::Symbol),
+                // Skip rows whose value type this minimal parser does not
+                // handle (bytes/record are base58 and not needed for a size
+                // comparison of the common text/entity/numeric mix).
+                _ => None,
+            };
+            let Some(is) = parsed else {
+                continue;
+            };
+            artifacts_in.push(Artifact {
+                the,
+                of,
+                is,
+                cause: None,
+            });
+        }
+        let fact_count = artifacts_in.len();
+
+        let root = tempfile::tempdir()?;
+        let backend = dialog_storage::FileSystemStorageBackend::<crate::Blake3Hash, Vec<u8>>::new(
+            root.path(),
+        )
+        .await?;
+        let measured = Arc::new(tokio::sync::Mutex::new(
+            dialog_storage::MeasuredStorage::new(backend),
+        ));
+        let mut facts = Artifacts::anonymous(measured.clone()).await?;
+
+        // Commit incrementally so a malformed key names the artifact that
+        // produced it (set DIALOG_IMPORT_BISECT to enable; otherwise commit in
+        // one batch for the timing figure).
+        let commit_start = std::time::Instant::now();
+        if std::env::var("DIALOG_IMPORT_BISECT").is_ok() {
+            for (index, artifact) in artifacts_in.iter().enumerate() {
+                if let Err(error) = facts
+                    .commit(std::iter::once(Instruction::Assert(artifact.clone())))
+                    .await
+                {
+                    panic!(
+                        "commit failed at row {index}: {error}\n  the={} of={} is={:?}",
+                        artifact.the, artifact.of, artifact.is
+                    );
+                }
+            }
+        } else {
+            facts
+                .commit(artifacts_in.iter().cloned().map(Instruction::Assert))
+                .await?;
+        }
+        let commit_elapsed = commit_start.elapsed();
+
+        let (write_bytes, writes) = {
+            let storage = measured.lock().await;
+            (storage.write_bytes(), storage.writes())
+        };
+
+        // Time a scan over the most common attribute in the data set.
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for artifact in &artifacts_in {
+            *counts.entry(artifact.the.to_string()).or_default() += 1;
+        }
+        let (top_attribute, top_count) = counts
+            .into_iter()
+            .max_by_key(|(_, count)| *count)
+            .unwrap_or_default();
+
+        let scan_start = std::time::Instant::now();
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().the(Attribute::from_str(&top_attribute)?))
+            .try_collect()
+            .await?;
+        let scan_elapsed = scan_start.elapsed();
+
+        eprintln!(
+            "REALDATA facts={fact_count} write_bytes={write_bytes} writes={writes} \
+             bytes/fact={:.1} bytes/entry={:.1} blocks/fact={:.3} \
+             commit={commit_elapsed:?} \
+             scan(the={top_attribute} n={top_count})={scan_elapsed:?} results={}",
+            write_bytes as f64 / fact_count as f64,
+            write_bytes as f64 / fact_count as f64 / 3.0,
+            writes as f64 / fact_count as f64,
+            selected.len(),
+        );
+
+        Ok(())
+    }
+
     /// A selector that constrains the entity, the attribute and the value
     /// pins every component of the index key, so the scan range collapses
     /// to a single exact key. Regression guard: the range must be treated
@@ -933,6 +1095,56 @@ mod tests {
             .await?;
         assert!(selected.is_empty(), "no value begins with Zzz");
 
+        Ok(())
+    }
+
+    /// A float value's key must round-trip once it accumulates into a shared
+    /// leaf. Regression guard for a value-tail width bug: `encode_f64` writes 8
+    /// bytes but the key parser once claimed 16 for `Float`, so a float key
+    /// over-read into the following components and split into fewer parts than
+    /// its schema — every commit that packed such a key into an index leaf then
+    /// failed. Commit enough float-valued facts to force a leaf, then read them
+    /// back.
+    #[dialog_common::test]
+    async fn it_round_trips_many_float_values() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        let attribute = Attribute::from_str("measure/value")?;
+        let mut data = Vec::new();
+        for index in 0..400u64 {
+            data.push(Artifact {
+                the: attribute.clone(),
+                of: Entity::new()?,
+                // A mix of magnitudes and signs, including a large timestamp-
+                // like integer stored as a float (the shape that first tripped
+                // this in real data).
+                is: Value::Float(index as f64 * 1.5 - 100.0),
+                cause: None,
+            });
+        }
+        data.push(Artifact {
+            the: attribute.clone(),
+            of: Entity::new()?,
+            is: Value::Float(1783112056217.0),
+            cause: None,
+        });
+        let expected = data.len();
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().the(attribute))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), expected, "every float fact reads back");
+        assert!(
+            selected
+                .iter()
+                .all(|fact| matches!(fact.is, Value::Float(_))),
+            "every value round-trips as a float"
+        );
         Ok(())
     }
 

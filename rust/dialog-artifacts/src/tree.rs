@@ -326,7 +326,9 @@ fn value_band_max(value_type: ValueDataType) -> Vec<u8> {
 /// non-numeric type is not expressible and the caller never constructs one).
 fn numeric_width(value_type: ValueDataType) -> usize {
     match value_type {
-        ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float => 16,
+        ValueDataType::UnsignedInt | ValueDataType::SignedInt => 16,
+        // `f64` encodes to 8 bytes (see `encode_f64` / `value_payload_len`).
+        ValueDataType::Float => 8,
         ValueDataType::Boolean => 1,
         _ => 0,
     }
