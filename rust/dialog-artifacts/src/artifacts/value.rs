@@ -949,6 +949,9 @@ impl From<ValueDataType> for PhantomData<ValueDataType> {
 
 #[cfg(test)]
 mod deserialize_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
 
     /// A multi-line text value must deserialize as `Value::String`, byte
@@ -958,7 +961,7 @@ mod deserialize_tests {
     /// text value beginning with a `scheme:`-shaped token (e.g. the
     /// `Tonk-Prose-Version: 1\r\n…` envelope) round-tripped as a broken
     /// entity.
-    #[test]
+    #[dialog_common::test]
     fn it_deserializes_a_multiline_text_value_as_string() {
         let text = "Tonk-Prose-Version: 1\r\nETag: \"999\"\r\n\r\n# Hello\n\nbody";
         let json = serde_json::to_string(text).expect("serialize");
@@ -971,7 +974,7 @@ mod deserialize_tests {
     }
 
     /// A plain text value with a colon and a space is text, not an entity.
-    #[test]
+    #[dialog_common::test]
     fn it_deserializes_colon_text_as_string() {
         for text in ["note: buy milk", "value: with colon", "http status: 200"] {
             let json = serde_json::to_string(text).expect("serialize");
@@ -983,7 +986,7 @@ mod deserialize_tests {
     /// Real entity URIs still deserialize as `Value::Entity` — the fix
     /// only excludes whitespace-bearing strings, which no canonical URI
     /// contains.
-    #[test]
+    #[dialog_common::test]
     fn it_still_deserializes_entity_uris_as_entity() {
         for uri in [
             "did:key:z6MkhcqMSivySW3g74SchZQBgEUHHR3EQ1uUp4exY9cev6Ug",
