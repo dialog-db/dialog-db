@@ -352,7 +352,9 @@ where
                             let mut keys = segment.keys::<Key>()?;
                             while let Some((at, key)) = keys.next_key()? {
                                 let entry = Entry {
-                                    key: Key::try_from_bytes(&key)?,
+                                    // Adopt the reconstructed key buffer rather
+                                    // than copying it again.
+                                    key: Key::try_from_bytes_owned(key)?,
                                     value: into_owned(segment.value_at(at)?)?,
                                 };
                                 yield entry;

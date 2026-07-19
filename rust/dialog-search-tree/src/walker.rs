@@ -107,7 +107,9 @@ where
                     ArchivedNodeBody::Segment(segment) => {
                         let mut keys = segment.keys::<Key>()?;
                         while let Some((at, key)) = keys.next_key()? {
-                            let entry_key = Key::try_from_bytes(&key)?;
+                            // Adopt the reconstructed key buffer instead of
+                            // copying it again (a `Vec`-backed key moves it in).
+                            let entry_key = Key::try_from_bytes_owned(key)?;
                             if range.contains(&entry_key) {
                                 entered_range = true;
                                 let value = into_owned(segment.value_at(at)?)?;
