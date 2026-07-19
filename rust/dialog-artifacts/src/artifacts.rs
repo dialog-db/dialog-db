@@ -719,13 +719,20 @@ mod tests {
         }
         let fact_count = artifacts_in.len();
 
+        // Fresh, unique tempdir per run (tempfile::tempdir), so the on-disk
+        // size reflects THIS import alone — not a reused directory or a
+        // long-lived repo with accumulated history. Auto-removed on drop.
         let root = tempfile::tempdir()?;
         let backend = dialog_storage::FileSystemStorageBackend::<crate::Blake3Hash, Vec<u8>>::new(
             root.path(),
         )
         .await?;
+        // Journaled(Measured(fs)): MeasuredStorage counts write/read bytes;
+        // JournaledStorage records the block hash of every read, so a query's
+        // reads can be named (and each block's on-disk size looked up) to show
+        // exactly which extra blocks a format touches and why.
         let measured = Arc::new(tokio::sync::Mutex::new(
-            dialog_storage::MeasuredStorage::new(backend),
+            dialog_storage::JournaledStorage::new(dialog_storage::MeasuredStorage::new(backend)),
         ));
         let mut facts = Artifacts::anonymous(measured.clone()).await?;
 
@@ -754,36 +761,121 @@ mod tests {
 
         let (write_bytes, writes) = {
             let storage = measured.lock().await;
-            (storage.write_bytes(), storage.writes())
+            (storage.backend().write_bytes(), storage.backend().writes())
         };
 
-        // Time a scan over the most common attribute in the data set.
+        // (1) TOTAL on-disk size after the import: recursively sum every file
+        // under the storage root — index blocks, spilled archive blocks, refs,
+        // everything the format persisted for this dataset. This is the size
+        // number the format reduction is about; write_bytes is cumulative
+        // bytes-written (counts overwrites), on_disk is the settled footprint.
+        fn dir_size(path: &std::path::Path) -> std::io::Result<(u64, u64)> {
+            let mut bytes = 0u64;
+            let mut files = 0u64;
+            for entry in std::fs::read_dir(path)? {
+                let entry = entry?;
+                let meta = entry.metadata()?;
+                if meta.is_dir() {
+                    let (b, f) = dir_size(&entry.path())?;
+                    bytes += b;
+                    files += f;
+                } else {
+                    bytes += meta.len();
+                    files += 1;
+                }
+            }
+            Ok((bytes, files))
+        }
+        let (on_disk_bytes, on_disk_files) = dir_size(root.path())?;
+
+        // Map a read (a block hash) back to its on-disk file size, so a
+        // query's reads can be summarized by count AND bytes moved. The
+        // FileSystemStorageBackend names each block file by its hash; the
+        // journal records the Blake3Hash key of each read.
+        let block_size_on_disk = |hash: &crate::Blake3Hash| -> u64 {
+            use base58::ToBase58;
+            let name = hash.to_base58();
+            let mut found = 0u64;
+            // Blocks live in per-store subdirectories (archive/index, ...);
+            // walk to find the file named for this hash.
+            fn walk(dir: &std::path::Path, name: &str, out: &mut u64) {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk(&path, name, out);
+                    } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
+                        *out = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    }
+                }
+            }
+            walk(root.path(), &name, &mut found);
+            found
+        };
+
+        // (2) + (3) Run realistic queries against the IMPORTED dataset on
+        // disk, journalling each so we can name the blocks read and time it.
+        // Pick the three most common attributes so the shapes are meaningful.
         let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for artifact in &artifacts_in {
             *counts.entry(artifact.the.to_string()).or_default() += 1;
         }
-        let (top_attribute, top_count) = counts
-            .into_iter()
-            .max_by_key(|(_, count)| *count)
-            .unwrap_or_default();
-
-        let scan_start = std::time::Instant::now();
-        let selected: Vec<Artifact> = facts
-            .select(ArtifactSelector::new().the(Attribute::from_str(&top_attribute)?))
-            .try_collect()
-            .await?;
-        let scan_elapsed = scan_start.elapsed();
+        let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         eprintln!(
-            "REALDATA facts={fact_count} write_bytes={write_bytes} writes={writes} \
-             bytes/fact={:.1} bytes/entry={:.1} blocks/fact={:.3} \
-             commit={commit_elapsed:?} \
-             scan(the={top_attribute} n={top_count})={scan_elapsed:?} results={}",
-            write_bytes as f64 / fact_count as f64,
-            write_bytes as f64 / fact_count as f64 / 3.0,
-            writes as f64 / fact_count as f64,
-            selected.len(),
+            "REALDATA facts={fact_count} \
+             on_disk={on_disk_bytes}B ({on_disk_files} files, {:.1} B/fact, {:.1} B/entry) \
+             write_bytes={write_bytes} writes={writes} \
+             commit={commit_elapsed:?}",
+            on_disk_bytes as f64 / fact_count as f64,
+            on_disk_bytes as f64 / fact_count as f64 / 3.0,
         );
+
+        for (attribute, count) in ranked.into_iter().take(3) {
+            let the = Attribute::from_str(&attribute)?;
+            {
+                let storage = measured.lock().await;
+                storage.clear_journal();
+            }
+            let scan_start = std::time::Instant::now();
+            let selected: Vec<Artifact> = facts
+                .select(ArtifactSelector::new().the(the))
+                .try_collect()
+                .await?;
+            let scan_elapsed = scan_start.elapsed();
+
+            // Name the blocks this query read and the bytes each moved, so a
+            // read-count difference between formats is explained by the actual
+            // blocks (count and size), not a guess.
+            let reads = {
+                let storage = measured.lock().await;
+                storage.get_reads()
+            };
+            let mut unique: std::collections::BTreeMap<crate::Blake3Hash, usize> =
+                std::collections::BTreeMap::new();
+            for hash in &reads {
+                *unique.entry(*hash).or_default() += 1;
+            }
+            let read_bytes: u64 = unique.keys().map(block_size_on_disk).sum();
+            eprintln!(
+                "  scan the={attribute} n={count} results={} \
+                 time={scan_elapsed:?} reads={} unique_blocks={} read_bytes={read_bytes}",
+                selected.len(),
+                reads.len(),
+                unique.len(),
+            );
+            for (hash, times) in &unique {
+                use base58::ToBase58;
+                eprintln!(
+                    "    block {} size={}B reads={times}",
+                    hash.to_base58(),
+                    block_size_on_disk(hash)
+                );
+            }
+        }
 
         Ok(())
     }
