@@ -492,6 +492,140 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    /// On-demand bug-tracker footprint: seeds the same 300 bugs the query
+    /// benchmark uses (seven `squash.bug/*` facts each) into a disk-backed store
+    /// wrapped in a byte counter, and reports the persisted size and the block
+    /// (node) count + size distribution. Run on this revision and on `main` to
+    /// compare formats: it answers both "how much smaller on disk" and "why the
+    /// block-read count differs" (block count/size = tree shape). Gated on
+    /// `DIALOG_BUG_FOOTPRINT`; native only.
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::absolute_paths)]
+    async fn it_measures_bug_footprint() -> anyhow::Result<()> {
+        use std::str::FromStr;
+        use std::sync::Arc;
+
+        if std::env::var("DIALOG_BUG_FOOTPRINT").is_err() {
+            eprintln!("DIALOG_BUG_FOOTPRINT not set; skipping bug footprint");
+            return Ok(());
+        }
+        let count: usize = std::env::var("DIALOG_BUG_COUNT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+
+        const STATUSES: &[&str] = &["done", "triage", "todo", "canceled", "in-progress"];
+        const PRIORITIES: &[&str] = &["medium", "high", "low", "urgent"];
+        const ASSIGNEES: &[&str] = &[
+            "",
+            "did:key:z6MkDQtgLHmp664Wf8wn32G9MT79GpKncnQkcJmLYYu6HEJz",
+            "did:key:z6MkAoFSTzm7XMv6wc1X9H5iND4YSfEaHw2LYWiTR2xDPfu8",
+            "did:key:z6MkGSesqrS3iyekKGrhMCmHyp82RxJaohuvnNMmdQXG9kza",
+        ];
+        // Seven facts per bug, matching the query bench's `Bug` concept.
+        let field = |ns: &str, name: &str| Attribute::from_str(&format!("{ns}/{name}")).unwrap();
+        let mut data = Vec::with_capacity(count * 7);
+        for index in 0..count {
+            let of = Entity::new()?;
+            let push = |data: &mut Vec<Artifact>, the: Attribute, is: Value| {
+                data.push(Artifact {
+                    the,
+                    of: of.clone(),
+                    is,
+                    cause: None,
+                });
+            };
+            push(
+                &mut data,
+                field("squash.bug", "status"),
+                Value::String(STATUSES[index % STATUSES.len()].to_string()),
+            );
+            push(
+                &mut data,
+                field("squash.bug", "priority"),
+                Value::String(PRIORITIES[index % PRIORITIES.len()].to_string()),
+            );
+            push(
+                &mut data,
+                field("squash.bug", "assignee"),
+                Value::String(ASSIGNEES[index % ASSIGNEES.len()].to_string()),
+            );
+            push(
+                &mut data,
+                field("squash.bug", "title"),
+                Value::String(format!("Bug #{index}: something is off")),
+            );
+            // `detail` follows the real tonk data's shape: mostly a few hundred
+            // chars, but roughly 1 in 25 is a long paste (>4096 bytes) that
+            // spills to a content-addressed block. This is what makes the
+            // measurement representative — a fixed short detail would miss the
+            // spill path entirely.
+            let detail_len = if index % 25 == 7 { 20_000 } else { 284 };
+            push(
+                &mut data,
+                field("squash.bug", "detail"),
+                Value::String("x".repeat(detail_len)),
+            );
+            push(
+                &mut data,
+                field("squash.bug", "ident"),
+                Value::String(format!("SQ-{index:04}")),
+            );
+            push(
+                &mut data,
+                field("squash.bug", "ordering"),
+                Value::Float(index as f64 * 1000.0),
+            );
+        }
+        let fact_count = data.len();
+
+        let root = tempfile::tempdir()?;
+        let backend = dialog_storage::FileSystemStorageBackend::<crate::Blake3Hash, Vec<u8>>::new(
+            root.path(),
+        )
+        .await?;
+        let measured = Arc::new(tokio::sync::Mutex::new(
+            dialog_storage::MeasuredStorage::new(backend),
+        ));
+        let mut facts = Artifacts::anonymous(measured.clone()).await?;
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        // Walk the on-disk directory to size every persisted block and build a
+        // size histogram (the tree's node bytes drive both footprint and reads).
+        let mut sizes: Vec<u64> = Vec::new();
+        for entry in std::fs::read_dir(root.path())? {
+            let path = entry?.path();
+            if path.is_file() {
+                sizes.push(std::fs::metadata(&path)?.len());
+            }
+        }
+        sizes.sort_unstable();
+        let total: u64 = sizes.iter().sum();
+        let blocks = sizes.len();
+        let (write_bytes, writes) = {
+            let storage = measured.lock().await;
+            (storage.write_bytes(), storage.writes())
+        };
+        let median = sizes.get(blocks / 2).copied().unwrap_or(0);
+        let max = sizes.last().copied().unwrap_or(0);
+        // Big blocks are the index/leaf nodes; small ones are revisions/refs.
+        let big = sizes.iter().filter(|&&s| s > 1024).count();
+
+        eprintln!(
+            "BUGFOOTPRINT bugs={count} facts={fact_count} \
+             on_disk_bytes={total} blocks={blocks} \
+             bytes/bug={:.1} bytes/fact={:.1} \
+             write_bytes={write_bytes} writes={writes} \
+             block_median={median} block_max={max} blocks_over_1k={big}",
+            total as f64 / count as f64,
+            total as f64 / fact_count as f64,
+        );
+        Ok(())
+    }
+
     /// On-demand real-data footprint + query harness. Skipped unless
     /// `DIALOG_IMPORT_CSV` points at a `the,of,as,is,cause` CSV (produced by
     /// `tonk export`). Imports every row into a disk-backed store wrapped in a
