@@ -536,7 +536,7 @@ where
                     let mut right = raise(node, height, target);
                     lift_boundary_spine(&mut left, false, &accessor).await?;
                     lift_boundary_spine(&mut right, true, &accessor).await?;
-                    let mut run = concat_levels::<Key, Value, D>(left, right, target)?;
+                    let mut run = concat_levels::<Key, Value, D>(left, right, target, &manifest)?;
                     if run.len() == 1 {
                         // Keep the accumulator's nominal height tight so later
                         // joins pad as little as possible.
@@ -1592,7 +1592,10 @@ where
         return Ok(None);
     }
     let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
-    let mut root = TransientNode::from(&node);
+    // The carved root stands at the source tree's left edge for the purposes
+    // of this carve, so it opens with the empty separator (negative infinity),
+    // exactly as `load` opens a tree root.
+    let mut root = TransientNode::open(&node, Vec::new())?;
 
     // Lift the spine covering each range bound so the trim below can edit the
     // boundary nodes in place. The two descents share a prefix until they
@@ -1662,32 +1665,42 @@ where
             let children = &mut index.children;
             let mut changed = false;
 
+            // Index children carry separators, not full keys: under the
+            // lower-bound convention `children[i].separator()` is the smallest
+            // key reachable in child `i`, so child `i` spans
+            // `[sep(i), sep(i+1))` and the last child runs to `+infinity`.
+            // Both bounds are therefore tested against separators, never
+            // against an upper bound (an index node has none to give).
             if trim_end {
-                // Keep children up to and including the first whose upper
-                // bound reaches the range end; every later child holds only
-                // keys beyond it.
+                // Child `i` lies wholly beyond the range end iff its own
+                // lower bound already exceeds it. Keep every child before the
+                // first such one.
+                let end = range.end().as_ref();
                 let mut keep = children.len();
                 for (at, child) in children.iter().enumerate() {
-                    if child.upper_bound_ref()? >= range.end() {
-                        keep = at + 1;
+                    if child.separator()? > end {
+                        keep = at;
                         break;
                     }
                 }
+                // The first child always stays: its separator is the node's
+                // own left edge, which cannot exceed a range the node
+                // straddles.
+                let keep = keep.max(1);
                 if keep < children.len() {
                     children.truncate(keep);
                     changed = true;
                 }
             }
             if trim_start {
-                // Drop children whose upper bound is below the range start;
-                // they hold only keys before it.
+                // Child `i` lies wholly before the range start iff the NEXT
+                // child's lower bound is still at or below it (so nothing in
+                // child `i` can reach the start). The last child has no
+                // successor and always stays.
+                let start = range.start().as_ref();
                 let mut below = 0;
-                for child in children.iter() {
-                    if child.upper_bound_ref()? < range.start() {
-                        below += 1;
-                    } else {
-                        break;
-                    }
+                while below + 1 < children.len() && children[below + 1].separator()? <= start {
+                    below += 1;
                 }
                 if below > 0 {
                     children.drain(..below);
@@ -1824,6 +1837,7 @@ fn concat_levels<Key, Value, D>(
     left: TransientNode<Key, Value>,
     right: TransientNode<Key, Value>,
     height: Rank,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1835,8 +1849,13 @@ where
 {
     match (left, right) {
         (TransientNode::Segment(mut left), TransientNode::Segment(right)) => {
+            let floor = left.separator.clone();
             left.entries.extend(right.entries);
-            Ok(regroup_entries::<Key, Value, D>(left.entries))
+            Ok(regroup_entries::<Key, Value, D>(
+                left.entries,
+                floor,
+                manifest,
+            ))
         }
         (TransientNode::Index(mut left), TransientNode::Index(mut right)) => {
             let left_last = left
@@ -1848,12 +1867,13 @@ where
                 .into_transient()?;
             let right_first = remove_first(&mut right.children)?.into_transient()?;
 
-            let seam = concat_levels::<Key, Value, D>(left_last, right_first, height - 1)?;
+            let seam =
+                concat_levels::<Key, Value, D>(left_last, right_first, height - 1, manifest)?;
 
             let mut combined = left.children;
             combined.extend(seam);
             combined.extend(right.children);
-            regroup_children::<Key, Value, D>(combined, height)
+            regroup_children::<Key, Value, D>(combined, height, manifest)
         }
         _ => Err(DialogSearchTreeError::Node(
             "Stitched subtrees had mismatched heights".into(),

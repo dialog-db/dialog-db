@@ -665,14 +665,21 @@ where
     /// node's true lower bound is unknowable after its left siblings were
     /// pruned). Callers partitioning work by these spans over-include,
     /// never miss. Costs no reads: bounds come from the frontier links.
-    pub fn divergent_bounds(&self) -> Vec<(Option<Key>, Key)> {
+    pub fn divergent_bounds(&self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
         let mut bounds = Vec::new();
         for tree in [&self.source, &self.target] {
-            let mut previous: Option<Key> = None;
-            for node in &tree.nodes {
-                let upper = node.upper_bound().clone();
-                bounds.push((previous.clone(), upper.clone()));
-                previous = Some(upper);
+            // A frontier node's key span is `[its separator, the next node's
+            // separator)`: separators are LOWER bounds, and the separator
+            // invariant puts the next one strictly above this node's maximum
+            // key. The final node has no successor, so its span runs open to
+            // the top of the key space.
+            for (at, node) in tree.nodes.iter().enumerate() {
+                let lower = node.lower_bound().to_vec();
+                let upper = tree
+                    .nodes
+                    .get(at + 1)
+                    .map(|next| next.lower_bound().to_vec());
+                bounds.push((lower, upper));
             }
         }
         bounds
