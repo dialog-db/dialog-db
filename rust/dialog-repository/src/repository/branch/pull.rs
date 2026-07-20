@@ -3193,6 +3193,34 @@ mod history_tests {
                 )]))
                 .perform(&env)
                 .await?;
+            if true {
+                let n = alice
+                    .claims()
+                    .select(ArtifactSelector::new().the("user/name".parse().unwrap()))
+                    .perform(&env)
+                    .await?
+                    .collect::<Vec<_>>()
+                    .await
+                    .len();
+                eprintln!(
+                    "DBGCOUNT {} {n} root={:?}",
+                    i + 1,
+                    alice
+                        .revision()
+                        .map(|r| r.tree.hash().as_ref()[..4].to_vec())
+                );
+            }
+        }
+        {
+            let n = alice
+                .claims()
+                .select(ArtifactSelector::new().the("user/name".parse().unwrap()))
+                .perform(&env)
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .len();
+            eprintln!("DBGCOUNT alice after 200 commits: {n}");
         }
         us.pull().from(&alice).perform(&env).await?;
         us.commit(stream::iter(vec![assert_one(
@@ -3213,6 +3241,17 @@ mod history_tests {
             )]))
             .perform(&env)
             .await?;
+        }
+        {
+            let before = us
+                .claims()
+                .select(ArtifactSelector::new().the("user/name".parse().unwrap()))
+                .perform(&env)
+                .await?
+                .collect::<Vec<_>>()
+                .await
+                .len();
+            eprintln!("DBGCOUNT before final pull: {before}");
         }
         env.reset();
         us.pull().from(&bob).perform(&env).await?.expect("merged");

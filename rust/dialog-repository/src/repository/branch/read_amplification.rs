@@ -285,6 +285,129 @@ async fn measure_shape(depth: usize) -> Result<()> {
     Ok(())
 }
 
+/// Compares the canonical and buffered write paths on the same instruction
+/// stream, at the same tree depth.
+///
+/// The question this answers: a commit must publish a canonical root, so the
+/// buffered path has to canonicalize before the head is signed. Does buffering
+/// still pay once that flush is charged to it?
+///
+/// Two regimes are measured, because they answer different questions:
+///
+/// - **per batch**: canonicalize after every batch, which is what a commit
+///   publishing a root every time would do. Buffering can only lose here, and
+///   the number says by how much.
+/// - **per N batches**: canonicalize once per `N`, which is what a commit path
+///   would look like if it could defer the flush (publishing a head only at a
+///   sync/publish point). This is the regime the buffer is designed for.
+async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
+    use crate::RepositoryArchiveExt as _;
+    use dialog_artifacts::tree::ArtifactTreeExt as _;
+    use dialog_artifacts::tree::write_instructions;
+    use dialog_artifacts::{Instruction as I, apply_buffered};
+    use dialog_effects::prelude::CatalogExt as _;
+    use dialog_search_tree::Delta;
+
+    let (operator, profile) = test_operator_with_profile().await;
+    let env = Counting::new(operator);
+    let repo = profile
+        .repository(unique_name("bench"))
+        .open()
+        .perform(&env)
+        .await?;
+    let main = repo.branch("main").open().perform(&env).await?;
+    for i in 0..depth {
+        main.commit(stream::iter(vec![assert_fact(i, "seed")]))
+            .perform(&env)
+            .await?;
+    }
+
+    let root = main.revision().expect("committed").tree;
+    let base = crate::Index::from_hash(dialog_common::Blake3Hash::from(*root.hash()));
+
+    // One fact per batch: the interactive-commit shape, where the fixed
+    // per-batch costs are least amortized and buffering has the most to prove.
+    let batch = |i: usize| -> Vec<I> { vec![assert_fact(depth + i, "write-path")] };
+
+    // Every batch's new nodes are imported into the archive, exactly as the
+    // commit path does before it references the root in a revision. Without
+    // this the next batch cannot read back what the last one wrote.
+    macro_rules! persist {
+        ($delta:expr) => {
+            main.archive()
+                .index()
+                .import($delta.flush().map(|(_, buffer)| buffer))
+                .perform(&env)
+                .await?
+        };
+    }
+
+    // Canonical: reshape per batch, exactly what the commit path does today.
+    let mut store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
+    let mut canonical = base.clone();
+    let started = Instant::now();
+    for i in 0..batches {
+        let mut delta = Delta::zero();
+        canonical
+            .apply_versioned(&mut store, &mut delta, None, stream::iter(batch(i)))
+            .await?;
+        persist!(delta);
+    }
+    let canonical_ms = started.elapsed().as_millis();
+
+    // Buffered, flushed per batch: the same reshape work plus buffer overhead.
+    let mut per_batch = base.clone();
+    let started = Instant::now();
+    for i in 0..batches {
+        let mut delta = Delta::zero();
+        apply_buffered(
+            &mut per_batch,
+            &mut store,
+            &mut delta,
+            None,
+            stream::iter(batch(i)),
+            true,
+        )
+        .await?;
+        persist!(delta);
+    }
+    let per_batch_ms = started.elapsed().as_millis();
+
+    // Buffered, flushed once at the end: the regime buffering is built for.
+    let storage =
+        dialog_search_tree::ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let mut deferred = dialog_search_tree::HitchhikerTree::open(&base);
+    let started = Instant::now();
+    for i in 0..batches {
+        let (next, _) =
+            write_instructions(deferred, &storage, None, stream::iter(batch(i))).await?;
+        deferred = next;
+    }
+    let mut delta = Delta::zero();
+    let _ = deferred.canonicalize(&storage, &mut delta).await?;
+    let deferred_ms = started.elapsed().as_millis();
+    persist!(delta);
+
+    println!(
+        "| write paths, depth {depth}, {batches} single-fact batches: \
+         canonical {canonical_ms}ms | buffered-per-batch {per_batch_ms}ms | \
+         buffered-deferred-flush {deferred_ms}ms |"
+    );
+    Ok(())
+}
+
+/// Prints a table of block reads, total effect dispatches, and wall
+/// time per scenario and depth. `#[ignore]`d: a measurement, not an
+/// assertion; see the module docs for the invocation.
+#[dialog_common::test]
+#[ignore]
+async fn write_path_comparison() -> Result<()> {
+    for depth in [1_000, 10_000] {
+        measure_write_paths(depth, 100).await?;
+    }
+    Ok(())
+}
+
 /// Prints a table of block reads, total effect dispatches, and wall
 /// time per scenario and depth. `#[ignore]`d: a measurement, not an
 /// assertion; see the module docs for the invocation.
@@ -304,6 +427,73 @@ async fn read_amplification_by_depth() -> Result<()> {
     println!("|--------|----------------------------|-------------|---------|----------|");
     for sample in &samples {
         println!("{}", sample.row());
+    }
+    Ok(())
+}
+
+/// The same measurements the pre-version-control baseline takes, so the two
+/// can be compared directly: commit wall time at depth, merge reads, and the
+/// zero-read paths.
+#[dialog_common::test]
+#[ignore]
+async fn current_costs() -> Result<()> {
+    for depth in [1_000usize, 10_000] {
+        let (operator, profile) = test_operator_with_profile().await;
+        let env = Counting::new(operator);
+        let repo = profile
+            .repository(unique_name("bench"))
+            .open()
+            .perform(&env)
+            .await?;
+        let main = repo.branch("main").open().perform(&env).await?;
+        for i in 0..depth {
+            main.commit(stream::iter(vec![assert_fact(i, "seed")]))
+                .perform(&env)
+                .await?;
+        }
+
+        let started = Instant::now();
+        for i in 0..100 {
+            main.commit(stream::iter(vec![assert_fact(depth + i, "measure")]))
+                .perform(&env)
+                .await?;
+        }
+        let commit_ms = started.elapsed().as_millis();
+
+        let feature = repo.branch("feature").open().perform(&env).await?;
+        feature.set_upstream(&main).perform(&env).await?;
+        feature.pull().perform(&env).await?;
+        main.commit(stream::iter(vec![assert_fact(depth + 500, "theirs")]))
+            .perform(&env)
+            .await?;
+        feature
+            .commit(stream::iter(vec![assert_fact(depth + 501, "ours")]))
+            .perform(&env)
+            .await?;
+        env.reset();
+        let started = Instant::now();
+        feature.pull().perform(&env).await?;
+        let merge_ms = started.elapsed().as_millis();
+        let merge_reads = env.block_reads();
+
+        let ff = repo.branch("ff").open().perform(&env).await?;
+        ff.set_upstream(&main).perform(&env).await?;
+        ff.pull().perform(&env).await?;
+        main.commit(stream::iter(vec![assert_fact(depth + 700, "ff")]))
+            .perform(&env)
+            .await?;
+        env.reset();
+        ff.pull().perform(&env).await?;
+        let ff_reads = env.block_reads();
+        env.reset();
+        ff.pull().perform(&env).await?;
+        let noop_reads = env.block_reads();
+
+        println!(
+            "| CURRENT depth {depth}: 100 commits {commit_ms}ms ({:.2}ms each) | \
+             merge {merge_reads} reads / {merge_ms}ms | ff {ff_reads} reads | no-op {noop_reads} reads |",
+            commit_ms as f64 / 100.0
+        );
     }
     Ok(())
 }

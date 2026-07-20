@@ -85,6 +85,9 @@ mod key;
 pub use key::*;
 
 /// Shared tree-ops on the artifact prolly tree.
+mod buffered;
+pub use buffered::*;
+
 pub mod merge;
 pub mod tree;
 

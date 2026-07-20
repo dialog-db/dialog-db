@@ -12,6 +12,7 @@ integration-tests = []
 web-integration-tests = []
 
 [dependencies]
+tracing = { workspace = true }
 dialog-common = { workspace = true }
 dialog-macros = { workspace = true }
 dialog-storage = { workspace = true }
@@ -65,6 +66,11 @@ required-features = ["helpers"]
 
 [[bench]]
 name = "batch"
+harness = false
+required-features = ["helpers"]
+
+[[bench]]
+name = "sync"
 harness = false
 required-features = ["helpers"]
 

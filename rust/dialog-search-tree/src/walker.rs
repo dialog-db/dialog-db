@@ -17,9 +17,182 @@ use rkyv::{
 };
 
 use crate::{
+<<<<<<< ours
     Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, PersistentNode, Value,
     into_owned,
+=======
+    Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, NoveltyEntry, NoveltyOp,
+    PersistentNode, SymmetryWith, Value, into_owned,
+>>>>>>> theirs
 };
+
+/// Whether `key` sorts past the end of `range`, so an ascending walk can stop.
+fn past_range_end<Key, R>(range: &R, key: &Key) -> bool
+where
+    Key: Ord,
+    R: RangeBounds<Key>,
+{
+    match range.end_bound() {
+        Bound::Included(end) => key > end,
+        Bound::Excluded(end) => key >= end,
+        Bound::Unbounded => false,
+    }
+}
+
+/// The buffered ops covering the leaf a walk currently sits on, resolved to one
+/// winning op per key and sorted by key.
+///
+/// `path` is the walk's ancestor stack, root first, each entry paired with the
+/// index of the child it descended into. That gives both the ops (each index
+/// node's `novelty`) and the leaf's span: the child link's upper bound, and its
+/// predecessor's as the exclusive lower bound. Ops outside the span belong to
+/// sibling leaves and are skipped, so each op is resolved at exactly the one
+/// leaf whose range covers it, the same leaf a flush would route it to.
+///
+/// The rightmost leaf of the rightmost path is open-ended: an op sorting past
+/// every key belongs to it, matching the flush rule that the last child takes
+/// whatever remains.
+///
+/// Within a key the last op wins, matching how a point read resolves a key and
+/// how a flush replays them.
+#[allow(clippy::type_complexity)]
+fn pending_for_leaf<Key, Value>(
+    path: &[(PersistentNode<Key, Value>, Option<usize>)],
+) -> Result<Vec<(Key, NoveltyOp<Value>)>, DialogSearchTreeError>
+where
+    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived> + 'static,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+{
+    // Pass one: establish the leaf's span from the links alone, touching no
+    // buffered entry. The span is what makes the second pass cheap, so it has
+    // to be known before any op is looked at.
+    let mut lower: Option<Key> = None;
+    let mut upper: Option<Key> = None;
+    let mut open_ended = true;
+
+    for (node, descended) in path {
+        let ArchivedNodeBody::Index(index) = node.body()? else {
+            continue;
+        };
+        let Some(at) = descended else { continue };
+
+        if let Some(link) = index.links.get(*at) {
+            upper = Some(into_owned::<Key>(&link.upper_bound)?);
+            if *at + 1 != index.links.len() {
+                open_ended = false;
+            }
+            if *at > 0
+                && let Some(previous) = index.links.get(at - 1)
+            {
+                lower = Some(into_owned::<Key>(&previous.upper_bound)?);
+            }
+        }
+    }
+
+    // Pass two: collect only the ops that fall in this leaf's span.
+    //
+    // A buffer holds ops for its whole subtree, so most of them belong to
+    // sibling leaves. Deciding that from the *archived* key skips the
+    // deserialization for every op that is not ours, which is the bulk of them:
+    // a full buffer costs one comparison per op instead of a `Key` + `Value`
+    // allocation per op.
+    //
+    // Buffers are sorted by key, so the in-range ops form a contiguous run and
+    // the scan can stop at the first key past the span rather than walking the
+    // tail.
+    let mut winners: Vec<(Key, NoveltyOp<Value>)> = Vec::new();
+    for (node, descended) in path {
+        let ArchivedNodeBody::Index(index) = node.body()? else {
+            continue;
+        };
+        if descended.is_none() {
+            continue;
+        }
+
+        for entry in index.novelty.iter() {
+            // Below the span: skip without decoding.
+            if lower.as_ref().is_some_and(|lower| &entry.key <= lower) {
+                continue;
+            }
+            // Past the span: the rest of this sorted buffer is too, so stop.
+            if !open_ended && upper.as_ref().is_some_and(|upper| &entry.key > upper) {
+                break;
+            }
+
+            let entry: NoveltyEntry<Key, Value> = into_owned(entry)?;
+            match winners.iter_mut().find(|(key, _)| *key == entry.key) {
+                Some((_, op)) => *op = entry.op,
+                None => winners.push((entry.key, entry.op)),
+            }
+        }
+    }
+
+    winners.sort_by(|(left, _), (right, _)| left.cmp(right));
+    Ok(winners)
+}
+
+/// The winning buffered op for `key` along a root-to-leaf search path, or
+/// `None` when no ancestor has one pending.
+///
+/// A write lands in a node's buffer and only reaches a leaf when that buffer
+/// overflows, so a read that consults the leaf alone misses every recent write
+/// to that key. Within a key the last op wins, matching how a flush replays them.
+pub fn pending_for_key<Key, Value>(
+    path: &[TreeLayer<Key, Value>],
+    key: &Key,
+) -> Result<Option<NoveltyOp<Value>>, DialogSearchTreeError>
+where
+    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived> + 'static,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+{
+    let mut winner = None;
+    for layer in path {
+        let ArchivedNodeBody::Index(index) = layer.host.body()? else {
+            continue;
+        };
+        // Buffers are sorted by key, so the run of entries for this key is
+        // found by binary search rather than by scanning the whole buffer. A
+        // node's buffer holds ops for its entire subtree, so scanning it per
+        // read is the difference between constant and linear work in the buffer
+        // size on every point read.
+        let at = index.novelty.partition_point(|entry| entry.key < *key);
+        // Within a key the last op wins, and equal keys are contiguous.
+        let mut found = None;
+        for entry in index.novelty[at..].iter() {
+            if entry.key != *key {
+                break;
+            }
+            found = Some(entry);
+        }
+        if let Some(entry) = found {
+            let entry: NoveltyEntry<Key, Value> = into_owned(entry)?;
+            winner = Some(entry.op);
+        }
+    }
+    Ok(winner)
+}
 
 /// A traversal mechanism for walking through a tree structure.
 pub struct TreeWalker<Key, Value>
@@ -99,6 +272,7 @@ where
                         0
                     };
 
+<<<<<<< ours
                     if child_index < index.len() {
                         let next_node = accessor.get_node(index.hash_at(child_index)?).await?;
                         search_path.push((node, Some(child_index)));
@@ -146,6 +320,79 @@ where
                             return;
                         }
                     }
+=======
+                    },
+                    ArchivedNodeBody::Segment(segment) => {
+                        // Ops buffered on the ancestors of this leaf are part of
+                        // the tree's content: a write lands in a node's buffer
+                        // and only reaches a leaf when that buffer overflows, so
+                        // a walk that reads segments alone misses every recent
+                        // write. Collect the covering ops from the path and
+                        // merge them over the stored entries, exactly as a flush
+                        // would resolve them.
+                        let pending = pending_for_leaf::<Key, Value>(&search_path)?;
+
+                        let mut buffered = pending.into_iter().peekable();
+
+                        for entry in segment.entries.iter() {
+                            let entry: Entry<Key, Value> = into_owned(entry)?;
+
+                            // Buffered inserts sorting before this entry.
+                            while let Some((key, _)) = buffered.peek() {
+                                if *key >= entry.key {
+                                    break;
+                                }
+                                let (key, op) = buffered.next().expect("peeked");
+                                if let NoveltyOp::Assert(value) = op
+                                    && range.contains(&key)
+                                {
+                                    entered_range = true;
+                                    yield Entry { key, value };
+                                }
+                            }
+
+                            // A covering op supersedes the stored entry.
+                            let superseded = matches!(buffered.peek(), Some((key, _)) if *key == entry.key);
+                            if superseded {
+                                let (key, op) = buffered.next().expect("peeked");
+                                if let NoveltyOp::Assert(value) = op
+                                    && range.contains(&key)
+                                {
+                                    entered_range = true;
+                                    yield Entry { key, value };
+                                }
+                                continue;
+                            }
+
+                            if range.contains(&entry.key) {
+                                entered_range = true;
+                                yield entry;
+                            } else if past_range_end(&range, &entry.key) {
+                                // Past the end: entries only ascend from here,
+                                // so nothing further can match.
+                                //
+                                // This must not be gated on having already
+                                // matched something. A scan whose range hits no
+                                // stored entry would otherwise never exit and
+                                // would walk the rest of the tree, making an
+                                // empty lookup cost the size of the database.
+                                return;
+                            } else if entered_range {
+                                return;
+                            }
+                        }
+
+                        // Buffered inserts past the last stored entry.
+                        for (key, op) in buffered {
+                            if let NoveltyOp::Assert(value) = op
+                                && range.contains(&key)
+                            {
+                                entered_range = true;
+                                yield Entry { key, value };
+                            }
+                        }
+                    },
+>>>>>>> theirs
                 }
             }
         }
@@ -441,5 +688,246 @@ impl<Key, Value> SearchResult<Key, Value> {
 
         path.reverse();
         path
+    }
+}
+
+#[cfg(test)]
+mod walker_novelty_tests {
+    #![allow(unexpected_cfgs)]
+
+    use anyhow::Result;
+    use dialog_common::Blake3Hash;
+    use dialog_storage::MemoryStorageBackend;
+    use futures_util::StreamExt as _;
+
+    use crate::{Buffer, ContentAddressedStorage, Delta, HitchhikerTree, PersistentTree};
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    type Store = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+    type Tree = PersistentTree<[u8; 4], Vec<u8>>;
+
+    async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Successive buffered writes must all survive: a commit buffers, the next
+    /// commit opens over the *published* root and buffers again, and every
+    /// earlier write must still be readable. This is the shape the repository
+    /// commit path produces.
+    #[dialog_common::test]
+    async fn it_accumulates_across_successive_buffered_writes() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let mut tree = Tree::empty();
+        let mut expected: Vec<([u8; 4], Vec<u8>)> = Vec::new();
+
+        // 50 successive "commits", each buffering one write over the last
+        // published root, exactly as the commit path now does.
+        for i in 0..50u32 {
+            let key = (i * 37 % 500).to_be_bytes();
+            let value = vec![i as u8];
+
+            let buffered = HitchhikerTree::open(&tree)
+                .with_op_buf_size(8)
+                .insert(key, value.clone(), &storage)
+                .await?;
+            let mut delta = Delta::zero();
+            let root = buffered.persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+            tree = Tree::from_hash_with_cache(root, Default::default());
+
+            expected.retain(|(k, _)| *k != key);
+            expected.push((key, value));
+
+            // Every write so far must be readable, by scan and by point read.
+            expected.sort_by(|(a, _), (b, _)| a.cmp(b));
+            let mut seen = Vec::new();
+            {
+                let stream = tree.stream_range(.., &storage);
+                futures_util::pin_mut!(stream);
+                while let Some(entry) = stream.next().await {
+                    let entry = entry?;
+                    seen.push((entry.key, entry.value));
+                }
+            }
+            assert_eq!(
+                seen,
+                expected,
+                "after {} commits the scan must see every write",
+                i + 1
+            );
+
+            for (key, value) in &expected {
+                assert_eq!(
+                    tree.get(key, &storage).await?.as_ref(),
+                    Some(value),
+                    "after {} commits the point read must see key {key:?}",
+                    i + 1
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Several writes in ONE buffered batch, repeated across batches. The
+    /// artifact layer writes 3+ keys per fact (EAV/AEV/VAE orderings) plus
+    /// history records, so a commit buffers many keys at once and the next
+    /// commit buffers many more over it.
+    #[dialog_common::test]
+    async fn it_accumulates_multi_key_buffered_batches() -> Result<()> {
+        for seed in 0..20u64 {
+            let mut rng = 0x9E3779B97F4A7C15u64 ^ seed;
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+
+            let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut tree = Tree::empty();
+            let mut expected: std::collections::BTreeMap<[u8; 4], Vec<u8>> = Default::default();
+
+            for batch in 0..20u32 {
+                // Scattered keys, like content-hashed artifact keys.
+                let keys: Vec<u32> = (0..6).map(|_| next() % 100_000).collect();
+
+                let mut buffered = HitchhikerTree::open(&tree).with_op_buf_size(8);
+                for key in &keys {
+                    let value = vec![batch as u8];
+                    buffered = buffered
+                        .insert(key.to_be_bytes(), value.clone(), &storage)
+                        .await?;
+                    expected.insert(key.to_be_bytes(), value);
+                }
+                let mut delta = Delta::zero();
+                let root = buffered.persist(&mut delta)?;
+                settle(&mut delta, &mut storage).await?;
+                tree = Tree::from_hash_with_cache(root, Default::default());
+
+                let mut seen = Vec::new();
+                {
+                    let stream = tree.stream_range(.., &storage);
+                    futures_util::pin_mut!(stream);
+                    while let Some(entry) = stream.next().await {
+                        let entry = entry?;
+                        seen.push((entry.key, entry.value));
+                    }
+                }
+                let want: Vec<_> = expected.iter().map(|(k, v)| (*k, v.clone())).collect();
+                assert_eq!(
+                    seen, want,
+                    "seed {seed}, batch {batch}: scan must see every buffered write"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A buffered range scan must return exactly what the canonical tree
+    /// returns, for every sub-range, across many random key layouts.
+    ///
+    /// The walker merges ops from the ancestors on its search path, scoped to
+    /// the leaf it is sitting on; getting that scoping wrong drops or duplicates
+    /// entries only for particular layouts, which is why this sweeps seeds.
+    #[dialog_common::test]
+    async fn it_scans_buffered_like_canonical_across_layouts() -> Result<()> {
+        for seed in 0..40u64 {
+            let mut rng = 0x9E3779B97F4A7C15u64 ^ seed;
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+
+            let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+            // Random base, random keys (big-endian so byte order is key order).
+            let base_keys: Vec<u32> = (0..300).map(|_| next() % 4000).collect();
+            let mut base = Tree::empty();
+            let mut delta = Delta::zero();
+            for key in &base_keys {
+                base = base
+                    .edit()
+                    .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
+                    .await?
+                    .persist(&mut delta)?;
+                settle(&mut delta, &mut storage).await?;
+            }
+
+            // Random ops, small buffer so they cascade across levels.
+            let ops: Vec<(bool, u32)> = (0..60)
+                .map(|_| (!next().is_multiple_of(3), next() % 4000))
+                .collect();
+
+            let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(8);
+            let mut canonical = HitchhikerTree::open(&base).with_op_buf_size(8);
+            for (insert, key) in &ops {
+                if *insert {
+                    buffered = buffered
+                        .insert(key.to_be_bytes(), vec![7], &storage)
+                        .await?;
+                    canonical = canonical
+                        .insert(key.to_be_bytes(), vec![7], &storage)
+                        .await?;
+                } else {
+                    buffered = buffered.delete(key.to_be_bytes(), &storage).await?;
+                    canonical = canonical.delete(key.to_be_bytes(), &storage).await?;
+                }
+            }
+
+            let mut delta = Delta::zero();
+            let buffered_root = buffered.persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+            let buffered_tree = Tree::from_hash_with_cache(buffered_root, Default::default());
+
+            let mut delta = Delta::zero();
+            let canonical_tree = canonical.canonicalize(&storage, &mut delta).await?;
+            settle(&mut delta, &mut storage).await?;
+
+            for (low, high) in [
+                (0u32, 4000u32),
+                (0, 100),
+                (500, 1500),
+                (3000, 4000),
+                (77, 78),
+            ] {
+                let range = low.to_be_bytes()..=high.to_be_bytes();
+
+                let mut from_buffered = Vec::new();
+                {
+                    let stream = buffered_tree.stream_range(range.clone(), &storage);
+                    futures_util::pin_mut!(stream);
+                    while let Some(entry) = stream.next().await {
+                        let entry = entry?;
+                        from_buffered.push((entry.key, entry.value));
+                    }
+                }
+
+                let mut from_canonical = Vec::new();
+                {
+                    let stream = canonical_tree.stream_range(range, &storage);
+                    futures_util::pin_mut!(stream);
+                    while let Some(entry) = stream.next().await {
+                        let entry = entry?;
+                        from_canonical.push((entry.key, entry.value));
+                    }
+                }
+
+                assert_eq!(
+                    from_buffered, from_canonical,
+                    "seed {seed}: buffered scan of [{low}, {high}] must match canonical"
+                );
+            }
+        }
+        Ok(())
     }
 }

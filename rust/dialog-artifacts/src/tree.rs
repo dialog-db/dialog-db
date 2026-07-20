@@ -36,6 +36,7 @@ use std::ops::RangeInclusive;
 
 use crate::history::{Cause as HistoryCause, Claim, Record, Version};
 use crate::{
+<<<<<<< ours
     Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum, DialogArtifactsError,
     EntityKey, EntityKeyPart, FromKey, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut,
     State, ValueDataType, ValueKey, encode_value_owned,
@@ -43,6 +44,12 @@ use crate::{
     key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
     match_selector_and_key_ref,
     selector::Constrained,
+=======
+    ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, ArtifactWriter, AttributeKey, AttributeKeyPart,
+    Datum, DialogArtifactsError, ENTITY_LENGTH, ENTITY_RAW_HEAD, EntityKey, EntityKeyPart, FromKey,
+    Instruction, Key, KeyBytes, KeyView, KeyViewConstruct, KeyViewMut, MatchCandidate, State,
+    ValueKey, selector::Constrained,
+>>>>>>> theirs
 };
 
 /// The concrete search-tree type the artifact indexes use.
@@ -552,6 +559,7 @@ impl ArtifactTreeExt for ArtifactTree {
         // Open one transient edit batch over this tree's spine and apply every
         // instruction's writes to it in flight, so the whole instruction stream
         // costs a single persist instead of one full tree rebuild per key.
+<<<<<<< ours
         let mut transient = self.edit();
 
         // History records are buffered and only written if the batch changed
@@ -808,6 +816,10 @@ impl ArtifactTreeExt for ArtifactTree {
         for (key, entry) in history_entries {
             transient = transient.insert(key, entry, &storage).await?;
         }
+=======
+        let (transient, changed) =
+            write_instructions(self.edit(), &storage, version, instructions).await?;
+>>>>>>> theirs
 
         // Seal the whole batch with a single bottom-up persist into the
         // caller's delta.
@@ -1026,6 +1038,7 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
     }
 }
 
+<<<<<<< ours
 #[cfg(test)]
 mod spill_cache_tests {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -1133,4 +1146,270 @@ mod spill_cache_tests {
         assert_eq!(fetch_spilled(&store, &key).await?, None);
         Ok(())
     }
+=======
+/// Applies an instruction stream to any [`ArtifactWriter`], returning the
+/// written target and whether the batch changed the indexes.
+///
+/// This is the whole of the artifact write semantics: reserved-namespace
+/// enforcement, cardinality-one supersession, coverage records, and the history
+/// entries each instruction contributes. It is generic over the write target so
+/// the canonical edit path and the buffered (hitchhiker) path run *identical*
+/// semantics; only where the writes land differs.
+///
+/// The supersession scans go through [`ArtifactWriter::scan`] and
+/// [`ArtifactWriter::read`], which see the batch's own pending writes on both
+/// targets. On the buffered target that means the node buffers are merged into
+/// the scan: a `Replace` blind to a buffered prior would leave it live at a
+/// cardinality-one slot, and a `Retract` blind to one would cite nothing and so
+/// cover nothing at merge time.
+#[tracing::instrument(skip_all, name = "write_instructions")]
+#[allow(clippy::too_many_lines)]
+pub async fn write_instructions<W, S, I>(
+    mut transient: W,
+    storage: &ContentAddressedStorage<TreeStorageBridge<S>>,
+    version: Option<Version>,
+    instructions: I,
+) -> Result<(W, bool), DialogArtifactsError>
+where
+    W: ArtifactWriter,
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + Clone
+        + ConditionalSync,
+    I: Stream<Item = Instruction> + ConditionalSend,
+{
+    // History records are buffered and only written if the batch changed
+    // the indexes: a batch of pure no-ops must leave the tree untouched,
+    // history region included.
+    let mut history_entries: Vec<(Key, State<Datum>)> = Vec::new();
+    let mut changed = false;
+
+    tokio::pin!(instructions);
+    while let Some(instruction) = instructions.next().await {
+        // The `dialog.` namespace is reserved for version-control
+        // machinery (revision records — see
+        // `history::RevisionRecord`), which writes through
+        // [`ArtifactTreeExt::record`] rather than instructions. At the
+        // library level lineage therefore cannot be corrupted through
+        // the ordinary write path.
+        {
+            let (Instruction::Assert(artifact)
+            | Instruction::Replace(artifact)
+            | Instruction::Retract(artifact)) = &instruction;
+            if artifact.the.as_str().starts_with("dialog.") {
+                return Err(DialogArtifactsError::ReservedAttribute(
+                    artifact.the.to_string(),
+                ));
+            }
+        }
+        match instruction {
+            Instruction::Assert(artifact) => {
+                changed = true;
+                let entity_key = EntityKey::from(&artifact);
+                let value_key = ValueKey::from_key(&entity_key);
+                let attribute_key = AttributeKey::from_key(&entity_key);
+
+                // A version-tagged assertion records its history: an
+                // assertion is purely additive, so it supersedes nothing.
+                if let Some(version) = &version {
+                    let record = Record::Assert(Claim {
+                        the: artifact.the.clone(),
+                        of: artifact.of.clone(),
+                        is: artifact.is.clone(),
+                        cause: HistoryCause::genesis(),
+                    });
+                    if let Some(coverage) = record.coverage_entry(version) {
+                        history_entries.push(coverage);
+                    }
+                    history_entries.push(record.into_entry(version));
+                }
+
+                let mut datum = Datum::from(artifact);
+                datum.version = version;
+                let added = State::Added(datum);
+                transient = transient
+                    .write(entity_key.into_key().into(), added.clone(), storage)
+                    .await?;
+                transient = transient
+                    .write(attribute_key.into_key().into(), added.clone(), storage)
+                    .await?;
+                transient = transient
+                    .write(value_key.into_key().into(), added, storage)
+                    .await?;
+            }
+            Instruction::Replace(artifact) => {
+                let entity_key = EntityKey::from(&artifact);
+
+                // Scan priors at this (entity, attribute) against the
+                // in-flight transient tree, so writes from earlier
+                // instructions in this batch are visible. Same-valued priors
+                // already represent the desired state; only different-valued
+                // ones need superseding. Sameness is compared on the raw
+                // stored form — (value_type, bytes) — sparing a full
+                // `Artifact` parse per candidate. The scan borrows
+                // `transient` immutably, so collect into owned vectors in a
+                // scope that ends before the subsequent mutating
+                // reassignments.
+                let replace_type = u8::from(artifact.is.data_type());
+                let replace_value = artifact.is.to_bytes();
+                let mut superseded_keys: Vec<Key> = Vec::new();
+                let mut superseded_versions: Vec<Version> = Vec::new();
+                let mut found_same_value = false;
+                {
+                    let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
+                        .set_entity(entity_key.entity())
+                        .set_attribute(entity_key.attribute())
+                        .into_key();
+                    let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
+                        .set_entity(entity_key.entity())
+                        .set_attribute(entity_key.attribute())
+                        .into_key();
+                    let search_stream = transient.scan(
+                        KeyBytes::from(search_start)..=KeyBytes::from(search_end),
+                        storage,
+                    );
+                    tokio::pin!(search_stream);
+                    while let Some(candidate) = search_stream.next().await {
+                        let candidate = candidate?;
+                        if let State::Added(current_element) = candidate.value {
+                            if current_element.value_type == replace_type
+                                && current_element.value == replace_value
+                            {
+                                found_same_value = true;
+                            } else {
+                                superseded_keys.push(Key::from(candidate.key));
+                                superseded_versions.extend(current_element.version);
+                            }
+                        }
+                    }
+                }
+                // Cardinality-one no-op: the identical claim already
+                // stands, at its original version, and there is nothing
+                // to supersede. Nothing changes in the indexes and no
+                // history is recorded — a fresh record would fork the
+                // claim's lineage away from the version the standing
+                // datum carries.
+                if found_same_value && superseded_keys.is_empty() {
+                    continue;
+                }
+                changed = true;
+
+                for key in superseded_keys {
+                    let entity_key = EntityKey(key);
+                    let value_key = ValueKey::from_key(&entity_key);
+                    let attribute_key = AttributeKey::from_key(&entity_key);
+
+                    transient = transient
+                        .erase(&entity_key.into_key().into(), storage)
+                        .await?;
+                    transient = transient
+                        .erase(&value_key.into_key().into(), storage)
+                        .await?;
+                    transient = transient
+                        .erase(&attribute_key.into_key().into(), storage)
+                        .await?;
+                }
+
+                // A version-tagged replacement records its history: its
+                // cause lists the versions of the claims it superseded —
+                // exactly the data removed from the indexes above. The
+                // record is written even when the insert below is skipped
+                // because a same-valued prior survives; the supersession
+                // of the different-valued claims still happened and must
+                // be attributable.
+                if let Some(version) = &version {
+                    let record = Record::Assert(Claim {
+                        the: artifact.the.clone(),
+                        of: artifact.of.clone(),
+                        is: artifact.is.clone(),
+                        cause: HistoryCause::new(superseded_versions),
+                    });
+                    if let Some(coverage) = record.coverage_entry(version) {
+                        history_entries.push(coverage);
+                    }
+                    history_entries.push(record.into_entry(version));
+                }
+
+                if found_same_value {
+                    continue;
+                }
+
+                let entity_key = EntityKey::from(&artifact);
+                let value_key = ValueKey::from_key(&entity_key);
+                let attribute_key = AttributeKey::from_key(&entity_key);
+                let mut datum = Datum::from(artifact);
+                datum.version = version;
+                let added = State::Added(datum);
+                transient = transient
+                    .write(entity_key.into_key().into(), added.clone(), storage)
+                    .await?;
+                transient = transient
+                    .write(attribute_key.into_key().into(), added.clone(), storage)
+                    .await?;
+                transient = transient
+                    .write(value_key.into_key().into(), added, storage)
+                    .await?;
+            }
+            Instruction::Retract(artifact) => {
+                changed = true;
+                let entity_key = EntityKey::from(&artifact);
+                let value_key = ValueKey::from_key(&entity_key);
+                let attribute_key = AttributeKey::from_key(&entity_key);
+
+                // A version-tagged retraction records its history: its
+                // cause is the version of the assertion it withdraws.
+                // An assertion made earlier in this same batch carries
+                // this batch's own version; a record must not claim
+                // itself as its cause, so that degenerates to a genesis
+                // retraction.
+                if let Some(version) = &version {
+                    let withdrawn = match transient
+                        .read(&entity_key.clone().into_key().into(), storage)
+                        .await?
+                    {
+                        Some(State::Added(datum)) => {
+                            datum.version.filter(|withdrawn| withdrawn != version)
+                        }
+                        _ => None,
+                    };
+                    let record = Record::Retract(Claim {
+                        the: artifact.the.clone(),
+                        of: artifact.of.clone(),
+                        is: artifact.is.clone(),
+                        cause: withdrawn.into_iter().collect(),
+                    });
+                    if let Some(coverage) = record.coverage_entry(version) {
+                        history_entries.push(coverage);
+                    }
+                    history_entries.push(record.into_entry(version));
+                }
+
+                // Observed-remove semantics: retraction deletes the
+                // fact's keys outright — no tombstone. The retract
+                // record written above is the durable carrier of the
+                // deletion (it replicates as history), and a replica's
+                // causal context is what stops a stale peer's copy from
+                // resurrecting the fact at merge time (see
+                // `notes/version-control.md`). Deleting an absent
+                // key is a no-op, so a same-batch assert+retract cancels
+                // to nothing and a retract of a fact that never existed
+                // changes nothing in the indexes.
+                transient = transient
+                    .erase(&entity_key.into_key().into(), storage)
+                    .await?;
+                transient = transient
+                    .erase(&attribute_key.into_key().into(), storage)
+                    .await?;
+                transient = transient
+                    .erase(&value_key.into_key().into(), storage)
+                    .await?;
+            }
+        }
+    }
+
+    for (key, entry) in history_entries {
+        transient = transient.write(key.into(), entry, storage).await?;
+    }
+
+    Ok((transient, changed))
+>>>>>>> theirs
 }

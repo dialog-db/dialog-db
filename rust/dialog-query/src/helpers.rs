@@ -49,8 +49,15 @@ use dialog_storage::{Blake3Hash, DialogStorageError, JournaledStorage, StorageBa
 #[cfg(not(target_arch = "wasm32"))]
 use dialog_storage::NativeTempSpace;
 use futures_util::{TryStreamExt as _, stream};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::env;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tracing::span::Attributes;
+use tracing::{Id, Subscriber};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context as LayerContext;
+use tracing_subscriber::registry::LookupSpan;
 
 use ::dialog_query::concept::query::ConceptRules;
 use ::dialog_query::error::EvaluationError;
@@ -164,6 +171,130 @@ pub struct Stuff {
     pub name: stuff::Name,
     /// Role of the stuff member.
     pub role: stuff::Role,
+}
+
+/// Attributes of the bug-tracker benchmark concept.
+pub mod bug {
+    use ::dialog_query::Attribute;
+
+    /// Bug status (triage / todo / in-progress / done / canceled).
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("squash.bug")]
+    pub struct Status(pub String);
+
+    /// Bug priority (low / medium / high / urgent).
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("squash.bug")]
+    pub struct Priority(pub String);
+
+    /// Bug assignee (a DID string, or empty for unassigned).
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("squash.bug")]
+    pub struct Assignee(pub String);
+
+    /// Bug title.
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("squash.bug")]
+    pub struct Title(pub String);
+
+    /// LexoRank-style ordering key. Float in the real schema — the field that
+    /// would have tripped the float-key width bug in a concept join.
+    #[derive(Attribute, Clone, PartialEq)]
+    #[domain("squash.bug")]
+    pub struct Ordering(pub f64);
+}
+
+/// A realistic bug-tracker record: the seven-way join the tonk bug app runs.
+/// Fewer fields than the real seven (detail/ident omitted) is enough to
+/// exercise a real multi-premise concept join with a `Float` field.
+#[derive(Clone, Debug, PartialEq, Concept)]
+pub struct Bug {
+    /// The bug entity.
+    pub this: Entity,
+    /// Its status.
+    pub status: bug::Status,
+    /// Its priority.
+    pub priority: bug::Priority,
+    /// Its assignee.
+    pub assignee: bug::Assignee,
+    /// Its title.
+    pub title: bug::Title,
+    /// Its ordering key (Float).
+    pub ordering: bug::Ordering,
+}
+
+/// Per-span accumulated `(micros, calls)`, shared between the subscriber
+/// layer that records them and the report that prints them.
+#[cfg(not(target_arch = "wasm32"))]
+type PhaseTotals = Arc<Mutex<BTreeMap<&'static str, (u128, u64)>>>;
+
+/// Installs a tracing subscriber that totals time per span name, so a
+/// benchmark can attribute cost to phases without hand-rolled timers.
+///
+/// Enabled by `DIALOG_TRACE=1`. Reports on drop of the returned guard.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn trace_phases() -> Option<PhaseReport> {
+    if env::var("DIALOG_TRACE").is_err() {
+        return None;
+    }
+    let totals: PhaseTotals = Arc::default();
+    let layer = PhaseLayer {
+        totals: totals.clone(),
+    };
+    use tracing_subscriber::prelude::*;
+    let _ = tracing_subscriber::registry().with(layer).try_init();
+    Some(PhaseReport { totals })
+}
+
+/// Accumulated per-span timings, printed when dropped.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct PhaseReport {
+    totals: PhaseTotals,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for PhaseReport {
+    fn drop(&mut self) {
+        let totals = self.totals.lock().expect("phase totals");
+        for (name, (micros, count)) in totals.iter() {
+            eprintln!(
+                "TRACE {name:<24} total={micros:>10}us calls={count:<7} mean={:>8}us",
+                micros / (*count).max(1) as u128
+            );
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PhaseLayer {
+    totals: PhaseTotals,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct SpanStart(Instant);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<S> Layer<S> for PhaseLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(&self, _attrs: &Attributes<'_>, id: &Id, ctx: LayerContext<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut().insert(SpanStart(Instant::now()));
+        }
+    }
+
+    fn on_close(&self, id: Id, ctx: LayerContext<'_, S>) {
+        if let Some(span) = ctx.span(&id)
+            && let Some(start) = span.extensions().get::<SpanStart>()
+        {
+            let elapsed = start.0.elapsed().as_micros();
+            let mut totals = self.totals.lock().expect("phase totals");
+            let entry = totals.entry(span.name()).or_insert((0, 0));
+            entry.0 += elapsed;
+            entry.1 += 1;
+        }
+    }
 }
 
 /// The outcome of running a single query through [`BenchEnv::run_query`].
@@ -561,11 +692,15 @@ where
         self.query_stuff().await
     }
 
+<<<<<<< ours
     /// Seed a realistic bug-tracker fact base: `count` bugs, each a seven-fact
     /// [`Bug`] record, with status/priority/assignee drawn from the same
     /// distribution as the real tonk data (mostly-done/triage, medium priority,
     /// a few assignees plus many unassigned). Returns the seeded entities so a
     /// transaction benchmark can update specific bugs. Off the measured path.
+=======
+    /// Seed `count` bug records in one transaction, returning their entities.
+>>>>>>> theirs
     pub async fn seed_bugs(&self, count: usize) -> Result<Vec<Entity>> {
         const STATUSES: &[&str] = &["done", "triage", "todo", "canceled", "in-progress"];
         const PRIORITIES: &[&str] = &["medium", "high", "low", "urgent"];
@@ -694,6 +829,7 @@ where
         Ok(())
     }
 
+<<<<<<< ours
     /// Import the real bug records from a `tonk export` CSV (the
     /// `the,of,as,is,cause` layout) into the branch, asserting every
     /// `squash.bug/*` fact — including `detail` (the long free-text
@@ -961,6 +1097,32 @@ where
         let start = std::time::Instant::now();
         let filed = Entity::new()?;
         {
+=======
+    /// Seed `count` bugs the way a real tracker accumulates them: one commit
+    /// per bug, then a status change and a reassignment on a share of them.
+    ///
+    /// The single-transaction [`seed_bugs`](Self::seed_bugs) leaves a history
+    /// two commits deep, which makes every per-commit history cost (skip-table
+    /// construction, ancestry walks, context derivation) look free because
+    /// there is no ancestry to walk. A tracker that has seen a few hundred
+    /// edits has a few hundred revisions, and those costs grow with depth.
+    pub async fn seed_bugs_staged(&self, count: usize) -> Result<Vec<Entity>> {
+        const STATUSES: &[&str] = &["done", "triage", "todo", "canceled", "in-progress"];
+        const PRIORITIES: &[&str] = &["medium", "high", "low", "urgent"];
+        const ASSIGNEES: &[&str] = &[
+            "",
+            "did:key:z6MkDQtgLHmp664Wf8wn32G9MT79GpKncnQkcJmLYYu6HEJz",
+            "did:key:z6MkAoFSTzm7XMv6wc1X9H5iND4YSfEaHw2LYWiTR2xDPfu8",
+            "did:key:z6MkGSesqrS3iyekKGrhMCmHyp82RxJaohuvnNMmdQXG9kza",
+        ];
+
+        let mut entities = Vec::with_capacity(count);
+
+        // One commit per filed bug.
+        for index in 0..count {
+            let entity = Entity::new()?;
+            entities.push(entity.clone());
+>>>>>>> theirs
             let branch = self
                 .repo
                 .branch(&self.branch)
@@ -970,17 +1132,27 @@ where
             branch
                 .transaction()
                 .assert(Bug {
+<<<<<<< ours
                     this: filed,
                     status: bug::Status("triage".to_string()),
                     priority: bug::Priority("high".to_string()),
                     assignee: bug::Assignee(String::new()),
                     title: bug::Title("A newly filed bug".to_string()),
                     ordering: bug::Ordering(count as f64 * 1000.0),
+=======
+                    this: entity,
+                    status: bug::Status(STATUSES[index % STATUSES.len()].to_string()),
+                    priority: bug::Priority(PRIORITIES[index % PRIORITIES.len()].to_string()),
+                    assignee: bug::Assignee(ASSIGNEES[index % ASSIGNEES.len()].to_string()),
+                    title: bug::Title(format!("Bug #{index}: something is off")),
+                    ordering: bug::Ordering(index as f64 * 1000.0),
+>>>>>>> theirs
                 })
                 .commit()
                 .perform(&self.operator)
                 .await?;
         }
+<<<<<<< ours
         eprintln!("BUGBENCH {:<22} time={:?}", "file-bug", start.elapsed());
 
         let start = std::time::Instant::now();
@@ -994,6 +1166,74 @@ where
 
         eprintln!("BUGBENCH seeded {count} bugs in {seed_elapsed:?}");
         Ok(())
+=======
+
+        // A status change on every third bug, and a reassignment on every
+        // fifth: the edits a tracker actually accumulates after filing.
+        for (index, entity) in entities.iter().enumerate() {
+            if index % 3 == 0 {
+                self.update_bug_status(entity, "in-progress").await?;
+            }
+            if index % 5 == 0 {
+                self.reassign_bug(entity, ASSIGNEES[1], "todo").await?;
+            }
+        }
+
+        Ok(entities)
+    }
+
+    /// Commit `depth` times in sequence, reporting how per-commit cost grows
+    /// with history depth.
+    ///
+    /// Skip tables grow as log2(depth), so the per-commit history work (skip
+    /// construction, ancestry lookups) grows with the log of how much history
+    /// precedes the commit. A benchmark seeded in one transaction cannot see
+    /// this at all; this walks the curve directly.
+    pub async fn probe_commit_depth(&self, depth: usize) -> Result<Vec<(usize, u128)>> {
+        let mut samples = Vec::new();
+        let mut window = Instant::now();
+        // Reuse one branch handle across commits when asked, so the
+        // branch-owned record/node memos survive: this isolates how much
+        // of the depth curve is cold skip-table fetches.
+        let reuse = env::var("DIALOG_REUSE_BRANCH").is_ok();
+        let mut held: Option<_> = None;
+        for index in 0..depth {
+            let entity = Entity::new()?;
+            if held.is_none() || !reuse {
+                held = Some(
+                    self.repo
+                        .branch(&self.branch)
+                        .open()
+                        .perform(&self.operator)
+                        .await?,
+                );
+            }
+            let branch = held.as_ref().expect("branch handle");
+            branch
+                .transaction()
+                .assert(Bug {
+                    this: entity,
+                    status: bug::Status("triage".to_string()),
+                    priority: bug::Priority("medium".to_string()),
+                    assignee: bug::Assignee(String::new()),
+                    title: bug::Title(format!("Bug #{index}")),
+                    ordering: bug::Ordering(index as f64),
+                })
+                .commit()
+                .perform(&self.operator)
+                .await?;
+
+            // Sample the average commit cost over each power-of-two window, so
+            // the curve is read at the depths where a skip level is added.
+            let at = index + 1;
+            if at.is_power_of_two() && at >= 8 {
+                let span = window.elapsed().as_micros();
+                samples.push((at, span / (at as u128 / 2)));
+                window = Instant::now();
+            }
+        }
+        Ok(samples)
+>>>>>>> theirs
     }
 
     /// Open the repository under `profile` and assemble the environment.
@@ -1062,6 +1302,160 @@ impl BenchEnv<Operator<::dialog_storage::provider::storage::WebSpace>> {
 
 #[cfg(test)]
 mod test {
+
+    /// How does per-commit cost grow with history depth? `#[ignore]`d unless
+    /// `DIALOG_DEPTH_BENCH` is set.
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::absolute_paths)]
+    async fn it_probes_commit_depth() -> Result<()> {
+        if env::var("DIALOG_DEPTH_BENCH").is_err() {
+            return Ok(());
+        }
+        let depth: usize = env::var("DIALOG_DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2048);
+        let _trace = crate::helpers::trace_phases();
+        let env = BenchEnv::temp().await?;
+        for (at, per_commit) in env.probe_commit_depth(depth).await? {
+            let levels = (at as f64).log2().floor() as u32;
+            eprintln!(
+                "DEPTHBENCH depth={at:<7} skip_levels~={levels:<3} per_commit={per_commit}us"
+            );
+        }
+        Ok(())
+    }
+
+    // A gated, on-demand benchmark: fully-qualified std paths keep it
+    // self-contained without adding imports the rest of the module doesn't use.
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::absolute_paths)]
+    async fn it_benchmarks_bug_tracker() -> Result<()> {
+        if env::var("DIALOG_BUG_BENCH").is_err() {
+            eprintln!("DIALOG_BUG_BENCH not set; skipping bug-tracker benchmark");
+            return Ok(());
+        }
+        let count: usize = env::var("DIALOG_BUG_COUNT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300);
+
+        // On-disk is the realistic case: in-memory hides read cost, since
+        // extra reads become near-free RAM hits instead of real I/O.
+        let on_disk = env::var("DIALOG_BUG_DISK").is_ok();
+        let seed_start = Instant::now();
+        // The two arms differ only in storage; each has its own concrete
+        // `BenchEnv` type, so the shared body below is generic over the
+        // provider rather than boxed.
+        let staged = env::var("DIALOG_BUG_STAGED").is_ok();
+        if on_disk {
+            let env = BenchEnv::temp().await?;
+            let entities = if staged {
+                env.seed_bugs_staged(count).await?
+            } else {
+                env.seed_bugs(count).await?
+            };
+            return run_bug_bench_body(env, entities, count, seed_start).await;
+        }
+        let env = BenchEnv::volatile().await?;
+        let entities = if staged {
+            env.seed_bugs_staged(count).await?
+        } else {
+            env.seed_bugs(count).await?
+        };
+        run_bug_bench_body(env, entities, count, seed_start).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::absolute_paths)]
+    async fn run_bug_bench_body<Env>(
+        env: BenchEnv<Env>,
+        entities: Vec<Entity>,
+        count: usize,
+        seed_start: Instant,
+    ) -> Result<()>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<SpaceLoad>
+            + Provider<SpaceCreate>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let seed_elapsed = seed_start.elapsed();
+
+        let bench = |label: &'static str, run: JoinRun, elapsed: std::time::Duration| {
+            eprintln!(
+                "BUGBENCH {label:<22} results={:<5} reads={:<6} unique_reads={:<5} time={elapsed:?}",
+                run.results_len, run.reads, run.unique_reads
+            );
+        };
+
+        // Query: all bugs (the board view — a full six-field concept join).
+        let start = Instant::now();
+        let all = env.query_bugs_by_status(None).await?;
+        bench("all-bugs", all, start.elapsed());
+
+        // Query: bugs with status = done (a common filter).
+        let start = Instant::now();
+        let done = env.query_bugs_by_status(Some("done")).await?;
+        bench("status=done", done, start.elapsed());
+
+        // Query: bugs with status = triage (the "open" board column).
+        let start = Instant::now();
+        let triage = env.query_bugs_by_status(Some("triage")).await?;
+        bench("status=triage", triage, start.elapsed());
+
+        // Transaction: file a new bug (a whole seven-fact record).
+        let start = Instant::now();
+        let filed = Entity::new()?;
+        {
+            let branch = env
+                .repo
+                .branch(&env.branch)
+                .open()
+                .perform(&env.operator)
+                .await?;
+            branch
+                .transaction()
+                .assert(Bug {
+                    this: filed.clone(),
+                    status: bug::Status("triage".to_string()),
+                    priority: bug::Priority("high".to_string()),
+                    assignee: bug::Assignee(String::new()),
+                    title: bug::Title("A newly filed bug".to_string()),
+                    ordering: bug::Ordering(count as f64 * 1000.0),
+                })
+                .commit()
+                .perform(&env.operator)
+                .await?;
+        }
+        eprintln!("BUGBENCH {:<22} time={:?}", "file-bug", start.elapsed());
+
+        // Transaction: close a bug (supersede its status).
+        let start = Instant::now();
+        env.update_bug_status(&entities[3], "done").await?;
+        eprintln!("BUGBENCH {:<22} time={:?}", "close-bug", start.elapsed());
+
+        // Transaction: reassign + set status.
+        let start = Instant::now();
+        env.reassign_bug(&entities[5], "did:key:zNewAssignee", "in-progress")
+            .await?;
+        eprintln!("BUGBENCH {:<22} time={:?}", "reassign-bug", start.elapsed());
+
+        eprintln!("BUGBENCH seeded {count} bugs in {seed_elapsed:?}");
+        Ok(())
+    }
+
     use super::*;
 
     #[cfg(target_arch = "wasm32")]

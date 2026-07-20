@@ -8,6 +8,7 @@ use crate::{
     node::columnar::{ColumnarLeaf, StreamingLeaf, archived_column_slices},
 };
 
+<<<<<<< ours
 fn malformed(message: &str) -> DialogSearchTreeError {
     DialogSearchTreeError::Encoding(message.to_string())
 }
@@ -116,6 +117,28 @@ impl ArchivedIndex {
             }
         };
         Ok(below.saturating_sub(1))
+=======
+impl<Key, Value> ArchivedIndex<Key, Value>
+where
+    Key: self::Key,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Value: self::Value,
+{
+    /// Returns the upper bound key of the last link in this index.
+    ///
+    /// **Stored content only**: a node's buffered ops are deliberately excluded.
+    /// The bound doubles as the node's routing key and as the input to its rank
+    /// (and therefore to the tree's shape), so letting a pending op move it
+    /// would reshape the tree as a side effect of buffering, and would disagree
+    /// with [`Node::upper_bound_ref`], which routes from links alone.
+    ///
+    /// Readers that must not skip buffered writes therefore cannot rely on the
+    /// bound alone; see [`TreeWalker::stream`](crate::TreeWalker::stream), which
+    /// carries an open-ended flag down the rightmost path for exactly this
+    /// reason.
+    pub fn upper_bound(&self) -> Option<&Key::Archived> {
+        self.links.last().map(|link| &link.upper_bound)
+>>>>>>> theirs
     }
 }
 

@@ -47,6 +47,7 @@ const MAX_SKIP_LEVEL: usize = 32;
 /// logarithmically on the commits that follow. A parent whose record has
 /// not been replicated simply terminates the table — skips are an
 /// accelerator, never a correctness requirement.
+#[tracing::instrument(skip_all, name = "extend_skips")]
 pub async fn extend_skips<H: History>(
     history: &H,
     parent: &Version,

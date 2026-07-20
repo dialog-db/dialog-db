@@ -211,6 +211,35 @@ where
     }
 }
 
+/// A pending operation buffered at an index node (the node's novelty).
+///
+/// An insert or update is an [`Assert`](NoveltyOp::Assert) carrying the value;
+/// a delete is a [`Retract`](NoveltyOp::Retract) tombstone. Both flow down the
+/// tree with a flush and are resolved against the leaf segment; within a key the
+/// last op wins.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedNoveltyOp)]
+pub enum NoveltyOp<Value> {
+    /// Assert (insert or update) the value.
+    Assert(Value),
+    /// Retract (delete) the key.
+    Retract,
+}
+
+/// A single buffered op together with the key it applies to.
+///
+/// The key is the raw byte string, matching the front-coded separator table:
+/// under the value-in-key format a key IS its bytes, so a buffered op needs no
+/// key type of its own.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedNoveltyEntry)]
+pub struct NoveltyEntry<Value> {
+    /// The key this op applies to.
+    pub key: Vec<u8>,
+    /// The buffered op.
+    pub op: NoveltyOp<Value>,
+}
+
 /// An index node holding its children as a front-coded separator table.
 ///
 /// Each child contributes its lower-bound separator (see [`Link`]); the table
@@ -235,6 +264,18 @@ pub struct PersistentIndex {
     pub ends: Vec<u32>,
     /// Child node content hashes, in child order.
     pub hashes: Vec<Blake3Hash>,
+    /// Ops pending against the subtree this node roots, sorted by key (the
+    /// node's novelty).
+    ///
+    /// An empty `novelty` makes this node byte-identical to a canonical
+    /// (fully flushed) index, so
+    /// [`canonicalize`](crate::HitchhikerTree::canonicalize) reproduces the
+    /// canonical tree exactly. The buffer is deliberately excluded from the
+    /// separator table: separators are routing keys and rank inputs, so
+    /// letting a pending op move one would reshape the tree as a side effect
+    /// of buffering.
+    #[rkyv(omit_bounds)]
+    pub novelty: Vec<NoveltyEntry<Value>>,
 }
 
 impl PersistentIndex {
@@ -434,5 +475,32 @@ where
         Ok(PersistentNodeBody::Segment(
             PersistentSegment::from_entries(entries, header)?,
         ))
+    }
+}
+
+/// The winning buffered op for `key` in a node's `novelty`, or `None` when the
+/// key is not buffered here.
+///
+/// **The single definition of how a buffered op resolves**, shared by every
+/// reader (point reads on stored and lifted trees, range scans, the
+/// differential) so they cannot drift apart. A buffer is sorted by key and
+/// stable within a key, so the run of equal-key entries is contiguous and its
+/// last element is the most recent op, matching how a flush replays them.
+pub fn resolve_pending<'a, Key, Value>(
+    novelty: &'a [NoveltyEntry<Key, Value>],
+    key: &Key,
+) -> Option<&'a NoveltyOp<Value>>
+where
+    Key: Ord,
+{
+    let at = novelty.partition_point(|entry| entry.key < *key);
+    if at < novelty.len() && novelty[at].key == *key {
+        let mut last = at;
+        while last + 1 < novelty.len() && novelty[last + 1].key == *key {
+            last += 1;
+        }
+        Some(&novelty[last].op)
+    } else {
+        None
     }
 }

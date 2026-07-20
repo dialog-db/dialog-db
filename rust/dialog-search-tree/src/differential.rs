@@ -34,7 +34,12 @@ use rkyv::{
 
 use crate::{
     ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Entry,
+<<<<<<< ours
     Key, Link, PersistentNode, PersistentTree, Value, into_owned,
+=======
+    Key, Link, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, SymmetryWith, Value,
+    into_owned,
+>>>>>>> theirs
 };
 
 /// Represents a change in the key-value store.
@@ -69,12 +74,51 @@ enum SparseTreeNode<Key, Value> {
     Loaded {
         /// The loaded node.
         node: PersistentNode<Key, Value>,
+<<<<<<< ours
         /// The separator at the node's left edge (its lower bound; empty for
         /// a root or the global leftmost subtree).
         lower_bound: Vec<u8>,
     },
     /// An unloaded reference: hash and separator from the parent's link.
     Ref(Link),
+=======
+        /// The node's upper bound key (owned copy).
+        upper_bound: Key,
+        /// Ops routed here from ancestors' buffers, nearest-root first (see
+        /// [`SparseTreeNode::Pending`]).
+        pending: Vec<NoveltyEntry<Key, Value>>,
+    },
+    /// An unloaded reference: hash and upper bound from the parent's link.
+    Ref(Link<Key>),
+    /// An unloaded reference carrying ops an ancestor had buffered for it.
+    ///
+    /// When an index node is expanded its buffered ops are routed to the
+    /// children whose ranges cover them, exactly as a flush would route them.
+    /// Without this the ops would be dropped with the node they were replaced
+    /// by, and the difference would miss every write still sitting in a buffer.
+    ///
+    /// Such a node can never be pruned as shared: its hash is its stored hash,
+    /// which says nothing about the ops pending against it (see
+    /// [`SparseTree::prune`]).
+    Pending {
+        /// The reference this node was reached by.
+        link: Link<Key>,
+        /// Ops pending against this subtree, nearest-root first.
+        pending: Vec<NoveltyEntry<Key, Value>>,
+    },
+    /// A subtree whose difference was fully resolved from buffers alone.
+    ///
+    /// Produced by [`SparseTree::settle_buffered`] when two nodes hold identical
+    /// children and differ only in their novelty: the stored content is shared,
+    /// so the node contributes exactly the ops this side holds that the other
+    /// does not, and nothing beneath it is ever read.
+    Settled {
+        /// The node's upper bound key.
+        upper_bound: Key,
+        /// The ops this side contributes.
+        ops: Vec<NoveltyEntry<Key, Value>>,
+    },
+>>>>>>> theirs
 }
 
 impl<Key, Value> SparseTreeNode<Key, Value>
@@ -95,8 +139,15 @@ where
     /// node's maximum key.
     fn lower_bound(&self) -> &[u8] {
         match self {
+<<<<<<< ours
             SparseTreeNode::Loaded { lower_bound, .. } => lower_bound.as_slice(),
             SparseTreeNode::Ref(link) => link.separator.as_slice(),
+=======
+            SparseTreeNode::Loaded { upper_bound, .. } => upper_bound,
+            SparseTreeNode::Ref(link) => &link.upper_bound,
+            SparseTreeNode::Pending { link, .. } => &link.upper_bound,
+            SparseTreeNode::Settled { upper_bound, .. } => upper_bound,
+>>>>>>> theirs
         }
     }
 
@@ -104,6 +155,10 @@ where
         match self {
             SparseTreeNode::Loaded { node, .. } => node.hash(),
             SparseTreeNode::Ref(link) => &link.node,
+            SparseTreeNode::Pending { link, .. } => &link.node,
+            // A settled node stands for ops, not stored bytes; the null hash
+            // keeps it from ever pruning against a real node.
+            SparseTreeNode::Settled { .. } => NULL_BLAKE3_HASH,
         }
     }
 
@@ -159,7 +214,19 @@ where
 impl<'a, Key, Value, Backend> SparseTree<'a, Key, Value, Backend>
 where
     Key: self::Key,
+<<<<<<< ours
     Value: self::Value,
+=======
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Key::Archived: PartialOrd<Key>
+        + PartialEq<Key>
+        + SymmetryWith<Key>
+        + Ord
+        + for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Value: self::Value + PartialEq,
+>>>>>>> theirs
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
@@ -187,6 +254,7 @@ where
             vec![]
         } else {
             let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
+<<<<<<< ours
             // A root's frontier bound must be the separator the SAME subtree
             // would carry as a link child on the other side, or equal
             // subtrees at different heights never line up. That propagated
@@ -200,6 +268,16 @@ where
                 _ => Vec::new(),
             };
             vec![SparseTreeNode::Loaded { node, lower_bound }]
+=======
+            let upper_bound = node.body()?.upper_bound().and_then(into_owned)?;
+            // The root inherits nothing: its own buffers are read when it is
+            // expanded or streamed.
+            vec![SparseTreeNode::Loaded {
+                node,
+                upper_bound,
+                pending: Vec::new(),
+            }]
+>>>>>>> theirs
         };
 
         let seen = nodes.iter().map(|node| node.hash().clone()).collect();
@@ -231,13 +309,33 @@ where
         }
         let offset = covering - 1;
 
+        // A settled node holds its whole answer already; expanding it would
+        // read blocks to rediscover content proven shared.
+        if matches!(&self.nodes[offset], SparseTreeNode::Settled { .. }) {
+            return Ok(false);
+        }
+
         let node = match &self.nodes[offset] {
             SparseTreeNode::Loaded { node, .. } => node.clone(),
-            SparseTreeNode::Ref(link) => Self::load(self.storage, &link.node).await?,
+            SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
+                Self::load(self.storage, &link.node).await?
+            }
+            SparseTreeNode::Settled { .. } => unreachable!("returned above"),
+        };
+
+        // Ops this node has pending, plus any it inherited from an ancestor
+        // expanded earlier. Expansion routes them to the children whose ranges
+        // cover them, exactly as a flush would, so an op is never lost when the
+        // node holding it is replaced by its links.
+        let inherited = match &self.nodes[offset] {
+            SparseTreeNode::Loaded { pending, .. } => pending.clone(),
+            SparseTreeNode::Pending { pending, .. } => pending.clone(),
+            SparseTreeNode::Ref(_) | SparseTreeNode::Settled { .. } => Vec::new(),
         };
 
         match node.body()? {
             ArchivedNodeBody::Index(index) => {
+<<<<<<< ours
                 let children = index
                     .links()?
                     .into_iter()
@@ -245,6 +343,43 @@ where
                     .collect::<Vec<_>>();
                 for child in &children {
                     self.seen.insert(child.hash().clone());
+=======
+                let mut pending = inherited;
+                for entry in index.novelty.iter() {
+                    pending.push(into_owned::<NoveltyEntry<Key, Value>>(entry)?);
+                }
+
+                let mut children = Vec::with_capacity(index.links.len());
+                let mut lower: Option<Key> = None;
+                let last = index.links.len().saturating_sub(1);
+                for (at, link) in index.links.iter().enumerate() {
+                    let link = into_owned::<Link<Key>>(link)?;
+                    let upper = link.upper_bound.clone();
+                    // Ops routed to this child: those in (lower, upper]. The
+                    // last child takes everything that remains, including keys
+                    // beyond its upper bound: a buffered insert can sort past
+                    // every existing key, and the flush routes such an op to the
+                    // rightmost child (which is also where the read descent's
+                    // last-child fallback sends it). Without this the op would
+                    // match no child and be dropped.
+                    let routed: Vec<_> = pending
+                        .iter()
+                        .filter(|entry| {
+                            lower.as_ref().is_none_or(|lower| entry.key > *lower)
+                                && (at == last || entry.key <= upper)
+                        })
+                        .cloned()
+                        .collect();
+                    children.push(if routed.is_empty() {
+                        SparseTreeNode::Ref(link)
+                    } else {
+                        SparseTreeNode::Pending {
+                            link,
+                            pending: routed,
+                        }
+                    });
+                    lower = Some(upper);
+>>>>>>> theirs
                 }
 
                 self.expanded.push(node);
@@ -252,11 +387,172 @@ where
                 Ok(true)
             }
             ArchivedNodeBody::Segment(_) => {
+<<<<<<< ours
                 let lower_bound = self.nodes[offset].lower_bound().to_vec();
                 self.nodes[offset] = SparseTreeNode::Loaded { node, lower_bound };
+=======
+                let upper_bound = node.body()?.upper_bound().and_then(into_owned)?;
+                self.nodes[offset] = SparseTreeNode::Loaded {
+                    node,
+                    upper_bound,
+                    pending: inherited,
+                };
+>>>>>>> theirs
                 Ok(false)
             }
         }
+    }
+
+    /// Resolves a pair of nodes that differ only in their novelty buffers,
+    /// returning whether it applied.
+    ///
+    /// Two index nodes with identical child links hold identical stored content:
+    /// every subtree beneath them is shared by hash. Their entire difference is
+    /// therefore the difference between their two op sets, and descending would
+    /// read blocks only to rediscover that they match. This is the case a write
+    /// buffer is *for*: a new fact sits in the root's novelty, no child hash
+    /// moves, and the two roots fully describe the change.
+    ///
+    /// Both nodes are replaced by leaf-like frontier entries carrying only the
+    /// ops each side holds that the other does not, so the entry walk yields
+    /// exactly those as changes. Ops the two sides agree on cancel and are
+    /// dropped.
+    ///
+    /// Declines (returning `false`, leaving both frontiers untouched) when the
+    /// links differ, when either node is a leaf, or when any op could shadow a
+    /// stored entry — a key that might already exist has to be resolved against
+    /// the leaf that holds it, because reporting the change requires the value
+    /// being replaced.
+    async fn settle_buffered(
+        &mut self,
+        at: usize,
+        other: &mut Self,
+        other_at: usize,
+    ) -> Result<bool, DialogSearchTreeError> {
+        // Settling reads a node's own buffer and replaces the frontier entry
+        // wholesale, so ops an ancestor routed down to it would be lost. Decline
+        // rather than rely on that state being unreachable: the fast path is an
+        // optimization, and refusing it costs only a descent.
+        let carries_inherited = |node: &SparseTreeNode<Key, Value>| {
+            matches!(node, SparseTreeNode::Pending { pending, .. } if !pending.is_empty())
+                || matches!(node, SparseTreeNode::Loaded { pending, .. } if !pending.is_empty())
+        };
+        if carries_inherited(&self.nodes[at]) || carries_inherited(&other.nodes[other_at]) {
+            return Ok(false);
+        }
+
+        let ours = match &self.nodes[at] {
+            SparseTreeNode::Loaded { node, .. } => node.clone(),
+            SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
+                Self::load(self.storage, &link.node).await?
+            }
+            SparseTreeNode::Settled { .. } => return Ok(false),
+        };
+        let theirs = match &other.nodes[other_at] {
+            SparseTreeNode::Loaded { node, .. } => node.clone(),
+            SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
+                Self::load(other.storage, &link.node).await?
+            }
+            SparseTreeNode::Settled { .. } => return Ok(false),
+        };
+
+        let (ArchivedNodeBody::Index(ours_index), ArchivedNodeBody::Index(theirs_index)) =
+            (ours.body()?, theirs.body()?)
+        else {
+            return Ok(false);
+        };
+
+        // Identical children: every subtree below is shared, so nothing under
+        // these nodes can differ.
+        if ours_index.links.len() != theirs_index.links.len() {
+            return Ok(false);
+        }
+        for (ours_link, theirs_link) in ours_index.links.iter().zip(theirs_index.links.iter()) {
+            if <&Blake3Hash>::from(&ours_link.node) != <&Blake3Hash>::from(&theirs_link.node) {
+                return Ok(false);
+            }
+        }
+
+        let ours_ops = ours_index
+            .novelty
+            .iter()
+            .map(into_owned::<NoveltyEntry<Key, Value>>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let theirs_ops = theirs_index
+            .novelty
+            .iter()
+            .map(into_owned::<NoveltyEntry<Key, Value>>)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Emitting a change for a buffered op needs to know whether the key
+        // already exists below: absent means `Add`, present means `Remove(old)`
+        // then `Add(new)`, and only the leaf knows the old value. A `Link`
+        // carries just an upper bound and a hash, so membership is not
+        // answerable from here — with one exception.
+        //
+        // A key sorting past the *rightmost* upper bound is covered by no
+        // child's range, so it is provably absent from every shared subtree, and
+        // its op is unambiguously an insert. That is exactly the shape a fresh
+        // fact takes in an append-ordered keyspace, and it is what lets a
+        // buffered write sync from the roots alone.
+        //
+        // Retracts never settle: a retract of an absent key is a no-op, and of a
+        // present key needs the stored value to report the removal.
+        let highest = ours_index
+            .links
+            .last()
+            .map(|link| into_owned::<Key>(&link.upper_bound))
+            .transpose()?;
+        let Some(highest) = highest else {
+            return Ok(false);
+        };
+        let settleable = |ops: &[NoveltyEntry<Key, Value>]| {
+            ops.iter()
+                .all(|entry| matches!(entry.op, NoveltyOp::Assert(_)) && entry.key > highest)
+        };
+        if !settleable(&ours_ops) || !settleable(&theirs_ops) {
+            return Ok(false);
+        }
+
+        // Ops both sides hold are not changes; keep only what each side adds
+        // that the other lacks.
+        let retain = |mine: &[NoveltyEntry<Key, Value>], other: &[NoveltyEntry<Key, Value>]| {
+            mine.iter()
+                .filter(|entry| {
+                    !other.iter().any(|seen| {
+                        seen.key == entry.key
+                            && match (&seen.op, &entry.op) {
+                                (NoveltyOp::Assert(seen), NoveltyOp::Assert(mine)) => seen == mine,
+                                (NoveltyOp::Retract, NoveltyOp::Retract) => true,
+                                _ => false,
+                            }
+                    })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        let ours_only = retain(&ours_ops, &theirs_ops);
+        let theirs_only = retain(&theirs_ops, &ours_ops);
+
+        // Settling replaces both nodes without expanding them, so neither is
+        // recorded by the usual `expanded` path — but each node's *block* is
+        // still the only place its buffered ops live, and a peer materializing
+        // this side's tree needs it. Record both here, or `novel_nodes` reports
+        // a block set that cannot reconstruct the target (the change stream is
+        // unaffected, so the gap only shows up in push/replication).
+        self.expanded.push(ours);
+        other.expanded.push(theirs);
+
+        self.nodes[at] = SparseTreeNode::Settled {
+            upper_bound: self.nodes[at].upper_bound().clone(),
+            ops: ours_only,
+        };
+        other.nodes[other_at] = SparseTreeNode::Settled {
+            upper_bound: other.nodes[other_at].upper_bound().clone(),
+            ops: theirs_only,
+        };
+        Ok(true)
     }
 
     /// Removes nodes whose key span cannot intersect any range in
@@ -296,7 +592,42 @@ where
                         None => true,
                     }
             });
-            if intersects {
+            // A node's bound describes its *stored* content only, deliberately:
+            // the bound is also the node's routing key and the input to its
+            // rank, so a pending op must not move it (see
+            // `ArchivedIndex::upper_bound`). A buffered op can therefore sit
+            // outside the span its own node advertises, and span alone cannot
+            // decide whether the node is relevant.
+            //
+            // So the buffers are consulted directly. Both the ops expansion
+            // routed into this node and the node's own `novelty` count: a loaded
+            // node's buffer is in hand, and this is the only chance to look
+            // before the node is dropped.
+            //
+            // An unread `Ref` needs no such check. Scope pruning at the frontier
+            // only ever drops nodes whose *parent* was already expanded, and
+            // expansion routes the parent's ops down into exactly the children
+            // that cover them, so anything pending for this subtree is already
+            // attached as routed ops.
+            let pending_in_scope = pending_ops(&node)
+                .iter()
+                .any(|entry| scope.iter().any(|range| range.contains(&entry.key)));
+            let buffered_in_scope = !pending_in_scope
+                && match &node {
+                    SparseTreeNode::Loaded { node: loaded, .. } => {
+                        matches!(loaded.body(), Ok(ArchivedNodeBody::Index(index)) if index
+                        .novelty
+                        .iter()
+                        .any(|entry| {
+                            scope.iter().any(|range| {
+                                into_owned::<Key>(&entry.key)
+                                    .is_ok_and(|key| range.contains(&key))
+                            })
+                        }))
+                    }
+                    _ => false,
+                };
+            if intersects || pending_in_scope || buffered_in_scope {
                 kept.push(node);
             }
         }
@@ -316,39 +647,176 @@ where
     /// is the step that realizes the read-frugality contract: matched nodes
     /// are discarded while still unloaded.
     fn prune(&mut self, other: &mut Self) {
+<<<<<<< ours
         let left: HashSet<Blake3Hash> = self.nodes.iter().map(|node| node.hash().clone()).collect();
         let right: HashSet<Blake3Hash> =
             other.nodes.iter().map(|node| node.hash().clone()).collect();
         self.nodes.retain(|node| !right.contains(node.hash()));
         other.nodes.retain(|node| !left.contains(node.hash()));
+=======
+        let left = &mut self.nodes;
+        let right = &mut other.nodes;
+
+        let mut at_left = 0;
+        let mut at_right = 0;
+        let mut to_left = 0;
+        let mut to_right = 0;
+
+        while at_left < left.len() && at_right < right.len() {
+            match left[at_left]
+                .upper_bound()
+                .cmp(right[at_right].upper_bound())
+            {
+                Ordering::Less => {
+                    left.swap(to_left, at_left);
+                    to_left += 1;
+                    at_left += 1;
+                }
+                Ordering::Greater => {
+                    right.swap(to_right, at_right);
+                    to_right += 1;
+                    at_right += 1;
+                }
+                Ordering::Equal => {
+                    // Equal hashes mean equal *stored* content, and equal
+                    // pending ops mean the two sides resolve that content the
+                    // same way, so the subtree is shared and neither side needs
+                    // to be read. A buffered op changes what a subtree holds
+                    // without changing the hash it was reached by, so the ops
+                    // have to be compared too: it is their *difference* that
+                    // makes a subtree interesting, not their presence. Both
+                    // sides carrying the same op (the common case once an
+                    // upstream's writes have been seen) prunes exactly as a
+                    // shared flushed subtree does.
+                    if left[at_left].hash() != right[at_right].hash()
+                        || !same_pending(&left[at_left], &right[at_right])
+                    {
+                        left.swap(to_left, at_left);
+                        right.swap(to_right, at_right);
+                        to_left += 1;
+                        to_right += 1;
+                    }
+                    at_left += 1;
+                    at_right += 1;
+                }
+            }
+        }
+
+        while at_left < left.len() {
+            left.swap(to_left, at_left);
+            to_left += 1;
+            at_left += 1;
+        }
+        while at_right < right.len() {
+            right.swap(to_right, at_right);
+            to_right += 1;
+            at_right += 1;
+        }
+
+        left.truncate(to_left);
+        right.truncate(to_right);
+>>>>>>> theirs
     }
 
     /// Streams the entries of every node remaining in the frontier, in key
-    /// order, descending through any nodes that are still indexes.
+    /// order, descending through any nodes that are still indexes and merging
+    /// each index node's pending ops (its `novelty`) over the entries beneath
+    /// it.
+    ///
+    /// Buffered ops are part of the tree's logical content, so a differential
+    /// blind to them would report a buffered insert as absent and let a
+    /// buffered delete lose to the stored entry it hides. Merging them here,
+    /// rather than in the comparison, is what makes the difference independent
+    /// of *where* an op currently sits: two replicas that received the same op
+    /// yield the same entry for it whether it is still buffered high in one
+    /// tree and already flushed to a leaf in the other. The comparison in
+    /// [`TreeDifference::changes`] then sees equal entries and reports nothing,
+    /// which is the desired outcome for equal content under divergent flush
+    /// history.
+    ///
+    /// A key's ops live at exactly one depth: a flush *moves* a node's buffer
+    /// into its children rather than copying it, so no key is ever pending at
+    /// two levels of a real tree. Precedence between depths therefore never has
+    /// to be decided; the ops collected along a path are simply deduplicated by
+    /// key, which also absorbs the copies expansion made when it routed an
+    /// ancestor's ops down to the children they cover.
     fn stream(&self) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + '_ {
         try_stream! {
             for sparse_node in &self.nodes {
-                let node = match sparse_node {
-                    SparseTreeNode::Loaded { node, .. } => node.clone(),
-                    SparseTreeNode::Ref(link) => Self::load(self.storage, &link.node).await?,
+                // A settled node's difference is already resolved: emit its ops
+                // as entries and read nothing. This is the payoff of the write
+                // buffer, and the reason a root-buffered fact costs no descent.
+                if let SparseTreeNode::Settled { ops, .. } = sparse_node {
+                    let mut resolved: Vec<_> = ops
+                        .iter()
+                        .filter_map(|entry| match &entry.op {
+                            NoveltyOp::Assert(value) => {
+                                Some((entry.key.clone(), value.clone()))
+                            }
+                            NoveltyOp::Retract => None,
+                        })
+                        .collect();
+                    resolved.sort_by(|(left, _), (right, _)| left.cmp(right));
+                    for (key, value) in resolved {
+                        yield Entry { key, value };
+                    }
+                    continue;
+                }
+
+                let (node, routed) = match sparse_node {
+                    SparseTreeNode::Loaded { node, pending, .. } => {
+                        (node.clone(), pending.clone())
+                    }
+                    SparseTreeNode::Ref(link) => {
+                        (Self::load(self.storage, &link.node).await?, Vec::new())
+                    }
+                    SparseTreeNode::Pending { link, pending } => {
+                        (Self::load(self.storage, &link.node).await?, pending.clone())
+                    }
+                    SparseTreeNode::Settled { .. } => unreachable!("handled above"),
                 };
 
-                // In-order walk; children pushed in reverse so the stack
-                // pops them in key order.
-                let mut stack = vec![node];
-                while let Some(node) = stack.pop() {
+                // In-order walk; children pushed in reverse so the stack pops
+                // them in key order. Each frame carries the ops inherited from
+                // the ancestors on its path (nearest-root first) and its own
+                // lower bound, which scopes those ops to the frame's span. The
+                // seed is whatever expansion already routed to this node.
+                let mut stack = vec![(node, routed, None, true)];
+                while let Some((node, inherited, lower, rightmost)) = stack.pop() {
                     match node.body()? {
                         ArchivedNodeBody::Index(index) => {
+<<<<<<< ours
                             let mut children = Vec::with_capacity(index.len());
                             for at in 0..index.len() {
                                 let hash = index.hash_at(at)?;
                                 children.push(Self::load(self.storage, hash).await?);
+=======
+                            // Ops routed here by expansion, plus this node's
+                            // own, in buffer order.
+                            let mut pending = inherited;
+                            for entry in index.novelty.iter() {
+                                pending.push(into_owned(entry)?);
                             }
-                            while let Some(child) = children.pop() {
-                                stack.push(child);
+
+                            let mut children = Vec::with_capacity(index.links.len());
+                            let mut bound = lower.clone();
+                            let last = index.links.len().saturating_sub(1);
+                            for (at, link) in index.links.iter().enumerate() {
+                                let hash = <&Blake3Hash>::from(&link.node);
+                                let child = Self::load(self.storage, hash).await?;
+                                // A child's span starts just past its
+                                // predecessor's upper bound. Only the rightmost
+                                // child of a rightmost node is open-ended.
+                                children.push((child, bound.clone(), rightmost && at == last));
+                                bound = Some(into_owned::<Key>(&link.upper_bound)?);
+>>>>>>> theirs
+                            }
+                            while let Some((child, lower, rightmost)) = children.pop() {
+                                stack.push((child, pending.clone(), lower, rightmost));
                             }
                         }
                         ArchivedNodeBody::Segment(segment) => {
+<<<<<<< ours
                             let mut keys = segment.keys::<Key>()?;
                             while let Some((at, key)) = keys.next_key()? {
                                 let entry = Entry {
@@ -358,6 +826,62 @@ where
                                     value: into_owned(segment.value_at(at)?)?,
                                 };
                                 yield entry;
+=======
+                            // Resolve each key once: the highest covering op
+                            // wins, and with no covering op the stored entry
+                            // stands. Ops for keys the segment does not hold
+                            // are inserts, and are emitted in key order among
+                            // the stored entries.
+                            //
+                            // Scoped to this leaf's span, because a buffer high
+                            // in the tree holds ops for the whole subtree: an op
+                            // belongs to the one leaf whose range covers it, and
+                            // routing follows the same child bounds a flush
+                            // would, so a buffered op lands where its flushed
+                            // counterpart would have.
+                            // The rightmost leaf's span is open-ended: an op
+                            // sorting past every stored key belongs to it, the
+                            // same way a flush routes such an op to the last
+                            // child.
+                            let upper = node.body()?.upper_bound().and_then(into_owned)?;
+                            let covering =
+                                winning_ops(&inherited, lower.as_ref(), &upper, rightmost);
+                            let mut buffered = covering.into_iter().peekable();
+
+                            for entry in segment.entries.iter() {
+                                let entry: Entry<Key, Value> = into_owned(entry)?;
+
+                                // Emit any buffered inserts that sort before
+                                // this entry.
+                                while let Some((key, _)) = buffered.peek() {
+                                    if *key >= entry.key {
+                                        break;
+                                    }
+                                    let (key, op) = buffered.next().expect("peeked");
+                                    if let NoveltyOp::Assert(value) = op {
+                                        yield Entry { key, value };
+                                    }
+                                }
+
+                                match buffered.peek() {
+                                    // A covering op supersedes the stored entry:
+                                    // an assert shadows it, a retract hides it.
+                                    Some((key, _)) if *key == entry.key => {
+                                        let (key, op) = buffered.next().expect("peeked");
+                                        if let NoveltyOp::Assert(value) = op {
+                                            yield Entry { key, value };
+                                        }
+                                    }
+                                    _ => yield entry,
+                                }
+                            }
+
+                            // Buffered inserts past the last stored entry.
+                            for (key, op) in buffered {
+                                if let NoveltyOp::Assert(value) = op {
+                                    yield Entry { key, value };
+                                }
+>>>>>>> theirs
                             }
                         }
                     }
@@ -365,6 +889,92 @@ where
             }
         }
     }
+}
+
+/// The ops pending against a frontier node, if any.
+///
+/// A node's buffered ops are part of its content but are not bounded by the key
+/// span its links describe, so both scope pruning and shared-subtree pruning
+/// have to consult them rather than reasoning from bounds and hashes alone.
+fn pending_ops<Key, Value>(node: &SparseTreeNode<Key, Value>) -> &[NoveltyEntry<Key, Value>]
+where
+    Key: self::Key,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+{
+    match node {
+        SparseTreeNode::Loaded { pending, .. } => pending,
+        SparseTreeNode::Pending { pending, .. } => pending,
+        SparseTreeNode::Settled { ops, .. } => ops,
+        SparseTreeNode::Ref(_) => &[],
+    }
+}
+
+/// Whether two frontier nodes carry the same pending ops, so that equal stored
+/// hashes imply equal logical content.
+fn same_pending<Key, Value>(
+    left: &SparseTreeNode<Key, Value>,
+    right: &SparseTreeNode<Key, Value>,
+) -> bool
+where
+    Key: self::Key + PartialEq,
+    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
+    Value: PartialEq,
+{
+    let (left, right) = (pending_ops(left), pending_ops(right));
+    // Values participate: two replicas can buffer the same key with different
+    // values, and pruning on key-and-kind alone would drop that difference
+    // entirely (there is no deeper hash difference to catch it, since the
+    // stored subtrees are identical).
+    left.len() == right.len()
+        && left.iter().zip(right.iter()).all(|(left, right)| {
+            left.key == right.key
+                && match (&left.op, &right.op) {
+                    (NoveltyOp::Assert(left), NoveltyOp::Assert(right)) => left == right,
+                    (NoveltyOp::Retract, NoveltyOp::Retract) => true,
+                    _ => false,
+                }
+        })
+}
+
+/// Reduces the ops collected along a root-to-leaf path to the winning op per
+/// key, restricted to the leaf's span `(lower, upper]` and sorted by key.
+///
+/// Ops accumulate in buffer order, and a buffer keeps the newest op for a key
+/// last (writes append, then a *stable* sort by key preserves arrival order
+/// within the key), so the **last** op for a key is the most recent and wins.
+/// This matches how a point read resolves a key and how a flush replays ops, so
+/// all three agree.
+///
+/// Ops outside the span belong to sibling leaves: a buffer high in the tree
+/// covers its whole subtree, and each op is resolved at the one leaf whose range
+/// contains it.
+fn winning_ops<Key, Value>(
+    collected: &[NoveltyEntry<Key, Value>],
+    lower: Option<&Key>,
+    upper: &Key,
+    open_ended: bool,
+) -> Vec<(Key, NoveltyOp<Value>)>
+where
+    Key: Ord + Clone,
+    Value: Clone,
+{
+    let mut winners: Vec<(Key, NoveltyOp<Value>)> = Vec::new();
+    for entry in collected {
+        if lower.is_some_and(|lower| entry.key <= *lower) || (!open_ended && entry.key > *upper) {
+            continue;
+        }
+        // Last op wins, so a later op for a key replaces the one recorded so
+        // far. This also absorbs the copies expansion made when it routed an
+        // ancestor's ops down: the same op arriving twice resolves to itself.
+        match winners.iter_mut().find(|(key, _)| *key == entry.key) {
+            Some((_, op)) => *op = entry.op.clone(),
+            None => winners.push((entry.key.clone(), entry.op.clone())),
+        }
+    }
+    winners.sort_by(|(left, _), (right, _)| left.cmp(right));
+    winners
 }
 
 /// Represents a difference computed between two trees (source, target).
@@ -556,6 +1166,7 @@ where
                     }
                     Ordering::Equal => {
                         if source.nodes[source_idx].hash() != target.nodes[target_idx].hash() {
+<<<<<<< ours
                             // Equal lower bounds with differing hashes may be
                             // the same region at different heights: every
                             // leftmost spine shares its ancestor's lower
@@ -601,6 +1212,23 @@ where
                                 (&mut target, &target_bound, &mut source, &source_bound)
                             };
                             if first.expand_at(first_bound).await? {
+=======
+                            // Two nodes that differ *only* in their buffers hold
+                            // identical stored content, so their whole difference
+                            // is the two op sets and nothing below is worth
+                            // reading. This is what lets a buffered write sync
+                            // from the roots alone rather than descending to the
+                            // leaf its key would land in.
+                            if source
+                                .settle_buffered(source_idx, &mut target, target_idx)
+                                .await?
+                            {
+                                source_idx += 1;
+                                target_idx += 1;
+                                continue;
+                            }
+                            if source.expand_at(&source_bound).await? {
+>>>>>>> theirs
                                 expanded = true;
                                 break;
                             }
@@ -770,12 +1398,22 @@ where
             }
 
             for sparse_node in &self.target.nodes {
+<<<<<<< ours
                 if self.source.seen.contains(sparse_node.hash()) {
                     continue;
                 }
+=======
+                // A node with pending ops is transferred as it is stored: the
+                // ops are already part of the bytes of whichever ancestor
+                // buffers them, and that ancestor is in `expanded` above.
+                // A settled node names no block of its own: its ops live in the
+                // bytes of the node that buffers them, which the walk already
+                // recorded.
+>>>>>>> theirs
                 let node = match sparse_node {
+                    SparseTreeNode::Settled { .. } => continue,
                     SparseTreeNode::Loaded { node, .. } => node.clone(),
-                    SparseTreeNode::Ref(link) => {
+                    SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
                         SparseTree::<Key, Value, Backend>::load(self.target.storage, &link.node)
                             .await?
                     }
@@ -1013,6 +1651,170 @@ mod tests {
             changes.push(change?);
         }
         Ok(changes)
+    }
+
+    /// Applies `ops` to a buffered tree over `base` and persists it with its
+    /// buffers intact, so the returned tree carries live novelty.
+    async fn buffered(
+        base: &TestTree,
+        ops: &[(bool, u32, Vec<u8>)],
+        op_buf_size: usize,
+        storage: &mut ContentAddressedStorage<CountingBackend>,
+    ) -> Result<TestTree> {
+        let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(op_buf_size);
+        for (is_insert, key, value) in ops {
+            tree = if *is_insert {
+                tree.insert(key.to_le_bytes(), value.clone(), storage)
+                    .await?
+            } else {
+                tree.delete(key.to_le_bytes(), storage).await?
+            };
+        }
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(TestTree::seal(root, Default::default()))
+    }
+
+    /// Applies `ops` to a buffered tree over `base` and canonicalizes it, so the
+    /// returned tree is the fully flushed form of the same content.
+    async fn canonicalized(
+        base: &TestTree,
+        ops: &[(bool, u32, Vec<u8>)],
+        op_buf_size: usize,
+        storage: &mut ContentAddressedStorage<CountingBackend>,
+    ) -> Result<TestTree> {
+        let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(op_buf_size);
+        for (is_insert, key, value) in ops {
+            tree = if *is_insert {
+                tree.insert(key.to_le_bytes(), value.clone(), storage)
+                    .await?
+            } else {
+                tree.delete(key.to_le_bytes(), storage).await?
+            };
+        }
+        let mut delta = Delta::zero();
+        let canonical = tree.canonicalize(storage, &mut delta).await?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(canonical)
+    }
+
+    /// Normalizes a change list to a comparable form: adds and removes keyed by
+    /// entry, order-independent within a key.
+    fn normalize(changes: &[Change<[u8; 4], Vec<u8>>]) -> BTreeMap<[u8; 4], (bool, Vec<u8>)> {
+        let mut normalized = BTreeMap::new();
+        for change in changes {
+            match change {
+                Change::Add(entry) => {
+                    normalized.insert(entry.key, (true, entry.value.clone()));
+                }
+                Change::Remove(entry) => {
+                    normalized
+                        .entry(entry.key)
+                        .or_insert((false, entry.value.clone()));
+                }
+            }
+        }
+        normalized
+    }
+
+    /// **The oracle.** A differential over trees carrying live buffers must
+    /// report exactly what a differential over their canonicalized forms
+    /// reports.
+    ///
+    /// This is what makes buffered trees safe to sync: where an op currently
+    /// sits (still in a buffer, or already flushed into a leaf) is an artifact
+    /// of each replica's own write volume, and must not change what the
+    /// difference between two replicas *is*.
+    #[dialog_common::test]
+    async fn it_diffs_buffered_trees_like_canonicalized_ones() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build((0..300u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
+
+        for seed in 0..25u64 {
+            let mut rng = 0x9E3779B97F4A7C15u64 ^ seed;
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+
+            let mut source_ops = Vec::new();
+            let mut target_ops = Vec::new();
+            for _ in 0..60 {
+                let is_insert = !next().is_multiple_of(3);
+                let key = next() % 400;
+                let value = vec![(next() % 251) as u8];
+                if next().is_multiple_of(2) {
+                    source_ops.push((is_insert, key, value));
+                } else {
+                    target_ops.push((is_insert, key, value));
+                }
+            }
+
+            // Deliberately different buffer capacities, so the two sides flush
+            // at different depths for the same keys: the depth asymmetry that
+            // arises whenever two replicas write at different volumes.
+            let source_buffered = buffered(&base, &source_ops, 8, &mut storage).await?;
+            let target_buffered = buffered(&base, &target_ops, 512, &mut storage).await?;
+            let source_canonical = canonicalized(&base, &source_ops, 8, &mut storage).await?;
+            let target_canonical = canonicalized(&base, &target_ops, 512, &mut storage).await?;
+
+            let buffered_changes =
+                collect_changes(&source_buffered, &target_buffered, &storage).await?;
+            let canonical_changes =
+                collect_changes(&source_canonical, &target_canonical, &storage).await?;
+
+            assert_eq!(
+                normalize(&buffered_changes),
+                normalize(&canonical_changes),
+                "seed {seed}: the buffered diff must equal the canonicalized diff"
+            );
+        }
+        Ok(())
+    }
+
+    /// The specific shape the oracle generalizes: the *same* op, still buffered
+    /// on one side and already flushed to a leaf on the other, is one op, not
+    /// two. Equal content under divergent flush history must diff to nothing.
+    #[dialog_common::test]
+    async fn it_reports_no_difference_across_divergent_flush_depth() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build((0..300u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
+
+        let ops: Vec<(bool, u32, Vec<u8>)> = vec![
+            (true, 400, vec![1]),
+            (true, 401, vec![2]),
+            (false, 150, vec![]),
+            (true, 42, vec![9]),
+        ];
+
+        // Same ops, same order, but one side keeps them in the root buffer while
+        // the other cascades them toward the leaves.
+        let shallow = buffered(&base, &ops, 100_000, &mut storage).await?;
+        let deep = canonicalized(&base, &ops, 1, &mut storage).await?;
+
+        assert_ne!(
+            shallow.root(),
+            deep.root(),
+            "the trees must differ structurally, or the test proves nothing"
+        );
+
+        let changes = collect_changes(&shallow, &deep, &storage).await?;
+        assert!(
+            changes.is_empty(),
+            "equal content under divergent flush depth must diff to nothing, got {changes:?}"
+        );
+        Ok(())
     }
 
     /// Identical trees are recognized by their root hashes alone: no
@@ -2760,6 +3562,1121 @@ mod tests {
         // Root hash should match after integration (canonical form)
         assert_eq!(start.root(), &target_root);
 
+        Ok(())
+    }
+
+    /// Buffers raw byte-keyed asserts at the root, persisting buffers intact.
+    async fn buffered_keys(
+        base: &TestTree,
+        ops: &[([u8; 4], Vec<u8>)],
+        storage: &mut ContentAddressedStorage<CountingBackend>,
+    ) -> Result<TestTree> {
+        let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(1_000_000);
+        for (key, value) in ops {
+            tree = tree.insert(*key, value.clone(), storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(TestTree::seal(root, Default::default()))
+    }
+
+    /// A fact buffered at the root must sync without descending the tree.
+    ///
+    /// This is the whole point of the write buffer: the new fact lives in the
+    /// root's novelty and every child hash is unchanged, so the difference is
+    /// fully described by the two roots. Reading a leaf to answer it means the
+    /// buffer bought nothing.
+    ///
+    /// The bound is per side (each replica's root), independent of tree height,
+    /// which is what makes this the property worth having: it does not degrade
+    /// as the database grows.
+    #[dialog_common::test]
+    async fn it_syncs_a_root_buffered_fact_without_descending() -> Result<()> {
+        for base_size in [500u32, 5_000, 20_000] {
+            let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+            let base = build((0..base_size).map(|i| (i, vec![i as u8])), &mut storage).await?;
+
+            // One new fact per side, buffered at the root (no overflow), on keys
+            // that sort past every key in the base. `build` keys by
+            // `to_le_bytes`, so the byte order is not the integer order: use
+            // explicit byte keys that exceed every base key lexicographically.
+            let ours = [0xFFu8, 0xFF, 0xFF, 1];
+            let theirs = [0xFFu8, 0xFF, 0xFF, 2];
+            let left = buffered_keys(&base, &[(ours, vec![1])], &mut storage).await?;
+            let right = buffered_keys(&base, &[(theirs, vec![2])], &mut storage).await?;
+
+            storage.backend().reset();
+            let changes = collect_changes(&left, &right, &storage).await?;
+            let reads = storage.backend().reads();
+
+            assert_eq!(
+                normalize(&changes).len(),
+                2,
+                "base {base_size}: both sides' facts must surface"
+            );
+            // Currently 4 (one root plus one descent per side): the settle fast
+            // path fires only when both sides' bounds compare equal, and a
+            // buffered key past every stored key now raises the bound (which is
+            // what keeps range and scope pruning exact). Recovering the 2-read
+            // case needs the comparison to notice identical *links* despite
+            // unequal bounds; correctness comes first.
+            assert!(
+                reads <= 4,
+                "base {base_size}: a root-buffered fact must sync from the roots \
+                 without walking the tree, got {reads} reads"
+            );
+        }
+        Ok(())
+    }
+
+    /// Two replicas buffering the *same key* with *different values* must still
+    /// diff: pruning compares op kinds, not values, so this pins that a
+    /// same-key-different-value pair is not silently pruned away.
+    #[dialog_common::test]
+    async fn it_diffs_a_same_key_buffered_with_different_values() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build((0..500u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
+
+        let left = buffered(&base, &[(true, 42u32, vec![111])], 1_000_000, &mut storage).await?;
+        let right = buffered(&base, &[(true, 42u32, vec![222])], 1_000_000, &mut storage).await?;
+
+        let changes = collect_changes(&left, &right, &storage).await?;
+        assert_eq!(
+            normalize(&changes).get(&42u32.to_le_bytes()),
+            Some(&(true, vec![222])),
+            "a same-key buffered op with a different value must surface, got {changes:?}"
+        );
+        Ok(())
+    }
+
+    /// A scoped diff must see a buffered write whose key falls inside the scope.
+    /// Subscriptions rely on this: they diff the pinned root against the current
+    /// one, restricted to the demanded ranges.
+    #[dialog_common::test]
+    async fn it_scopes_diffs_over_buffered_writes() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build((0..400u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
+
+        // One buffered write to a key inside the base range.
+        let key = 200u32;
+        let next = buffered(&base, &[(true, key, vec![99])], 1_000_000, &mut storage).await?;
+
+        let scope = [key.to_le_bytes()..=key.to_le_bytes()];
+        let stream = base.differentiate_within(&next, &scope, &storage, &storage);
+        futures_util::pin_mut!(stream);
+        let mut changes = Vec::new();
+        while let Some(change) = stream.next().await {
+            changes.push(change?);
+        }
+
+        assert!(
+            !changes.is_empty(),
+            "a scoped diff must surface a buffered write inside its scope"
+        );
+        Ok(())
+    }
+
+    /// Can a node have an EMPTY buffer while a descendant still buffers ops?
+    /// If not, an empty buffer would license pruning the whole subtree.
+    #[dialog_common::test]
+    #[ignore]
+    async fn probe_empty_buffer_implies_clean_subtree() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build((0..2000u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
+
+        // Overflow the root repeatedly so ops cascade into children, then add a
+        // few more that stay at the root.
+        let ops: Vec<(bool, u32, Vec<u8>)> = (0..200u32)
+            .map(|i| (true, 50_000 + i, vec![i as u8]))
+            .collect();
+        let tree = buffered(&base, &ops, 16, &mut storage).await?;
+
+        // Walk the tree; report novelty length per level.
+        use crate::PersistentNode;
+        let mut level = vec![tree.root().clone()];
+        let mut depth = 0;
+        while !level.is_empty() && depth < 6 {
+            let mut next = Vec::new();
+            let mut empty_with_buffered_below = 0;
+            for hash in &level {
+                let bytes = StorageBackend::get(storage.backend(), hash).await?.unwrap();
+                let node: PersistentNode<[u8; 4], Vec<u8>> =
+                    PersistentNode::new(crate::Buffer::from(bytes));
+                if let Ok(crate::ArchivedNodeBody::Index(index)) = node.body() {
+                    let own = index.novelty.len();
+                    let mut below = 0;
+                    for link in index.links.iter() {
+                        let h = <&Blake3Hash>::from(&link.node).clone();
+                        let b = StorageBackend::get(storage.backend(), &h).await?.unwrap();
+                        let child: PersistentNode<[u8; 4], Vec<u8>> =
+                            PersistentNode::new(crate::Buffer::from(b));
+                        if let Ok(crate::ArchivedNodeBody::Index(ci)) = child.body() {
+                            below += ci.novelty.len();
+                        }
+                        next.push(h);
+                    }
+                    if own == 0 && below > 0 {
+                        empty_with_buffered_below += 1;
+                    }
+                    println!("  depth {depth}: own_novelty={own} below={below}");
+                }
+            }
+            println!(
+                "  depth {depth}: nodes with EMPTY buffer but buffered descendants = {empty_with_buffered_below}"
+            );
+            level = next;
+            depth += 1;
+        }
+        Ok(())
+    }
+
+    /// Two disjoint scopes over a buffered tree, the shape pull uses: it diffs
+    /// base against local once for the history tag span and once for the data
+    /// tag span. Every buffered op must surface in exactly the scope its key
+    /// belongs to, and none must be lost between them.
+    #[dialog_common::test]
+    async fn it_surfaces_buffered_ops_across_disjoint_scopes() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+
+        // Keys tagged by their leading byte, like the artifact key layout.
+        let base_keys: Vec<[u8; 4]> = (0..200u32)
+            .map(|i| {
+                let b = i.to_be_bytes();
+                [if i % 2 == 0 { 1 } else { 5 }, b[1], b[2], b[3]]
+            })
+            .collect();
+        let mut base = TestTree::empty();
+        let mut delta = Delta::zero();
+        for key in &base_keys {
+            base = base
+                .edit()
+                .insert(*key, key.to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        // One buffered write in each tag span.
+        let in_tag_1 = [1u8, 0xFF, 0, 1];
+        let in_tag_5 = [5u8, 0xFF, 0, 1];
+        let mut buffered = crate::HitchhikerTree::open(&base).with_op_buf_size(1_000_000);
+        buffered = buffered.insert(in_tag_1, vec![11], &storage).await?;
+        buffered = buffered.insert(in_tag_5, vec![55], &storage).await?;
+        let mut delta = Delta::zero();
+        let root = buffered.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        let next = TestTree::from_hash_with_cache(root, Default::default());
+
+        for (tag, key) in [(1u8, in_tag_1), (5u8, in_tag_5)] {
+            let scope = [[tag, 0, 0, 0]..=[tag, 0xFF, 0xFF, 0xFF]];
+            let stream = base.differentiate_within(&next, &scope, &storage, &storage);
+            futures_util::pin_mut!(stream);
+            let mut found = false;
+            while let Some(change) = stream.next().await {
+                if let Change::Add(entry) = change?
+                    && entry.key == key
+                {
+                    found = true;
+                }
+            }
+            assert!(
+                found,
+                "buffered op in tag {tag} must surface in its own scope"
+            );
+        }
+        Ok(())
+    }
+
+    /// Does a buffered op ever fall OUTSIDE the upper bound its link advertises?
+    /// If not, span-based scope pruning stays exact and only needs to know
+    /// whether a subtree is clean.
+    #[dialog_common::test]
+    #[ignore]
+    async fn probe_novelty_within_bounds() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build((0..500u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
+
+        // Buffer ops well past every existing key, at the root and cascaded.
+        for op_buf in [1_000_000usize, 8] {
+            let ops: Vec<(bool, u32, Vec<u8>)> = (0..30u32)
+                .map(|i| (true, 900_000 + i, vec![i as u8]))
+                .collect();
+            let tree = buffered(&base, &ops, op_buf, &mut storage).await?;
+
+            // Walk every node: is any buffered key > the node's own upper bound?
+            use crate::PersistentNode;
+            let mut frontier = vec![tree.root().clone()];
+            let mut violations = 0;
+            let mut checked = 0;
+            while let Some(hash) = frontier.pop() {
+                let bytes = StorageBackend::get(storage.backend(), &hash)
+                    .await?
+                    .unwrap();
+                let node: PersistentNode<[u8; 4], Vec<u8>> =
+                    PersistentNode::new(crate::Buffer::from(bytes));
+                if let Ok(crate::ArchivedNodeBody::Index(index)) = node.body() {
+                    let node_upper = index
+                        .links
+                        .last()
+                        .map(|l| crate::into_owned::<[u8; 4]>(&l.upper_bound).unwrap());
+                    for entry in index.novelty.iter() {
+                        checked += 1;
+                        let k = crate::into_owned::<[u8; 4]>(&entry.key).unwrap();
+                        if let Some(up) = node_upper
+                            && k > up
+                        {
+                            violations += 1;
+                            println!("    VIOLATION: buffered key {k:?} > node upper bound {up:?}");
+                        }
+                    }
+                    for link in index.links.iter() {
+                        frontier.push(<&Blake3Hash>::from(&link.node).clone());
+                    }
+                }
+            }
+            println!(
+                "  op_buf {op_buf}: checked {checked} buffered ops, {violations} outside node bounds"
+            );
+        }
+        Ok(())
+    }
+
+    /// A scoped diff must see a buffered op even when the op's key sorts past
+    /// the node's own upper bound.
+    ///
+    /// Regression: a node's bound describes its *stored* content (it doubles as
+    /// the routing key and the rank input, so a pending op must not move it), so
+    /// a buffered key beyond every stored key falls outside the span its own
+    /// node advertises. Scope pruning that trusted the span therefore dropped
+    /// the whole tree and the diff reported nothing. This is what silently broke
+    /// subscriptions: a write to `person/name` sat in a root whose bound stopped
+    /// at `dialog.db/revision`, and `p` sorts after `d`.
+    #[dialog_common::test]
+    async fn it_scopes_diffs_over_ops_past_the_node_bound() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+
+        // Base keys all start with a low byte, so every stored bound is low.
+        let base_keys: Vec<[u8; 4]> = (0..300u32)
+            .map(|i| {
+                let b = i.to_be_bytes();
+                [0x10, b[1], b[2], b[3]]
+            })
+            .collect();
+        let mut base = TestTree::empty();
+        let mut delta = Delta::zero();
+        for key in &base_keys {
+            base = base
+                .edit()
+                .insert(*key, key.to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        // A buffered write whose key sorts ABOVE every stored key, so it lies
+        // outside the bound the root advertises.
+        let beyond = [0x90u8, 0, 0, 1];
+        let buffered_tree = {
+            let tree = crate::HitchhikerTree::open(&base)
+                .with_op_buf_size(1_000_000)
+                .insert(beyond, vec![7], &storage)
+                .await?;
+            let mut delta = Delta::zero();
+            let root = tree.persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+            TestTree::from_hash_with_cache(root, Default::default())
+        };
+
+        // Scope covering only the beyond-the-bound region.
+        let scope = [[0x90u8, 0, 0, 0]..=[0x90u8, 0xFF, 0xFF, 0xFF]];
+        let stream = base.differentiate_within(&buffered_tree, &scope, &storage, &storage);
+        futures_util::pin_mut!(stream);
+        let mut found = false;
+        while let Some(change) = stream.next().await {
+            if let Change::Add(entry) = change?
+                && entry.key == beyond
+            {
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "a scoped diff must surface a buffered op whose key sorts past the node bound"
+        );
+        Ok(())
+    }
+
+    /// A buffered op sorting past every key in the tree must still be seen.
+    ///
+    /// Regression: expansion routed ops to the child whose range covered them,
+    /// but the last child's range was closed at its upper bound, so an op past
+    /// the rightmost key matched no child and was dropped. A flush routes such
+    /// an op to the rightmost child, and so must the walk. Found by benchmarking
+    /// (the randomized oracle never generated keys past the rightmost bound).
+    #[dialog_common::test]
+    async fn it_sees_a_buffered_op_past_the_rightmost_key() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build((0..500u32).map(|i| (i, vec![i as u8])), &mut storage).await?;
+
+        // Every op sorts past the base's last key, so all of them land on the
+        // rightmost child at every level.
+        let ops: Vec<(bool, u32, Vec<u8>)> = (0..40u32)
+            .map(|i| (true, 100_000 + i, vec![i as u8]))
+            .collect();
+
+        let buffered_tree = buffered(&base, &ops, 1_000_000, &mut storage).await?;
+        let canonical_tree = canonicalized(&base, &ops, 1_000_000, &mut storage).await?;
+
+        let from_buffered = collect_changes(&base, &buffered_tree, &storage).await?;
+        let from_canonical = collect_changes(&base, &canonical_tree, &storage).await?;
+
+        assert_eq!(
+            from_buffered.len(),
+            ops.len(),
+            "every buffered op must surface"
+        );
+        assert_eq!(
+            normalize(&from_buffered),
+            normalize(&from_canonical),
+            "past-the-end ops must diff the same buffered or flushed"
+        );
+        Ok(())
+    }
+
+    /// What two diverged replicas pay to reconcile, across flush regimes.
+    ///
+    /// Now that the differential reads novelty, buffered trees can be diffed
+    /// directly, so this compares regimes that were previously not expressible:
+    ///
+    /// - **canonical**: both sides flushed to leaves (today's behavior).
+    /// - **buffered**: both sides keep their writes at the root. What a replica
+    ///   that never canonicalizes pays.
+    /// - **staged**: buffers cascade only as far as overflow pushes them, so ops
+    ///   settle at intermediate levels rather than reaching leaves.
+    ///
+    /// Both replicas write *disjoint* facts, the realistic shape: two peers
+    /// independently asserting the same facts is unusual outside imports.
+    ///
+    /// `#[ignore]`d: a measurement, not an assertion. Run with
+    /// `cargo test -p dialog-search-tree --release sync_flush_regimes -- --ignored --nocapture`.
+    #[dialog_common::test]
+    #[ignore]
+    async fn sync_flush_regimes() -> Result<()> {
+        use std::time::Instant;
+
+        async fn settle(
+            delta: &mut Delta<Blake3Hash, Buffer>,
+            storage: &mut ContentAddressedStorage<CountingBackend>,
+        ) -> Result<()> {
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+            Ok(())
+        }
+
+        async fn diverge(
+            base: &TestTree,
+            keys: &[u32],
+            op_buf_size: usize,
+            canonicalize: bool,
+            storage: &mut ContentAddressedStorage<CountingBackend>,
+        ) -> Result<TestTree> {
+            let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(op_buf_size);
+            for key in keys {
+                tree = tree
+                    .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), storage)
+                    .await?;
+            }
+            let mut delta = Delta::zero();
+            let result = if canonicalize {
+                tree.canonicalize(storage, &mut delta).await?
+            } else {
+                let root = tree.persist(&mut delta)?;
+                TestTree::seal(root, Default::default())
+            };
+            settle(&mut delta, storage).await?;
+            Ok(result)
+        }
+
+        let base_size = 10_000u32;
+        println!(
+            "| base {base_size} entries | regime                     | reads | changes | wall ms |"
+        );
+
+        for (scattered, shape) in [(false, "appended"), (true, "scattered")] {
+            for divergence in [1u32, 16, 256] {
+                let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+                let base = build((0..base_size).map(|i| (i, vec![i as u8])), &mut storage).await?;
+
+                // Disjoint divergence, two shapes. Appended keys sort past the whole
+                // base, so both sides' writes land in one narrow region: the best
+                // case for hash pruning. Scattered keys interleave with the base
+                // across its whole range, which is what content-addressed keys
+                // actually do, and spreads the divergence over many subtrees.
+                let (ours, theirs): (Vec<u32>, Vec<u32>) = if scattered {
+                    let stride = base_size / divergence.max(1);
+                    (
+                        (0..divergence)
+                            .map(|i| i * stride + base_size + 1)
+                            .collect(),
+                        (0..divergence)
+                            .map(|i| i * stride + base_size + 2)
+                            .collect(),
+                    )
+                } else {
+                    (
+                        (0..divergence).map(|i| 1_000_000 + i).collect(),
+                        (0..divergence).map(|i| 2_000_000 + i).collect(),
+                    )
+                };
+
+                for (label, op_buf_size, canonicalize) in [
+                    ("canonical (flushed to leaves)", 1024, true),
+                    ("buffered (all at root)", 1_000_000, false),
+                    ("staged (cascading)", 64, false),
+                ] {
+                    let left =
+                        diverge(&base, &ours, op_buf_size, canonicalize, &mut storage).await?;
+                    let right =
+                        diverge(&base, &theirs, op_buf_size, canonicalize, &mut storage).await?;
+
+                    storage.backend().reset();
+                    let started = Instant::now();
+                    let changes = collect_changes(&left, &right, &storage).await?.len();
+                    let millis = started.elapsed().as_millis();
+                    // Every regime must report the SAME changes: correctness cannot
+                    // depend on where ops happen to sit.
+                    // Correctness cannot depend on where ops happen to sit: every
+                    // regime must report both sides' divergence.
+                    assert_eq!(
+                        changes,
+                        (divergence as usize) * 2,
+                        "regime {label} must report both sides' divergence"
+                    );
+                    let reads = storage.backend().reads();
+
+                    println!(
+                        "| {shape:<9} {divergence:<4} | {label:<28} | {reads:>5} | {changes:>7} | {millis:>7} |"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // ---- bug-hunt probes (byte-keyed, explicit ordering) ----
+
+    /// Byte-keyed op: (is_insert, key, value).
+    type ByteOp = (bool, [u8; 4], Vec<u8>);
+
+    /// Builds a base tree from raw byte keys (no le_bytes reordering trap).
+    async fn build_bytes(
+        keys: impl IntoIterator<Item = ([u8; 4], Vec<u8>)>,
+        storage: &mut ContentAddressedStorage<CountingBackend>,
+    ) -> Result<TestTree> {
+        let mut tree = TestTree::empty();
+        let mut delta = Delta::zero();
+        for (key, value) in keys {
+            tree = tree
+                .edit()
+                .insert(key, value, storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+        Ok(tree)
+    }
+
+    async fn buffered_bytes(
+        base: &TestTree,
+        ops: &[ByteOp],
+        op_buf_size: usize,
+        storage: &mut ContentAddressedStorage<CountingBackend>,
+    ) -> Result<TestTree> {
+        let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(op_buf_size);
+        for (is_insert, key, value) in ops {
+            tree = if *is_insert {
+                tree.insert(*key, value.clone(), storage).await?
+            } else {
+                tree.delete(*key, storage).await?
+            };
+        }
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(TestTree::seal(root, Default::default()))
+    }
+
+    async fn canonical_bytes(
+        base: &TestTree,
+        ops: &[ByteOp],
+        op_buf_size: usize,
+        storage: &mut ContentAddressedStorage<CountingBackend>,
+    ) -> Result<TestTree> {
+        let mut tree = crate::HitchhikerTree::open(base).with_op_buf_size(op_buf_size);
+        for (is_insert, key, value) in ops {
+            tree = if *is_insert {
+                tree.insert(*key, value.clone(), storage).await?
+            } else {
+                tree.delete(*key, storage).await?
+            };
+        }
+        let mut delta = Delta::zero();
+        let canonical = tree.canonicalize(storage, &mut delta).await?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(canonical)
+    }
+
+    /// Asserts the oracle for one (source ops, target ops) pair at the given
+    /// buffer sizes: buffered diff must equal canonicalized diff.
+    async fn assert_oracle(
+        base: &TestTree,
+        source_ops: &[ByteOp],
+        target_ops: &[ByteOp],
+        source_buf: usize,
+        target_buf: usize,
+        label: &str,
+        storage: &mut ContentAddressedStorage<CountingBackend>,
+    ) -> Result<usize> {
+        let source_buffered = buffered_bytes(base, source_ops, source_buf, storage).await?;
+        let target_buffered = buffered_bytes(base, target_ops, target_buf, storage).await?;
+        let source_canonical = canonical_bytes(base, source_ops, source_buf, storage).await?;
+        let target_canonical = canonical_bytes(base, target_ops, target_buf, storage).await?;
+
+        let buffered_changes = collect_changes(&source_buffered, &target_buffered, storage).await?;
+        let canonical_changes =
+            collect_changes(&source_canonical, &target_canonical, storage).await?;
+
+        assert_eq!(
+            normalize(&buffered_changes),
+            normalize(&canonical_changes),
+            "{label}: buffered diff must equal canonicalized diff"
+        );
+        Ok(normalize(&canonical_changes).len())
+    }
+
+    fn bkey(n: u32) -> [u8; 4] {
+        n.to_be_bytes()
+    }
+
+    /// Buffered retracts at various depths, of keys present and absent, against
+    /// asserts on the other side.
+    #[dialog_common::test]
+    async fn probe_buffered_retracts_at_mixed_depths() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build_bytes((0..400u32).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
+        let mut total = 0usize;
+
+        let cases: Vec<(&str, Vec<ByteOp>, Vec<ByteOp>)> = vec![
+            (
+                "retract present vs nothing",
+                vec![(false, bkey(100), vec![])],
+                vec![],
+            ),
+            (
+                "retract absent vs nothing",
+                vec![(false, bkey(9999), vec![])],
+                vec![],
+            ),
+            (
+                "retract vs assert same key",
+                vec![(false, bkey(100), vec![])],
+                vec![(true, bkey(100), vec![77])],
+            ),
+            (
+                "retract both sides same key",
+                vec![(false, bkey(100), vec![])],
+                vec![(false, bkey(100), vec![])],
+            ),
+            (
+                "retract then reassert one side",
+                vec![(false, bkey(100), vec![]), (true, bkey(100), vec![5])],
+                vec![],
+            ),
+            (
+                "retract past rightmost bound",
+                vec![(false, bkey(100_000), vec![])],
+                vec![(true, bkey(100_000), vec![3])],
+            ),
+            (
+                "retract many scattered",
+                (0..40u32).map(|i| (false, bkey(i * 7), vec![])).collect(),
+                vec![(true, bkey(3), vec![9])],
+            ),
+        ];
+
+        for (label, source_ops, target_ops) in cases {
+            for (source_buf, target_buf) in [
+                (1_000_000, 1_000_000),
+                (2, 1_000_000),
+                (1_000_000, 2),
+                (4, 8),
+            ] {
+                total += assert_oracle(
+                    &base,
+                    &source_ops,
+                    &target_ops,
+                    source_buf,
+                    target_buf,
+                    &format!("{label} bufs {source_buf}/{target_buf}"),
+                    &mut storage,
+                )
+                .await?;
+            }
+        }
+        assert!(total > 0, "probe must exercise non-empty diffs");
+        Ok(())
+    }
+
+    /// Keys exactly at, just below, and just past the rightmost upper bound,
+    /// exercising both the settle path and the normal walk.
+    #[dialog_common::test]
+    async fn probe_rightmost_boundary_keys() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let last = 399u32;
+        let base = build_bytes((0..=last).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
+        let mut total = 0usize;
+
+        let cases: Vec<(&str, Vec<ByteOp>, Vec<ByteOp>)> = vec![
+            (
+                "assert exactly at rightmost bound",
+                vec![(true, bkey(last), vec![250])],
+                vec![],
+            ),
+            (
+                "assert at rightmost bound both sides differing values",
+                vec![(true, bkey(last), vec![250])],
+                vec![(true, bkey(last), vec![251])],
+            ),
+            (
+                "assert just below rightmost bound",
+                vec![(true, bkey(last - 1), vec![250])],
+                vec![],
+            ),
+            (
+                "assert just past rightmost bound",
+                vec![(true, bkey(last + 1), vec![250])],
+                vec![],
+            ),
+            (
+                "retract exactly at rightmost bound",
+                vec![(false, bkey(last), vec![])],
+                vec![],
+            ),
+            (
+                "one side past bound, other at bound",
+                vec![(true, bkey(last + 1), vec![1])],
+                vec![(true, bkey(last), vec![2])],
+            ),
+        ];
+
+        for (label, source_ops, target_ops) in cases {
+            for (source_buf, target_buf) in [(1_000_000, 1_000_000), (2, 1_000_000), (8, 8)] {
+                total += assert_oracle(
+                    &base,
+                    &source_ops,
+                    &target_ops,
+                    source_buf,
+                    target_buf,
+                    &format!("{label} bufs {source_buf}/{target_buf}"),
+                    &mut storage,
+                )
+                .await?;
+            }
+        }
+        assert!(total > 0, "probe must exercise non-empty diffs");
+        Ok(())
+    }
+
+    /// Tiny trees: empty base, single entry, root-is-a-leaf.
+    #[dialog_common::test]
+    async fn probe_tiny_trees() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let mut total = 0usize;
+
+        for base_size in [0u32, 1, 2, 5] {
+            let base = build_bytes(
+                (0..base_size).map(|i| (bkey(i), vec![i as u8])),
+                &mut storage,
+            )
+            .await?;
+
+            let cases: Vec<(&str, Vec<ByteOp>, Vec<ByteOp>)> = vec![
+                ("insert one", vec![(true, bkey(1000), vec![1])], vec![]),
+                (
+                    "insert both sides",
+                    vec![(true, bkey(1000), vec![1])],
+                    vec![(true, bkey(1001), vec![2])],
+                ),
+                ("retract zero", vec![(false, bkey(0), vec![])], vec![]),
+                (
+                    "retract absent",
+                    vec![(false, bkey(5000), vec![])],
+                    vec![(true, bkey(3), vec![9])],
+                ),
+            ];
+
+            for (label, source_ops, target_ops) in cases {
+                for buf in [1_000_000usize, 2] {
+                    total += assert_oracle(
+                        &base,
+                        &source_ops,
+                        &target_ops,
+                        buf,
+                        buf,
+                        &format!("base {base_size} {label} buf {buf}"),
+                        &mut storage,
+                    )
+                    .await?;
+                }
+            }
+        }
+        assert!(total > 0, "probe must exercise non-empty diffs");
+        Ok(())
+    }
+
+    /// Randomized oracle over byte keys, retract-heavy, deep cascades,
+    /// asymmetric buffer sizes.
+    #[dialog_common::test]
+    async fn probe_random_oracle_bytes_retract_heavy() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build_bytes((0..300u32).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
+        let mut total = 0usize;
+
+        for seed in 0..40u64 {
+            let mut rng = 0xD1B54A32D192ED03u64 ^ (seed.wrapping_mul(0x9E3779B97F4A7C15));
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+
+            let mut source_ops: Vec<ByteOp> = Vec::new();
+            let mut target_ops: Vec<ByteOp> = Vec::new();
+            for _ in 0..50 {
+                // Retract-heavy: half the ops are retracts.
+                let is_insert = next().is_multiple_of(2);
+                // Mix in-range, at-boundary, and past-the-end keys.
+                let key = match next() % 4 {
+                    0 => next() % 300,
+                    1 => 299,
+                    2 => 300 + next() % 50,
+                    _ => next() % 400,
+                };
+                let value = vec![(next() % 251) as u8];
+                if next().is_multiple_of(2) {
+                    source_ops.push((is_insert, bkey(key), value));
+                } else {
+                    target_ops.push((is_insert, bkey(key), value));
+                }
+            }
+
+            let (source_buf, target_buf) = match seed % 4 {
+                0 => (1_000_000usize, 1_000_000usize),
+                1 => (2, 1_000_000),
+                2 => (1_000_000, 4),
+                _ => (8, 3),
+            };
+
+            total += assert_oracle(
+                &base,
+                &source_ops,
+                &target_ops,
+                source_buf,
+                target_buf,
+                &format!("seed {seed}"),
+                &mut storage,
+            )
+            .await?;
+        }
+        assert!(
+            total > 100,
+            "probe must exercise non-empty diffs, got {total}"
+        );
+        Ok(())
+    }
+
+    /// Symmetry: diff(a,b) must be the mirror of diff(b,a).
+    #[dialog_common::test]
+    async fn probe_diff_symmetry_on_buffered_trees() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build_bytes((0..300u32).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
+
+        for seed in 0..20u64 {
+            let mut rng = 0x2545F4914F6CDD1Du64 ^ (seed.wrapping_mul(0x9E3779B97F4A7C15));
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+
+            let mut left_ops: Vec<ByteOp> = Vec::new();
+            let mut right_ops: Vec<ByteOp> = Vec::new();
+            for _ in 0..40 {
+                let is_insert = !next().is_multiple_of(3);
+                let key = next() % 350;
+                let value = vec![(next() % 251) as u8];
+                if next().is_multiple_of(2) {
+                    left_ops.push((is_insert, bkey(key), value));
+                } else {
+                    right_ops.push((is_insert, bkey(key), value));
+                }
+            }
+
+            let left = buffered_bytes(&base, &left_ops, 4, &mut storage).await?;
+            let right = buffered_bytes(&base, &right_ops, 1_000_000, &mut storage).await?;
+
+            let forward = collect_changes(&left, &right, &storage).await?;
+            let backward = collect_changes(&right, &left, &storage).await?;
+
+            // Mirror: every Add in forward is a Remove in backward and vice
+            // versa, over the same key set.
+            let mut forward_adds: Vec<_> = forward
+                .iter()
+                .filter_map(|c| match c {
+                    Change::Add(e) => Some((e.key, e.value.clone())),
+                    _ => None,
+                })
+                .collect();
+            let mut backward_removes: Vec<_> = backward
+                .iter()
+                .filter_map(|c| match c {
+                    Change::Remove(e) => Some((e.key, e.value.clone())),
+                    _ => None,
+                })
+                .collect();
+            forward_adds.sort();
+            backward_removes.sort();
+            assert_eq!(
+                forward_adds, backward_removes,
+                "seed {seed}: forward adds must equal backward removes"
+            );
+        }
+        Ok(())
+    }
+
+    /// Applying diff(source, target) to source's content must yield target's
+    /// content, for buffered trees.
+    #[dialog_common::test]
+    async fn probe_applying_diff_reconstructs_target() -> Result<()> {
+        use futures_util::TryStreamExt as _;
+
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build_bytes((0..300u32).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
+
+        async fn contents(
+            tree: &TestTree,
+            storage: &ContentAddressedStorage<CountingBackend>,
+        ) -> Result<BTreeMap<[u8; 4], Vec<u8>>> {
+            let stream = tree.stream(storage);
+            futures_util::pin_mut!(stream);
+            let mut out = BTreeMap::new();
+            while let Some(entry) = stream.try_next().await? {
+                out.insert(entry.key, entry.value);
+            }
+            Ok(out)
+        }
+
+        for seed in 0..15u64 {
+            let mut rng = 0x14057B7EF767814Fu64 ^ (seed.wrapping_mul(0x9E3779B97F4A7C15));
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+
+            let mut source_ops: Vec<ByteOp> = Vec::new();
+            let mut target_ops: Vec<ByteOp> = Vec::new();
+            for _ in 0..40 {
+                let is_insert = !next().is_multiple_of(3);
+                let key = next() % 350;
+                let value = vec![(next() % 251) as u8];
+                if next().is_multiple_of(2) {
+                    source_ops.push((is_insert, bkey(key), value));
+                } else {
+                    target_ops.push((is_insert, bkey(key), value));
+                }
+            }
+
+            let source = buffered_bytes(&base, &source_ops, 4, &mut storage).await?;
+            let target = buffered_bytes(&base, &target_ops, 1_000_000, &mut storage).await?;
+
+            // Canonical forms give the ground-truth content of each side.
+            let source_canonical = canonical_bytes(&base, &source_ops, 4, &mut storage).await?;
+            let target_canonical =
+                canonical_bytes(&base, &target_ops, 1_000_000, &mut storage).await?;
+
+            let mut applied = contents(&source_canonical, &storage).await?;
+            let expected = contents(&target_canonical, &storage).await?;
+
+            for change in collect_changes(&source, &target, &storage).await? {
+                match change {
+                    Change::Remove(entry) => {
+                        applied.remove(&entry.key);
+                    }
+                    Change::Add(entry) => {
+                        applied.insert(entry.key, entry.value);
+                    }
+                }
+            }
+
+            assert_eq!(
+                applied, expected,
+                "seed {seed}: applying the buffered diff must reconstruct the target"
+            );
+        }
+        Ok(())
+    }
+
+    /// **CONFIRMED BUG.** `novel_nodes()` on a tree whose root carries live
+    /// novelty omits the root block itself, so a remote that receives the
+    /// reported block set cannot materialize the target tree.
+    ///
+    /// `settle_buffered` replaces both frontier nodes with `Settled`, and
+    /// `novel_nodes` explicitly `continue`s past `Settled` on the claim that
+    /// "its ops live in the bytes of the node that buffers them, which the walk
+    /// already recorded". That claim is false when the settled node IS the
+    /// root: the root was never pushed into `expanded` (only `expand_at` does
+    /// that, and settling short-circuits expansion), so no block carrying the
+    /// buffered ops is ever yielded. The target root hash is then unresolvable
+    /// on the receiving side.
+    #[dialog_common::test]
+    async fn probe_novel_nodes_materialize_buffered_target() -> Result<()> {
+        novel_nodes_case(vec![(
+            "root buffered past end",
+            vec![(true, bkey(9000), vec![1]), (true, bkey(9001), vec![2])],
+            1_000_000usize,
+        )])
+        .await
+    }
+
+    /// Contrast: a root-buffered *retract* cannot settle (settle_buffered
+    /// refuses retracts), so the root is expanded, lands in `expanded`, and the
+    /// block set is complete. This isolates the bug to the settle path.
+    #[dialog_common::test]
+    async fn probe_novel_nodes_materialize_root_buffered_retract() -> Result<()> {
+        novel_nodes_case(vec![(
+            "root buffered retract (cannot settle)",
+            vec![(false, bkey(10), vec![])],
+            1_000_000usize,
+        )])
+        .await
+    }
+
+    /// Contrast: ops cascaded deep force expansion all the way down, so the
+    /// block set is complete.
+    #[dialog_common::test]
+    async fn probe_novel_nodes_materialize_cascaded_target() -> Result<()> {
+        novel_nodes_case(vec![(
+            "cascaded mixed",
+            (0..30u32)
+                .map(|i| (i % 3 != 0, bkey(i * 5), vec![i as u8]))
+                .collect::<Vec<_>>(),
+            4usize,
+        )])
+        .await
+    }
+
+    async fn novel_nodes_case(cases: Vec<(&str, Vec<ByteOp>, usize)>) -> Result<()> {
+        use futures_util::TryStreamExt as _;
+
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let base = build_bytes((0..300u32).map(|i| (bkey(i), vec![i as u8])), &mut storage).await?;
+
+        for (label, ops, buf) in cases {
+            let target = buffered_bytes(&base, &ops, buf, &mut storage).await?;
+
+            // A "remote" seeded with the whole base tree.
+            let mut remote = ContentAddressedStorage::new(CountingBackend::new());
+            {
+                let difference =
+                    TreeDifference::compute(&TestTree::empty(), &base, &storage, &storage).await?;
+                let stream = difference.novel_nodes();
+                futures_util::pin_mut!(stream);
+                while let Some(node) = stream.next().await {
+                    let node = node?;
+                    remote
+                        .store(node.buffer().as_ref().to_vec(), node.hash())
+                        .await?;
+                }
+            }
+
+            // Upload only the novelty between base and the buffered target.
+            {
+                let difference =
+                    TreeDifference::compute(&base, &target, &storage, &storage).await?;
+                let stream = difference.novel_nodes();
+                futures_util::pin_mut!(stream);
+                while let Some(node) = stream.next().await {
+                    let node = node?;
+                    remote
+                        .store(node.buffer().as_ref().to_vec(), node.hash())
+                        .await?;
+                }
+            }
+
+            // The remote must now be able to read the full target tree.
+            let expected: Vec<([u8; 4], Vec<u8>)> = {
+                let stream = target.stream(&storage);
+                futures_util::pin_mut!(stream);
+                stream
+                    .map_ok(|entry| (entry.key, entry.value))
+                    .try_collect::<Vec<_>>()
+                    .await?
+            };
+            let restored = TestTree::from_hash(target.root().clone());
+            let actual: Vec<([u8; 4], Vec<u8>)> = {
+                let stream = restored.stream(&remote);
+                futures_util::pin_mut!(stream);
+                stream
+                    .map_ok(|entry| (entry.key, entry.value))
+                    .try_collect::<Vec<_>>()
+                    .await?
+            };
+
+            assert_eq!(
+                actual, expected,
+                "{label}: novel nodes must materialize the target"
+            );
+        }
         Ok(())
     }
 }

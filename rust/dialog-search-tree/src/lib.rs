@@ -164,6 +164,9 @@ pub use storage::*;
 mod tree;
 pub use tree::*;
 
+mod hitchhiker;
+pub use hitchhiker::*;
+
 mod delta;
 pub use delta::*;
 
