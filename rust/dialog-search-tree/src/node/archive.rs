@@ -8,12 +8,14 @@ use crate::{
     node::columnar::{ColumnarLeaf, StreamingLeaf, archived_column_slices},
 };
 
-<<<<<<< ours
 fn malformed(message: &str) -> DialogSearchTreeError {
     DialogSearchTreeError::Encoding(message.to_string())
 }
 
-impl ArchivedIndex {
+impl<Value> ArchivedIndex<Value>
+where
+    Value: rkyv::Archive,
+{
     /// Number of children in this index.
     pub fn len(&self) -> usize {
         self.hashes.len()
@@ -117,28 +119,6 @@ impl ArchivedIndex {
             }
         };
         Ok(below.saturating_sub(1))
-=======
-impl<Key, Value> ArchivedIndex<Key, Value>
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Value: self::Value,
-{
-    /// Returns the upper bound key of the last link in this index.
-    ///
-    /// **Stored content only**: a node's buffered ops are deliberately excluded.
-    /// The bound doubles as the node's routing key and as the input to its rank
-    /// (and therefore to the tree's shape), so letting a pending op move it
-    /// would reshape the tree as a side effect of buffering, and would disagree
-    /// with [`Node::upper_bound_ref`], which routes from links alone.
-    ///
-    /// Readers that must not skip buffered writes therefore cannot rely on the
-    /// bound alone; see [`TreeWalker::stream`](crate::TreeWalker::stream), which
-    /// carries an open-ended flag down the rightmost path for exactly this
-    /// reason.
-    pub fn upper_bound(&self) -> Option<&Key::Archived> {
-        self.links.last().map(|link| &link.upper_bound)
->>>>>>> theirs
     }
 }
 
@@ -266,7 +246,7 @@ mod tests {
             })
             .collect();
         let body: PersistentNodeBody<Vec<u8>> =
-            PersistentNodeBody::index_from_links(links, Manifest::default())?;
+            PersistentNodeBody::index_from_links(links, Vec::new(), Manifest::default())?;
         Ok(PersistentNode::new(Buffer::from(body.as_bytes()?)))
     }
 
@@ -336,6 +316,7 @@ mod tests {
             suffixes: b"abcd".to_vec(),
             ends: vec![3, 1],
             hashes: vec![Blake3Hash::hash(b"x"), Blake3Hash::hash(b"y")],
+            novelty: Vec::new(),
         });
         let node = TestNode::new(Buffer::from(body.as_bytes()?));
         assert!(node.as_index()?.separator(1).is_err());
@@ -348,6 +329,7 @@ mod tests {
             suffixes: b"ab".to_vec(),
             ends: vec![9],
             hashes: vec![Blake3Hash::hash(b"x")],
+            novelty: Vec::new(),
         });
         let node = TestNode::new(Buffer::from(body.as_bytes()?));
         assert!(node.as_index()?.separator(0).is_err());

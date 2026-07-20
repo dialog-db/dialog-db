@@ -34,12 +34,8 @@ use rkyv::{
 
 use crate::{
     ArchivedNodeBody, Buffer, ContentAddressedStorage, DialogSearchTreeError, Distribution, Entry,
-<<<<<<< ours
-    Key, Link, PersistentNode, PersistentTree, Value, into_owned,
-=======
-    Key, Link, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, SymmetryWith, Value,
-    into_owned,
->>>>>>> theirs
+    Key, Link, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Value, into_owned,
+    resolve_pending,
 };
 
 /// Represents a change in the key-value store.
@@ -74,22 +70,15 @@ enum SparseTreeNode<Key, Value> {
     Loaded {
         /// The loaded node.
         node: PersistentNode<Key, Value>,
-<<<<<<< ours
         /// The separator at the node's left edge (its lower bound; empty for
         /// a root or the global leftmost subtree).
         lower_bound: Vec<u8>,
+        /// Ops routed here from ancestors' buffers, nearest-root first (see
+        /// [`SparseTreeNode::Pending`]).
+        pending: Vec<NoveltyEntry<Value>>,
     },
     /// An unloaded reference: hash and separator from the parent's link.
     Ref(Link),
-=======
-        /// The node's upper bound key (owned copy).
-        upper_bound: Key,
-        /// Ops routed here from ancestors' buffers, nearest-root first (see
-        /// [`SparseTreeNode::Pending`]).
-        pending: Vec<NoveltyEntry<Key, Value>>,
-    },
-    /// An unloaded reference: hash and upper bound from the parent's link.
-    Ref(Link<Key>),
     /// An unloaded reference carrying ops an ancestor had buffered for it.
     ///
     /// When an index node is expanded its buffered ops are routed to the
@@ -102,9 +91,9 @@ enum SparseTreeNode<Key, Value> {
     /// [`SparseTree::prune`]).
     Pending {
         /// The reference this node was reached by.
-        link: Link<Key>,
+        link: Link,
         /// Ops pending against this subtree, nearest-root first.
-        pending: Vec<NoveltyEntry<Key, Value>>,
+        pending: Vec<NoveltyEntry<Value>>,
     },
     /// A subtree whose difference was fully resolved from buffers alone.
     ///
@@ -113,12 +102,12 @@ enum SparseTreeNode<Key, Value> {
     /// so the node contributes exactly the ops this side holds that the other
     /// does not, and nothing beneath it is ever read.
     Settled {
-        /// The node's upper bound key.
-        upper_bound: Key,
+        /// The separator at the node's left edge (its lower bound), carried
+        /// over from the node this entry replaced so the frontier stays sorted.
+        lower_bound: Vec<u8>,
         /// The ops this side contributes.
-        ops: Vec<NoveltyEntry<Key, Value>>,
+        ops: Vec<NoveltyEntry<Value>>,
     },
->>>>>>> theirs
 }
 
 impl<Key, Value> SparseTreeNode<Key, Value>
@@ -139,15 +128,10 @@ where
     /// node's maximum key.
     fn lower_bound(&self) -> &[u8] {
         match self {
-<<<<<<< ours
             SparseTreeNode::Loaded { lower_bound, .. } => lower_bound.as_slice(),
             SparseTreeNode::Ref(link) => link.separator.as_slice(),
-=======
-            SparseTreeNode::Loaded { upper_bound, .. } => upper_bound,
-            SparseTreeNode::Ref(link) => &link.upper_bound,
-            SparseTreeNode::Pending { link, .. } => &link.upper_bound,
-            SparseTreeNode::Settled { upper_bound, .. } => upper_bound,
->>>>>>> theirs
+            SparseTreeNode::Pending { link, .. } => link.separator.as_slice(),
+            SparseTreeNode::Settled { lower_bound, .. } => lower_bound.as_slice(),
         }
     }
 
@@ -170,7 +154,9 @@ where
             SparseTreeNode::Loaded { node, .. } => {
                 matches!(node.body(), Ok(ArchivedNodeBody::Index(_)))
             }
-            SparseTreeNode::Ref(_) => false,
+            SparseTreeNode::Ref(_)
+            | SparseTreeNode::Pending { .. }
+            | SparseTreeNode::Settled { .. } => false,
         }
     }
 
@@ -184,7 +170,9 @@ where
                 Ok(ArchivedNodeBody::Index(index)) => index.contains_hash(hash),
                 _ => false,
             },
-            SparseTreeNode::Ref(_) => false,
+            SparseTreeNode::Ref(_)
+            | SparseTreeNode::Pending { .. }
+            | SparseTreeNode::Settled { .. } => false,
         }
     }
 }
@@ -214,19 +202,7 @@ where
 impl<'a, Key, Value, Backend> SparseTree<'a, Key, Value, Backend>
 where
     Key: self::Key,
-<<<<<<< ours
-    Value: self::Value,
-=======
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value + PartialEq,
->>>>>>> theirs
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
@@ -254,7 +230,6 @@ where
             vec![]
         } else {
             let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
-<<<<<<< ours
             // A root's frontier bound must be the separator the SAME subtree
             // would carry as a link child on the other side, or equal
             // subtrees at different heights never line up. That propagated
@@ -267,17 +242,13 @@ where
                 ArchivedNodeBody::Index(index) if !index.is_empty() => index.separator(0)?,
                 _ => Vec::new(),
             };
-            vec![SparseTreeNode::Loaded { node, lower_bound }]
-=======
-            let upper_bound = node.body()?.upper_bound().and_then(into_owned)?;
             // The root inherits nothing: its own buffers are read when it is
             // expanded or streamed.
             vec![SparseTreeNode::Loaded {
                 node,
-                upper_bound,
+                lower_bound,
                 pending: Vec::new(),
             }]
->>>>>>> theirs
         };
 
         let seen = nodes.iter().map(|node| node.hash().clone()).collect();
@@ -335,51 +306,49 @@ where
 
         match node.body()? {
             ArchivedNodeBody::Index(index) => {
-<<<<<<< ours
-                let children = index
-                    .links()?
-                    .into_iter()
-                    .map(SparseTreeNode::Ref)
-                    .collect::<Vec<_>>();
-                for child in &children {
-                    self.seen.insert(child.hash().clone());
-=======
                 let mut pending = inherited;
                 for entry in index.novelty.iter() {
-                    pending.push(into_owned::<NoveltyEntry<Key, Value>>(entry)?);
+                    pending.push(into_owned::<NoveltyEntry<Value>>(entry)?);
                 }
 
-                let mut children = Vec::with_capacity(index.links.len());
-                let mut lower: Option<Key> = None;
-                let last = index.links.len().saturating_sub(1);
-                for (at, link) in index.links.iter().enumerate() {
-                    let link = into_owned::<Link<Key>>(link)?;
-                    let upper = link.upper_bound.clone();
-                    // Ops routed to this child: those in (lower, upper]. The
-                    // last child takes everything that remains, including keys
-                    // beyond its upper bound: a buffered insert can sort past
-                    // every existing key, and the flush routes such an op to the
-                    // rightmost child (which is also where the read descent's
-                    // last-child fallback sends it). Without this the op would
-                    // match no child and be dropped.
+                let links = index.links()?;
+                let mut children = Vec::with_capacity(links.len());
+                for (at, link) in links.into_iter().enumerate() {
+                    // Ops routed to this child, by the same lower-bound rule
+                    // routing uses: the covering child is the last one whose
+                    // separator is at or below the key, so this child takes
+                    // `[sep(at), sep(at + 1))`. The leftmost child also takes
+                    // everything below its own separator (routing clamps a key
+                    // below every separator to it), and the rightmost child is
+                    // open-ended: a buffered insert can sort past every existing
+                    // key, and a flush routes such an op to the last child.
+                    // Without those two open ends the op would match no child
+                    // and be dropped.
+                    let lower = index.separator(at)?;
+                    let upper = if at + 1 < index.len() {
+                        Some(index.separator(at + 1)?)
+                    } else {
+                        None
+                    };
                     let routed: Vec<_> = pending
                         .iter()
                         .filter(|entry| {
-                            lower.as_ref().is_none_or(|lower| entry.key > *lower)
-                                && (at == last || entry.key <= upper)
+                            let key = entry.key.as_slice();
+                            (at == 0 || key >= lower.as_slice())
+                                && upper.as_ref().is_none_or(|upper| key < upper.as_slice())
                         })
                         .cloned()
                         .collect();
-                    children.push(if routed.is_empty() {
+                    let child = if routed.is_empty() {
                         SparseTreeNode::Ref(link)
                     } else {
                         SparseTreeNode::Pending {
                             link,
                             pending: routed,
                         }
-                    });
-                    lower = Some(upper);
->>>>>>> theirs
+                    };
+                    self.seen.insert(child.hash().clone());
+                    children.push(child);
                 }
 
                 self.expanded.push(node);
@@ -387,17 +356,12 @@ where
                 Ok(true)
             }
             ArchivedNodeBody::Segment(_) => {
-<<<<<<< ours
                 let lower_bound = self.nodes[offset].lower_bound().to_vec();
-                self.nodes[offset] = SparseTreeNode::Loaded { node, lower_bound };
-=======
-                let upper_bound = node.body()?.upper_bound().and_then(into_owned)?;
                 self.nodes[offset] = SparseTreeNode::Loaded {
                     node,
-                    upper_bound,
+                    lower_bound,
                     pending: inherited,
                 };
->>>>>>> theirs
                 Ok(false)
             }
         }
@@ -464,11 +428,17 @@ where
 
         // Identical children: every subtree below is shared, so nothing under
         // these nodes can differ.
-        if ours_index.links.len() != theirs_index.links.len() {
+        if ours_index.len() != theirs_index.len() {
             return Ok(false);
         }
-        for (ours_link, theirs_link) in ours_index.links.iter().zip(theirs_index.links.iter()) {
-            if <&Blake3Hash>::from(&ours_link.node) != <&Blake3Hash>::from(&theirs_link.node) {
+        for at in 0..ours_index.len() {
+            if ours_index.hash_at(at)? != theirs_index.hash_at(at)? {
+                return Ok(false);
+            }
+            // Separators are the routing keys: identical child hashes under
+            // shifted separators would route the same op to different subtrees
+            // on the two sides, so require those to agree too.
+            if ours_index.separator(at)? != theirs_index.separator(at)? {
                 return Ok(false);
             }
         }
@@ -476,39 +446,46 @@ where
         let ours_ops = ours_index
             .novelty
             .iter()
-            .map(into_owned::<NoveltyEntry<Key, Value>>)
+            .map(into_owned::<NoveltyEntry<Value>>)
             .collect::<Result<Vec<_>, _>>()?;
         let theirs_ops = theirs_index
             .novelty
             .iter()
-            .map(into_owned::<NoveltyEntry<Key, Value>>)
+            .map(into_owned::<NoveltyEntry<Value>>)
             .collect::<Result<Vec<_>, _>>()?;
 
         // Emitting a change for a buffered op needs to know whether the key
         // already exists below: absent means `Add`, present means `Remove(old)`
         // then `Add(new)`, and only the leaf knows the old value. A `Link`
-        // carries just an upper bound and a hash, so membership is not
-        // answerable from here — with one exception.
+        // carries just a separator and a hash, so membership is not answerable
+        // from here, with one exception.
         //
-        // A key sorting past the *rightmost* upper bound is covered by no
-        // child's range, so it is provably absent from every shared subtree, and
-        // its op is unambiguously an insert. That is exactly the shape a fresh
-        // fact takes in an append-ordered keyspace, and it is what lets a
-        // buffered write sync from the roots alone.
+        // Separators are lower bounds, so every key stored under this index
+        // sorts at or above the leftmost separator. A key strictly below it is
+        // therefore provably absent from every shared subtree, and its op is
+        // unambiguously an insert.
+        //
+        // This is the mirror of the upper-bound formulation: with lower-bound
+        // separators the *right* end is open (the last child takes whatever
+        // remains), so nothing can be proven absent above the table, while the
+        // left end is closed and gives the proof instead.
         //
         // Retracts never settle: a retract of an absent key is a no-op, and of a
         // present key needs the stored value to report the removal.
-        let highest = ours_index
-            .links
-            .last()
-            .map(|link| into_owned::<Key>(&link.upper_bound))
-            .transpose()?;
-        let Some(highest) = highest else {
+        if ours_index.is_empty() {
             return Ok(false);
-        };
-        let settleable = |ops: &[NoveltyEntry<Key, Value>]| {
-            ops.iter()
-                .all(|entry| matches!(entry.op, NoveltyOp::Assert(_)) && entry.key > highest)
+        }
+        let lowest = ours_index.separator(0)?;
+        // An empty leftmost separator (the global leftmost spine under the
+        // production reseparation rule) bounds nothing: no key sorts below it,
+        // so no op can be proven an insert and settling never applies.
+        if lowest.is_empty() {
+            return Ok(false);
+        }
+        let settleable = |ops: &[NoveltyEntry<Value>]| {
+            ops.iter().all(|entry| {
+                matches!(entry.op, NoveltyOp::Assert(_)) && entry.key.as_slice() < lowest.as_slice()
+            })
         };
         if !settleable(&ours_ops) || !settleable(&theirs_ops) {
             return Ok(false);
@@ -516,7 +493,7 @@ where
 
         // Ops both sides hold are not changes; keep only what each side adds
         // that the other lacks.
-        let retain = |mine: &[NoveltyEntry<Key, Value>], other: &[NoveltyEntry<Key, Value>]| {
+        let retain = |mine: &[NoveltyEntry<Value>], other: &[NoveltyEntry<Value>]| {
             mine.iter()
                 .filter(|entry| {
                     !other.iter().any(|seen| {
@@ -545,11 +522,11 @@ where
         other.expanded.push(theirs);
 
         self.nodes[at] = SparseTreeNode::Settled {
-            upper_bound: self.nodes[at].upper_bound().clone(),
+            lower_bound: self.nodes[at].lower_bound().to_vec(),
             ops: ours_only,
         };
         other.nodes[other_at] = SparseTreeNode::Settled {
-            upper_bound: other.nodes[other_at].upper_bound().clone(),
+            lower_bound: other.nodes[other_at].lower_bound().to_vec(),
             ops: theirs_only,
         };
         Ok(true)
@@ -609,21 +586,21 @@ where
             // expansion routes the parent's ops down into exactly the children
             // that cover them, so anything pending for this subtree is already
             // attached as routed ops.
+            let in_scope = |key: &[u8]| {
+                scope
+                    .iter()
+                    .any(|range| key >= range.start().as_ref() && key <= range.end().as_ref())
+            };
             let pending_in_scope = pending_ops(&node)
                 .iter()
-                .any(|entry| scope.iter().any(|range| range.contains(&entry.key)));
+                .any(|entry| in_scope(entry.key.as_slice()));
             let buffered_in_scope = !pending_in_scope
                 && match &node {
                     SparseTreeNode::Loaded { node: loaded, .. } => {
                         matches!(loaded.body(), Ok(ArchivedNodeBody::Index(index)) if index
                         .novelty
                         .iter()
-                        .any(|entry| {
-                            scope.iter().any(|range| {
-                                into_owned::<Key>(&entry.key)
-                                    .is_ok_and(|key| range.contains(&key))
-                            })
-                        }))
+                        .any(|entry| in_scope(&entry.key)))
                     }
                     _ => false,
                 };
@@ -646,76 +623,34 @@ where
     /// so a hash cannot recur in a frontier and set matching is exact. This
     /// is the step that realizes the read-frugality contract: matched nodes
     /// are discarded while still unloaded.
+    ///
+    /// A hash alone stops being sufficient once ops can be pending against a
+    /// node: a buffered op changes what a subtree holds without changing the
+    /// hash it was reached by. So a node carrying pending ops never prunes,
+    /// and a node's *own* buffer is accounted for by the fact that it is part
+    /// of the node's bytes and therefore of its hash. It is the ops'
+    /// *difference* that makes a subtree interesting, not their presence: two
+    /// sides carrying the same op reach the same hash and prune exactly as a
+    /// shared flushed subtree does.
     fn prune(&mut self, other: &mut Self) {
-<<<<<<< ours
-        let left: HashSet<Blake3Hash> = self.nodes.iter().map(|node| node.hash().clone()).collect();
-        let right: HashSet<Blake3Hash> =
-            other.nodes.iter().map(|node| node.hash().clone()).collect();
-        self.nodes.retain(|node| !right.contains(node.hash()));
-        other.nodes.retain(|node| !left.contains(node.hash()));
-=======
-        let left = &mut self.nodes;
-        let right = &mut other.nodes;
-
-        let mut at_left = 0;
-        let mut at_right = 0;
-        let mut to_left = 0;
-        let mut to_right = 0;
-
-        while at_left < left.len() && at_right < right.len() {
-            match left[at_left]
-                .upper_bound()
-                .cmp(right[at_right].upper_bound())
-            {
-                Ordering::Less => {
-                    left.swap(to_left, at_left);
-                    to_left += 1;
-                    at_left += 1;
-                }
-                Ordering::Greater => {
-                    right.swap(to_right, at_right);
-                    to_right += 1;
-                    at_right += 1;
-                }
-                Ordering::Equal => {
-                    // Equal hashes mean equal *stored* content, and equal
-                    // pending ops mean the two sides resolve that content the
-                    // same way, so the subtree is shared and neither side needs
-                    // to be read. A buffered op changes what a subtree holds
-                    // without changing the hash it was reached by, so the ops
-                    // have to be compared too: it is their *difference* that
-                    // makes a subtree interesting, not their presence. Both
-                    // sides carrying the same op (the common case once an
-                    // upstream's writes have been seen) prunes exactly as a
-                    // shared flushed subtree does.
-                    if left[at_left].hash() != right[at_right].hash()
-                        || !same_pending(&left[at_left], &right[at_right])
-                    {
-                        left.swap(to_left, at_left);
-                        right.swap(to_right, at_right);
-                        to_left += 1;
-                        to_right += 1;
-                    }
-                    at_left += 1;
-                    at_right += 1;
-                }
-            }
-        }
-
-        while at_left < left.len() {
-            left.swap(to_left, at_left);
-            to_left += 1;
-            at_left += 1;
-        }
-        while at_right < right.len() {
-            right.swap(to_right, at_right);
-            to_right += 1;
-            at_right += 1;
-        }
-
-        left.truncate(to_left);
-        right.truncate(to_right);
->>>>>>> theirs
+        let prunable = |node: &SparseTreeNode<Key, Value>| pending_ops(node).is_empty();
+        let left: HashSet<Blake3Hash> = self
+            .nodes
+            .iter()
+            .filter(|node| prunable(node))
+            .map(|node| node.hash().clone())
+            .collect();
+        let right: HashSet<Blake3Hash> = other
+            .nodes
+            .iter()
+            .filter(|node| prunable(node))
+            .map(|node| node.hash().clone())
+            .collect();
+        self.nodes
+            .retain(|node| !prunable(node) || !right.contains(node.hash()));
+        other
+            .nodes
+            .retain(|node| !prunable(node) || !left.contains(node.hash()));
     }
 
     /// Streams the entries of every node remaining in the frontier, in key
@@ -747,18 +682,20 @@ where
                 // as entries and read nothing. This is the payoff of the write
                 // buffer, and the reason a root-buffered fact costs no descent.
                 if let SparseTreeNode::Settled { ops, .. } = sparse_node {
-                    let mut resolved: Vec<_> = ops
-                        .iter()
-                        .filter_map(|entry| match &entry.op {
-                            NoveltyOp::Assert(value) => {
-                                Some((entry.key.clone(), value.clone()))
+                    let mut resolved: Vec<(Vec<u8>, Value)> = Vec::new();
+                    for entry in ops {
+                        // Last op wins, matching how a flush replays them.
+                        if let Some(op) = resolve_pending(ops, &entry.key) {
+                            if let NoveltyOp::Assert(value) = op {
+                                if !resolved.iter().any(|(key, _)| key == &entry.key) {
+                                    resolved.push((entry.key.clone(), value.clone()));
+                                }
                             }
-                            NoveltyOp::Retract => None,
-                        })
-                        .collect();
+                        }
+                    }
                     resolved.sort_by(|(left, _), (right, _)| left.cmp(right));
                     for (key, value) in resolved {
-                        yield Entry { key, value };
+                        yield Entry { key: Key::try_from_bytes(&key)?, value };
                     }
                     continue;
                 }
@@ -781,16 +718,10 @@ where
                 // the ancestors on its path (nearest-root first) and its own
                 // lower bound, which scopes those ops to the frame's span. The
                 // seed is whatever expansion already routed to this node.
-                let mut stack = vec![(node, routed, None, true)];
-                while let Some((node, inherited, lower, rightmost)) = stack.pop() {
+                let mut stack = vec![(node, routed, None, None)];
+                while let Some((node, inherited, lower, upper)) = stack.pop() {
                     match node.body()? {
                         ArchivedNodeBody::Index(index) => {
-<<<<<<< ours
-                            let mut children = Vec::with_capacity(index.len());
-                            for at in 0..index.len() {
-                                let hash = index.hash_at(at)?;
-                                children.push(Self::load(self.storage, hash).await?);
-=======
                             // Ops routed here by expansion, plus this node's
                             // own, in buffer order.
                             let mut pending = inherited;
@@ -798,36 +729,37 @@ where
                                 pending.push(into_owned(entry)?);
                             }
 
-                            let mut children = Vec::with_capacity(index.links.len());
-                            let mut bound = lower.clone();
-                            let last = index.links.len().saturating_sub(1);
-                            for (at, link) in index.links.iter().enumerate() {
-                                let hash = <&Blake3Hash>::from(&link.node);
+                            let mut children = Vec::with_capacity(index.len());
+                            for at in 0..index.len() {
+                                let hash = index.hash_at(at)?;
                                 let child = Self::load(self.storage, hash).await?;
-                                // A child's span starts just past its
-                                // predecessor's upper bound. Only the rightmost
-                                // child of a rightmost node is open-ended.
-                                children.push((child, bound.clone(), rightmost && at == last));
-                                bound = Some(into_owned::<Key>(&link.upper_bound)?);
->>>>>>> theirs
+                                // Separators are lower bounds, so child `at`
+                                // spans `[sep(at), sep(at + 1))`. The leftmost
+                                // child inherits the frame's own lower bound
+                                // (routing clamps a key below every separator to
+                                // it) and the rightmost inherits the frame's
+                                // upper bound, which is open at the top of the
+                                // rightmost spine: an op sorting past every
+                                // stored key belongs there, the same way a flush
+                                // routes such an op to the last child.
+                                let child_lower = if at == 0 {
+                                    lower.clone()
+                                } else {
+                                    Some(index.separator(at)?)
+                                };
+                                let child_upper = if at + 1 < index.len() {
+                                    Some(index.separator(at + 1)?)
+                                } else {
+                                    upper.clone()
+                                };
+                                children.push((child, child_lower, child_upper));
                             }
-                            while let Some((child, lower, rightmost)) = children.pop() {
-                                stack.push((child, pending.clone(), lower, rightmost));
+                            while let Some((child, lower, upper)) = children.pop() {
+                                stack.push((child, pending.clone(), lower, upper));
                             }
                         }
                         ArchivedNodeBody::Segment(segment) => {
-<<<<<<< ours
-                            let mut keys = segment.keys::<Key>()?;
-                            while let Some((at, key)) = keys.next_key()? {
-                                let entry = Entry {
-                                    // `key` borrows the decoder's reused buffer;
-                                    // this owns the single copy.
-                                    key: Key::try_from_bytes(key)?,
-                                    value: into_owned(segment.value_at(at)?)?,
-                                };
-                                yield entry;
-=======
-                            // Resolve each key once: the highest covering op
+                            // Resolve each key once: the winning covering op
                             // wins, and with no covering op the stored entry
                             // stands. Ops for keys the segment does not hold
                             // are inserts, and are emitted in key order among
@@ -836,52 +768,65 @@ where
                             // Scoped to this leaf's span, because a buffer high
                             // in the tree holds ops for the whole subtree: an op
                             // belongs to the one leaf whose range covers it, and
-                            // routing follows the same child bounds a flush
+                            // routing follows the same child separators a flush
                             // would, so a buffered op lands where its flushed
                             // counterpart would have.
-                            // The rightmost leaf's span is open-ended: an op
-                            // sorting past every stored key belongs to it, the
-                            // same way a flush routes such an op to the last
-                            // child.
-                            let upper = node.body()?.upper_bound().and_then(into_owned)?;
-                            let covering =
-                                winning_ops(&inherited, lower.as_ref(), &upper, rightmost);
+                            let covering = winning_ops(
+                                &inherited,
+                                lower.as_deref(),
+                                upper.as_deref(),
+                            );
                             let mut buffered = covering.into_iter().peekable();
 
-                            for entry in segment.entries.iter() {
-                                let entry: Entry<Key, Value> = into_owned(entry)?;
-
+                            let mut keys = segment.keys::<Key>()?;
+                            while let Some((at, key)) = keys.next_key()? {
                                 // Emit any buffered inserts that sort before
                                 // this entry.
-                                while let Some((key, _)) = buffered.peek() {
-                                    if *key >= entry.key {
+                                while let Some((buffered_key, _)) = buffered.peek() {
+                                    if buffered_key.as_slice() >= key {
                                         break;
                                     }
-                                    let (key, op) = buffered.next().expect("peeked");
+                                    let (buffered_key, op) = buffered.next().expect("peeked");
                                     if let NoveltyOp::Assert(value) = op {
-                                        yield Entry { key, value };
+                                        yield Entry {
+                                            key: Key::try_from_bytes(&buffered_key)?,
+                                            value,
+                                        };
                                     }
                                 }
 
-                                match buffered.peek() {
-                                    // A covering op supersedes the stored entry:
-                                    // an assert shadows it, a retract hides it.
-                                    Some((key, _)) if *key == entry.key => {
-                                        let (key, op) = buffered.next().expect("peeked");
-                                        if let NoveltyOp::Assert(value) = op {
-                                            yield Entry { key, value };
-                                        }
+                                // A covering op supersedes the stored entry: an
+                                // assert shadows it, a retract hides it.
+                                if matches!(
+                                    buffered.peek(),
+                                    Some((buffered_key, _)) if buffered_key.as_slice() == key
+                                ) {
+                                    let (buffered_key, op) = buffered.next().expect("peeked");
+                                    if let NoveltyOp::Assert(value) = op {
+                                        yield Entry {
+                                            key: Key::try_from_bytes(&buffered_key)?,
+                                            value,
+                                        };
                                     }
-                                    _ => yield entry,
+                                    continue;
                                 }
+
+                                yield Entry {
+                                    // `key` borrows the decoder's reused buffer;
+                                    // this owns the single copy.
+                                    key: Key::try_from_bytes(key)?,
+                                    value: into_owned(segment.value_at(at)?)?,
+                                };
                             }
 
                             // Buffered inserts past the last stored entry.
-                            for (key, op) in buffered {
+                            for (buffered_key, op) in buffered {
                                 if let NoveltyOp::Assert(value) = op {
-                                    yield Entry { key, value };
+                                    yield Entry {
+                                        key: Key::try_from_bytes(&buffered_key)?,
+                                        value,
+                                    };
                                 }
->>>>>>> theirs
                             }
                         }
                     }
@@ -896,12 +841,7 @@ where
 /// A node's buffered ops are part of its content but are not bounded by the key
 /// span its links describe, so both scope pruning and shared-subtree pruning
 /// have to consult them rather than reasoning from bounds and hashes alone.
-fn pending_ops<Key, Value>(node: &SparseTreeNode<Key, Value>) -> &[NoveltyEntry<Key, Value>]
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-{
+fn pending_ops<Key, Value>(node: &SparseTreeNode<Key, Value>) -> &[NoveltyEntry<Value>] {
     match node {
         SparseTreeNode::Loaded { pending, .. } => pending,
         SparseTreeNode::Pending { pending, .. } => pending,
@@ -910,36 +850,14 @@ where
     }
 }
 
-/// Whether two frontier nodes carry the same pending ops, so that equal stored
-/// hashes imply equal logical content.
-fn same_pending<Key, Value>(
-    left: &SparseTreeNode<Key, Value>,
-    right: &SparseTreeNode<Key, Value>,
-) -> bool
-where
-    Key: self::Key + PartialEq,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Value: PartialEq,
-{
-    let (left, right) = (pending_ops(left), pending_ops(right));
-    // Values participate: two replicas can buffer the same key with different
-    // values, and pruning on key-and-kind alone would drop that difference
-    // entirely (there is no deeper hash difference to catch it, since the
-    // stored subtrees are identical).
-    left.len() == right.len()
-        && left.iter().zip(right.iter()).all(|(left, right)| {
-            left.key == right.key
-                && match (&left.op, &right.op) {
-                    (NoveltyOp::Assert(left), NoveltyOp::Assert(right)) => left == right,
-                    (NoveltyOp::Retract, NoveltyOp::Retract) => true,
-                    _ => false,
-                }
-        })
-}
-
 /// Reduces the ops collected along a root-to-leaf path to the winning op per
-/// key, restricted to the leaf's span `(lower, upper]` and sorted by key.
+/// key, restricted to the leaf's span `[lower, upper)` and sorted by key.
+///
+/// Separators are lower bounds, so a leaf's span is closed below and open
+/// above, and both ends may be absent: `None` for `lower` on the leftmost spine
+/// (routing clamps a key below every separator into it) and `None` for `upper`
+/// on the rightmost spine (a flush routes an op sorting past every key to the
+/// last child).
 ///
 /// Ops accumulate in buffer order, and a buffer keeps the newest op for a key
 /// last (writes append, then a *stable* sort by key preserves arrival order
@@ -950,25 +868,24 @@ where
 /// Ops outside the span belong to sibling leaves: a buffer high in the tree
 /// covers its whole subtree, and each op is resolved at the one leaf whose range
 /// contains it.
-fn winning_ops<Key, Value>(
-    collected: &[NoveltyEntry<Key, Value>],
-    lower: Option<&Key>,
-    upper: &Key,
-    open_ended: bool,
-) -> Vec<(Key, NoveltyOp<Value>)>
+fn winning_ops<Value>(
+    collected: &[NoveltyEntry<Value>],
+    lower: Option<&[u8]>,
+    upper: Option<&[u8]>,
+) -> Vec<(Vec<u8>, NoveltyOp<Value>)>
 where
-    Key: Ord + Clone,
     Value: Clone,
 {
-    let mut winners: Vec<(Key, NoveltyOp<Value>)> = Vec::new();
+    let mut winners: Vec<(Vec<u8>, NoveltyOp<Value>)> = Vec::new();
     for entry in collected {
-        if lower.is_some_and(|lower| entry.key <= *lower) || (!open_ended && entry.key > *upper) {
+        let key = entry.key.as_slice();
+        if lower.is_some_and(|lower| key < lower) || upper.is_some_and(|upper| key >= upper) {
             continue;
         }
         // Last op wins, so a later op for a key replaces the one recorded so
         // far. This also absorbs the copies expansion made when it routed an
         // ancestor's ops down: the same op arriving twice resolves to itself.
-        match winners.iter_mut().find(|(key, _)| *key == entry.key) {
+        match winners.iter_mut().find(|(candidate, _)| candidate == key) {
             Some((_, op)) => *op = entry.op.clone(),
             None => winners.push((entry.key.clone(), entry.op.clone())),
         }
@@ -1166,7 +1083,21 @@ where
                     }
                     Ordering::Equal => {
                         if source.nodes[source_idx].hash() != target.nodes[target_idx].hash() {
-<<<<<<< ours
+                            // Two nodes that differ *only* in their buffers hold
+                            // identical stored content, so their whole difference
+                            // is the two op sets and nothing below is worth
+                            // reading. This is what lets a buffered write sync
+                            // from the roots alone rather than descending to the
+                            // leaf its key would land in.
+                            if source
+                                .settle_buffered(source_idx, &mut target, target_idx)
+                                .await?
+                            {
+                                source_idx += 1;
+                                target_idx += 1;
+                                continue;
+                            }
+
                             // Equal lower bounds with differing hashes may be
                             // the same region at different heights: every
                             // leftmost spine shares its ancestor's lower
@@ -1212,23 +1143,6 @@ where
                                 (&mut target, &target_bound, &mut source, &source_bound)
                             };
                             if first.expand_at(first_bound).await? {
-=======
-                            // Two nodes that differ *only* in their buffers hold
-                            // identical stored content, so their whole difference
-                            // is the two op sets and nothing below is worth
-                            // reading. This is what lets a buffered write sync
-                            // from the roots alone rather than descending to the
-                            // leaf its key would land in.
-                            if source
-                                .settle_buffered(source_idx, &mut target, target_idx)
-                                .await?
-                            {
-                                source_idx += 1;
-                                target_idx += 1;
-                                continue;
-                            }
-                            if source.expand_at(&source_bound).await? {
->>>>>>> theirs
                                 expanded = true;
                                 break;
                             }
@@ -1398,18 +1312,17 @@ where
             }
 
             for sparse_node in &self.target.nodes {
-<<<<<<< ours
+                // A node with pending ops is transferred as it is stored: the
+                // ops are already part of the bytes of whichever ancestor
+                // buffers them, and that ancestor is in `expanded` above, so
+                // the seen-check below is still the right test for the block
+                // this frontier entry names.
                 if self.source.seen.contains(sparse_node.hash()) {
                     continue;
                 }
-=======
-                // A node with pending ops is transferred as it is stored: the
-                // ops are already part of the bytes of whichever ancestor
-                // buffers them, and that ancestor is in `expanded` above.
                 // A settled node names no block of its own: its ops live in the
                 // bytes of the node that buffers them, which the walk already
                 // recorded.
->>>>>>> theirs
                 let node = match sparse_node {
                     SparseTreeNode::Settled { .. } => continue,
                     SparseTreeNode::Loaded { node, .. } => node.clone(),
@@ -3710,8 +3623,8 @@ mod tests {
                 if let Ok(crate::ArchivedNodeBody::Index(index)) = node.body() {
                     let own = index.novelty.len();
                     let mut below = 0;
-                    for link in index.links.iter() {
-                        let h = <&Blake3Hash>::from(&link.node).clone();
+                    for at in 0..index.len() {
+                        let h = index.hash_at(at)?.clone();
                         let b = StorageBackend::get(storage.backend(), &h).await?.unwrap();
                         let child: PersistentNode<[u8; 4], Vec<u8>> =
                             PersistentNode::new(crate::Buffer::from(b));
@@ -3828,22 +3741,31 @@ mod tests {
                 let node: PersistentNode<[u8; 4], Vec<u8>> =
                     PersistentNode::new(crate::Buffer::from(bytes));
                 if let Ok(crate::ArchivedNodeBody::Index(index)) = node.body() {
-                    let node_upper = index
-                        .links
-                        .last()
-                        .map(|l| crate::into_owned::<[u8; 4]>(&l.upper_bound).unwrap());
+                    // Separators are lower bounds, so a node's own table
+                    // bounds its ops from BELOW: every buffered key must sort
+                    // at or above the leftmost separator. The right end is
+                    // open (the last child takes whatever remains), so there
+                    // is nothing to check above.
+                    let node_lower = if index.is_empty() {
+                        None
+                    } else {
+                        Some(index.separator(0)?)
+                    };
                     for entry in index.novelty.iter() {
                         checked += 1;
-                        let k = crate::into_owned::<[u8; 4]>(&entry.key).unwrap();
-                        if let Some(up) = node_upper
-                            && k > up
+                        let k: &[u8] = &entry.key;
+                        if let Some(low) = node_lower.as_ref()
+                            && !low.is_empty()
+                            && k < low.as_slice()
                         {
                             violations += 1;
-                            println!("    VIOLATION: buffered key {k:?} > node upper bound {up:?}");
+                            println!(
+                                "    VIOLATION: buffered key {k:?} < node lower bound {low:?}"
+                            );
                         }
                     }
-                    for link in index.links.iter() {
-                        frontier.push(<&Blake3Hash>::from(&link.node).clone());
+                    for at in 0..index.len() {
+                        frontier.push(index.hash_at(at)?.clone());
                     }
                 }
             }

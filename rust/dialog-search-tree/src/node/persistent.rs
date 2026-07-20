@@ -190,7 +190,7 @@ where
 
     /// Interprets this node as an index node, returning an error if it's a
     /// segment.
-    pub fn as_index(&self) -> Result<&ArchivedIndex, DialogSearchTreeError> {
+    pub fn as_index(&self) -> Result<&ArchivedIndex<Value>, DialogSearchTreeError> {
         self.body().and_then(|body| match body {
             ArchivedNodeBody::Index(index) => Ok(index),
             ArchivedNodeBody::Segment(_) => Err(DialogSearchTreeError::Access(
@@ -249,7 +249,7 @@ pub struct NoveltyEntry<Value> {
 /// nothing.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedIndex)]
-pub struct PersistentIndex {
+pub struct PersistentIndex<Value> {
     /// The tree's format header, carried by every node so any node hash is a
     /// complete, self-describing tree root. Identical across a tree's nodes,
     /// so structural sharing stores it once in practice.
@@ -274,11 +274,10 @@ pub struct PersistentIndex {
     /// separator table: separators are routing keys and rank inputs, so
     /// letting a pending op move one would reshape the tree as a side effect
     /// of buffering.
-    #[rkyv(omit_bounds)]
     pub novelty: Vec<NoveltyEntry<Value>>,
 }
 
-impl PersistentIndex {
+impl<Value> PersistentIndex<Value> {
     /// Builds the separator table from child links, in order.
     ///
     /// The table layout is a pure function of the links: the prefix is the
@@ -309,6 +308,7 @@ impl PersistentIndex {
             suffixes,
             ends,
             hashes,
+            novelty: Vec::new(),
         }
     }
 }
@@ -416,7 +416,7 @@ where
 #[rkyv(archived = ArchivedNodeBody)]
 pub enum PersistentNodeBody<Value> {
     /// An index node containing links to child nodes.
-    Index(PersistentIndex),
+    Index(PersistentIndex<Value>),
     /// A leaf segment containing key-value entries.
     Segment(PersistentSegment<Value>),
 }
@@ -444,8 +444,13 @@ where
 {
     /// Builds an index node body from child links, stamping the tree's format
     /// header.
+    ///
+    /// `novelty` is the buffer of ops pending against this subtree; it is
+    /// empty for a canonical (fully flushed) index, which makes such a node
+    /// byte-identical to one built before the novelty buffer existed.
     pub fn index_from_links(
         links: Vec<Link>,
+        novelty: Vec<NoveltyEntry<Value>>,
         header: Manifest,
     ) -> Result<Self, DialogSearchTreeError> {
         if links.is_empty() {
@@ -453,9 +458,9 @@ where
                 "Attempted to create an index from zero links".into(),
             ));
         }
-        Ok(PersistentNodeBody::Index(PersistentIndex::from_links(
-            links, header,
-        )))
+        let mut index = PersistentIndex::from_links(links, header);
+        index.novelty = novelty;
+        Ok(PersistentNodeBody::Index(index))
     }
 
     /// Builds a leaf segment node body from entries, stamping the tree's
@@ -486,17 +491,14 @@ where
 /// differential) so they cannot drift apart. A buffer is sorted by key and
 /// stable within a key, so the run of equal-key entries is contiguous and its
 /// last element is the most recent op, matching how a flush replays them.
-pub fn resolve_pending<'a, Key, Value>(
-    novelty: &'a [NoveltyEntry<Key, Value>],
-    key: &Key,
-) -> Option<&'a NoveltyOp<Value>>
-where
-    Key: Ord,
-{
-    let at = novelty.partition_point(|entry| entry.key < *key);
-    if at < novelty.len() && novelty[at].key == *key {
+pub fn resolve_pending<'a, Value>(
+    novelty: &'a [NoveltyEntry<Value>],
+    key: &[u8],
+) -> Option<&'a NoveltyOp<Value>> {
+    let at = novelty.partition_point(|entry| entry.key.as_slice() < key);
+    if at < novelty.len() && novelty[at].key.as_slice() == key {
         let mut last = at;
-        while last + 1 < novelty.len() && novelty[last + 1].key == *key {
+        while last + 1 < novelty.len() && novelty[last + 1].key.as_slice() == key {
             last += 1;
         }
         Some(&novelty[last].op)

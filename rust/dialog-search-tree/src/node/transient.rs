@@ -10,14 +10,8 @@ use rkyv::{
 };
 
 use crate::{
-<<<<<<< ours
     ArchivedNodeBody, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Key, Link,
-    Manifest, Node, PersistentNode, PersistentNodeBody, Rank, Value, into_owned,
-=======
-    ArchivedNodeBody, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Key, Link, Node,
-    NoveltyEntry, PersistentIndex, PersistentNode, PersistentNodeBody, Rank, SymmetryWith, Value,
-    into_owned,
->>>>>>> theirs
+    Manifest, Node, NoveltyEntry, PersistentNode, PersistentNodeBody, Rank, Value, into_owned,
 };
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
@@ -40,16 +34,12 @@ pub enum TransientNode<Key, Value> {
     Segment(TransientSegment<Key, Value>),
 }
 
-<<<<<<< ours
-/// An index node holding live child nodes.
+/// An index node holding live child nodes and a novelty buffer.
 ///
 /// An index carries no separator of its own: its separator is by definition
 /// its first child's separator (the seam at any node's left edge is the seam
 /// at its leftmost leaf's left edge), so it is derived on demand via
 /// [`TransientNode::separator`].
-=======
-/// An index node holding live child nodes and a novelty buffer.
->>>>>>> theirs
 #[derive(Debug)]
 pub struct TransientIndex<Key, Value> {
     /// The child nodes, each persistent or transient.
@@ -59,7 +49,7 @@ pub struct TransientIndex<Key, Value> {
     /// A canonical edit (insert/delete) never introduces novelty, so on that
     /// path this is always empty and flows through reshape untouched. It becomes
     /// non-empty only on the hitchhiker write/flush path.
-    pub novelty: Vec<NoveltyEntry<Key, Value>>,
+    pub novelty: Vec<NoveltyEntry<Value>>,
 }
 
 /// A leaf segment holding live key-value entries.
@@ -77,11 +67,15 @@ pub struct TransientSegment<Key, Value> {
 impl<Key, Value> TransientNode<Key, Value> {
     /// The separator at this node's left edge.
     ///
-<<<<<<< ours
     /// A segment stores it; an index derives it from its first child (the
     /// seam at a node's left edge is its leftmost leaf's seam, so the same
     /// string propagates upward unchanged). Errors on an empty index, which
     /// violates the node invariant.
+    ///
+    /// Stored content only: a node's novelty is deliberately excluded, since
+    /// a separator is both a routing key and a rank input, so letting a
+    /// pending op move it would reshape the tree as a side effect of
+    /// buffering.
     pub fn separator(&self) -> Result<&[u8], DialogSearchTreeError> {
         match self {
             TransientNode::Segment(segment) => Ok(segment.separator.as_slice()),
@@ -91,17 +85,6 @@ impl<Key, Value> TransientNode<Key, Value> {
                 .ok_or_else(|| DialogSearchTreeError::Node("Index was unexpectedly empty".into()))?
                 .separator(),
         }
-=======
-    /// Errors if the index is empty (which violates the node invariant) or if a
-    /// persistent child's bound cannot be recovered.
-    pub fn upper_bound(&self) -> Result<Key, DialogSearchTreeError> {
-        // Stored content only: see `ArchivedIndex::upper_bound` for why a
-        // node's buffer must not move its bound.
-        self.children
-            .last()
-            .ok_or_else(|| DialogSearchTreeError::Node("Index was unexpectedly empty".into()))?
-            .upper_bound()
->>>>>>> theirs
     }
 }
 
@@ -194,31 +177,21 @@ where
     pub fn open_index(
         node: &PersistentNode<Key, Value>,
     ) -> Result<TransientIndex<Key, Value>, DialogSearchTreeError> {
-<<<<<<< ours
-        let children = node
-            .as_index()?
+        let index = node.as_index()?;
+        let children = index
             .links()?
             .into_iter()
             .map(Node::Persistent)
             .collect::<Vec<Node<Key, Value>>>();
-        Ok(TransientIndex { children })
-=======
-        let index = node.as_index()?;
-        let children = index
-            .links
-            .iter()
-            .map(|link| Ok(Node::Persistent(into_owned::<Link<Key>>(link)?)))
-            .collect::<Result<Vec<Node<Key, Value>>, DialogSearchTreeError>>()?;
         // Carry the node's novelty across to the transient form so a flush or
         // canonicalize can act on it. The deserialized ops are owned copies of
         // the archived novelty.
         let novelty = index
             .novelty
             .iter()
-            .map(into_owned::<NoveltyEntry<Key, Value>>)
-            .collect::<Result<Vec<NoveltyEntry<Key, Value>>, DialogSearchTreeError>>()?;
+            .map(into_owned::<NoveltyEntry<Value>>)
+            .collect::<Result<Vec<NoveltyEntry<Value>>, DialogSearchTreeError>>()?;
         Ok(TransientIndex { children, novelty })
->>>>>>> theirs
     }
 }
 
@@ -297,27 +270,12 @@ where
             TransientNode::Segment(segment) => {
                 PersistentNodeBody::segment_from_entries(segment.entries, *manifest)?
             }
-            TransientNode::Index(index) => {
-                let links = index
-                    .children
+            TransientNode::Index(TransientIndex { children, novelty }) => {
+                let links = children
                     .into_iter()
-<<<<<<< ours
                     .map(|child| child.into_link(delta, manifest))
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
-                PersistentNodeBody::index_from_links(links, *manifest)?
-=======
-                    .map(|child| child.into_link(delta))
-                    .collect::<Result<Vec<Link<Key>>, DialogSearchTreeError>>()?;
-                if links.is_empty() {
-                    return Err(DialogSearchTreeError::Node(
-                        "Attempted to persist an index with zero links".into(),
-                    ));
-                }
-                PersistentNodeBody::Index(PersistentIndex {
-                    links,
-                    novelty: index.novelty,
-                })
->>>>>>> theirs
+                PersistentNodeBody::index_from_links(links, novelty, *manifest)?
             }
         };
 
@@ -367,17 +325,20 @@ where
     >,
     D: Distribution,
 {
-<<<<<<< ours
     let threshold = BOTTOM_RANK + level;
     let mut groups: Vec<Node<Key, Value>> = vec![];
     let mut pending: Vec<Node<Key, Value>> = vec![];
 
+    // Reshaping produces canonical index nodes: novelty lives on the nodes
+    // the write path buffered it at, and a regrouped node is a fresh one, so
+    // it starts empty. A flush is what moves buffered ops downward.
     for child in children {
         let rank = D::seam_rank(child.separator()?, manifest);
         if rank > threshold && !pending.is_empty() {
             groups.push(
                 TransientNode::Index(TransientIndex {
                     children: std::mem::take(&mut pending),
+                    novelty: Vec::new(),
                 })
                 .into(),
             );
@@ -386,30 +347,16 @@ where
     }
 
     if !pending.is_empty() {
-        groups.push(TransientNode::Index(TransientIndex { children: pending }).into());
+        groups.push(
+            TransientNode::Index(TransientIndex {
+                children: pending,
+                novelty: Vec::new(),
+            })
+            .into(),
+        );
     }
 
     Ok(groups)
-=======
-    let ranked = children
-        .into_iter()
-        .map(|child| {
-            let rank = rank_of_node::<Key, Value, D>(&child)?;
-            Ok((child, rank))
-        })
-        .collect::<Result<Vec<(Node<Key, Value>, Rank)>, DialogSearchTreeError>>()?;
-
-    Ok(group_by_rank(ranked, BOTTOM_RANK + level)
-        .into_iter()
-        .map(|group| {
-            TransientNode::Index(TransientIndex {
-                children: group,
-                novelty: Vec::new(),
-            })
-            .into()
-        })
-        .collect())
->>>>>>> theirs
 }
 
 /// Regroups an ordered list of entries into leaf segments by the canonical cut

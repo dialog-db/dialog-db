@@ -2308,7 +2308,6 @@ mod tests {
         Ok(())
     }
 
-<<<<<<< ours
     /// A value larger than the inline threshold spills: its key carries a
     /// 32-byte reference, its bytes land as a content-addressed block in the
     /// store (keyed by that reference), and a select reconstructs the exact
@@ -2620,7 +2619,9 @@ mod tests {
             "equality-by-spilled-value returns one fact"
         );
         assert_eq!(results[0].is, wanted);
-=======
+        Ok(())
+    }
+
     /// Real-data footprint on an on-disk backend. Gated on `DIALOG_IMPORT_CSV`.
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg(not(target_arch = "wasm32"))]
@@ -2782,7 +2783,6 @@ mod tests {
             selected.len(),
         );
 
->>>>>>> theirs
         Ok(())
     }
 }

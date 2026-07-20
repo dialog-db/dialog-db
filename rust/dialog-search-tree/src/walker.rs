@@ -17,13 +17,8 @@ use rkyv::{
 };
 
 use crate::{
-<<<<<<< ours
-    Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, PersistentNode, Value,
-    into_owned,
-=======
-    Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, NoveltyEntry, NoveltyOp,
-    PersistentNode, SymmetryWith, Value, into_owned,
->>>>>>> theirs
+    Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, NoveltyOp, PersistentNode,
+    Value, into_owned,
 };
 
 /// Whether `key` sorts past the end of `range`, so an ascending walk can stop.
@@ -58,28 +53,24 @@ where
 #[allow(clippy::type_complexity)]
 fn pending_for_leaf<Key, Value>(
     path: &[(PersistentNode<Key, Value>, Option<usize>)],
-) -> Result<Vec<(Key, NoveltyOp<Value>)>, DialogSearchTreeError>
+) -> Result<Vec<(Vec<u8>, NoveltyOp<Value>)>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived> + 'static,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + 'static,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
 {
-    // Pass one: establish the leaf's span from the links alone, touching no
-    // buffered entry. The span is what makes the second pass cheap, so it has
-    // to be known before any op is looked at.
-    let mut lower: Option<Key> = None;
-    let mut upper: Option<Key> = None;
-    let mut open_ended = true;
+    // Pass one: establish the leaf's span from the separator table alone,
+    // touching no buffered entry. The span is what makes the second pass
+    // cheap, so it has to be known before any op is looked at.
+    //
+    // Separators are lower bounds: child `at` spans `[sep(at), sep(at + 1))`,
+    // and the last child of the rightmost path runs open-ended, matching the
+    // flush rule that the last child takes whatever remains.
+    let mut lower: Option<Vec<u8>> = None;
+    let mut upper: Option<Vec<u8>> = None;
 
     for (node, descended) in path {
         let ArchivedNodeBody::Index(index) = node.body()? else {
@@ -87,31 +78,31 @@ where
         };
         let Some(at) = descended else { continue };
 
-        if let Some(link) = index.links.get(*at) {
-            upper = Some(into_owned::<Key>(&link.upper_bound)?);
-            if *at + 1 != index.links.len() {
-                open_ended = false;
+        if *at < index.len() {
+            let separator = index.separator(*at)?;
+            if !separator.is_empty() {
+                lower = Some(separator);
             }
-            if *at > 0
-                && let Some(previous) = index.links.get(at - 1)
-            {
-                lower = Some(into_owned::<Key>(&previous.upper_bound)?);
-            }
+            upper = if *at + 1 < index.len() {
+                Some(index.separator(*at + 1)?)
+            } else {
+                // Rightmost child at this level: it inherits whatever bound
+                // an ancestor imposed, so leave `upper` as the ancestors set it.
+                upper
+            };
         }
     }
 
     // Pass two: collect only the ops that fall in this leaf's span.
     //
     // A buffer holds ops for its whole subtree, so most of them belong to
-    // sibling leaves. Deciding that from the *archived* key skips the
-    // deserialization for every op that is not ours, which is the bulk of them:
-    // a full buffer costs one comparison per op instead of a `Key` + `Value`
-    // allocation per op.
+    // sibling leaves. Deciding that from the archived key skips the
+    // deserialization for every op that is not ours, which is the bulk of them.
     //
     // Buffers are sorted by key, so the in-range ops form a contiguous run and
     // the scan can stop at the first key past the span rather than walking the
     // tail.
-    let mut winners: Vec<(Key, NoveltyOp<Value>)> = Vec::new();
+    let mut winners: Vec<(Vec<u8>, NoveltyOp<Value>)> = Vec::new();
     for (node, descended) in path {
         let ArchivedNodeBody::Index(index) = node.body()? else {
             continue;
@@ -121,19 +112,21 @@ where
         }
 
         for entry in index.novelty.iter() {
+            let key: &[u8] = &entry.key;
             // Below the span: skip without decoding.
-            if lower.as_ref().is_some_and(|lower| &entry.key <= lower) {
+            if lower.as_ref().is_some_and(|lower| key < lower.as_slice()) {
                 continue;
             }
-            // Past the span: the rest of this sorted buffer is too, so stop.
-            if !open_ended && upper.as_ref().is_some_and(|upper| &entry.key > upper) {
+            // At or past the exclusive upper bound: the rest of this sorted
+            // buffer is too, so stop.
+            if upper.as_ref().is_some_and(|upper| key >= upper.as_slice()) {
                 break;
             }
 
-            let entry: NoveltyEntry<Key, Value> = into_owned(entry)?;
-            match winners.iter_mut().find(|(key, _)| *key == entry.key) {
-                Some((_, op)) => *op = entry.op,
-                None => winners.push((entry.key, entry.op)),
+            let op: NoveltyOp<Value> = into_owned(&entry.op)?;
+            match winners.iter_mut().find(|(candidate, _)| candidate == key) {
+                Some((_, winner)) => *winner = op,
+                None => winners.push((key.to_vec(), op)),
             }
         }
     }
@@ -150,17 +143,10 @@ where
 /// to that key. Within a key the last op wins, matching how a flush replays them.
 pub fn pending_for_key<Key, Value>(
     path: &[TreeLayer<Key, Value>],
-    key: &Key,
+    key: &[u8],
 ) -> Result<Option<NoveltyOp<Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived> + 'static,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + 'static,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -177,18 +163,19 @@ where
         // node's buffer holds ops for its entire subtree, so scanning it per
         // read is the difference between constant and linear work in the buffer
         // size on every point read.
-        let at = index.novelty.partition_point(|entry| entry.key < *key);
+        let at = index
+            .novelty
+            .partition_point(|entry| entry.key.as_slice() < key);
         // Within a key the last op wins, and equal keys are contiguous.
         let mut found = None;
         for entry in index.novelty[at..].iter() {
-            if entry.key != *key {
+            if entry.key.as_slice() != key {
                 break;
             }
             found = Some(entry);
         }
         if let Some(entry) = found {
-            let entry: NoveltyEntry<Key, Value> = into_owned(entry)?;
-            winner = Some(entry.op);
+            winner = Some(into_owned::<NoveltyOp<Value>>(&entry.op)?);
         }
     }
     Ok(winner)
@@ -272,7 +259,6 @@ where
                         0
                     };
 
-<<<<<<< ours
                     if child_index < index.len() {
                         let next_node = accessor.get_node(index.hash_at(child_index)?).await?;
                         search_path.push((node, Some(child_index)));
@@ -284,15 +270,55 @@ where
                     continue;
                 }
 
+                // Ops buffered on the ancestors of this leaf are part of the
+                // tree's content: a write lands in a node's buffer and only
+                // reaches a leaf when that buffer overflows, so a walk that
+                // reads segments alone misses every recent write. Merge the
+                // covering ops over the stored entries, exactly as a flush
+                // would resolve them.
+                let pending = pending_for_leaf::<Key, Value>(&search_path)?;
+                let mut buffered = pending.into_iter().peekable();
+
                 // A leaf re-touched across selects (a join re-selects the same
                 // branch once per outer binding, landing on the same leaves)
                 // reuses a decode memoized on the node buffer; a leaf touched
                 // once (a single range scan) streams its keys without paying to
                 // materialize a cache it would never reuse. `should_memoize_keys`
                 // returns `false` on the first touch, `true` from the second on.
+                //
+                // Both arms resolve buffered ops identically; only how the
+                // stored keys are obtained differs.
                 if node.should_memoize_keys() {
                     let keys = node.memoized_keys()?;
                     for (at, key) in keys.iter().enumerate() {
+                        // Buffered inserts sorting before this entry.
+                        while let Some((buffered_key, _)) = buffered.peek() {
+                            if buffered_key.as_slice() >= key {
+                                break;
+                            }
+                            let (buffered_key, op) = buffered.next().expect("peeked");
+                            if let NoveltyOp::Assert(value) = op {
+                                let entry_key = Key::try_from_bytes(&buffered_key)?;
+                                if range.contains(&entry_key) {
+                                    entered_range = true;
+                                    yield Entry { key: entry_key, value };
+                                }
+                            }
+                        }
+
+                        // A covering op supersedes the stored entry.
+                        if matches!(buffered.peek(), Some((buffered_key, _)) if buffered_key.as_slice() == key) {
+                            let (buffered_key, op) = buffered.next().expect("peeked");
+                            if let NoveltyOp::Assert(value) = op {
+                                let entry_key = Key::try_from_bytes(&buffered_key)?;
+                                if range.contains(&entry_key) {
+                                    entered_range = true;
+                                    yield Entry { key: entry_key, value };
+                                }
+                            }
+                            continue;
+                        }
+
                         let entry_key = Key::try_from_bytes(key)?;
                         if range.contains(&entry_key) {
                             entered_range = true;
@@ -301,6 +327,16 @@ where
                             };
                             let value = into_owned(segment.value_at(at)?)?;
                             yield Entry { key: entry_key, value };
+                        } else if past_range_end(&range, &entry_key) {
+                            // Past the end: entries only ascend from here, so
+                            // nothing further can match.
+                            //
+                            // This must not be gated on having already matched
+                            // something. A scan whose range hits no stored
+                            // entry would otherwise never exit and would walk
+                            // the rest of the tree, making an empty lookup cost
+                            // the size of the database.
+                            return;
                         } else if entered_range {
                             return;
                         }
@@ -311,88 +347,59 @@ where
                     };
                     let mut keys = segment.keys::<Key>()?;
                     while let Some((at, key)) = keys.next_key()? {
+                        // Buffered inserts sorting before this entry.
+                        while let Some((buffered_key, _)) = buffered.peek() {
+                            if buffered_key.as_slice() >= key {
+                                break;
+                            }
+                            let (buffered_key, op) = buffered.next().expect("peeked");
+                            if let NoveltyOp::Assert(value) = op {
+                                let entry_key = Key::try_from_bytes(&buffered_key)?;
+                                if range.contains(&entry_key) {
+                                    entered_range = true;
+                                    yield Entry { key: entry_key, value };
+                                }
+                            }
+                        }
+
+                        // A covering op supersedes the stored entry.
+                        if matches!(buffered.peek(), Some((buffered_key, _)) if buffered_key.as_slice() == key) {
+                            let (buffered_key, op) = buffered.next().expect("peeked");
+                            if let NoveltyOp::Assert(value) = op {
+                                let entry_key = Key::try_from_bytes(&buffered_key)?;
+                                if range.contains(&entry_key) {
+                                    entered_range = true;
+                                    yield Entry { key: entry_key, value };
+                                }
+                            }
+                            continue;
+                        }
+
                         let entry_key = Key::try_from_bytes(key)?;
                         if range.contains(&entry_key) {
                             entered_range = true;
                             let value = into_owned(segment.value_at(at)?)?;
                             yield Entry { key: entry_key, value };
+                        } else if past_range_end(&range, &entry_key) {
+                            // See the memoized arm above: this exit must not be
+                            // gated on `entered_range`, or a range matching no
+                            // stored entry walks the rest of the tree.
+                            return;
                         } else if entered_range {
                             return;
                         }
                     }
-=======
-                    },
-                    ArchivedNodeBody::Segment(segment) => {
-                        // Ops buffered on the ancestors of this leaf are part of
-                        // the tree's content: a write lands in a node's buffer
-                        // and only reaches a leaf when that buffer overflows, so
-                        // a walk that reads segments alone misses every recent
-                        // write. Collect the covering ops from the path and
-                        // merge them over the stored entries, exactly as a flush
-                        // would resolve them.
-                        let pending = pending_for_leaf::<Key, Value>(&search_path)?;
+                }
 
-                        let mut buffered = pending.into_iter().peekable();
-
-                        for entry in segment.entries.iter() {
-                            let entry: Entry<Key, Value> = into_owned(entry)?;
-
-                            // Buffered inserts sorting before this entry.
-                            while let Some((key, _)) = buffered.peek() {
-                                if *key >= entry.key {
-                                    break;
-                                }
-                                let (key, op) = buffered.next().expect("peeked");
-                                if let NoveltyOp::Assert(value) = op
-                                    && range.contains(&key)
-                                {
-                                    entered_range = true;
-                                    yield Entry { key, value };
-                                }
-                            }
-
-                            // A covering op supersedes the stored entry.
-                            let superseded = matches!(buffered.peek(), Some((key, _)) if *key == entry.key);
-                            if superseded {
-                                let (key, op) = buffered.next().expect("peeked");
-                                if let NoveltyOp::Assert(value) = op
-                                    && range.contains(&key)
-                                {
-                                    entered_range = true;
-                                    yield Entry { key, value };
-                                }
-                                continue;
-                            }
-
-                            if range.contains(&entry.key) {
-                                entered_range = true;
-                                yield entry;
-                            } else if past_range_end(&range, &entry.key) {
-                                // Past the end: entries only ascend from here,
-                                // so nothing further can match.
-                                //
-                                // This must not be gated on having already
-                                // matched something. A scan whose range hits no
-                                // stored entry would otherwise never exit and
-                                // would walk the rest of the tree, making an
-                                // empty lookup cost the size of the database.
-                                return;
-                            } else if entered_range {
-                                return;
-                            }
+                // Buffered inserts past the last stored entry of this leaf.
+                for (buffered_key, op) in buffered {
+                    if let NoveltyOp::Assert(value) = op {
+                        let entry_key = Key::try_from_bytes(&buffered_key)?;
+                        if range.contains(&entry_key) {
+                            entered_range = true;
+                            yield Entry { key: entry_key, value };
                         }
-
-                        // Buffered inserts past the last stored entry.
-                        for (key, op) in buffered {
-                            if let NoveltyOp::Assert(value) = op
-                                && range.contains(&key)
-                            {
-                                entered_range = true;
-                                yield Entry { key, value };
-                            }
-                        }
-                    },
->>>>>>> theirs
+                    }
                 }
             }
         }

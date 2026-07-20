@@ -692,144 +692,11 @@ where
         self.query_stuff().await
     }
 
-<<<<<<< ours
     /// Seed a realistic bug-tracker fact base: `count` bugs, each a seven-fact
     /// [`Bug`] record, with status/priority/assignee drawn from the same
     /// distribution as the real tonk data (mostly-done/triage, medium priority,
     /// a few assignees plus many unassigned). Returns the seeded entities so a
     /// transaction benchmark can update specific bugs. Off the measured path.
-=======
-    /// Seed `count` bug records in one transaction, returning their entities.
->>>>>>> theirs
-    pub async fn seed_bugs(&self, count: usize) -> Result<Vec<Entity>> {
-        const STATUSES: &[&str] = &["done", "triage", "todo", "canceled", "in-progress"];
-        const PRIORITIES: &[&str] = &["medium", "high", "low", "urgent"];
-        const ASSIGNEES: &[&str] = &[
-            "",
-            "did:key:z6MkDQtgLHmp664Wf8wn32G9MT79GpKncnQkcJmLYYu6HEJz",
-            "did:key:z6MkAoFSTzm7XMv6wc1X9H5iND4YSfEaHw2LYWiTR2xDPfu8",
-            "did:key:z6MkGSesqrS3iyekKGrhMCmHyp82RxJaohuvnNMmdQXG9kza",
-        ];
-
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .open()
-            .perform(&self.operator)
-            .await?;
-
-        let mut entities = Vec::with_capacity(count);
-        let mut transaction = branch.transaction();
-        for index in 0..count {
-            let entity = Entity::new()?;
-            entities.push(entity.clone());
-            transaction = transaction.assert(Bug {
-                this: entity,
-                status: bug::Status(STATUSES[index % STATUSES.len()].to_string()),
-                priority: bug::Priority(PRIORITIES[index % PRIORITIES.len()].to_string()),
-                assignee: bug::Assignee(ASSIGNEES[index % ASSIGNEES.len()].to_string()),
-                title: bug::Title(format!("Bug #{index}: something is off")),
-                ordering: bug::Ordering(index as f64 * 1000.0),
-            });
-        }
-        transaction.commit().perform(&self.operator).await?;
-        Ok(entities)
-    }
-
-    /// Run the public [`Bug`] concept query, optionally pinning `status` to a
-    /// constant (the "bugs with status X" query the app issues; `None` leaves
-    /// status free for an all-bugs join). Reports the join's block reads.
-    pub async fn query_bugs_by_status(&self, status: Option<&str>) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
-
-        let env = JoinEnv {
-            branch: &branch,
-            operator: &self.operator,
-            rules: RuleRegistry::new(),
-            journal: ReadJournal::default(),
-        };
-
-        let status_term = match status {
-            Some(value) => Term::from(value.to_string()),
-            None => Term::var("status"),
-        };
-
-        env.journal().clear();
-        let results = Query::<Bug> {
-            this: Term::var("this"),
-            status: status_term,
-            priority: Term::var("priority"),
-            assignee: Term::var("assignee"),
-            title: Term::var("title"),
-            ordering: Term::var("ordering"),
-        }
-        .perform(&env)
-        .try_vec()
-        .await?;
-
-        Ok(JoinRun {
-            results_len: results.len(),
-            reads: env.journal().reads(),
-            unique_reads: env.journal().unique_reads(),
-        })
-    }
-
-    /// Update a bug's status (the "close a bug" transaction): assert a new
-    /// status on the entity. Cardinality-one means the assertion supersedes the
-    /// prior status. Returns the committed revision hash's presence.
-    pub async fn update_bug_status(&self, entity: &Entity, status: &str) -> Result<()> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .open()
-            .perform(&self.operator)
-            .await?;
-        branch
-            .transaction()
-            .assert(
-                ::dialog_query::the!("squash.bug/status")
-                    .of(entity.clone())
-                    .is(status.to_string()),
-            )
-            .commit()
-            .perform(&self.operator)
-            .await?;
-        Ok(())
-    }
-
-    /// Reassign a bug and set its status in one transaction (the "update
-    /// assignee + status" flow).
-    pub async fn reassign_bug(&self, entity: &Entity, assignee: &str, status: &str) -> Result<()> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .open()
-            .perform(&self.operator)
-            .await?;
-        branch
-            .transaction()
-            .assert(
-                ::dialog_query::the!("squash.bug/assignee")
-                    .of(entity.clone())
-                    .is(assignee.to_string()),
-            )
-            .assert(
-                ::dialog_query::the!("squash.bug/status")
-                    .of(entity.clone())
-                    .is(status.to_string()),
-            )
-            .commit()
-            .perform(&self.operator)
-            .await?;
-        Ok(())
-    }
-
-<<<<<<< ours
     /// Import the real bug records from a `tonk export` CSV (the
     /// `the,of,as,is,cause` layout) into the branch, asserting every
     /// `squash.bug/*` fact — including `detail` (the long free-text
@@ -1097,8 +964,41 @@ where
         let start = std::time::Instant::now();
         let filed = Entity::new()?;
         {
-=======
-    /// Seed `count` bugs the way a real tracker accumulates them: one commit
+            let branch = self
+                .repo
+                .branch(&self.branch)
+                .open()
+                .perform(&self.operator)
+                .await?;
+            branch
+                .transaction()
+                .assert(Bug {
+                    this: filed,
+                    status: bug::Status("triage".to_string()),
+                    priority: bug::Priority("high".to_string()),
+                    assignee: bug::Assignee(String::new()),
+                    title: bug::Title("A newly filed bug".to_string()),
+                    ordering: bug::Ordering(count as f64 * 1000.0),
+                })
+                .commit()
+                .perform(&self.operator)
+                .await?;
+        }
+        eprintln!("BUGBENCH {:<22} time={:?}", "file-bug", start.elapsed());
+
+        let start = std::time::Instant::now();
+        self.update_bug_status(&entities[3], "done").await?;
+        eprintln!("BUGBENCH {:<22} time={:?}", "close-bug", start.elapsed());
+
+        let start = std::time::Instant::now();
+        self.reassign_bug(&entities[5], "did:key:zNewAssignee", "in-progress")
+            .await?;
+        eprintln!("BUGBENCH {:<22} time={:?}", "reassign-bug", start.elapsed());
+
+        eprintln!("BUGBENCH seeded {count} bugs in {seed_elapsed:?}");
+        Ok(())
+    }
+
     /// per bug, then a status change and a reassignment on a share of them.
     ///
     /// The single-transaction [`seed_bugs`](Self::seed_bugs) leaves a history
@@ -1122,7 +1022,6 @@ where
         for index in 0..count {
             let entity = Entity::new()?;
             entities.push(entity.clone());
->>>>>>> theirs
             let branch = self
                 .repo
                 .branch(&self.branch)
@@ -1132,41 +1031,17 @@ where
             branch
                 .transaction()
                 .assert(Bug {
-<<<<<<< ours
-                    this: filed,
-                    status: bug::Status("triage".to_string()),
-                    priority: bug::Priority("high".to_string()),
-                    assignee: bug::Assignee(String::new()),
-                    title: bug::Title("A newly filed bug".to_string()),
-                    ordering: bug::Ordering(count as f64 * 1000.0),
-=======
                     this: entity,
                     status: bug::Status(STATUSES[index % STATUSES.len()].to_string()),
                     priority: bug::Priority(PRIORITIES[index % PRIORITIES.len()].to_string()),
                     assignee: bug::Assignee(ASSIGNEES[index % ASSIGNEES.len()].to_string()),
                     title: bug::Title(format!("Bug #{index}: something is off")),
                     ordering: bug::Ordering(index as f64 * 1000.0),
->>>>>>> theirs
                 })
                 .commit()
                 .perform(&self.operator)
                 .await?;
         }
-<<<<<<< ours
-        eprintln!("BUGBENCH {:<22} time={:?}", "file-bug", start.elapsed());
-
-        let start = std::time::Instant::now();
-        self.update_bug_status(&entities[3], "done").await?;
-        eprintln!("BUGBENCH {:<22} time={:?}", "close-bug", start.elapsed());
-
-        let start = std::time::Instant::now();
-        self.reassign_bug(&entities[5], "did:key:zNewAssignee", "in-progress")
-            .await?;
-        eprintln!("BUGBENCH {:<22} time={:?}", "reassign-bug", start.elapsed());
-
-        eprintln!("BUGBENCH seeded {count} bugs in {seed_elapsed:?}");
-        Ok(())
-=======
 
         // A status change on every third bug, and a reassignment on every
         // fifth: the edits a tracker actually accumulates after filing.
@@ -1233,7 +1108,6 @@ where
             }
         }
         Ok(samples)
->>>>>>> theirs
     }
 
     /// Open the repository under `profile` and assemble the environment.

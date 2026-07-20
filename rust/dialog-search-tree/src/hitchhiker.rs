@@ -41,8 +41,8 @@ use rkyv::{
 
 use crate::{
     Accessor, Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution,
-    Entry, Geometric, Key, Node, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree,
-    SymmetryWith, TransientNode, TransientRootParts, TransientSegment, TransientTree, Value,
+    Entry, Geometric, Key, Manifest, Node, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree,
+    TransientNode, TransientRootParts, TransientSegment, TransientTree, Value, resolve_pending,
 };
 
 /// The default per-node novelty capacity.
@@ -152,7 +152,6 @@ enum HitchhikerRoot<Key, Value> {
 pub struct HitchhikerTree<Key, Value, D = Geometric>
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
     D: Distribution,
 {
@@ -166,22 +165,7 @@ where
 
 impl<Key, Value, D> HitchhikerTree<Key, Value, D>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value
         + ConditionalSync
         + 'static
@@ -253,7 +237,7 @@ where
     {
         self.write(
             vec![NoveltyEntry {
-                key,
+                key: key.as_ref().to_vec(),
                 op: NoveltyOp::Assert(value),
             }],
             storage,
@@ -273,7 +257,7 @@ where
     {
         self.write(
             vec![NoveltyEntry {
-                key,
+                key: key.as_ref().to_vec(),
                 op: NoveltyOp::Retract,
             }],
             storage,
@@ -291,7 +275,7 @@ where
     /// a sequential edit would.
     async fn write<Backend>(
         mut self,
-        msgs: Vec<NoveltyEntry<Key, Value>>,
+        msgs: Vec<NoveltyEntry<Value>>,
         storage: &ContentAddressedStorage<Backend>,
     ) -> Result<Self, DialogSearchTreeError>
     where
@@ -307,7 +291,9 @@ where
             HitchhikerRoot::Unloaded(ref hash) if hash == NULL_BLAKE3_HASH => None,
             HitchhikerRoot::Unloaded(ref hash) => {
                 let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
-                Some(TransientNode::try_from(&node)?)
+                // The root's left edge is the tree's global leftmost seam,
+                // whose separator is the empty string (negative infinity).
+                Some(TransientNode::open(&node, Vec::new())?)
             }
         };
 
@@ -425,13 +411,13 @@ where
                 TransientNode::Index(index) => {
                     // A higher buffer holds the most recent op, so a covering op
                     // here wins over anything deeper.
-                    if let Some(op) = crate::resolve_pending(&index.novelty, key) {
+                    if let Some(op) = resolve_pending(&index.novelty, key.as_ref()) {
                         return Ok(match op {
                             NoveltyOp::Assert(value) => Some(value.clone()),
                             NoveltyOp::Retract => None,
                         });
                     }
-                    let at = child_index::<Key, Value>(&index.children, key)?;
+                    let at = child_index::<Key, Value>(&index.children, key.as_ref())?;
                     match &index.children[at] {
                         Node::Persistent(link) => {
                             return self.persistent_get(&link.node, key, storage).await;
@@ -479,9 +465,9 @@ where
         // The winning buffered op per key across the whole spine, in key order.
         // Collected up front (not inside the stream) so the returned stream owns
         // everything it touches and borrows nothing from `self`.
-        let mut pending: Vec<NoveltyEntry<Key, Value>> = Vec::new();
+        let mut pending: Vec<NoveltyEntry<Value>> = Vec::new();
         if let HitchhikerRoot::Loaded(node) = &self.root {
-            collect_novelty_in_range(node, &range, &mut pending);
+            collect_novelty_in_range::<Key, Value, R>(node, &range, &mut pending);
             pending.sort_by(|left, right| left.key.cmp(&right.key));
             // Root-most wins, and `collect_novelty_in_range` pushes in
             // root-to-leaf order, so the FIRST op for a key is the winner.
@@ -499,19 +485,22 @@ where
             loop {
                 // Emit whichever side is next in key order; where both hold the
                 // same key the buffered op wins and the stored entry is dropped.
+                // A buffered op carries raw key bytes and a stored entry a typed
+                // key; `Key`'s order agrees with its bytes, so they compare
+                // through `as_ref`.
                 let take_buffered = match (buffered.peek(), &stored) {
                     (None, _) => false,
                     (Some(_), None) => true,
-                    (Some(op), Some(entry)) => op.key <= entry.key,
+                    (Some(op), Some(entry)) => op.key.as_slice() <= entry.key.as_ref(),
                 };
 
                 if take_buffered {
                     let op = buffered.next().expect("peeked");
-                    if stored.as_ref().is_some_and(|entry| entry.key == op.key) {
+                    if stored.as_ref().is_some_and(|entry| entry.key.as_ref() == op.key.as_slice()) {
                         stored = futures_util::StreamExt::next(&mut base).await.transpose()?;
                     }
                     if let NoveltyOp::Assert(value) = op.op {
-                        yield Entry { key: op.key, value };
+                        yield Entry { key: Key::try_from_bytes(&op.key)?, value };
                     }
                 } else {
                     match stored.take() {
@@ -608,7 +597,13 @@ where
     ) -> Result<Blake3Hash, DialogSearchTreeError> {
         match self.root {
             HitchhikerRoot::Unloaded(hash) => Ok(hash),
-            HitchhikerRoot::Loaded(node) => Ok(node.persist(delta)?.hash().clone()),
+            // Every node carries the tree's format header. Like the canonical
+            // edit path, the buffered path stamps the default manifest; adopting
+            // a loaded root's own manifest needs an async read the synchronous
+            // seal cannot make, and today every tree uses the default.
+            HitchhikerRoot::Loaded(node) => {
+                Ok(node.persist(delta, &Manifest::default())?.hash().clone())
+            }
         }
     }
 }
@@ -622,23 +617,13 @@ where
 /// for when at least one child receives a real batch, rather than when the
 /// buffer merely happens to be full of ops scattered one-per-child.
 fn per_child_peak<Key, Value>(
-    buffered: &[NoveltyEntry<Key, Value>],
-    incoming: &[NoveltyEntry<Key, Value>],
+    buffered: &[NoveltyEntry<Value>],
+    incoming: &[NoveltyEntry<Value>],
     children: &[Node<Key, Value>],
 ) -> Result<usize, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
 {
     if children.is_empty() {
         return Ok(0);
@@ -661,33 +646,23 @@ where
 /// - **Index with room**: `msgs` are merged into `node.novelty` (kept sorted)
 ///   and the node is returned.
 /// - **Index overflow**: `node.novelty ++ msgs` is stable-sorted by key and
-///   partitioned by each child's upper bound; each child receives the ops in its
-///   range via a recursive one-level `enqueue`, and `node.novelty` is cleared.
-///   The last child absorbs every remaining op (keys beyond all bounds route to
-///   the rightmost child, matching the read descent's last-child fallback).
+///   partitioned by the children's lower-bound separators; each child receives
+///   the ops in its range via a recursive one-level `enqueue`, and
+///   `node.novelty` is cleared. Child `at` takes the ops in
+///   `[sep(at), sep(at + 1))`, the last child runs open-ended, and a key below
+///   every separator clamps into the leftmost child, matching how the read
+///   descent routes.
 fn enqueue<'a, Key, Value, D, Backend>(
     node: TransientNode<Key, Value>,
-    msgs: Vec<NoveltyEntry<Key, Value>>,
+    msgs: Vec<NoveltyEntry<Value>>,
     op_buf_size: usize,
     policy: FlushPolicy,
     trigger: FlushTrigger,
-    deferred: &'a mut Vec<NoveltyEntry<Key, Value>>,
+    deferred: &'a mut Vec<NoveltyEntry<Value>>,
     accessor: &'a Accessor<Backend>,
 ) -> NodeFuture<'a, Key, Value>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
@@ -744,18 +719,21 @@ where
             lift_child(child, accessor).await?;
         }
 
-        // Partition the ops by child upper bound, left to right; the last child
-        // takes everything that remains.
+        // Partition the ops by the children's lower-bound separators, left to
+        // right. Child `at` ends where child `at + 1` begins, so the cut is the
+        // NEXT child's separator, and the last child takes everything that
+        // remains. The ops sorting below the first separator stay with child 0,
+        // which is the same clamp routing applies, so no op is stranded.
         let child_count = index.children.len();
         let mut rest = combined.into_iter().peekable();
         for at in 0..child_count {
-            let took: Vec<NoveltyEntry<Key, Value>> = if at + 1 == child_count {
+            let took: Vec<NoveltyEntry<Value>> = if at + 1 == child_count {
                 rest.by_ref().collect()
             } else {
-                let bound = index.children[at].upper_bound()?;
+                let bound = index.children[at + 1].separator()?.to_vec();
                 let mut took = Vec::new();
                 while let Some(entry) = rest.peek() {
-                    if entry.key <= bound {
+                    if entry.key.as_slice() < bound.as_slice() {
                         took.push(rest.next().expect("peeked"));
                     } else {
                         break;
@@ -772,6 +750,7 @@ where
                 &mut index.children[at],
                 Node::Transient(TransientNode::Segment(TransientSegment {
                     entries: Vec::new(),
+                    separator: Vec::new(),
                 })),
             )
             .into_transient()?;
@@ -807,14 +786,7 @@ async fn lift_child<Key, Value, Backend>(
     accessor: &Accessor<Backend>,
 ) -> Result<(), DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
@@ -824,7 +796,11 @@ where
 {
     if let Node::Persistent(link) = child {
         let persistent = accessor.get_node(&link.node).await?;
-        *child = TransientNode::try_from(&persistent)?.into();
+        // The link carries the seam at the child's left edge; a lifted segment
+        // must keep it, since it is the ground truth every level above derives
+        // its separators from.
+        let separator = link.separator.clone();
+        *child = TransientNode::open(&persistent, separator)?.into();
     }
     Ok(())
 }
@@ -832,12 +808,7 @@ where
 /// Merges `incoming` into the already-sorted `novelty`, keeping it sorted by key
 /// and stable within equal keys (so the last op for a key remains last, which
 /// last-op-wins resolution relies on).
-fn merge_sorted<Key, Value>(
-    novelty: &mut Vec<NoveltyEntry<Key, Value>>,
-    incoming: Vec<NoveltyEntry<Key, Value>>,
-) where
-    Key: Ord,
-{
+fn merge_sorted<Value>(novelty: &mut Vec<NoveltyEntry<Value>>, incoming: Vec<NoveltyEntry<Value>>) {
     novelty.extend(incoming);
     novelty.sort_by(|a, b| a.key.cmp(&b.key));
 }
@@ -854,20 +825,10 @@ fn merge_sorted<Key, Value>(
 fn collect_novelty_in_range<Key, Value, R>(
     node: &TransientNode<Key, Value>,
     range: &R,
-    pending: &mut Vec<NoveltyEntry<Key, Value>>,
+    pending: &mut Vec<NoveltyEntry<Value>>,
 ) where
-    Key: self::Key + Ord + Clone + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value + Clone,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
     R: RangeBounds<Key>,
 {
     let TransientNode::Index(index) = node else {
@@ -878,9 +839,16 @@ fn collect_novelty_in_range<Key, Value, R>(
     // seek to its start rather than walking the whole buffer. A buffer holds
     // ops for its entire subtree, so scanning it per query makes a slot lookup
     // cost the size of the buffer instead of the size of the answer.
+    //
+    // A buffered key is raw bytes and a range bound is a typed key; `Key`'s
+    // order agrees with its bytes, so the two compare through `as_ref`.
     let from = match range.start_bound() {
-        Bound::Included(start) => index.novelty.partition_point(|entry| &entry.key < start),
-        Bound::Excluded(start) => index.novelty.partition_point(|entry| &entry.key <= start),
+        Bound::Included(start) => index
+            .novelty
+            .partition_point(|entry| entry.key.as_slice() < start.as_ref()),
+        Bound::Excluded(start) => index
+            .novelty
+            .partition_point(|entry| entry.key.as_slice() <= start.as_ref()),
         Bound::Unbounded => 0,
     };
 
@@ -889,8 +857,8 @@ fn collect_novelty_in_range<Key, Value, R>(
     while at < index.novelty.len() {
         // Past the range: the rest of this sorted buffer is too.
         match range.end_bound() {
-            Bound::Included(end) if &index.novelty[at].key > end => break,
-            Bound::Excluded(end) if &index.novelty[at].key >= end => break,
+            Bound::Included(end) if index.novelty[at].key.as_slice() > end.as_ref() => break,
+            Bound::Excluded(end) if index.novelty[at].key.as_slice() >= end.as_ref() => break,
             _ => {}
         }
         let mut last = at;
@@ -908,28 +876,37 @@ fn collect_novelty_in_range<Key, Value, R>(
 
     // Descend only into children whose span can intersect the range, so the
     // walk costs the span rather than the spine.
-    let mut lower: Option<&Key> = None;
-    for child in &index.children {
-        let upper = child.upper_bound_ref().ok();
-        let intersects = match upper {
-            Some(upper) => {
-                let above_start = match range.start_bound() {
-                    Bound::Included(start) | Bound::Excluded(start) => upper >= start,
-                    Bound::Unbounded => true,
-                };
-                let below_end = match (lower, range.end_bound()) {
-                    (Some(lower), Bound::Included(end)) => lower < end,
-                    (Some(lower), Bound::Excluded(end)) => lower < end,
-                    _ => true,
-                };
-                above_start && below_end
-            }
-            None => true,
+    //
+    // Separators are lower bounds: child `at` spans `[sep(at), sep(at + 1))`
+    // and the last child runs open-ended.
+    for (at, child) in index.children.iter().enumerate() {
+        let lower = child.separator().ok();
+        let upper = index
+            .children
+            .get(at + 1)
+            .and_then(|next| next.separator().ok());
+
+        // An open-ended right edge always reaches the range's start; otherwise
+        // the range must begin strictly below the next child's separator.
+        let above_start = match (upper, range.start_bound()) {
+            (Some(upper), Bound::Included(start)) => start.as_ref() < upper,
+            (Some(upper), Bound::Excluded(start)) => start.as_ref() < upper,
+            _ => true,
         };
-        if intersects && let Node::Transient(child) = child {
+        // The child begins at its own separator. An unreadable separator is
+        // kept rather than silently dropped.
+        let below_end = match (lower, range.end_bound()) {
+            (Some(lower), Bound::Included(end)) => lower <= end.as_ref(),
+            (Some(lower), Bound::Excluded(end)) => lower < end.as_ref(),
+            _ => true,
+        };
+
+        if above_start
+            && below_end
+            && let Node::Transient(child) = child
+        {
             collect_novelty_in_range(child, range, pending);
         }
-        lower = upper;
     }
 }
 
@@ -951,18 +928,8 @@ fn collect_stored_plan<Key, Value, R>(
     bounds: &R,
     plan: &mut Vec<StoredStep<Key, Value>>,
 ) where
-    Key: self::Key + Clone + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + Clone,
     Value: self::Value + Clone,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
     R: RangeBounds<Key>,
 {
     match node {
@@ -971,34 +938,34 @@ fn collect_stored_plan<Key, Value, R>(
             // a bounded scan still enumerates every node in the tree, so its
             // cost grows with the tree rather than with the range: a slot scan
             // over one (entity, attribute) pair ends up linear in history.
-            let mut lower: Option<&Key> = None;
-            for child in &index.children {
-                let upper = child.upper_bound_ref().ok();
-                let intersects = match upper {
-                    // (lower, upper] must overlap the requested range.
-                    Some(upper) => {
-                        let above_start = match bounds.start_bound() {
-                            Bound::Included(start) | Bound::Excluded(start) => upper >= start,
-                            Bound::Unbounded => true,
-                        };
-                        let below_end = match (lower, bounds.end_bound()) {
-                            (Some(lower), Bound::Included(end)) => lower < end,
-                            (Some(lower), Bound::Excluded(end)) => lower < end,
-                            (None, _) => true,
-                            (_, Bound::Unbounded) => true,
-                        };
-                        above_start && below_end
-                    }
-                    // An unreadable bound is kept rather than silently dropped.
-                    None => true,
+            //
+            // Separators are lower bounds, so child `at` spans
+            // `[sep(at), sep(at + 1))` and the last child runs open-ended.
+            for (at, child) in index.children.iter().enumerate() {
+                let lower = child.separator().ok();
+                let upper = index
+                    .children
+                    .get(at + 1)
+                    .and_then(|next| next.separator().ok());
+
+                let above_start = match (upper, bounds.start_bound()) {
+                    (Some(upper), Bound::Included(start)) => start.as_ref() < upper,
+                    (Some(upper), Bound::Excluded(start)) => start.as_ref() < upper,
+                    _ => true,
                 };
-                if intersects {
+                // An unreadable separator is kept rather than silently dropped.
+                let below_end = match (lower, bounds.end_bound()) {
+                    (Some(lower), Bound::Included(end)) => lower <= end.as_ref(),
+                    (Some(lower), Bound::Excluded(end)) => lower < end.as_ref(),
+                    _ => true,
+                };
+
+                if above_start && below_end {
                     match child {
                         Node::Persistent(link) => plan.push(StoredStep::Subtree(link.node.clone())),
                         Node::Transient(child) => collect_stored_plan(child, bounds, plan),
                     }
                 }
-                lower = upper;
             }
         }
         TransientNode::Segment(segment) => {
@@ -1011,32 +978,23 @@ fn collect_stored_plan<Key, Value, R>(
     }
 }
 
-/// Index of the child whose subtree covers `key`: the first child whose upper
-/// bound is `>= key`, or the last child when the key exceeds every bound.
+/// Index of the child whose subtree covers `key`: separators are lower bounds,
+/// so it is the LAST child whose separator is at or below the key, and a key
+/// sorting below every separator clamps to the leftmost child.
 ///
-/// Mirrors the transient tree's routing so a buffered read descends the same way
-/// a canonical edit would.
+/// Mirrors the transient tree's routing (and `carry_novelty`'s re-attachment
+/// rule) so a buffered read descends the same way a canonical edit would.
 fn child_index<Key, Value>(
     children: &[Node<Key, Value>],
-    key: &Key,
+    key: &[u8],
 ) -> Result<usize, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
 {
     let mut at = 0usize;
     while at + 1 < children.len() {
-        if children[at].upper_bound_ref()? < key {
+        if children[at + 1].separator()? <= key {
             at += 1;
         } else {
             break;
@@ -1048,26 +1006,11 @@ where
 /// Replays a list of buffered ops as canonical inserts/deletes on an edit batch.
 async fn replay_ops<Key, Value, D, Backend>(
     mut edit: TransientTree<Key, Value, D>,
-    ops: Vec<NoveltyEntry<Key, Value>>,
+    ops: Vec<NoveltyEntry<Value>>,
     storage: &ContentAddressedStorage<Backend>,
 ) -> Result<TransientTree<Key, Value, D>, DialogSearchTreeError>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value
         + ConditionalSync
         + 'static
@@ -1083,9 +1026,13 @@ where
         + ConditionalSync,
 {
     for entry in ops {
+        // A buffered op carries raw key bytes; the canonical edit path takes a
+        // typed key, so reconstruct it here (the same round trip a leaf read
+        // makes).
+        let key = Key::try_from_bytes(&entry.key)?;
         edit = match entry.op {
-            NoveltyOp::Assert(value) => edit.insert(entry.key, value, storage).await?,
-            NoveltyOp::Retract => edit.delete(&entry.key, storage).await?,
+            NoveltyOp::Assert(value) => edit.insert(key, value, storage).await?,
+            NoveltyOp::Retract => edit.delete(&key, storage).await?,
         };
     }
     Ok(edit)
@@ -1101,9 +1048,8 @@ where
 /// caller (canonicalize) stable-sorts the full set by key before replay.
 fn drain_novelty<Key, Value>(
     node: &mut TransientNode<Key, Value>,
-    ops: &mut Vec<NoveltyEntry<Key, Value>>,
+    ops: &mut Vec<NoveltyEntry<Value>>,
 ) where
-    Key: Clone,
     Value: Clone,
 {
     if let TransientNode::Index(index) = node {

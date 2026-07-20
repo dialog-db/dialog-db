@@ -15,15 +15,9 @@
 
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
-<<<<<<< ours
     DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest, Node,
-    PersistentNode, PersistentTree, Rank, TransientIndex, TransientNode, TransientSegment,
-    TreeWalker, Value, regroup_children, regroup_entries,
-=======
-    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Node, NoveltyEntry,
-    NoveltyOp, PersistentNode, PersistentTree, Rank, SymmetryWith, TransientIndex, TransientNode,
+    NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Rank, TransientIndex, TransientNode,
     TransientSegment, TreeWalker, Value, regroup_children, regroup_entries,
->>>>>>> theirs
 };
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
@@ -141,6 +135,7 @@ where
         Self {
             root: TransientRoot::Loaded(node),
             cache,
+            manifest: Manifest::default(),
             distribution: PhantomData,
         }
     }
@@ -196,7 +191,6 @@ where
             // The first entry of an empty tree becomes a lone segment wrapped in
             // a single-child index, matching the canonical root invariant that
             // the root is always an index.
-<<<<<<< ours
             None => {
                 // The first segment of a tree sits at the global leftmost
                 // seam. Its separator is seeded through the distribution's
@@ -212,16 +206,9 @@ where
                         entries: vec![entry],
                         separator,
                     }))],
+                    novelty: Vec::new(),
                 })
             }
-=======
-            None => TransientNode::Index(TransientIndex {
-                children: vec![Node::Transient(TransientNode::Segment(TransientSegment {
-                    entries: vec![entry],
-                }))],
-                novelty: Vec::new(),
-            }),
->>>>>>> theirs
             Some(root) => Edit::Upsert(entry)
                 .apply::<Backend, D>(root, &accessor, &manifest)
                 .await?
@@ -292,7 +279,7 @@ where
                     // buffer overflows. Resolving them on the way down is what
                     // makes a read of a lifted node agree with a read of the
                     // same node in its stored form.
-                    if let Some(op) = crate::resolve_pending(&index.novelty, key) {
+                    if let Some(op) = crate::resolve_pending(&index.novelty, key.as_ref()) {
                         return Ok(match op {
                             NoveltyOp::Assert(value) => Some(value.clone()),
                             NoveltyOp::Retract => None,
@@ -600,12 +587,8 @@ where
                     let mut right = raise(node, height, target);
                     lift_boundary_spine(&mut left, false, &accessor).await?;
                     lift_boundary_spine(&mut right, true, &accessor).await?;
-<<<<<<< ours
-                    let mut run = concat_levels::<Key, Value, D>(left, right, target, &manifest)?;
-=======
                     let (mut run, seam_novelty) =
-                        concat_levels::<Key, Value, D>(left, right, target)?;
->>>>>>> theirs
+                        concat_levels::<Key, Value, D>(left, right, target, &manifest)?;
                     if run.len() == 1 {
                         // Keep the accumulator's nominal height tight so later
                         // joins pad as little as possible.
@@ -651,16 +634,13 @@ where
                 seal_root::<Key, Value, D>(vec![node.into()], 0, &manifest)?
             }
             Some((TransientNode::Index(index), height)) => {
-<<<<<<< ours
-                seal_root::<Key, Value, D>(index.children, height - 1, &manifest)?
-=======
                 // `seal_root` reshapes the children into a canonical root and
                 // strips single-child chains, so the node holding this buffer
                 // may not survive. Carry the ops onto whatever root it returns:
                 // they are pending against this whole subtree, and the root is
                 // the one node guaranteed to cover it.
                 let novelty = index.novelty;
-                let sealed = seal_root::<Key, Value, D>(index.children, height - 1)?;
+                let sealed = seal_root::<Key, Value, D>(index.children, height - 1, &manifest)?;
                 match sealed {
                     Some(TransientNode::Index(mut root)) if !novelty.is_empty() => {
                         root.novelty.extend(novelty);
@@ -669,7 +649,6 @@ where
                     }
                     other => other,
                 }
->>>>>>> theirs
             }
         };
 
@@ -802,7 +781,9 @@ where
                     // win over stored entries), so the write would be invisible.
                     // Drop it: the edit supersedes it, and after this descent the
                     // leaf is the only place the key lives.
-                    index.novelty.retain(|entry| entry.key != *key);
+                    index
+                        .novelty
+                        .retain(|entry| entry.key.as_slice() != key.as_ref());
 
                     let at = child_for::<Key, Value>(&index.children, key);
                     lift(&mut index.children[at], accessor).await?;
@@ -1304,7 +1285,6 @@ where
         }
         Some((&at, rest)) => {
             let child = node.child_mut(at)?;
-<<<<<<< ours
             let replacement = reshape_path::<Key, Value, D>(
                 child,
                 rest,
@@ -1313,13 +1293,18 @@ where
                 left_fuse.and_then(|depth| depth.checked_sub(1)),
                 manifest,
             )?;
+            // Regrouping replaces `node` with a run of new nodes, so the ops
+            // buffered here have nowhere to live unless they are carried over:
+            // they are pending against this subtree, and the run covers exactly
+            // that subtree.
+            let carried = std::mem::take(&mut node.as_index_mut()?.novelty);
             let children = &mut node.as_index_mut()?.children;
-            if left_fuse == Some(0) {
+            let run = if left_fuse == Some(0) {
                 // The replacement's left-edge seam rank dropped: its head
                 // must merge into the left sibling. The edited child is
                 // consumed by its replacement either way.
                 children.remove(at);
-                fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)
+                fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)?
             } else {
                 splice_and_regroup::<Key, Value, D>(
                     children,
@@ -1327,28 +1312,78 @@ where
                     replacement,
                     height,
                     manifest,
-                )
-            }
-=======
-            let replacement = reshape_path::<Key, Value, D>(child, rest, edit, height - 1)?;
-            // Regrouping replaces `node` with a run of new nodes, so the ops
-            // buffered here have nowhere to live unless they are carried over:
-            // they are pending against this subtree, and the run covers exactly
-            // that subtree.
-            let carried = std::mem::take(&mut node.as_index_mut()?.novelty);
-            let run = splice_and_regroup::<Key, Value, D>(
-                &mut node.as_index_mut()?.children,
-                at..at + 1,
-                replacement,
-                height,
-            )?;
-            Ok(carry_novelty::<Key, Value>(run, carried)?)
->>>>>>> theirs
+                )?
+            };
+            carry_novelty::<Key, Value>(run, carried)
         }
     }
 }
 
-<<<<<<< ours
+/// Re-attaches ops to a run of nodes that replaced the node holding them.
+///
+/// A node's `novelty` is pending against the subtree it roots, so when a
+/// reshape dismantles that node the ops must land on nodes still covering their
+/// keys. The run covers exactly the range the dismantled node did, so each op
+/// goes to the node whose range contains it.
+///
+/// Separators are lower bounds, so the owning node is the last one whose
+/// separator is at or below the key; a key below every separator belongs to the
+/// leftmost node, matching how routing clamps.
+///
+/// A run of segments cannot hold ops at all, so those are wrapped in an index
+/// that can. Dropping them instead would lose pending writes.
+fn carry_novelty<Key, Value>(
+    mut run: Vec<Node<Key, Value>>,
+    novelty: Vec<NoveltyEntry<Value>>,
+) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    if novelty.is_empty() || run.is_empty() {
+        return Ok(run);
+    }
+
+    for entry in novelty {
+        // The node covering this key, by the same lower-bound rule routing
+        // uses: the last node whose separator is at or below the key.
+        let mut at = 0usize;
+        while at + 1 < run.len() {
+            match run[at + 1].separator() {
+                Ok(separator) if separator <= entry.key.as_slice() => at += 1,
+                _ => break,
+            }
+        }
+
+        match &mut run[at] {
+            Node::Transient(TransientNode::Index(index)) => {
+                index.novelty.push(entry);
+                index
+                    .novelty
+                    .sort_by(|left, right| left.key.cmp(&right.key));
+            }
+            // Leaves and persistent links cannot carry a buffer, so wrap the
+            // node in an index that can. The wrapper keeps the same key range,
+            // so routing is unchanged.
+            other => {
+                let placeholder = Node::Transient(TransientNode::Segment(TransientSegment {
+                    entries: Vec::new(),
+                    separator: Vec::new(),
+                }));
+                let wrapped = std::mem::replace(other, placeholder);
+                *other = Node::Transient(TransientNode::Index(TransientIndex {
+                    children: vec![wrapped],
+                    novelty: vec![entry],
+                }));
+            }
+        }
+    }
+    Ok(run)
+}
+
 /// Splices `run` into `children` at `insert_at` after fusing the run's first
 /// node with the child immediately to the left, then re-cuts the child list.
 ///
@@ -1368,37 +1403,10 @@ fn fuse_left_run<Key, Value, D>(
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
-=======
-/// Re-attaches ops to a run of nodes that replaced the node holding them.
-///
-/// A node's `novelty` is pending against the subtree it roots, so when a
-/// reshape dismantles that node the ops must land on nodes still covering their
-/// keys. The run covers exactly the range the dismantled node did, so each op
-/// goes to the node whose range contains it: the first whose upper bound is at
-/// or above the key, and the last node for anything past every bound (matching
-/// how a flush routes ops to the rightmost child).
-///
-/// A run of segments cannot hold ops at all, so those are wrapped in an index
-/// that can. Dropping them instead would lose pending writes.
-fn carry_novelty<Key, Value>(
-    mut run: Vec<Node<Key, Value>>,
-    novelty: Vec<NoveltyEntry<Key, Value>>,
-) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
-where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
->>>>>>> theirs
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
-<<<<<<< ours
     D: Distribution,
 {
     if insert_at == 0 {
@@ -1428,46 +1436,6 @@ where
         height,
         manifest,
     )
-=======
-{
-    if novelty.is_empty() || run.is_empty() {
-        return Ok(run);
-    }
-
-    for entry in novelty {
-        // The node covering this key, by the same rule the read descent uses.
-        let mut at = 0usize;
-        while at + 1 < run.len() {
-            match run[at].upper_bound_ref() {
-                Ok(bound) if bound < &entry.key => at += 1,
-                _ => break,
-            }
-        }
-
-        match &mut run[at] {
-            Node::Transient(TransientNode::Index(index)) => {
-                index.novelty.push(entry);
-                index.novelty.sort_by(|a, b| a.key.cmp(&b.key));
-            }
-            // Leaves and persistent links cannot carry a buffer, so wrap the
-            // node in an index that can. The wrapper keeps the same key range,
-            // so routing is unchanged.
-            other => {
-                let wrapped = std::mem::replace(
-                    other,
-                    Node::Transient(TransientNode::Segment(TransientSegment {
-                        entries: Vec::new(),
-                    })),
-                );
-                *other = Node::Transient(TransientNode::Index(TransientIndex {
-                    children: vec![wrapped],
-                    novelty: vec![entry],
-                }));
-            }
-        }
-    }
-    Ok(run)
->>>>>>> theirs
 }
 
 /// Re-shapes the shared prefix of a boundary delete down to the lowest common
@@ -1519,18 +1487,13 @@ where
         let main = take_transient(children, at)?;
         // After removing the main child the neighbour shifted left into `at`.
         let neighbor = take_transient(children, at)?;
-<<<<<<< ours
         let fused = fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1, manifest)?;
-        return if left_fuse == Some(0) {
-            fuse_left_run::<Key, Value, D>(children, at, fused, height, manifest)
+        let run = if left_fuse == Some(0) {
+            fuse_left_run::<Key, Value, D>(children, at, fused, height, manifest)?
         } else {
-            splice_and_regroup::<Key, Value, D>(children, at..at, fused, height, manifest)
+            splice_and_regroup::<Key, Value, D>(children, at..at, fused, height, manifest)?
         };
-=======
-        let fused = fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1)?;
-        let run = splice_and_regroup::<Key, Value, D>(children, at..at, fused, height)?;
         return carry_novelty::<Key, Value>(run, carried);
->>>>>>> theirs
     }
 
     // Above the LCA: recurse through the shared prefix, then splice and re-cut.
@@ -1545,24 +1508,15 @@ where
         left_fuse.and_then(|depth| depth.checked_sub(1)),
         manifest,
     )?;
-<<<<<<< ours
-    let children = &mut node.as_index_mut()?.children;
-    if left_fuse == Some(0) {
-        children.remove(at);
-        fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)
-    } else {
-        splice_and_regroup::<Key, Value, D>(children, at..at + 1, replacement, height, manifest)
-    }
-=======
     let carried = std::mem::take(&mut node.as_index_mut()?.novelty);
-    let run = splice_and_regroup::<Key, Value, D>(
-        &mut node.as_index_mut()?.children,
-        at..at + 1,
-        replacement,
-        height,
-    )?;
+    let children = &mut node.as_index_mut()?.children;
+    let run = if left_fuse == Some(0) {
+        children.remove(at);
+        fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)?
+    } else {
+        splice_and_regroup::<Key, Value, D>(children, at..at + 1, replacement, height, manifest)?
+    };
     carry_novelty::<Key, Value>(run, carried)
->>>>>>> theirs
 }
 
 /// Fuses the main subtree (whose rightmost leaf lost its boundary) with the
@@ -1889,8 +1843,8 @@ where
             // pending against it.
             let buffered_before = index.novelty.len();
             index.novelty.retain(|entry| {
-                (!trim_start || &entry.key >= range.start())
-                    && (!trim_end || &entry.key <= range.end())
+                (!trim_start || entry.key.as_slice() >= range.start().as_ref())
+                    && (!trim_end || entry.key.as_slice() <= range.end().as_ref())
             });
             let buffered_trimmed = index.novelty.len() != buffered_before;
 
@@ -2074,18 +2028,14 @@ fn raise<Key, Value>(
 /// A joined run of nodes together with the buffered ops lifted off the nodes
 /// the join dismantled. The ops are pending writes with no home until the
 /// caller re-attaches them to a node covering the run.
-type JoinedRun<Key, Value> = (Vec<Node<Key, Value>>, Vec<NoveltyEntry<Key, Value>>);
+type JoinedRun<Key, Value> = (Vec<Node<Key, Value>>, Vec<NoveltyEntry<Value>>);
 
 fn concat_levels<Key, Value, D>(
     left: TransientNode<Key, Value>,
     right: TransientNode<Key, Value>,
     height: Rank,
-<<<<<<< ours
     manifest: &Manifest,
-) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
-=======
 ) -> Result<JoinedRun<Key, Value>, DialogSearchTreeError>
->>>>>>> theirs
 where
     Key: self::Key,
     Value: self::Value,
@@ -2096,19 +2046,13 @@ where
 {
     match (left, right) {
         (TransientNode::Segment(mut left), TransientNode::Segment(right)) => {
-<<<<<<< ours
+            // Leaves buffer nothing.
             let floor = left.separator.clone();
             left.entries.extend(right.entries);
-            Ok(regroup_entries::<Key, Value, D>(
-                left.entries,
-                floor,
-                manifest,
+            Ok((
+                regroup_entries::<Key, Value, D>(left.entries, floor, manifest),
+                Vec::new(),
             ))
-=======
-            // Leaves buffer nothing.
-            left.entries.extend(right.entries);
-            Ok((regroup_entries::<Key, Value, D>(left.entries), Vec::new()))
->>>>>>> theirs
         }
         (TransientNode::Index(mut left), TransientNode::Index(mut right)) => {
             let left_last = left
@@ -2120,20 +2064,12 @@ where
                 .into_transient()?;
             let right_first = remove_first(&mut right.children)?.into_transient()?;
 
-<<<<<<< ours
-            let seam =
-                concat_levels::<Key, Value, D>(left_last, right_first, height - 1, manifest)?;
-=======
             let (seam, seam_novelty) =
-                concat_levels::<Key, Value, D>(left_last, right_first, height - 1)?;
->>>>>>> theirs
+                concat_levels::<Key, Value, D>(left_last, right_first, height - 1, manifest)?;
 
             let mut combined = left.children;
             combined.extend(seam);
             combined.extend(right.children);
-<<<<<<< ours
-            regroup_children::<Key, Value, D>(combined, height, manifest)
-=======
 
             // Both joined nodes' buffers are pending against the run being
             // built, and regrouping discards the nodes that held them. Hand
@@ -2146,10 +2082,9 @@ where
             novelty.sort_by(|a, b| a.key.cmp(&b.key));
 
             Ok((
-                regroup_children::<Key, Value, D>(combined, height)?,
+                regroup_children::<Key, Value, D>(combined, height, manifest)?,
                 novelty,
             ))
->>>>>>> theirs
         }
         _ => Err(DialogSearchTreeError::Node(
             "Stitched subtrees had mismatched heights".into(),
@@ -2268,14 +2203,7 @@ fn collect_stream_plan<Key, Value, R>(
     bounds: &R,
     plan: &mut Vec<StreamStep<Key, Value>>,
 ) where
-    Key: self::Key + Clone + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + Clone,
     Value: self::Value + Clone,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -2287,27 +2215,35 @@ fn collect_stream_plan<Key, Value, R>(
             // Skip subtrees whose span cannot intersect the range: otherwise a
             // bounded scan enumerates the whole spine and costs the size of the
             // tree rather than the size of the answer.
-            let mut lower: Option<Key> = None;
-            for child in &index.children {
-                let upper = child.upper_bound().ok();
-                let intersects = match &upper {
-                    Some(upper) => {
-                        let above_start = match bounds.start_bound() {
-                            std::ops::Bound::Included(start) | std::ops::Bound::Excluded(start) => {
-                                upper >= start
-                            }
-                            std::ops::Bound::Unbounded => true,
-                        };
-                        let below_end = match (&lower, bounds.end_bound()) {
-                            (Some(lower), std::ops::Bound::Included(end)) => lower < end,
-                            (Some(lower), std::ops::Bound::Excluded(end)) => lower < end,
-                            _ => true,
-                        };
-                        above_start && below_end
-                    }
-                    None => true,
+            //
+            // Separators are lower bounds: child `at` spans
+            // `[sep(at), sep(at + 1))`, and the last child runs open-ended.
+            // A child is kept when its span can overlap the requested range.
+            for (at, child) in index.children.iter().enumerate() {
+                let lower = child.separator().ok();
+                let upper = index
+                    .children
+                    .get(at + 1)
+                    .and_then(|next| next.separator().ok());
+
+                // The child's open-ended right edge always reaches the range's
+                // start; otherwise the range must begin strictly below the next
+                // child's separator.
+                let above_start = match (upper, bounds.start_bound()) {
+                    (Some(upper), std::ops::Bound::Included(start)) => start.as_ref() < upper,
+                    (Some(upper), std::ops::Bound::Excluded(start)) => start.as_ref() < upper,
+                    _ => true,
                 };
-                if intersects {
+                // The child begins at its own separator, so it can only
+                // contribute when the range extends at or past it. An
+                // unreadable separator is kept rather than silently dropped.
+                let below_end = match (lower, bounds.end_bound()) {
+                    (Some(lower), std::ops::Bound::Included(end)) => lower <= end.as_ref(),
+                    (Some(lower), std::ops::Bound::Excluded(end)) => lower < end.as_ref(),
+                    _ => true,
+                };
+
+                if above_start && below_end {
                     match child {
                         Node::Persistent(link) => {
                             plan.push(StreamStep::Persistent(link.node.clone()));
@@ -2315,7 +2251,6 @@ fn collect_stream_plan<Key, Value, R>(
                         Node::Transient(child) => collect_stream_plan(child, bounds, plan),
                     }
                 }
-                lower = upper;
             }
         }
         TransientNode::Segment(segment) => {
@@ -3876,7 +3811,11 @@ mod buffer_edit_interaction_tests {
                 PersistentNode::new(crate::Buffer::from(bytes));
             match node.body()? {
                 ArchivedNodeBody::Index(index) => {
-                    crate::into_owned::<[u8; 4]>(&index.links[0].upper_bound)?
+                    // Separators are lower bounds, so the second child's
+                    // separator IS the boundary key that ends the first child.
+                    let separator = index.separator(1)?;
+                    <[u8; 4]>::try_from(separator.as_slice())
+                        .expect("separator is a whole four-byte key")
                 }
                 ArchivedNodeBody::Segment(_) => panic!("expected an index root"),
             }
@@ -3937,7 +3876,11 @@ mod buffer_edit_interaction_tests {
                 PersistentNode::new(crate::Buffer::from(bytes));
             match node.body()? {
                 ArchivedNodeBody::Index(index) => {
-                    crate::into_owned::<[u8; 4]>(&index.links[0].upper_bound)?
+                    // Separators are lower bounds, so the second child's
+                    // separator IS the boundary key that ends the first child.
+                    let separator = index.separator(1)?;
+                    <[u8; 4]>::try_from(separator.as_slice())
+                        .expect("separator is a whole four-byte key")
                 }
                 ArchivedNodeBody::Segment(_) => panic!("expected an index root"),
             }
@@ -4610,8 +4553,8 @@ mod buffer_edit_interaction_tests {
             let node: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::new(Buffer::from(bytes));
             match node.body()? {
                 ArchivedNodeBody::Index(index) => {
-                    for link in index.links.iter() {
-                        frontier.push(<&Blake3Hash>::from(&link.node).clone());
+                    for at in 0..index.len() {
+                        frontier.push(index.hash_at(at)?.clone());
                     }
                 }
                 ArchivedNodeBody::Segment(_) => segments += 1,
@@ -4627,7 +4570,7 @@ mod buffer_edit_interaction_tests {
         (from..from + 200_000)
             .find(|candidate| {
                 !avoid.contains(candidate)
-                    && <crate::Geometric as crate::Distribution>::rank(&candidate.to_be_bytes())
+                    && <crate::Geometric as crate::Distribution>::rank(&candidate.to_be_bytes(), &crate::Manifest::default())
                         > crate::BOTTOM_RANK
             })
             .expect("a boundary-ranked key exists in range")
@@ -4648,7 +4591,7 @@ mod buffer_edit_interaction_tests {
         // open run.
         let base_keys: Vec<u32> = (0..400u32)
             .filter(|k| {
-                <crate::Geometric as crate::Distribution>::rank(&k.to_be_bytes())
+                <crate::Geometric as crate::Distribution>::rank(&k.to_be_bytes(), &crate::Manifest::default())
                     <= crate::BOTTOM_RANK
             })
             .collect();
@@ -4737,7 +4680,7 @@ mod buffer_edit_interaction_tests {
             .copied()
             .find(|k| {
                 *k < 399
-                    && <crate::Geometric as crate::Distribution>::rank(&k.to_be_bytes())
+                    && <crate::Geometric as crate::Distribution>::rank(&k.to_be_bytes(), &crate::Manifest::default())
                         > crate::BOTTOM_RANK
             })
             .expect("the base contains a non-final boundary key");

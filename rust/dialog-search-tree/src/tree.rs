@@ -176,24 +176,19 @@ where
         // (each layer is an Arc-backed node plus a child index), so the read
         // pays nothing for the siblings an update would later decode.
         if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
-<<<<<<< ours
-            let segment = result.leaf.as_segment()?;
-            if let Some(at) = segment.find::<Key>(key.as_ref())? {
-                into_owned(segment.value_at(at)?).map(Some)
-=======
             // A write lands in an ancestor's buffer and only reaches the leaf
             // when that buffer overflows, so a buffered op on the path is more
             // recent than whatever the leaf holds: an assert shadows the stored
             // value, a retract hides it.
-            if let Some(op) = crate::pending_for_key(&result.path, key)? {
+            if let Some(op) = crate::pending_for_key(&result.path, key.as_ref())? {
                 return Ok(match op {
                     crate::NoveltyOp::Assert(value) => Some(value),
                     crate::NoveltyOp::Retract => None,
                 });
             }
-            if let Some(entry) = result.leaf.body()?.find_entry(key)? {
-                into_owned(&entry.value).map(|value| Some(value))
->>>>>>> theirs
+            let segment = result.leaf.as_segment()?;
+            if let Some(at) = segment.find::<Key>(key.as_ref())? {
+                into_owned(segment.value_at(at)?).map(Some)
             } else {
                 Ok(None)
             }
