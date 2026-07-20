@@ -21,7 +21,7 @@
 //!   with the scan's `of` makes the join itself reject a valid record
 //!   replayed at another revision entity.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 use dialog_artifacts::history::VersionExt as _;
@@ -61,8 +61,7 @@ fn verified(of: &RecordBytes) -> Option<RevisionRecord> {
     }
     let record = (|| {
         let record = RevisionRecord::try_from_bytes(&of.0).ok()?;
-        verify_issuer_signature(&record.issuer, &record.payload().ok()?, &record.signature)
-            .ok()?;
+        verify_issuer_signature(&record.issuer, &record.payload().ok()?, &record.signature).ok()?;
         Some(record)
     })();
     let mut memo = memo.lock().expect("verified-record memo lock");
@@ -148,7 +147,7 @@ impl RevisionParent {
             return Vec::new();
         };
         let this = record.version().entity();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         record
             .parents
             .iter()

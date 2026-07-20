@@ -92,12 +92,14 @@ Alice's `A:2` (edition 2) and Bob's `B:1` (edition 1) are ordered neither way by
 The single most load-bearing derived structure. A replica's **watermark** (in code: `Context`) summarizes everything its head has ever incorporated:
 
 ```text
-watermark = { origin -> highest edition seen from that origin }
+watermark = { origin -> (highest edition seen, revision count seen) }
 
-seen(version)  exactly when  version.edition <= watermark[version.origin]
+seen(version)  exactly when  version.edition <= watermark[version.origin].edition
 ```
 
-Why one number per writer suffices, exactly and not approximately: each origin writes sequentially, each revision building on its own previous one, so the revisions you have seen from any origin are always a prefix of that origin's history. Seen their 7 means seen their 0 through 6. The table has one entry per writer, never grows with edits, and answers "have I seen this change?" in one lookup.
+Why one entry per writer suffices, exactly and not approximately: each origin writes sequentially, each revision building on its own previous one, so the revisions you have seen from any origin are always a prefix of that origin's history. Seen their 7 means seen their 0 through 6. The table has one entry per writer, never grows with edits, and answers "have I seen this change?" in one lookup.
+
+Each entry carries a second number beside the edition: **how many of that origin's revisions the ancestry actually contains**. Editions are Lamport depths, not write counts — an origin's first commit atop a deep adopted history mints an edition near the whole depth — so the count is what makes delta-size estimates exact: prefixes of one origin's chain are nested, so the difference of two counts is precisely the number of revisions one side has that the other lacks. Verification bounds it (a count can never exceed `edition + 1`), so a hostile inflated count is refused with the head.
 
 Watermarks also order replicas by knowledge: if every entry of watermark P is at or below the corresponding entry of watermark Q, then Q has seen everything P has (in code: `Q.includes(P)`). The pull scenarios below are gated entirely on this comparison.
 
@@ -136,7 +138,7 @@ History entries are keyed origin-first (writer, then edition), so one writer's r
 
 Every commit tags its facts with its version and appends one **claim record** per instruction. The record's key field is **supersedes**: the versions of the earlier claims this write replaced or withdrew.
 
-- **Assert** adds a fact; supersedes nothing.
+- **Assert** adds a fact; supersedes nothing. The fact orderings address a claim by `(entity, attribute, value)`, so two writers asserting the *identical* value share one index entry: the entry **collapses** their claim versions (one primary plus a sorted set) rather than overwriting, wherever same-value claims meet — an in-branch re-assert absorbs the standing versions, and a merge contest unions the two sides' sets deterministically. Everything downstream reasons over the whole set: a retraction covers every claim its author observed (the D3 promise holds on identical values, pinned by `it_covers_every_observed_claim_of_a_retracted_value`), and a covering record retires exactly the versions it names — the fact stays live while any collapsed claim remains uncovered, dying only when the last one is covered.
 - **Replace** sets the value at `(entity, attribute)`, deleting different-valued priors from the indexes and listing their versions in its record. An identical value already in place is a full no-op.
 - **Retract** deletes the fact's index entries and records the withdrawn claim's version. Covering writes (retractions, and replacements that superseded something) additionally mirror a compact entry into the **coverage region**: same key layout under its own tag, carrying the entity, attribute, covered versions, and polarity, but no value bytes. Its only purpose is enumerability: "every deletion or replacement since the sync base" becomes a scoped tree diff over this small region, without streaming the value-bearing assert records interleaved in the history log. It rides merges as ordinary append-only entries and is the repair source for the graft merge below. **No marker is left behind**: after a retract, the data regions look as if the fact never existed. What makes that safe across sync is the watermark, as the scenarios below show. (Same-batch assert+retract cancels to nothing; retracting a nonexistent fact is a no-op — no index change, no record, no minted revision. Two instructions on the same `(entity, attribute, value)` in one batch land at one history key; their records fold — later polarity, union of superseded versions — so a retract-then-re-assert of one value nets to an assert citing the version it overrode, and the log and its coverage mirror stay consistent.)
 
@@ -260,10 +262,10 @@ Cost: the intersection of the two change sets, plus coverage since base on both 
 
 ### Scenario 5: replaying the smaller side
 
-Fires when the graft does not: the pull is first contact (no sync base to partition against), or one side's delta sits at or below the small-delta threshold. One whole side's delta is transferred, and the only question is direction: which side is smaller. That is answered with zero reads by comparing the two watermarks' **divergence masses**: for each origin, how far one watermark's edition runs beyond the other's, summed. Editions count writes, so the excess estimates delta size.
+Fires when the graft does not: the pull is first contact (no sync base to partition against), or one side's delta sits at or below the small-delta threshold. One whole side's delta is transferred, and the only question is direction: which side is smaller. That is answered with zero reads by comparing the two watermarks' **divergence masses**: for each origin, how many of its revisions one watermark's count runs beyond the other's, summed. Counts count revisions exactly (per-origin prefixes are nested), so the mass IS the delta size in revisions — an origin's single fresh commit atop a ten-thousand-deep adopted history weighs as one revision, not ten thousand, which editions alone would get wrong.
 
 ```text
-ours               theirs
+ours (count)       theirs (count)
 alice: 5           alice: 7
 bob:   3           bob:   5
 me:    6           me:    4
@@ -458,4 +460,3 @@ Levers if interactive single-fact commits need to be cheaper, none started: the 
 4. **History horizon GC** behind a published bootstrap floor.
 5. **`State::Removed`** survives only for reading old trees; removing the variant is a serialization format change, deliberately deferred.
 6. **Re-asserts citing what they override**, making intentional resurrection first-class in the lineage; nothing depends on it. (The same-batch case landed with the record fold: a retract-then-re-assert of one value in one batch records an assert citing the withdrawn version. The cross-batch case — a plain re-assert after an earlier deletion — still records a genesis assert.)
-7. **Coverage of same-value claims collapsed at one key.** The fact orderings address a claim by `(entity, attribute, value)`, so two writers' claims of the identical value stand at one key and the datum remembers one version. A retraction covers only that remembered version, not every claim its author observed — the D3 promise ("covers Bob's AND Mallory's versions") holds only when the values differ. Fixing it needs the datum to carry the collapsed version set (a format change unioned at merge contests) or the retract path to consult the log. Pinned as a known gap by the ignored test `it_covers_every_observed_claim_of_a_retracted_value`.

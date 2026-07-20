@@ -125,6 +125,25 @@ pub trait Value: Clone + Debug + Sized + Archive + ConditionalSend {
         let _ = existing;
         None
     }
+
+    /// Domain-specific fusion for [`integrate`](crate::TransientTree::integrate)
+    /// contests: after the winner of a same-key contest is chosen, fold
+    /// whatever the LOSING value carries that must survive the contest into
+    /// the winner. The default keeps the winner untouched (pure
+    /// last-write-wins). An override exists for values that aggregate — the
+    /// dialog artifact datum collapses same-fact claim versions from both
+    /// sides into one entry, so a contest unions the two sets instead of
+    /// silently orphaning the loser's.
+    ///
+    /// Implementations must be deterministic and winner-directional: both
+    /// replicas resolve the contest with the same `(winner, loser)` roles
+    /// (the winner choice is antisymmetric), so `fuse(winner, &loser)`
+    /// computing the same bytes on both sides is what keeps them
+    /// convergent.
+    fn fuse(winner: Self, loser: &Self) -> Self {
+        let _ = loser;
+        winner
+    }
 }
 
 impl Value for Vec<u8> {}

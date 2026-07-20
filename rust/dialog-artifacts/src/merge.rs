@@ -42,6 +42,7 @@
 //! state beyond the differential itself.
 
 use core::ops::RangeInclusive;
+use std::collections::BTreeSet;
 use std::iter::repeat_n;
 use std::str::FromStr;
 use std::str::from_utf8;
@@ -55,7 +56,7 @@ use dialog_storage::{DialogStorageError, StorageBackend};
 
 use crate::Value;
 use crate::artifacts::decode_value;
-use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord};
+use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord, Version};
 use crate::key::varkey::{ValueRef, parse_key, parse_key_ref};
 use crate::tree::ArtifactTree;
 use crate::{
@@ -242,24 +243,39 @@ where
                             futures_util::StreamExt::next(&mut candidates).await
                         {
                             let candidate = candidate?;
-                            let covered = match &candidate.value {
-                                State::Added(datum) => datum
-                                    .version
-                                    .is_some_and(|version| superseded.contains(&version)),
-                                _ => false,
+                            let State::Added(datum) = &candidate.value else {
+                                continue;
                             };
-                            if covered {
-                                let entity_key = EntityKey(candidate.key);
-                                let attribute_key = AttributeKey::from_key(&entity_key);
-                                let value_key = ValueKey::from_key(&entity_key);
-                                for key in [
-                                    entity_key.into_key(),
-                                    attribute_key.into_key(),
-                                    value_key.into_key(),
-                                ] {
-                                    yield Change::Remove(Entry {
+                            if !datum
+                                .versions()
+                                .any(|version| superseded.contains(version))
+                            {
+                                continue;
+                            }
+                            // The entry may collapse several same-value
+                            // claims; the record retires exactly the ones
+                            // it names. Full coverage removes the entry
+                            // (guarded, so a claim the record never
+                            // observed is untouched); partial coverage
+                            // replaces it with the entry standing on its
+                            // surviving claims, at all three orderings.
+                            let surviving = datum.retire_covered(&superseded);
+                            let entity_key = EntityKey(candidate.key);
+                            let attribute_key = AttributeKey::from_key(&entity_key);
+                            let value_key = ValueKey::from_key(&entity_key);
+                            for key in [
+                                entity_key.into_key(),
+                                attribute_key.into_key(),
+                                value_key.into_key(),
+                            ] {
+                                yield Change::Remove(Entry {
+                                    key: key.clone(),
+                                    value: candidate.value.clone(),
+                                });
+                                if let Some(surviving) = &surviving {
+                                    yield Change::Add(Entry {
                                         key,
-                                        value: candidate.value.clone(),
+                                        value: State::Added(surviving.clone()),
                                     });
                                 }
                             }
@@ -292,21 +308,34 @@ where
                     // never propagate: deletion travels as history now.
                     State::Removed => continue,
                     State::Added(datum) => {
-                        // R1: a claim whose revision is already in the
-                        // local ancestry is never news — either it is
-                        // still live locally (nothing to do) or some
-                        // local record covered it (re-applying it would
-                        // resurrect a deletion). Claims without version
-                        // tags (unversioned writes) cannot be reasoned
-                        // about and pass through.
-                        let observed = datum
-                            .version
-                            .map(|version| context.observes(&version))
-                            .unwrap_or(false);
-                        if observed {
+                        // R1, per CLAIM: an entry stands for every claim
+                        // version it collapses (same-value claims share
+                        // one key), and each is screened independently.
+                        // An observed claim is never news — either it is
+                        // still live locally (the contest fuses it back
+                        // in) or some local record covered it
+                        // (re-applying it would resurrect a deletion) —
+                        // so observed versions are STRIPPED; the entry
+                        // passes on its unobserved claims alone, and is
+                        // dropped when none remain. Entries without
+                        // version tags (unversioned writes) cannot be
+                        // reasoned about and pass through.
+                        let observed: Vec<_> = datum
+                            .versions()
+                            .filter(|version| context.observes(version))
+                            .copied()
+                            .collect();
+                        if observed.is_empty() {
+                            yield Change::Add(entry);
                             continue;
                         }
-                        yield Change::Add(entry);
+                        let Some(surviving) = datum.retire_covered(&observed) else {
+                            continue;
+                        };
+                        yield Change::Add(Entry {
+                            key: entry.key,
+                            value: State::Added(surviving),
+                        });
                     }
                 },
                 // R2: guarded removes pass through; integrate applies
@@ -317,16 +346,20 @@ where
     }
 }
 
-/// Wrap a data-region differential, folding the version of every
+/// Wrap a data-region differential, collecting the version of every
 /// revision record riding it into `observed`.
 ///
 /// The revision records in an upstream delta are exactly the
 /// upstream-ancestry revisions the receiver may lack: a tree's records
 /// are a subset of its head's ancestry, and records at or below the
-/// sync base arrived with the pulls that established it. So `local
-/// context + observed` is the context of a head that adopts or merges
-/// this upstream — derived while the differential streams anyway, at
-/// zero extra reads, in place of the O(ancestry) `context_of` walk.
+/// sync base arrived with the pulls that established it. So the local
+/// context [`absorb`](Context::absorb)ing `observed` is the context of
+/// a head that adopts or merges this upstream — derived while the
+/// differential streams anyway, at zero extra reads, in place of the
+/// O(ancestry) `context_of` walk. The versions are collected as a SET
+/// (not folded into a context on the fly) because the count half of the
+/// watermark needs to know how many distinct new revisions arrived, and
+/// only the receiver's own watermark can screen which are new.
 ///
 /// Versions are derived from record *contents* (`RevisionRecord::version`,
 /// the same derivation the read-side check binds records with), not
@@ -335,7 +368,7 @@ where
 /// applies.
 pub fn observe_revisions<'a, C>(
     changes: C,
-    observed: Arc<Mutex<Context>>,
+    observed: Arc<Mutex<BTreeSet<Version>>>,
 ) -> impl Differential<Key, State<Datum>> + 'a
 where
     C: Differential<Key, State<Datum>> + 'a,
@@ -385,7 +418,7 @@ where
                 observed
                     .lock()
                     .expect("the revision observer mutex is never poisoned")
-                    .record(record.version());
+                    .insert(record.version());
             }
             yield change;
         }

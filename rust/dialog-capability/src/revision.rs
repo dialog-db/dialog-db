@@ -248,7 +248,8 @@ impl Revision {
     /// edition (8, big-endian)
     /// context, when present:
     ///     0x01 ++ entry count (8, big-endian)
-    ///          ++ entries (origin (32) ++ edition (8, big-endian), sorted)
+    ///          ++ entries (origin (32) ++ edition (8, big-endian)
+    ///                      ++ revision count (8, big-endian), sorted)
     /// ```
     ///
     /// A head without a context appends nothing after the edition (the
@@ -279,9 +280,10 @@ impl Revision {
         if let Some(context) = &self.context {
             bytes.push(0x01);
             bytes.extend_from_slice(&(context.len() as u64).to_be_bytes());
-            for (origin, edition) in context.iter() {
+            for (origin, watermark) in context.iter() {
                 bytes.extend_from_slice(&origin.0);
-                bytes.extend_from_slice(&edition.key_bytes());
+                bytes.extend_from_slice(&watermark.edition.key_bytes());
+                bytes.extend_from_slice(&watermark.count.to_be_bytes());
             }
         }
         bytes
@@ -312,8 +314,20 @@ impl Revision {
         };
         ceiling(&self.edition, "head")?;
         if let Some(context) = &self.context {
-            for (_, edition) in context.iter() {
-                ceiling(edition, "watermark")?;
+            for (_, watermark) in context.iter() {
+                ceiling(&watermark.edition, "watermark")?;
+                // A count can never exceed the observed prefix's depth:
+                // an origin's chain has strictly increasing editions, so
+                // at most `edition + 1` revisions fit below the
+                // watermark. A hostile inflated count would misroute
+                // every peer's merge direction.
+                if watermark.count > watermark.edition.value().saturating_add(1) {
+                    return Err(HistoryError::InvalidReference(format!(
+                        "watermark count {} exceeds its edition {} — more revisions \
+                         than the chain can hold",
+                        watermark.count, watermark.edition
+                    )));
+                }
             }
         }
         Ok(())
@@ -360,10 +374,7 @@ mod tests {
             did,
         );
         let mut context = Context::new();
-        context.record(Version::new(
-            Origin::from([1u8; 32]),
-            Edition::new(4),
-        ));
+        context.record(Version::new(Origin::from([1u8; 32]), Edition::new(4)));
         revision.context = Some(context);
         edit(&mut revision);
         revision.signature = issuer.sign(&revision.payload()).to_bytes().to_vec();

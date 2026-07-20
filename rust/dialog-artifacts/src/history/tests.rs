@@ -1059,18 +1059,15 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
     Ok(())
 }
 
-/// KNOWN GAP (spec D3): a retraction must cover every claim of the fact
-/// its author observed, but the standing datum remembers only ONE
-/// version — whichever write landed last (in-branch) or won the hash
-/// race (at merge). Two observed claims of the SAME value therefore
-/// leave the retract record citing one of them, and the uncovered claim
-/// can resurrect the fact through a later merge (the four-writer D3
-/// scenario with Mallory asserting the identical value). Ignored until
-/// the design lands: covering the full observed set needs either the
-/// datum to carry collapsed versions or the retract path to consult the
-/// log.
+/// Spec D3 on identical values: a retraction covers every claim of the
+/// fact its author observed. Same-value claims from different writers
+/// share one `(entity, attribute, value)` key, so the standing datum
+/// collapses their versions (`Datum::collapsed`) instead of overwriting
+/// — an overwrite left the earlier claim uncovered by the retract
+/// record, and the orphaned claim could resurrect the fact through a
+/// later merge (the four-writer D3 scenario with Mallory asserting the
+/// identical value).
 #[dialog_common::test]
-#[ignore = "pending design: retract coverage of same-value claims collapsed at one key"]
 async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
     use dialog_search_tree::Delta;
     use dialog_storage::{CborEncoder, Storage, StorageBackend as _};

@@ -420,7 +420,11 @@ where
                             // back to the deterministic last-write-wins
                             // hash race. Both paths are antisymmetric, so
                             // replicas integrating in opposite directions
-                            // pick the same winner and converge.
+                            // pick the same winner and converge — and the
+                            // loser is FUSED into the winner rather than
+                            // dropped, so value types that aggregate
+                            // (collapsed claim versions) survive the
+                            // contest on both sides identically.
                             let replaces = match entry.value.prevails_over(&existing) {
                                 Some(verdict) => verdict,
                                 None => {
@@ -429,8 +433,13 @@ where
                                     new_hash.as_bytes() > existing_hash.as_bytes()
                                 }
                             };
-                            if replaces {
-                                self = self.insert(entry.key, entry.value, storage).await?;
+                            let fused = if replaces {
+                                Value::fuse(entry.value, &existing)
+                            } else {
+                                Value::fuse(existing.clone(), &entry.value)
+                            };
+                            if fused != existing {
+                                self = self.insert(entry.key, fused, storage).await?;
                             }
                         }
                     }

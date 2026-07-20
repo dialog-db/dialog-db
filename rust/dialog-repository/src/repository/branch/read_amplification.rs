@@ -21,7 +21,7 @@ use std::time::Instant;
 use anyhow::Result;
 use futures_util::stream;
 
-use dialog_artifacts::history::context_of;
+use dialog_artifacts::history::{Context, context_of};
 use dialog_artifacts::{Artifact, Instruction, Value};
 
 use crate::RepositoryExt as _;
@@ -59,10 +59,7 @@ impl Sample {
 /// equality aside). Rows print this next to the scenario name so the
 /// table is self-labeling — the harness once claimed a "graft" row that
 /// the threshold actually routed through the screened path.
-fn routed(
-    ours: &dialog_artifacts::history::Context,
-    theirs: &dialog_artifacts::history::Context,
-) -> &'static str {
+fn routed(ours: &Context, theirs: &Context) -> &'static str {
     if ours.includes(theirs) {
         "skip"
     } else if theirs.includes(ours) {
@@ -266,12 +263,9 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
     // this row measures the graft itself (partition, stitch, contested
     // integrate, coverage repair).
     for i in 0..12 {
-        bob.commit(stream::iter(vec![assert_fact(
-            depth + 30 + i,
-            "bob later",
-        )]))
-        .perform(&env)
-        .await?;
+        bob.commit(stream::iter(vec![assert_fact(depth + 30 + i, "bob later")]))
+            .perform(&env)
+            .await?;
     }
     us.commit(stream::iter(vec![assert_fact(depth + 50, "ours late")]))
         .perform(&env)

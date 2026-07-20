@@ -61,9 +61,24 @@ pub type ArtifactTree = PersistentTree<Key, State<Datum>>;
 // merge screen (see `crate::merge` and `notes/version-control.md`),
 // so no `Removed` tombstone ever reaches a data-region `integrate`
 // contest. The only remaining contest is `Added` vs `Added` — two
-// byte-variants of the *same* value — which the default deterministic
-// hash race resolves. No `prevails_over` override is needed.
-impl TreeValue for State<Datum> {}
+// byte-variants of the *same* value (the key carries entity, attribute
+// AND value) — which the default deterministic hash race resolves.
+// The contest FUSES rather than drops: both sides' claim versions
+// collapse into the winner (`Datum::absorb_versions`), so a later
+// retraction can cover every claim its author observed — a dropped
+// loser version could otherwise resurrect the fact through a peer that
+// still holds it (spec D3 on identical values).
+impl TreeValue for State<Datum> {
+    fn fuse(winner: Self, loser: &Self) -> Self {
+        match (winner, loser) {
+            (State::Added(mut winner), State::Added(loser)) => {
+                winner.absorb_versions(loser.versions());
+                State::Added(winner)
+            }
+            (winner, _) => winner,
+        }
+    }
+}
 
 /// Adapts a [`StorageBackend`] keyed by raw `[u8; 32]` hashes (the
 /// [`dialog_storage::Blake3Hash`] alias used throughout the artifact
@@ -774,6 +789,21 @@ impl ArtifactTreeExt for ArtifactTree {
 
                     let mut datum = Datum::for_artifact(&artifact);
                     datum.version = version;
+                    // The fact orderings address a claim by (entity,
+                    // attribute, value), so asserting a value that already
+                    // stands re-asserts the SAME key: the standing claims
+                    // collapse into the new datum rather than being
+                    // overwritten. A later retraction covers the whole set —
+                    // an insert-overwrite here silently orphaned the earlier
+                    // claim, which could then resurrect the fact through a
+                    // merge. Versioned writes only; the probe rides the same
+                    // spine the insert below loads anyway.
+                    if version.is_some()
+                        && let Some(State::Added(standing)) =
+                            transient.get(&entity_key, &storage).await?
+                    {
+                        datum.absorb_versions(standing.versions());
+                    }
                     let added = State::Added(datum);
                     transient = transient
                         .insert(entity_key, added.clone(), &storage)
@@ -835,10 +865,15 @@ impl ArtifactTreeExt for ArtifactTree {
                                 if current.is == artifact.is {
                                     found_same_value = true;
                                 } else {
-                                    // The superseded claim's version feeds the
+                                    // The superseded claims' versions feed the
                                     // replacement record's cause, so a reader
                                     // can order the two without reading values.
-                                    superseded_versions.extend(current_element.version);
+                                    // ALL of the entry's claims: same-value
+                                    // asserts collapse into one datum, and a
+                                    // replacement its author issued having
+                                    // observed the fact supersedes every claim
+                                    // standing behind it.
+                                    superseded_versions.extend(current_element.versions());
                                     superseded_keys.push(candidate.key);
                                 }
                             }
@@ -920,18 +955,25 @@ impl ArtifactTreeExt for ArtifactTree {
                     changed = true;
 
                     // A version-tagged retraction records its history: its
-                    // cause is the version of the assertion it withdraws.
-                    // An assertion made earlier in this same batch carries
-                    // this batch's own version; a record must not claim
-                    // itself as its cause, so that degenerates to a genesis
-                    // retraction.
+                    // cause is EVERY claim the standing entry collapses —
+                    // same-value asserts from different writers share one
+                    // key, and the retraction's author observed all of them
+                    // (spec D3: a retraction covers exactly what its author
+                    // had seen). An assertion made earlier in this same
+                    // batch carries this batch's own version; a record must
+                    // not claim itself as its cause, so that one is dropped
+                    // (alone, it degenerates to a genesis retraction).
                     if let Some(version) = &version {
-                        let withdrawn = standing.version.filter(|withdrawn| withdrawn != version);
+                        let withdrawn: Vec<Version> = standing
+                            .versions()
+                            .filter(|withdrawn| *withdrawn != version)
+                            .copied()
+                            .collect();
                         let record = Record::Retract(Claim {
                             the: artifact.the.clone(),
                             of: artifact.of.clone(),
                             is: artifact.is.clone(),
-                            cause: withdrawn.into_iter().collect(),
+                            cause: HistoryCause::new(withdrawn),
                         });
                         buffer_record(&mut history_records, record, version);
                     }

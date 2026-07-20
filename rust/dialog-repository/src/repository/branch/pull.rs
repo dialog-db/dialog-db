@@ -1,4 +1,6 @@
 use crate::RevisionExt as _;
+use std::collections::BTreeSet;
+use std::mem;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::DialogArtifactsError;
@@ -460,8 +462,11 @@ impl<'a> Pull<'a> {
                             continue;
                         }
                         // Scan the covered slot in the stitched tree and
-                        // collect the claims whose versions the record
-                        // names; delete them at all three orderings.
+                        // collect the entries whose claims the record
+                        // names. An entry may collapse several same-value
+                        // claims: full coverage deletes it at all three
+                        // orderings, partial coverage rewrites it standing
+                        // on its surviving claims.
                         let mut retire = Vec::new();
                         {
                             let candidates = stitched
@@ -472,14 +477,18 @@ impl<'a> Pull<'a> {
                             {
                                 let candidate = candidate?;
                                 if let dialog_artifacts::State::Added(datum) = &candidate.value
-                                    && let Some(version) = datum.version
-                                    && record.supersedes.contains(&version)
+                                    && datum
+                                        .versions()
+                                        .any(|version| record.supersedes.contains(version))
                                 {
-                                    retire.push(candidate.key);
+                                    retire.push((
+                                        candidate.key,
+                                        datum.retire_covered(&record.supersedes),
+                                    ));
                                 }
                             }
                         }
-                        for key in retire {
+                        for (key, surviving) in retire {
                             let entity_key = dialog_artifacts::EntityKey(key);
                             let attribute_key =
                                 dialog_artifacts::AttributeKey::from_key(&entity_key);
@@ -489,7 +498,18 @@ impl<'a> Pull<'a> {
                                 attribute_key.into_key(),
                                 value_key.into_key(),
                             ] {
-                                stitched = stitched.delete(&key, &tree_store).await?;
+                                stitched = match &surviving {
+                                    None => stitched.delete(&key, &tree_store).await?,
+                                    Some(datum) => {
+                                        stitched
+                                            .insert(
+                                                key,
+                                                dialog_artifacts::State::Added(datum.clone()),
+                                                &tree_store,
+                                            )
+                                            .await?
+                                    }
+                                };
                             }
                         }
                     }
@@ -747,14 +767,15 @@ impl<'a> Pull<'a> {
         let data_changes =
             base_tree.differentiate_within(&upstream_tree, &data_scope, &tree_store, &tree_store);
         let screened_history = merge::screen_history(history_changes, local_snapshot, screen_store);
-        // Fold the version of every revision record riding the delta
+        // Collect the version of every revision record riding the delta
         // into `observed` while the data differential streams anyway.
         // Those records are exactly the upstream-ancestry revisions we
         // may lack (records at or below the sync base arrived with the
-        // pulls that established it), so `local_context + observed` is
-        // the context of a head that adopts or merges this upstream —
-        // derived at zero extra reads, in place of the ancestry walk.
-        let observed = Arc::new(Mutex::new(Context::new()));
+        // pulls that established it), so the local context absorbing
+        // `observed` is the context of a head that adopts or merges this
+        // upstream — derived at zero extra reads, in place of the
+        // ancestry walk.
+        let observed = Arc::new(Mutex::new(BTreeSet::new()));
         let observed_data = merge::observe_revisions(data_changes, observed.clone());
         let screened_data = merge::screen_data(observed_data, local_context.clone());
         let screened = futures_util::StreamExt::chain(screened_history, screened_data);
@@ -767,18 +788,21 @@ impl<'a> Pull<'a> {
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
         // The merged head's context, derived incrementally: the local
-        // context plus every revision that rode the delta (folded by
-        // `observe_revisions` while the differential streamed). The
-        // records in the delta are exactly the upstream-ancestry
+        // context absorbing every revision that rode the delta
+        // (collected by `observe_revisions` while the differential
+        // streamed; `absorb` screens them against the local watermark,
+        // so both the editions and the revision counts land exactly).
+        // The records in the delta are exactly the upstream-ancestry
         // revisions we may have lacked, so this equals the ancestry walk
         // without paying it.
         let merged_context = {
             let mut context = local_context;
-            context.merge(
-                &observed
+            let observed = mem::take(
+                &mut *observed
                     .lock()
                     .expect("the revision observer mutex is never poisoned"),
             );
+            context.absorb(observed);
             context
         };
 
@@ -2255,6 +2279,95 @@ mod history_tests {
             count_labels(mallory.clone()).await,
             0,
             "Jordan observed Mallory's claim, so his retraction covers it"
+        );
+
+        Ok(())
+    }
+
+    /// The reordered four-writer scenario: Alice merges Mallory's
+    /// IDENTICAL claim before retracting. The same-value contest
+    /// collapses both claim versions into one index entry, so Alice's
+    /// retraction covers Bob's AND Mallory's claims — and the deletion
+    /// then holds against every stale holder, in both pull directions.
+    /// Before the collapsed set, the contest kept only one version:
+    /// the orphaned claim was covered by no record, and Bob's replica
+    /// kept the label live while Alice's showed it dead — permanent
+    /// divergence with all further pulls quiescing.
+    #[dialog_common::test]
+    async fn it_retracts_collapsed_same_value_claims_everywhere() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let count_labels = |branch: crate::Branch| {
+            let operator = &operator;
+            async move {
+                let rows: Vec<_> = branch
+                    .claims()
+                    .select(ArtifactSelector::new().the("task/label".parse().unwrap()))
+                    .perform(operator)
+                    .await
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                rows.len()
+            }
+        };
+        let urgent = || Artifact {
+            the: "task/label".parse().unwrap(),
+            of: "task:7".parse().unwrap(),
+            is: Value::String("urgent".to_string()),
+            cause: None,
+        };
+
+        // Bob labels the task; Alice and Mallory sync it.
+        let bob = repo.branch("bob").open().perform(&operator).await?;
+        bob.commit(stream::iter(vec![Instruction::Assert(urgent())]))
+            .perform(&operator)
+            .await?;
+        for name in ["alice", "mallory"] {
+            let b = repo.branch(name).open().perform(&operator).await?;
+            b.set_upstream(&bob).perform(&operator).await?;
+            b.pull().perform(&operator).await?;
+        }
+        let alice = repo.branch("alice").load().perform(&operator).await?;
+        let mallory = repo.branch("mallory").load().perform(&operator).await?;
+
+        // Mallory asserts the identical value under her own claim;
+        // Alice pulls it (the same-value contest collapses the two
+        // versions into one entry), THEN retracts having observed both.
+        mallory
+            .commit(stream::iter(vec![Instruction::Assert(urgent())]))
+            .perform(&operator)
+            .await?;
+        alice.pull().from(&mallory).perform(&operator).await?;
+        alice
+            .commit(stream::iter(vec![Instruction::Retract(urgent())]))
+            .perform(&operator)
+            .await?;
+        assert_eq!(count_labels(alice.clone()).await, 0, "dead at Alice");
+
+        // Bob still holds the fact live. Both pull directions must
+        // converge on the deletion: his stale copy is dropped by R1
+        // (both its versions are in Alice's ancestry), and her covering
+        // record retires his live copy by R3.
+        bob.pull().from(&alice).perform(&operator).await?;
+        assert_eq!(
+            count_labels(bob.clone()).await,
+            0,
+            "the retraction covers Bob's collapsed claim too — no resurrection"
+        );
+        alice.pull().from(&bob).perform(&operator).await?;
+        assert_eq!(count_labels(alice.clone()).await, 0, "and stays dead");
+
+        // Mallory converges the same way.
+        mallory.pull().from(&alice).perform(&operator).await?;
+        assert_eq!(
+            count_labels(mallory.clone()).await,
+            0,
+            "Mallory's own claim was observed and covered"
         );
 
         Ok(())

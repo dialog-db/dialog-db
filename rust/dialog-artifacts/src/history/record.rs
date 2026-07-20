@@ -53,6 +53,7 @@ impl Record {
             cause: None,
             blob: None,
             version: Some(*version),
+            collapsed: Vec::new(),
             supersedes: claim.cause.versions().to_vec(),
             retraction,
         };
@@ -78,6 +79,7 @@ impl Record {
             cause: None,
             blob: None,
             version: Some(*version),
+            collapsed: Vec::new(),
             supersedes: claim.cause.versions().to_vec(),
             retraction: !self.is_assertion(),
         };
