@@ -435,18 +435,16 @@ where
         // Expand any remaining target index nodes so novel_nodes() can
         // enumerate every novel node, not just unexpanded subtree roots.
         // These reads are not wasted: every remaining target node is novel
-        // by construction and must be visited to be reported.
-        loop {
-            let mut expanded = false;
-            for index in 0..difference.target.nodes.len() {
-                let bound = difference.target.nodes[index].lower_bound().to_vec();
-                if difference.target.expand_at(&bound).await? {
-                    expanded = true;
-                    break;
-                }
-            }
-            if !expanded {
-                break;
+        // by construction and must be visited to be reported. One
+        // left-to-right pass suffices: an expansion splices the children in
+        // place of their parent, so re-checking the same position drills
+        // down until a segment remains, and positions already passed can
+        // never become expandable again.
+        let mut index = 0;
+        while index < difference.target.nodes.len() {
+            let bound = difference.target.nodes[index].lower_bound().to_vec();
+            if !difference.target.expand_at(&bound).await? {
+                index += 1;
             }
         }
 

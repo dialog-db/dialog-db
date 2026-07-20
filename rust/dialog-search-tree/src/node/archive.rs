@@ -547,6 +547,7 @@ mod tests {
             fanout_n: 4,
             max_separator: 128,
             inline_n: 64,
+            spill_prefix: 16,
         };
         let entries: Vec<Entry<[u8; 8], Vec<u8>>> = [key("x")]
             .into_iter()

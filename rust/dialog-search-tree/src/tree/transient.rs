@@ -33,7 +33,10 @@ use rkyv::{
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
-use std::{marker::PhantomData, ops::RangeBounds};
+use std::{
+    marker::PhantomData,
+    ops::{Bound, RangeBounds},
+};
 
 /// The root of a [`TransientTree`].
 ///
@@ -323,7 +326,7 @@ where
             TransientRoot::Unloaded(hash) => vec![StreamStep::Persistent(hash.clone())],
             TransientRoot::Loaded(node) => {
                 let mut plan = Vec::new();
-                collect_stream_plan(node, &mut plan);
+                collect_stream_plan(node, &bounds, &mut plan);
                 plan
             }
         };
@@ -1533,27 +1536,62 @@ enum StreamStep<Key, Value> {
 /// Walks the transient `node` left to right, appending each persistent subtree
 /// (as a hash) and each transient leaf entry (cloned) to `plan` in ascending
 /// key order.
+///
+/// Children whose key span cannot intersect `bounds` are pruned: a child's
+/// span is `[its separator, the next sibling's separator)` under lower-bound
+/// routing, so a subtree entirely below the range start or at/above the range
+/// end contributes nothing and costs neither a clone (transient) nor a root
+/// fetch and descent (persistent). A sibling whose separator cannot be read
+/// is treated as unbounded — pruning degrades, correctness does not.
 fn collect_stream_plan<Key, Value>(
     node: &TransientNode<Key, Value>,
+    bounds: &(Bound<Key>, Bound<Key>),
     plan: &mut Vec<StreamStep<Key, Value>>,
 ) where
-    Key: Clone,
+    Key: self::Key,
     Value: Clone,
 {
+    // Whether a child spanning `[span_start, span_end)` (separator bytes;
+    // `None` when unknown) could hold a key inside `bounds`.
+    let intersects = |span_start: Option<&[u8]>, span_end: Option<&[u8]>| {
+        let below = match (&bounds.0, span_end) {
+            // Keys are < span_end <= start: every key sorts below the range.
+            (Bound::Included(start) | Bound::Excluded(start), Some(end)) => end <= start.as_ref(),
+            _ => false,
+        };
+        let above = match (&bounds.1, span_start) {
+            // Keys are >= span_start > end (or >= end when exclusive).
+            (Bound::Included(end), Some(start)) => start > end.as_ref(),
+            (Bound::Excluded(end), Some(start)) => start >= end.as_ref(),
+            _ => false,
+        };
+        !below && !above
+    };
+
     match node {
         TransientNode::Index(index) => {
-            for child in &index.children {
+            for (at, child) in index.children.iter().enumerate() {
+                let span_start = child.separator().ok();
+                let span_end = index
+                    .children
+                    .get(at + 1)
+                    .and_then(|sibling| sibling.separator().ok());
+                if !intersects(span_start, span_end) {
+                    continue;
+                }
                 match child {
                     Node::Persistent(link) => {
                         plan.push(StreamStep::Persistent(link.node.clone()));
                     }
-                    Node::Transient(child) => collect_stream_plan(child, plan),
+                    Node::Transient(child) => collect_stream_plan(child, bounds, plan),
                 }
             }
         }
         TransientNode::Segment(segment) => {
             for entry in &segment.entries {
-                plan.push(StreamStep::Entry(entry.clone()));
+                if bounds.contains(&entry.key) {
+                    plan.push(StreamStep::Entry(entry.clone()));
+                }
             }
         }
     }
@@ -2317,6 +2355,67 @@ mod tests {
             "insert-only vs insert-then-delete must converge for the same entry set"
         );
 
+        Ok(())
+    }
+
+    /// A bounded stream over a lightly-edited tree reads only blocks on the
+    /// range's own path: persistent siblings whose separator spans cannot
+    /// intersect the bounds are pruned from the stream plan. Regression
+    /// guard — the plan once listed EVERY persistent subtree, so a small
+    /// interior range over a tree edited at both ends paid a root fetch and
+    /// descent per untouched subtree.
+    #[dialog_common::test]
+    async fn it_prunes_out_of_range_subtrees_from_bounded_streams() -> Result<()> {
+        use crate::helpers::test_storage;
+        use futures_util::StreamExt as _;
+
+        fn make_key(i: u32) -> [u8; 8] {
+            let mut key = [0u8; 8];
+            key[..4].copy_from_slice(&i.to_be_bytes());
+            key
+        }
+
+        let mut storage = test_storage();
+        let mut tree = PersistentTree::<[u8; 8], Vec<u8>>::empty();
+        let mut delta = Delta::zero();
+        for i in 0..5_000u32 {
+            tree = tree
+                .edit()
+                .insert(make_key(i), i.to_le_bytes().to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        // Reopen cold (fresh node cache) so every touched block is a real
+        // read, then edit both ends WITHOUT persisting: the spine is
+        // transient at the edges and the middle stays persistent.
+        let tree = PersistentTree::<[u8; 8], Vec<u8>>::from_hash(tree.root().clone());
+        let edit = tree
+            .edit()
+            .insert(make_key(0), vec![9], &storage)
+            .await?
+            .insert(make_key(4_999), vec![9], &storage)
+            .await?;
+
+        storage.backend().clear_journal();
+        let stream = edit.stream_range(make_key(2_400)..make_key(2_420), &storage);
+        futures_util::pin_mut!(stream);
+        let mut yielded = 0usize;
+        while let Some(entry) = stream.next().await {
+            entry?;
+            yielded += 1;
+        }
+        assert_eq!(yielded, 20, "the bounded stream yields exactly the range");
+        let reads = storage.backend().get_reads().len();
+        assert!(
+            reads <= 2,
+            "reads stay proportional to the range's path, got {reads}"
+        );
         Ok(())
     }
 

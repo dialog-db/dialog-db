@@ -4,9 +4,8 @@ use crate::KeyType;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, ValueReferenceKeyPart,
-    key::inline_threshold, key::value_payload, key::varkey, key::varkey::KeyParts,
-    key::varkey::ValuePayload,
+    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, key::inline_threshold,
+    key::value_payload, key::varkey, key::varkey::KeyParts, key::varkey::ValuePayload,
 };
 
 use super::{Key, KeyView, KeyViewConstruct, KeyViewMut};
@@ -34,21 +33,6 @@ impl KeyViewConstruct for ValueKey<Key> {
 
     fn max() -> Self {
         Self(Key::from(varkey::build_key(&KeyParts::max(VALUE_KEY_TAG))))
-    }
-
-    fn from_parts(
-        entity: EntityKeyPart,
-        attribute: AttributeKeyPart,
-        value_type: ValueDataType,
-        value_reference: ValueReferenceKeyPart,
-    ) -> Self {
-        Self::default()
-            .set_entity(entity)
-            .set_attribute(attribute)
-            .set_value(
-                value_type,
-                ValuePayload::Reference(value_reference.0.to_vec()),
-            )
     }
 }
 
@@ -82,6 +66,10 @@ where
 
     fn value_is_spilled(&self) -> bool {
         varkey::value_is_spilled(self.0.as_ref(), VALUE_KEY_TAG)
+    }
+
+    fn value_spill_hash(&self) -> Option<&[u8]> {
+        varkey::value_spill_hash(self.0.as_ref(), VALUE_KEY_TAG)
     }
 }
 

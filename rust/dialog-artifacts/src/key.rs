@@ -82,25 +82,29 @@ pub(crate) const ENTITY_LENGTH: usize = 64;
 pub(crate) const ATTRIBUTE_LENGTH: usize = 64;
 /// Length of the value data type field in key bytes
 pub(crate) const VALUE_DATA_TYPE_LENGTH: usize = 1;
-/// Length of the value reference field in key bytes
-pub(crate) const VALUE_REFERENCE_LENGTH: usize = 32;
-
-pub(crate) const MINIMUM_VALUE_REFERENCE: [u8; VALUE_REFERENCE_LENGTH] =
-    [u8::MIN; VALUE_REFERENCE_LENGTH];
-pub(crate) const MAXIMUM_VALUE_REFERENCE: [u8; VALUE_REFERENCE_LENGTH] =
-    [u8::MAX; VALUE_REFERENCE_LENGTH];
 
 /// Decides how a [`Value`] is carried in a key: a small value is encoded inline
-/// in its order-preserving form (and stays range-queryable); a value whose
-/// encoded form exceeds `inline_n` spills to its 32-byte content-addressed
-/// reference (equality-only). This is the single place the inline-vs-spill
-/// decision is made, so the fact-building path and the selector path agree.
+/// in its order-preserving form; a value whose encoded form exceeds `inline_n`
+/// spills — its value slot carries the order-preserving encoding of the first
+/// [`spill_prefix`] RAW bytes (a byte-prefix of the full inline encoding, since
+/// escaping is per-byte, so spilled values sort INTO their type band next to
+/// inline ones) and the key gains a trailing 32-byte whole-value hash, which
+/// keeps distinct large values distinct (cardinality-many) and addresses the
+/// archive block. This is the single place the inline-vs-spill decision is
+/// made, so the fact-building path and the selector path agree.
 pub(crate) fn value_payload(value: &Value, inline_n: usize) -> ValuePayload {
     let encoded = encode_value_owned(value);
     if encoded.len() <= inline_n {
         ValuePayload::Inline(encoded)
     } else {
-        ValuePayload::Reference(value.to_reference().to_vec())
+        let raw = value.to_bytes();
+        let take = spill_prefix().min(raw.len());
+        let mut prefix = Vec::new();
+        crate::encode_bytes(&raw[..take], &mut prefix);
+        ValuePayload::Spilled {
+            prefix,
+            hash: value.to_reference().to_vec(),
+        }
     }
 }
 
@@ -119,6 +123,15 @@ pub(crate) fn inline_threshold() -> usize {
     dialog_search_tree::Manifest::default().inline_n as usize
 }
 
+/// How many leading RAW value bytes a spilled value's key carries as its
+/// order-preserving prefix. Prefix and range predicates decide from the key
+/// whenever the answer lies within this many bytes; beyond it, the scan loads
+/// the block and post-filters. Reads the default manifest for the same
+/// reason (and with the same deferral) as [`inline_threshold`].
+pub(crate) fn spill_prefix() -> usize {
+    dialog_search_tree::Manifest::default().spill_prefix as usize
+}
+
 /// Whether `value` spills (its encoded form exceeds the inline threshold, so
 /// the key carries a reference and the payload must carry the raw bytes).
 /// The single source of truth the payload builder and the key builder share.
@@ -126,22 +139,69 @@ pub(crate) fn value_spills(value: &Value) -> bool {
     value_payload(value, inline_threshold()).is_reference()
 }
 
+/// Builds all three index keys — `(EAV, AEV, VAE)` — for an artifact from a
+/// single field-encoding pass: the entity/attribute bytes and the value
+/// payload are computed once and serialized per ordering.
+///
+/// This is the commit hot path. Building the EAV key through the chained
+/// `set_*` rebuilds (each a full parse + re-encode) and then projecting the
+/// other two orderings through `FromKey` (each accessor re-splitting the key)
+/// costs ~ten key walks per instruction; this costs three plain
+/// serializations of the same parts.
+pub(crate) fn artifact_index_keys(artifact: &crate::Artifact) -> (Key, Key, Key) {
+    let mut parts = varkey::KeyParts {
+        tag: ENTITY_KEY_TAG,
+        entity: artifact.of.as_str().as_bytes().to_vec(),
+        attribute: artifact.the.as_str().as_bytes().to_vec(),
+        value_type: artifact.is.data_type(),
+        value: value_payload(&artifact.is, inline_threshold()),
+    };
+    let eav = Key::from(varkey::build_key(&parts));
+    parts.tag = ATTRIBUTE_KEY_TAG;
+    let aev = Key::from(varkey::build_key(&parts));
+    parts.tag = VALUE_KEY_TAG;
+    let vae = Key::from(varkey::build_key(&parts));
+    (eav, aev, vae)
+}
+
+/// Re-projects an existing index key of any ordering into all three
+/// orderings — `(EAV, AEV, VAE)` — with a single parse. Errors on a key that
+/// does not parse (corruption), rather than silently projecting garbage.
+pub(crate) fn reproject_index_keys(
+    key: &Key,
+) -> Result<(Key, Key, Key), crate::DialogArtifactsError> {
+    let mut parts = varkey::parse_key(key.as_ref()).ok_or_else(|| {
+        crate::DialogArtifactsError::InvalidKey(
+            "key does not parse while re-projecting orderings".to_string(),
+        )
+    })?;
+    parts.tag = ENTITY_KEY_TAG;
+    let eav = Key::from(varkey::build_key(&parts));
+    parts.tag = ATTRIBUTE_KEY_TAG;
+    let aev = Key::from(varkey::build_key(&parts));
+    parts.tag = VALUE_KEY_TAG;
+    let vae = Key::from(varkey::build_key(&parts));
+    Ok((eav, aev, vae))
+}
+
 /// The exact value-tail bytes a key carries for `value`: the value-type byte
-/// (with the spill flag set when the value spilled) followed by the payload
-/// (inline order-preserving encoding, or the 32-byte spilled reference).
+/// followed by the value slot (inline order-preserving encoding, or a spilled
+/// value's encoded prefix) and, for a spilled value, the whole-value hash.
 ///
 /// This is what makes a [`SortKey`](crate::SortKey) reproduce the tree's byte
 /// order: same-`(the, of, type)` facts sort by this tail exactly as the
 /// EAV/AEV/VAE keys do.
 pub(crate) fn value_tail_bytes(value: &Value) -> Vec<u8> {
     let payload = value_payload(value, inline_threshold());
-    let mut type_byte: u8 = value.data_type().into();
-    if payload.is_reference() {
-        type_byte |= varkey::SPILL_FLAG;
+    let mut tail = Vec::with_capacity(1 + payload.slot_bytes().len());
+    tail.push(value.data_type().into());
+    tail.extend_from_slice(payload.slot_bytes());
+    // A spilled key's whole-value hash trails the key; within a same-
+    // `(the, of)` group the components between the value slot and the hash
+    // are equal, so appending it here reproduces the tree's tie-break order.
+    if let ValuePayload::Spilled { hash, .. } = &payload {
+        tail.extend_from_slice(hash);
     }
-    let mut tail = Vec::with_capacity(1 + payload.as_bytes().len());
-    tail.push(type_byte);
-    tail.extend_from_slice(payload.as_bytes());
     tail
 }
 
@@ -320,14 +380,6 @@ pub trait KeyViewConstruct: KeyViewMut + Default {
 
     /// Construct the highest possible [`KeyView`] (all non-tag bits are one)
     fn max() -> Self;
-
-    /// Construct a [`KeyView`] from the provided component key parts.
-    fn from_parts(
-        entity: EntityKeyPart,
-        attribute: AttributeKeyPart,
-        value_type: ValueDataType,
-        value_reference: ValueReferenceKeyPart,
-    ) -> Self;
 }
 
 /// Trait for mutably modifying key view components.
@@ -394,14 +446,18 @@ pub trait KeyView: Sized + Clone {
     /// Get the [`ValueDataType`] that is represented by this [`KeyView`].
     fn value_type(&self) -> ValueDataType;
 
-    /// Borrow the raw value payload bytes of this [`KeyView`]: the inline
-    /// order-preserving value encoding, or a spilled 32-byte reference.
+    /// Borrow the bytes occupying this [`KeyView`]'s value SLOT: the full
+    /// inline order-preserving encoding, or a spilled value's encoded prefix.
     /// [`value_is_spilled`](KeyView::value_is_spilled) says which.
     fn value_payload(&self) -> &[u8];
 
-    /// Whether this [`KeyView`]'s value spilled (its payload is a reference
-    /// rather than the inline order-preserving value).
+    /// Whether this [`KeyView`]'s value spilled (the key carries the value's
+    /// encoded prefix plus a trailing whole-value hash).
     fn value_is_spilled(&self) -> bool;
+
+    /// Borrow the 32-byte whole-value hash trailing a spilled key (the
+    /// archive block address), or `None` for an inline value.
+    fn value_spill_hash(&self) -> Option<&[u8]>;
 }
 
 /// Trait for constructing key views from artifact selectors.
@@ -437,11 +493,13 @@ where
     fn from_key(key: &Ka) -> Self {
         // Copy the value payload faithfully so all three orderings (EAV/AEV/VAE)
         // for one fact carry the identical value slot: an inline payload stays
-        // inline, a spilled reference stays spilled.
-        let payload = if key.value_is_spilled() {
-            ValuePayload::Reference(key.value_payload().to_vec())
-        } else {
-            ValuePayload::Inline(key.value_payload().to_vec())
+        // inline, a spilled value keeps its encoded prefix and trailing hash.
+        let payload = match key.value_spill_hash() {
+            Some(hash) => ValuePayload::Spilled {
+                prefix: key.value_payload().to_vec(),
+                hash: hash.to_vec(),
+            },
+            None => ValuePayload::Inline(key.value_payload().to_vec()),
         };
         Kb::default()
             .set_entity(key.entity())
@@ -553,38 +611,54 @@ mod tests {
         Ok(())
     }
 
-    /// A spilled key sorts strictly above every inline key of the same
-    /// `(entity, attribute)` — the spill flag lives in the type byte's high
-    /// bit, giving spilled values their own band — and its payload (the
-    /// 32-byte reference) never equals the inline encoding of the same
-    /// logical value.
+    /// A spilled value sorts INTO its type band by its in-key prefix, right
+    /// next to inline values sharing those leading bytes — there is no
+    /// separate spilled band — and two large values sharing their whole
+    /// key-prefix stay DISTINCT keys via the trailing whole-value hash
+    /// (cardinality-many must not collapse).
     #[dialog_common::test]
-    async fn it_separates_the_spilled_band_from_inline_bands() -> anyhow::Result<()> {
-        let content = "z".repeat(inline_threshold() + 1);
-        let spilled = fact(Value::String(content.clone()));
-        let spilled_key = EntityKey::from(&spilled).into_key();
+    async fn it_sorts_spilled_values_into_their_type_band() -> anyhow::Result<()> {
+        let big = "z".repeat(inline_threshold() + 1);
+        let spilled_key = EntityKey::from(&fact(Value::String(big.clone()))).into_key();
 
-        let inline_values = [
-            Value::Bytes(vec![0xFF; 8]),
-            Value::String("zzzz".into()),
-            Value::UnsignedInt(u128::MAX),
-            Value::Float(f64::INFINITY),
-            Value::Symbol(Attribute::from_str("zz/zz")?),
-        ];
-        for value in inline_values {
-            let inline_key = EntityKey::from(&fact(value.clone())).into_key();
-            assert!(
-                inline_key < spilled_key,
-                "inline {value:?} must sort below the spilled band"
-            );
-        }
+        // In-band neighbors: ordered by leading value bytes, not banished
+        // above the type band.
+        let below = EntityKey::from(&fact(Value::String("y-below".into()))).into_key();
+        let shorter = EntityKey::from(&fact(Value::String("zz".into()))).into_key();
+        let next_band = EntityKey::from(&fact(Value::UnsignedInt(1))).into_key();
+        assert!(
+            below < spilled_key,
+            "sorts by leading bytes within the band"
+        );
+        assert!(
+            shorter < spilled_key,
+            "an inline string that is a prefix of the spilled one sorts below it"
+        );
+        assert!(
+            spilled_key < next_band,
+            "stays inside the String band, below the next type band"
+        );
+
+        // Cardinality-many: two large values sharing their entire key-prefix
+        // differ only in the trailing hash — distinct keys, both spilled.
+        let sibling = format!("{}A", "z".repeat(inline_threshold() + 1));
+        let sibling_key = EntityKey::from(&fact(Value::String(sibling))).into_key();
+        assert_ne!(
+            spilled_key, sibling_key,
+            "same-prefix large values stay distinct via the trailing hash"
+        );
+        assert_eq!(
+            EntityKey(&spilled_key).value_payload(),
+            EntityKey(&sibling_key).value_payload(),
+            "their value slots (the in-key prefixes) are identical"
+        );
 
         let key = EntityKey(&spilled_key);
         assert!(key.value_is_spilled());
-        assert_ne!(
-            key.value_payload(),
-            content.as_bytes(),
-            "the key carries a reference, not the value bytes"
+        assert_eq!(
+            key.value_spill_hash(),
+            Some(Value::String(big).to_reference().as_slice()),
+            "the trailing hash addresses the archive block"
         );
         Ok(())
     }
@@ -631,15 +705,26 @@ mod tests {
     }
 
     /// The inline-vs-spill decision spills a value whose encoded form exceeds
-    /// the threshold to its 32-byte reference; a value within the threshold
-    /// stays inline.
+    /// the threshold: the payload keeps the encoded leading raw bytes as the
+    /// key-prefix and carries the whole-value hash; a value within the
+    /// threshold stays inline.
     #[dialog_common::test]
     async fn it_spills_above_the_inline_threshold() -> anyhow::Result<()> {
-        // A tiny threshold forces even a short string to spill to its reference.
+        // A tiny threshold forces even a short string to spill.
         let value = Value::String("this-string-exceeds-a-tiny-threshold".into());
         let spilled = value_payload(&value, 4);
         assert!(spilled.is_reference(), "oversized value spills");
-        assert_eq!(spilled.as_bytes(), value.to_reference().to_vec());
+        let ValuePayload::Spilled { prefix, hash } = &spilled else {
+            panic!("expected a spilled payload");
+        };
+        assert_eq!(hash.as_slice(), value.to_reference().as_slice());
+        let raw = value.to_bytes();
+        let mut expected = Vec::new();
+        crate::encode_bytes(&raw[..raw.len().min(super::spill_prefix())], &mut expected);
+        assert_eq!(
+            prefix, &expected,
+            "the slot keeps the encoded leading raw bytes"
+        );
 
         // Under a generous threshold the same value stays inline.
         let inline = value_payload(&value, 4096);
@@ -647,10 +732,11 @@ mod tests {
         Ok(())
     }
 
-    /// A value that spills builds a key whose value-type byte has the spill bit
-    /// set and whose payload is the 32-byte reference.
+    /// A value that spills builds a key whose value slot holds the encoded
+    /// prefix (sorting into the type band next to inline values) and whose
+    /// trailing 32 bytes are the whole-value hash.
     #[dialog_common::test]
-    async fn it_builds_a_spilled_key_with_the_spill_flag() -> anyhow::Result<()> {
+    async fn it_builds_a_spilled_key_with_prefix_and_trailing_hash() -> anyhow::Result<()> {
         let value = Value::String("x".repeat(inline_threshold() + 1));
         let key = EntityKey::from(&fact(value.clone()));
 
@@ -660,7 +746,19 @@ mod tests {
             value.data_type(),
             "type survives spilling"
         );
-        assert_eq!(key.value_payload(), value.to_reference().to_vec());
+        let raw = value.to_bytes();
+        let mut expected = Vec::new();
+        crate::encode_bytes(&raw[..super::spill_prefix()], &mut expected);
+        assert_eq!(
+            key.value_payload(),
+            expected.as_slice(),
+            "the slot holds the encoded prefix"
+        );
+        assert_eq!(
+            key.value_spill_hash(),
+            Some(value.to_reference().as_slice()),
+            "the whole-value hash trails the key"
+        );
         Ok(())
     }
 }

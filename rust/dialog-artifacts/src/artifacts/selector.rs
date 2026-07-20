@@ -70,10 +70,11 @@ where
     /// be strings beginning with this string. The M3 value-in-key
     /// format stores the value order-preservingly in the VAE index, so
     /// this is an exact key range over the value dimension. Spilled
-    /// values (above the inline threshold) are equality-only and never
-    /// match a prefix, on any scan route; a prefix containing a NUL
-    /// byte cannot match past the NUL (the inline payload escapes
-    /// `0x00`).
+    /// values participate through the leading bytes their key carries:
+    /// a prefix within that in-key prefix decides from the key alone,
+    /// and a longer one loads the value and post-filters. A prefix
+    /// containing a NUL byte cannot match past the NUL (the inline
+    /// payload escapes `0x00`).
     value_prefix: Option<String>,
     /// Lower bound on the value: selected [`Artifact`]s' values must be
     /// `>=` (or `>`, when not inclusive) this. The value sorts
@@ -236,15 +237,16 @@ where
         }
     }
 
-    /// Constrain selected [`Artifact`]s to textual values (string/bytes)
-    /// beginning with `prefix`. A prefix is a constraint, so the resulting
-    /// selector is [`Constrained`]; an exact value set via
-    /// [`ArtifactSelector::is`] takes precedence during scans.
+    /// Constrain selected [`Artifact`]s to string values beginning with
+    /// `prefix`. A prefix is a constraint, so the resulting selector is
+    /// [`Constrained`]; an exact value set via [`ArtifactSelector::is`] takes
+    /// precedence during scans.
     ///
     /// The M3 value-in-key format stores the value order-preservingly in the
     /// VAE index, so this narrows the scan to the value sub-range whose keys
-    /// begin with `prefix` (a spilled value, whose key carries a reference
-    /// rather than the inline bytes, is re-checked per entry).
+    /// begin with `prefix`. A spilled value participates through the leading
+    /// bytes its key carries: a probe within that in-key prefix decides from
+    /// the key alone, and a longer probe loads the value and post-filters.
     pub fn is_starting_with(self, prefix: impl Into<String>) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,

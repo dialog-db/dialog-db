@@ -15,12 +15,13 @@
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Buffer, Change, ContentAddressedStorage, Delta, TreeDifference};
+use dialog_search_tree::{Buffer, ContentAddressedStorage, Delta, TreeDifference};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    BLOB_KEY_TAG, BlobKey, Datum, DialogArtifactsError, State,
+    BlobKey, Datum, DialogArtifactsError, State,
+    spill::{ShipmentRef, shipment_refs},
     tree::{ArtifactTree, TreeStorageBridge},
 };
 
@@ -67,7 +68,7 @@ impl BlobRecord {
 
     /// Decode a blob record from a tree value. `Removed` (a retracted entry)
     /// decodes to `None`.
-    fn from_state(state: &State<Datum>) -> Result<Option<Self>, DialogArtifactsError> {
+    pub(crate) fn from_state(state: &State<Datum>) -> Result<Option<Self>, DialogArtifactsError> {
         let datum = match state {
             State::Added(datum) => datum,
             State::Removed => return Ok(None),
@@ -135,24 +136,11 @@ where
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
     try_stream! {
         let difference = TreeDifference::compute(&checkpoint, &current, &storage, &storage).await?;
-        let changes = difference.changes();
-        tokio::pin!(changes);
-        for await change in changes {
-            let (entry, removed) = match change? {
-                Change::Add(entry) => (entry, false),
-                Change::Remove(entry) => (entry, true),
-            };
-            let key = entry.key;
-            if key.tag() != BLOB_KEY_TAG {
-                continue;
-            }
-            let hash = BlobKey(key).blob_hash();
-            // Decoding rejects a malformed record; a `None` decode is a
-            // retraction tombstone, which is a reference only when removed.
-            match (removed, BlobRecord::from_state(&entry.value)?) {
-                (false, Some(_)) => yield BlobChange::Added(hash),
-                (true, _) => yield BlobChange::Removed(hash),
-                (false, None) => {}
+        let refs = shipment_refs(&difference);
+        tokio::pin!(refs);
+        for await item in refs {
+            if let ShipmentRef::Blob(change) = item? {
+                yield change;
             }
         }
     }

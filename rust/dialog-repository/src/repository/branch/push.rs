@@ -1,5 +1,5 @@
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{BlobChange, BlobIndexExt as _, blob_changes, spilled_refs};
+use dialog_artifacts::{BlobChange, BlobIndexExt as _, ShipmentRef, shipment_refs};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync};
@@ -165,84 +165,73 @@ impl Push<'_> {
                 // stream type and produces large futures.
                 Box::pin(upload).await?;
 
-                // Ship blobs newly referenced since the sync checkpoint. The
-                // entry-level view of the same differential, restricted to the
-                // BLOB tag, names exactly what the remote lacks under
-                // fast-forward. Bytes must land on the remote before we publish
+                // Ship the blocks the tree nodes reference but the node upload
+                // does not carry: blob bytes and spilled value blocks. Both
+                // are surfaced by ONE entry-level drain of the SAME
+                // differential the node upload just walked (`shipment_refs`),
+                // so the changed paths are read once per push instead of once
+                // per concern. Bytes must land on the remote before we publish
                 // a revision that references them, so a failed upload here
                 // aborts the push with the revision still unpublished.
                 let blob_store = LocalIndex::new(env, index.clone());
                 let current_index = Index::from_hash(NodeHash::from(*revision.tree.hash()));
                 let address = remote.address();
-                let mut changes = std::pin::pin!(blob_changes(
-                    Index::from_hash(NodeHash::from(*base.hash())),
-                    Index::from_hash(NodeHash::from(*revision.tree.hash())),
-                    blob_store.clone(),
-                ));
-                while let Some(change) = changes.next().await {
-                    // Removals ship nothing; the remote keeps its bytes.
-                    let BlobChange::Added(hash) = change? else {
-                        continue;
-                    };
-                    let digest = dialog_common::Blake3Hash::from(hash);
-                    // Size from the current tree's blob index (no byte fetch).
-                    let record = current_index
-                        .get_blob(&blob_store, &hash)
-                        .await?
-                        .ok_or_else(|| {
-                            BlobError::ExecutionError(format!(
-                                "blob {digest:?} referenced by the tree but absent from its index"
-                            ))
-                        })?;
-                    // Local bytes -> remote import sink. Mirrors the remote
-                    // `Read` fork in `branch/blob.rs` and `RemotePut`'s `Put`
-                    // fork in `remote/archive.rs`, substituting the blob
-                    // `Import` effect (single-part on the current providers).
-                    let mut source = branch
-                        .archive()
-                        .blob()
-                        .read(digest.clone())
-                        .perform(env)
-                        .await?;
-                    let mut sink = address
-                        .subject
-                        .clone()
-                        .archive()
-                        .blob()
-                        .import(digest.clone(), record.size)
-                        .fork(address.site())
-                        .perform(env)
-                        .await?;
-                    while let Some(chunk) = source.next().await? {
-                        sink.write_all(&chunk).await?;
+                let mut refs = std::pin::pin!(shipment_refs(&difference));
+                while let Some(shipment) = refs.next().await {
+                    match shipment? {
+                        // Removals ship nothing; the remote keeps its bytes.
+                        ShipmentRef::Blob(BlobChange::Removed(_)) => {}
+                        ShipmentRef::Blob(BlobChange::Added(hash)) => {
+                            let digest = dialog_common::Blake3Hash::from(hash);
+                            // Size from the current tree's blob index (no byte
+                            // fetch).
+                            let record = current_index
+                                .get_blob(&blob_store, &hash)
+                                .await?
+                                .ok_or_else(|| {
+                                    BlobError::ExecutionError(format!(
+                                        "blob {digest:?} referenced by the tree but absent from its index"
+                                    ))
+                                })?;
+                            // Local bytes -> remote import sink. Mirrors the
+                            // remote `Read` fork in `branch/blob.rs` and
+                            // `RemotePut`'s `Put` fork in `remote/archive.rs`,
+                            // substituting the blob `Import` effect
+                            // (single-part on the current providers).
+                            let mut source = branch
+                                .archive()
+                                .blob()
+                                .read(digest.clone())
+                                .perform(env)
+                                .await?;
+                            let mut sink = address
+                                .subject
+                                .clone()
+                                .archive()
+                                .blob()
+                                .import(digest.clone(), record.size)
+                                .fork(address.site())
+                                .perform(env)
+                                .await?;
+                            while let Some(chunk) = source.next().await? {
+                                sink.write_all(&chunk).await?;
+                            }
+                            sink.finish().await?;
+                        }
+                        // A value larger than the inline threshold lives as a
+                        // content-addressed block (addressed by its 32-byte
+                        // value reference) in the same store as the tree
+                        // nodes. Local bytes -> remote block put, mirroring
+                        // the novel node upload.
+                        ShipmentRef::SpilledValue(reference) => {
+                            let bytes = blob_store.get(&reference).await?.ok_or_else(|| {
+                                BlobError::ExecutionError(format!(
+                                    "spilled value block {reference:?} referenced by the tree but absent from the local archive"
+                                ))
+                            })?;
+                            remote_index.put(Buffer::from(bytes)).perform(env).await?;
+                        }
                     }
-                    sink.finish().await?;
-                }
-
-                // Ship spilled value blocks newly referenced since the sync
-                // checkpoint. A value larger than the inline threshold lives as
-                // a content-addressed block (addressed by its 32-byte value
-                // reference) in the same store as the tree nodes, but the
-                // node-level differential above does not surface it — it is not
-                // a node. `spilled_refs` walks the same differential's entries,
-                // keeping the EAV-tagged spilled keys, and names each such block
-                // once. Local bytes -> remote block put, mirroring the novel
-                // node upload. Bytes must land on the remote before we publish a
-                // revision that references them.
-                let spill_store = LocalIndex::new(env, index.clone());
-                let mut refs = std::pin::pin!(spilled_refs(
-                    Index::from_hash(NodeHash::from(*base.hash())),
-                    Index::from_hash(NodeHash::from(*revision.tree.hash())),
-                    spill_store.clone(),
-                ));
-                while let Some(reference) = refs.next().await {
-                    let reference = reference?;
-                    let bytes = spill_store.get(&reference).await?.ok_or_else(|| {
-                        BlobError::ExecutionError(format!(
-                            "spilled value block {reference:?} referenced by the tree but absent from the local archive"
-                        ))
-                    })?;
-                    remote_index.put(Buffer::from(bytes)).perform(env).await?;
                 }
 
                 upstream.publish(revision.clone()).perform(env).await?;
