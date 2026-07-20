@@ -19,8 +19,10 @@
 
 use std::borrow::Cow;
 
+use crate::history::version::VERSION_LENGTH;
 use crate::{
-    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, ENTITY_KEY_TAG, VALUE_KEY_TAG, ValueDataType, decode_bytes,
+    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG, HISTORY_KEY_TAG,
+    VALUE_KEY_TAG, ValueDataType, decode_bytes,
     decode_bytes_cow, encode_bytes,
 };
 
@@ -77,6 +79,15 @@ pub struct KeyParts {
     pub value_type: ValueDataType,
     /// The value payload: inline order-preserving bytes or a spilled reference.
     pub value: ValuePayload,
+    /// The fixed-width version prefix carried ONLY by the history and coverage
+    /// orderings ([`HISTORY_KEY_TAG`]/[`COVERAGE_KEY_TAG`]), which sort by the
+    /// producing revision first. `None` for the fact orderings, whose keys
+    /// carry no version.
+    ///
+    /// Written raw (not length-prefixed): [`Version::key_bytes`] is
+    /// fixed-width and already order-preserving, so it needs no delimiter and
+    /// the variable-length fields that follow still parse.
+    pub version: Option<[u8; VERSION_LENGTH]>,
 }
 
 impl KeyParts {
@@ -298,6 +309,20 @@ pub fn build_key(parts: &KeyParts) -> Vec<u8> {
             encode_bytes(&parts.attribute, &mut out);
             encode_bytes(&parts.entity, &mut out);
         }
+        HISTORY_KEY_TAG | COVERAGE_KEY_TAG => {
+            // History/coverage: version, then entity, attribute, value tail.
+            // The version leads so records sort by the revision that produced
+            // them (an ancestor's records always precede a descendant's), which
+            // is what makes "every record since a version" a range scan. Unlike
+            // the pre-M3 fixed-width history key, every field here is lossless,
+            // so a record reconstructs from its key alone.
+            if let Some(version) = &parts.version {
+                out.extend_from_slice(version);
+            }
+            encode_bytes(&parts.entity, &mut out);
+            encode_bytes(&parts.attribute, &mut out);
+            write_value_tail(parts, &mut out);
+        }
         _ => {
             // Unknown/other tags: entity then attribute then value tail, a
             // safe default that stays self-delimiting.
@@ -457,6 +482,7 @@ pub fn parse_key(bytes: &[u8]) -> Option<KeyParts> {
                 attribute,
                 value_type,
                 value,
+                version: None,
             }
         }
         ATTRIBUTE_KEY_TAG => {
@@ -469,6 +495,21 @@ pub fn parse_key(bytes: &[u8]) -> Option<KeyParts> {
                 attribute,
                 value_type,
                 value,
+                version: None,
+            }
+        }
+        HISTORY_KEY_TAG | COVERAGE_KEY_TAG => {
+            let (version, rest) = rest.split_at_checked(VERSION_LENGTH)?;
+            let (entity, rest) = decode_bytes(rest)?;
+            let (attribute, rest) = decode_bytes(rest)?;
+            let (value_type, value, _rest) = value_tail(rest)?;
+            KeyParts {
+                tag,
+                entity,
+                attribute,
+                value_type,
+                value,
+                version: Some(version.try_into().ok()?),
             }
         }
         VALUE_KEY_TAG => {
@@ -481,6 +522,7 @@ pub fn parse_key(bytes: &[u8]) -> Option<KeyParts> {
                 attribute,
                 value_type,
                 value,
+                version: None,
             }
         }
         _ => {
@@ -493,6 +535,7 @@ pub fn parse_key(bytes: &[u8]) -> Option<KeyParts> {
                 attribute,
                 value_type,
                 value,
+                version: None,
             }
         }
     };
@@ -650,7 +693,8 @@ mod tests {
             attribute: attribute.to_vec(),
             value_type: ValueDataType::String,
             value: inline_string(&format!("v{value}")),
-        }
+                version: None,
+            }
     }
 
     /// Every ordering round-trips build -> parse unchanged, including

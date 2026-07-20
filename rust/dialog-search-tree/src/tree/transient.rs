@@ -466,6 +466,24 @@ where
             .unwrap_or_else(Cache::new);
         let accessor = Accessor::new(cache.clone(), storage.clone());
 
+        // The stitched tree keeps its sources' format. A manifest lives in the
+        // nodes, so it is read from the first source root the stitch touches;
+        // pieces of one stitch share a format (they are ranges of trees being
+        // merged). A stitch of nothing but loose entries has no source to
+        // inherit from and takes the default format.
+        let mut manifest = None;
+        for piece in &pieces {
+            if let Piece::Range { source, .. } = piece {
+                let root = source.root().clone();
+                if &root != NULL_BLAKE3_HASH {
+                    let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
+                    manifest = Some(node.manifest()?);
+                    break;
+                }
+            }
+        }
+        let manifest = manifest.unwrap_or_default();
+
         // Carve every piece into a part: a subtree of known height whose
         // interior children are still persistent links. A part also remembers
         // its source root when carving left the source untouched, enabling the
@@ -486,7 +504,7 @@ where
                 }
                 Piece::Entries(entries) => {
                     if !entries.is_empty() {
-                        let run = regroup_entries::<Key, Value, D>(entries);
+                        let run = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
                         parts.push((
                             TransientNode::Index(TransientIndex { children: run }),
                             1,
@@ -542,10 +560,10 @@ where
             // sources; hand it to the leveling loop as a height-0 run so it
             // gains its canonical index root.
             Some((node @ TransientNode::Segment(_), _)) => {
-                seal_root::<Key, Value, D>(vec![node.into()], 0)?
+                seal_root::<Key, Value, D>(vec![node.into()], 0, &manifest)?
             }
             Some((TransientNode::Index(index), height)) => {
-                seal_root::<Key, Value, D>(index.children, height - 1)?
+                seal_root::<Key, Value, D>(index.children, height - 1, &manifest)?
             }
         };
 
@@ -555,6 +573,7 @@ where
                 None => TransientRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
             },
             cache,
+            manifest,
             distribution: PhantomData,
         })
     }
@@ -568,8 +587,7 @@ where
 /// after every key of the pieces before it.
 pub enum Piece<'a, Key, Value, D = Geometric>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
+    Key: self::Key,
     Value: self::Value,
     D: Distribution,
 {
@@ -1562,14 +1580,7 @@ async fn carve<Key, Value, Backend>(
     accessor: &Accessor<Backend>,
 ) -> Result<Option<(TransientNode<Key, Value>, Rank, Trim)>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1581,7 +1592,7 @@ where
         return Ok(None);
     }
     let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
-    let mut root = TransientNode::try_from(&node)?;
+    let mut root = TransientNode::from(&node);
 
     // Lift the spine covering each range bound so the trim below can edit the
     // boundary nodes in place. The two descents share a prefix until they
@@ -1627,13 +1638,6 @@ fn trim_to_range<Key, Value>(
 ) -> Result<Trim, DialogSearchTreeError>
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1757,14 +1761,7 @@ async fn lift_boundary_spine<Key, Value, Backend>(
     accessor: &Accessor<Backend>,
 ) -> Result<(), DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -1829,14 +1826,7 @@ fn concat_levels<Key, Value, D>(
     height: Rank,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -3428,4 +3418,5 @@ mod tests {
         }
         Ok(())
     }
+}
 }
