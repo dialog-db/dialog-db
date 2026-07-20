@@ -43,12 +43,16 @@ impl Record {
     /// artifact tree: the [`history_key`] for the claim at `version`, and
     /// the claim in [`Datum`] form with the supersedes/retraction fields
     /// carrying what [`Claim::cause`] and the record polarity express.
-    pub fn into_entry(self, version: &Version) -> (Key, State<Datum>) {
+    ///
+    /// `inline_n` is the target tree's value inline-vs-spill threshold; the
+    /// key carries the claim's value through that decision (see
+    /// [`history_key`]), so it must be the tree's own.
+    pub fn into_entry(self, version: &Version, inline_n: usize) -> (Key, State<Datum>) {
         let retraction = !self.is_assertion();
         let claim = match self {
             Record::Assert(claim) | Record::Retract(claim) => claim,
         };
-        let key = history_key(version, &claim.of, &claim.the, &claim.is);
+        let key = history_key(version, &claim.of, &claim.the, &claim.is, inline_n);
         let datum = Datum {
             cause: None,
             blob: None,

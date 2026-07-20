@@ -4,8 +4,8 @@ use crate::KeyType;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, key::inline_threshold,
-    key::value_payload, key::varkey, key::varkey::KeyParts, key::varkey::ValuePayload,
+    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, key::value_payload, key::varkey,
+    key::varkey::KeyParts, key::varkey::ValuePayload,
 };
 
 use super::{Key, KeyView, KeyViewConstruct, KeyViewMut, ValueReferenceKeyPart};
@@ -146,15 +146,20 @@ where
     }
 }
 
-impl From<&Artifact> for EntityKey<Key> {
-    fn from(fact: &Artifact) -> Self {
+impl EntityKey<Key> {
+    /// Builds the key for `fact` under the target tree's value inline-vs-spill
+    /// threshold `inline_n` (its `manifest.inline_n`).
+    ///
+    /// The threshold is a parameter rather than a global because it is a
+    /// property of the tree being written, not of the process: a fact written
+    /// into a tree whose manifest says one threshold must be looked up under
+    /// that same threshold, or a boundary-sized value inlines on one path and
+    /// spills on the other and the lookup misses.
+    pub fn from_artifact(fact: &Artifact, inline_n: usize) -> Self {
         EntityKey::<Key>::default()
             .set_entity(EntityKeyPart::from(&fact.of))
             .set_attribute(AttributeKeyPart::from(&fact.the))
-            .set_value(
-                fact.is.data_type(),
-                value_payload(&fact.is, inline_threshold()),
-            )
+            .set_value(fact.is.data_type(), value_payload(&fact.is, inline_n))
     }
 }
 

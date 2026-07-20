@@ -18,8 +18,8 @@ use rkyv::{
 
 use crate::{
     Accessor, Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Differential,
-    Distribution, Entry, Geometric, Key, SearchOptions, SearchResult, TreeDifference, TreeWalker,
-    Value, into_owned,
+    Distribution, Entry, Geometric, Key, Manifest, PersistentNode, SearchOptions, SearchResult,
+    TreeDifference, TreeWalker, Value, into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -317,7 +317,33 @@ where
         }
     }
 
-    /// Opens a batch of in-place edits over this tree.
+    /// Reads this tree's format [`Manifest`] out of its root node.
+    ///
+    /// The manifest is data, not code: it is inlined into every node, so the
+    /// tree's real format constants are recovered by loading the root and
+    /// reading its header. An empty tree (a null root) has no node to read
+    /// from and therefore no format of its own yet, so it reports
+    /// [`Manifest::default`]: the format a first write would stamp into it.
+    /// This mirrors the fallback the stitch path uses when no source piece has
+    /// a manifest to inherit.
+    pub async fn manifest<Backend>(
+        &self,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Manifest, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        if &self.root == NULL_BLAKE3_HASH {
+            return Ok(Manifest::default());
+        }
+        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let node: PersistentNode<Key, Value> = accessor.get_node(&self.root).await?;
+        node.manifest()
+    }
+
+    /// Opens a batch of in-place edits over this tree, adopting the tree's own
+    /// format [`Manifest`].
     ///
     /// The returned [`TransientTree`] holds the tree's spine in transient form;
     /// apply [`insert`](TransientTree::insert) / [`delete`](TransientTree::delete)
@@ -325,9 +351,41 @@ where
     /// back into a [`PersistentTree`]. A single batch and the equivalent sequence
     /// of one-operation batches each persisted in turn converge on the same root.
     ///
+    /// This reads the root node to recover the tree's manifest (see
+    /// [`manifest`](Self::manifest)), so an edit of a tree built under
+    /// non-default format constants preserves that format instead of silently
+    /// rewriting it under the defaults. Prefer this over the synchronous
+    /// [`edit`](Self::edit) wherever an `await` is available.
+    pub async fn edit_with_manifest<Backend>(
+        &self,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<TransientTree<Key, Value, D>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        let manifest = self.manifest(storage).await?;
+        Ok(TransientTree::with_manifest(
+            self.root.clone(),
+            self.node_cache.clone(),
+            manifest,
+        ))
+    }
+
+    /// Opens a batch of in-place edits over this tree under the *default*
+    /// format [`Manifest`].
+    ///
     /// Opening is synchronous and touches no storage: the root is loaded lazily
     /// by the first edit that descends into it. Equivalent to
     /// [`TransientTree::from`].
+    ///
+    /// Because recovering a tree's real manifest means loading its root node,
+    /// which is async, this entry cannot do it and assumes the defaults. It is
+    /// therefore only sound for a tree whose manifest IS [`Manifest::default`]
+    /// (which today is every tree, since nothing constructs another). Editing a
+    /// non-default tree through this entry rewrites the touched path under the
+    /// default format. Use [`edit_with_manifest`](Self::edit_with_manifest)
+    /// whenever the caller can await.
     pub fn edit(&self) -> TransientTree<Key, Value, D> {
         TransientTree::new(self.root.clone(), self.node_cache.clone())
     }

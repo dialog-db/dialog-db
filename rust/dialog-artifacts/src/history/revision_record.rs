@@ -150,11 +150,18 @@ impl RevisionRecord {
     /// large-leaf rebuilds to two. (Collapsing to one ordering needs
     /// the query planner to learn per-attribute index availability;
     /// until then both query shapes must be served.)
-    pub fn entries(&self) -> Result<Vec<(Key, State<Datum>)>, DialogArtifactsError> {
+    ///
+    /// `inline_n` is the target tree's value inline-vs-spill threshold (its
+    /// `manifest.inline_n`): the record's value rides its key through that
+    /// decision, so a read must use the same one to find it.
+    pub fn entries(
+        &self,
+        inline_n: usize,
+    ) -> Result<Vec<(Key, State<Datum>)>, DialogArtifactsError> {
         let version = self.version();
         let artifact = self.to_artifact(&version)?;
 
-        let entity_key = EntityKey::from(&artifact);
+        let entity_key = EntityKey::from_artifact(&artifact, inline_n);
         let attribute_key = AttributeKey::from_key(&entity_key);
         let mut datum = Datum::for_artifact(&artifact);
         datum.version = Some(version);

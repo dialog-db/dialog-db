@@ -1,5 +1,5 @@
 use crate::artifacts::query::Select;
-use crate::key::value_tail_bytes;
+use crate::key::{default_inline_threshold, value_tail_bytes};
 use crate::selector::Constrained;
 use crate::{
     Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Entity,
@@ -277,12 +277,12 @@ pub type SortKey = (Vec<u8>, Vec<u8>, u8, Vec<u8>);
 /// same-`(the, of, type)` facts order by value exactly as the tree does. See
 /// [`SortKey`] for why the component order is correct across all three scan
 /// modes.
-pub fn sort_key(artifact: &Artifact) -> SortKey {
+pub fn sort_key(artifact: &Artifact, inline_n: usize) -> SortKey {
     (
         artifact.the.as_str().as_bytes().to_vec(),
         artifact.of.as_str().as_bytes().to_vec(),
         artifact.is.data_type().into(),
-        value_tail_bytes(&artifact.is),
+        value_tail_bytes(&artifact.is, inline_n),
     )
 }
 
@@ -386,9 +386,27 @@ impl<'a> Provider<Select<'a>> for Changes {
         // order the prolly tree would scan for this selector — see
         // `SortKey` docs. That's the precondition `merge_grouped`
         // relies on when it unions this stream with a branch scan.
-        matched.sort_by_key(sort_key);
+        // This overlay is sorted in memory against a branch scan that is
+        // itself in `sort_key` order. Both sides order by the same function,
+        // and the comparison never touches stored key bytes, so the default
+        // threshold is sound here (see `default_sort_key`).
+        matched.sort_by_key(default_sort_key);
         Ok(Box::pin(stream::iter(matched.into_iter().map(Ok))))
     }
+}
+
+/// [`sort_key`] under the default inline-vs-spill threshold, for callers with
+/// no tree in scope.
+///
+/// Sound only where the key is used as an in-memory ordering/identity key
+/// compared against OTHER `default_sort_key` values within the same process,
+/// never against bytes read out of a tree. Under that use the threshold merely
+/// has to be a consistent function of the value, and every participant applies
+/// the same one, so which threshold it is cannot change any comparison's
+/// outcome. Callers that compare against stored keys must pass the tree's own
+/// `manifest.inline_n` to [`sort_key`] instead.
+pub fn default_sort_key(artifact: &Artifact) -> SortKey {
+    sort_key(artifact, default_inline_threshold())
 }
 
 #[cfg(test)]
@@ -544,7 +562,7 @@ mod tests {
         assert_eq!(results.len(), 2);
         // Attributes ordered by their key bytes — verify by checking
         // the output is monotonic under sort_key.
-        let keys: Vec<_> = results.iter().map(sort_key).collect();
+        let keys: Vec<_> = results.iter().map(default_sort_key).collect();
         let mut sorted_keys = keys.clone();
         sorted_keys.sort();
         assert_eq!(keys, sorted_keys);

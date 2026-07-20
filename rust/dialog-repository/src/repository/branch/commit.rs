@@ -315,7 +315,11 @@ where
         let mut record = revision.record(parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
         debug_assert_eq!(record.version(), version);
-        tree.record(&mut store, &mut delta, record.entries()?)
+        // The record's key carries its value through the tree's own
+        // inline-vs-spill threshold, so read it off the tree rather than
+        // assuming the default.
+        let inline_n = tree.inline_threshold(store.clone(), &delta).await?;
+        tree.record(&mut store, &mut delta, record.entries(inline_n)?)
             .await?;
         // Seed the verified-record memo with what we just minted. The next
         // commit's skip-table walk starts at this very record, so without this

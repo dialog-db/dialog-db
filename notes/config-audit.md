@@ -40,9 +40,21 @@ Note they are *already* per-tree settable via `with_op_buf_size`/`with_flush_pol
 
 ## Active bug to fix in the same change
 
-`inline_threshold()` (`dialog-artifacts/src/key.rs:120`) returns `Manifest::default().inline_n`, and the in-source TODO admits the consequence: the search tree's coin reads the spill threshold from the *tree's own* manifest at edit time, but the artifact key builders decide inline-vs-spill *before* the tree edit, without the manifest in scope.
+`Manifest::default()` is assumed in **three** places, not one. All three are correct only while every tree uses the default manifest, so all three activate the moment the manifest becomes genuinely configurable, i.e. the moment this project succeeds.
 
-So `inline_n` is honored on one path and ignored on the other. This is masked today only because nothing sets a non-default manifest, which means **it activates the moment the manifest becomes genuinely configurable, i.e. the moment this project succeeds.** Fix = thread the tree's manifest into the key builders. Not a new field.
+1. **`inline_threshold()`** (`dialog-artifacts/src/key.rs:120`) returns `Manifest::default().inline_n`. Roughly 8 call sites (`key.rs`, `key/entity.rs`, `key/attribute.rs`, `key/value.rs`, `key/history.rs`, `artifacts/match.rs`).
+
+   **Correction to an earlier framing of mine:** I described this as `inline_n` being "honored on one path and ignored on the other", i.e. a live two-path disagreement with the search tree's boundary coin. That is wrong. Grepping `inline_n` inside `dialog-search-tree` finds it only in `manifest.rs` and tests: the coin reads `max_separator` and `branch_factor` only. `inline_n` is inert inside the search tree, and its sole consumer is `dialog-artifacts`. So this was a single global that would have disagreed with the tree's own *recorded* value once manifests became configurable, not a disagreement between two live paths today. Still worth fixing, for the same reason, but the severity was overstated.
+
+2. **`TransientTree::new`** (`tree/transient.rs:123`) stamps `Manifest::default()`, discarding the loaded root's actual manifest. Its own TODO (line 88) states the blocker precisely: adopting it means reading the root node, which is *async*, and the synchronous `edit()`/`new` entry cannot do that.
+
+3. **`TransientTree::from_loaded`** (`tree/transient.rs:138`) same.
+
+So editing a non-default tree currently **rewrites it in the default format** rather than preserving its own. That is worse than the spill disagreement: it silently reformats data on write.
+
+The stitch path (`tree/transient.rs:518-533`) already demonstrates the right pattern: load the first source root, read `node.manifest()?`, fall back to default only when there is no source to inherit from. It is async there, which is exactly why it works.
+
+**Fix shape:** make manifest acquisition async at the edit entry point (or carry the manifest on `PersistentTree` so it is known without a load), then thread the tree's manifest into the key builders instead of `inline_threshold()`'s global default. The three sites want one solution, not three.
 
 ## Coupling hazards
 

@@ -101,11 +101,12 @@ where
 async fn store_spilled_value<S>(
     store: &mut S,
     artifact: &Artifact,
+    inline_n: usize,
 ) -> Result<(), DialogArtifactsError>
 where
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
 {
-    if value_spills(&artifact.is) {
+    if value_spills(&artifact.is, inline_n) {
         let reference = artifact.is.to_reference();
         store.set(reference, artifact.is.to_bytes()).await?;
     }
@@ -476,6 +477,27 @@ pub trait ArtifactTreeExt {
             + Clone
             + ConditionalSync;
 
+    /// This tree's value inline-vs-spill threshold: `manifest.inline_n` of the
+    /// manifest its root node carries.
+    ///
+    /// Every key built for this tree must go through this threshold, both on
+    /// the write path and when a reader builds a selector range, so that a
+    /// boundary-sized value lands at the same key on both. An empty tree has no
+    /// root to read and reports the default (the threshold a first write would
+    /// stamp into it).
+    ///
+    /// `delta` is read through, because the tree's root may live only in an
+    /// unflushed batch.
+    async fn inline_threshold<S>(
+        &self,
+        store: S,
+        delta: &Delta<NodeHash, Buffer>,
+    ) -> Result<usize, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync;
+
     /// Write pre-built entries (e.g. revision lineage records — see
     /// [`Record::into_entry`](crate::history::Record::into_entry)) into the
     /// tree as one edit batch, accumulating new nodes in `delta`
@@ -552,11 +574,32 @@ impl ArtifactTreeExt for ArtifactTree {
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
 
+        // Every key this batch builds must use THIS tree's value-spill
+        // threshold, and the edit batch must keep this tree's format rather
+        // than restamping it with the defaults; both come from the manifest
+        // the tree's own root node carries.
+        //
+        // Read it THROUGH the delta: this tree's root may have been persisted
+        // by an earlier batch that the caller has not flushed to `store` yet,
+        // so it exists only in `delta`. Reading it off the bare store would
+        // fail to find the node.
+        let (manifest, transient) = {
+            let read_through = ContentAddressedStorage::new(DeltaReadThrough {
+                delta: &*delta,
+                store: store.clone(),
+            });
+            (
+                self.manifest(&read_through).await?,
+                self.edit_with_manifest(&read_through).await?,
+            )
+        };
+        let inline_n = manifest.inline_n as usize;
+
         // Open one transient edit batch over this tree's spine and apply every
         // instruction's writes to it in flight, so the whole instruction stream
         // costs a single persist instead of one full tree rebuild per key.
         let (transient, changed) =
-            write_instructions(self.edit(), store, &storage, version, instructions).await?;
+            write_instructions(transient, store, &storage, version, inline_n, instructions).await?;
 
         // Seal the whole batch with a single bottom-up persist into the
         // caller's delta.
@@ -642,6 +685,23 @@ impl ArtifactTreeExt for ArtifactTree {
         Ok(records)
     }
 
+    async fn inline_threshold<S>(
+        &self,
+        store: S,
+        delta: &Delta<NodeHash, Buffer>,
+    ) -> Result<usize, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        // Read through `delta`: this tree's root may have been persisted by an
+        // earlier batch that the caller has not flushed to `store` yet, so the
+        // node exists only there.
+        let storage = ContentAddressedStorage::new(DeltaReadThrough { delta, store });
+        Ok(self.manifest(&storage).await?.inline_n as usize)
+    }
+
     async fn record<S>(
         &mut self,
         store: &mut S,
@@ -687,7 +747,8 @@ impl ArtifactTreeExt for ArtifactTree {
         let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         try_stream! {
-            let range = selector_range(&selector);
+            let inline_n = tree.manifest(&storage).await?.inline_n as usize;
+            let range = selector_range(&selector, inline_n);
 
             let stream = tree.stream_range(range, &storage);
             tokio::pin!(stream);
@@ -703,7 +764,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 let Some(parts) = parse_key_ref(raw.key.as_ref()) else {
                     continue;
                 };
-                if !match_selector_and_key_ref(&selector, &parts) {
+                if !match_selector_and_key_ref(&selector, &parts, inline_n) {
                     continue;
                 }
                 let State::Added(datum) = &raw.value else {
@@ -738,7 +799,16 @@ impl ArtifactTreeExt for ArtifactTree {
 /// it as the unit of a demand cover — a range that came back empty is
 /// still demanded (the emptiness was read), so a later write into it
 /// must invalidate the reader.
-pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusive<Key> {
+///
+/// `inline_n` is the target tree's value inline-vs-spill threshold (its
+/// `manifest.inline_n`). A value-constrained selector's bounds carry the
+/// value's payload through the same inline-vs-spill decision the facts were
+/// written under, so passing a different threshold brackets the wrong keys and
+/// an equality scan on a boundary-sized value silently returns nothing.
+pub fn selector_range(
+    selector: &ArtifactSelector<Constrained>,
+    inline_n: usize,
+) -> RangeInclusive<Key> {
     if selector.entity().is_some()
         || (selector.entity_prefix().is_some()
             && selector.value().is_none()
@@ -746,8 +816,8 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
             && selector.attribute_prefix().is_none())
     {
         let (start, end) = apply_prefix_bounds(
-            <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
-            <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
+            <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(selector, inline_n),
+            <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector, inline_n),
             selector,
         );
         start.into_key()..=end.into_key()
@@ -757,15 +827,15 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
         || selector.value_upper().is_some()
     {
         let (start, end) = apply_prefix_bounds(
-            <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
-            <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
+            <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector, inline_n),
+            <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector, inline_n),
             selector,
         );
         start.into_key()..=end.into_key()
     } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
         let (start, end) = apply_prefix_bounds(
-            <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
-            <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
+            <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector, inline_n),
+            <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector, inline_n),
             selector,
         );
         start.into_key()..=end.into_key()
@@ -795,6 +865,14 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
 /// bridge) for the value blocks of spilling values: a value above the manifest's
 /// inline threshold lives as a content-addressed block, and its key carries only
 /// the 32-byte reference to it.
+///
+/// `inline_n` is that inline threshold, and it must be the TARGET TREE's own
+/// (`manifest.inline_n`, read via
+/// [`PersistentTree::manifest`](dialog_search_tree::PersistentTree::manifest)),
+/// not a process-wide default. Every key this function builds and every
+/// selector range a later read builds must agree on it: a boundary-sized value
+/// that inlines on one side and spills on the other lands at a different key,
+/// so the read misses the fact entirely.
 #[tracing::instrument(skip_all, name = "write_instructions")]
 #[allow(clippy::too_many_lines)]
 pub async fn write_instructions<W, S, I>(
@@ -802,6 +880,7 @@ pub async fn write_instructions<W, S, I>(
     store: &mut S,
     storage: &ContentAddressedStorage<TreeStorageBridge<S>>,
     version: Option<Version>,
+    inline_n: usize,
     instructions: I,
 ) -> Result<(W, bool), DialogArtifactsError>
 where
@@ -838,14 +917,14 @@ where
         match instruction {
             Instruction::Assert(artifact) => {
                 changed = true;
-                let entity_key = EntityKey::from(&artifact);
+                let entity_key = EntityKey::from_artifact(&artifact, inline_n);
                 let value_key = ValueKey::from_key(&entity_key);
                 let attribute_key = AttributeKey::from_key(&entity_key);
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact; the key holds only the
                 // 32-byte reference to it.
-                store_spilled_value(store, &artifact).await?;
+                store_spilled_value(store, &artifact, inline_n).await?;
 
                 // A version-tagged assertion records its history: an
                 // assertion is purely additive, so it supersedes nothing.
@@ -859,7 +938,7 @@ where
                     if let Some(coverage) = record.coverage_entry(version) {
                         history_entries.push(coverage);
                     }
-                    history_entries.push(record.into_entry(version));
+                    history_entries.push(record.into_entry(version, inline_n));
                 }
 
                 let mut datum = Datum::for_artifact(&artifact);
@@ -876,7 +955,7 @@ where
                     .await?;
             }
             Instruction::Replace(artifact) => {
-                let entity_key = EntityKey::from(&artifact);
+                let entity_key = EntityKey::from_artifact(&artifact, inline_n);
 
                 // Scan priors at this (entity, attribute) against the
                 // in-flight write target, so writes from earlier instructions
@@ -976,20 +1055,20 @@ where
                     if let Some(coverage) = record.coverage_entry(version) {
                         history_entries.push(coverage);
                     }
-                    history_entries.push(record.into_entry(version));
+                    history_entries.push(record.into_entry(version, inline_n));
                 }
 
                 if found_same_value {
                     continue;
                 }
 
-                let entity_key = EntityKey::from(&artifact);
+                let entity_key = EntityKey::from_artifact(&artifact, inline_n);
                 let value_key = ValueKey::from_key(&entity_key);
                 let attribute_key = AttributeKey::from_key(&entity_key);
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact.
-                store_spilled_value(store, &artifact).await?;
+                store_spilled_value(store, &artifact, inline_n).await?;
 
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
@@ -1006,7 +1085,7 @@ where
             }
             Instruction::Retract(artifact) => {
                 changed = true;
-                let entity_key = EntityKey::from(&artifact);
+                let entity_key = EntityKey::from_artifact(&artifact, inline_n);
                 let value_key = ValueKey::from_key(&entity_key);
                 let attribute_key = AttributeKey::from_key(&entity_key);
 
@@ -1035,7 +1114,7 @@ where
                     if let Some(coverage) = record.coverage_entry(version) {
                         history_entries.push(coverage);
                     }
-                    history_entries.push(record.into_entry(version));
+                    history_entries.push(record.into_entry(version, inline_n));
                 }
 
                 // Observed-remove semantics: retraction deletes the
@@ -1068,6 +1147,7 @@ mod spill_cache_tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::{ArtifactTree, ArtifactTreeExt, fetch_spilled, fetch_spilled_cached, spill_cache};
+    use crate::key::default_inline_threshold;
     use crate::{Artifact, EntityKey, Instruction, KeyView, Value};
     use dialog_search_tree::Delta;
     use dialog_storage::{Blake3Hash, MeasuredStorage, MemoryStorageBackend, StorageBackend};
@@ -1104,7 +1184,7 @@ mod spill_cache_tests {
                 .await
                 .unwrap();
         }
-        let key = EntityKey::from(&artifact).into_key();
+        let key = EntityKey::from_artifact(&artifact, default_inline_threshold()).into_key();
         assert!(EntityKey(&key).value_is_spilled(), "value must spill");
         (store, key, value)
     }
@@ -1163,7 +1243,7 @@ mod spill_cache_tests {
             stream::iter(vec![Instruction::Assert(artifact.clone())]),
         )
         .await?;
-        let key = EntityKey::from(&artifact).into_key();
+        let key = EntityKey::from_artifact(&artifact, default_inline_threshold()).into_key();
         let cache = spill_cache();
         assert_eq!(fetch_spilled_cached(&store, &cache, &key).await?, None);
         assert_eq!(fetch_spilled(&store, &key).await?, None);

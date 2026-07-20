@@ -10,7 +10,7 @@ use dialog_search_tree::Entry;
 use crate::{
     ATTRIBUTE_KEY_TAG, ArtifactSelector, AttributeKey, Datum, ENTITY_KEY_TAG, EntityKey, Key,
     KeyView, State, VALUE_KEY_TAG, ValueKey, artifacts::selector::Constrained, decode_value,
-    key::inline_threshold, key::value_payload, key::varkey::KeyRef,
+    key::value_payload, key::varkey::KeyRef,
 };
 
 /// Checks whether an already-parsed [`KeyRef`] matches a selector's
@@ -23,6 +23,7 @@ use crate::{
 pub fn match_selector_and_key_ref(
     selector: &ArtifactSelector<Constrained>,
     key: &KeyRef<'_>,
+    inline_n: usize,
 ) -> bool {
     if let Some(entity) = selector.entity()
         && entity.as_str().as_bytes() != key.entity.as_ref()
@@ -45,7 +46,7 @@ pub fn match_selector_and_key_ref(
         // bytes) and a spilled one (its 32-byte reference). The spill flag must
         // agree too: an inline payload and a reference of equal bytes would
         // otherwise falsely match.
-        let expected = value_payload(value, inline_threshold());
+        let expected = value_payload(value, inline_n);
         if expected.is_reference() != key.value.is_reference()
             || expected.as_bytes() != key.value.as_bytes()
         {
@@ -134,7 +135,11 @@ pub fn match_selector_and_key_ref(
 ///
 /// Entity and attribute are now stored losslessly at full length, so every
 /// comparison here (exact and prefix) is exact against the key bytes.
-fn match_selector_and_key_view<K>(selector: &ArtifactSelector<Constrained>, key: K) -> bool
+fn match_selector_and_key_view<K>(
+    selector: &ArtifactSelector<Constrained>,
+    key: K,
+    inline_n: usize,
+) -> bool
 where
     K: KeyView,
 {
@@ -159,7 +164,7 @@ where
         // bytes) and a spilled one (its 32-byte reference). The spill flag must
         // also agree: an inline payload and a reference of equal bytes would
         // otherwise falsely match.
-        let expected = value_payload(value, inline_threshold());
+        let expected = value_payload(value, inline_n);
         if expected.is_reference() != key.value_is_spilled()
             || expected.as_bytes() != key.value_payload()
         {
@@ -192,19 +197,27 @@ where
 /// against an [`ArtifactSelector`]. In practice, this is implemented for the
 /// [`Entry`]s of the various internal indexes of the database.
 pub trait MatchCandidate {
-    /// Returns true if the implementor matches the given [`ArtifactSelector`]
-    fn matches_selector(&self, selector: &ArtifactSelector<Constrained>) -> bool;
+    /// Returns true if the implementor matches the given [`ArtifactSelector`].
+    ///
+    /// `inline_n` is the value inline-vs-spill threshold the candidate's key
+    /// was WRITTEN under (the storing tree's `manifest.inline_n`). A value
+    /// constraint is compared by re-encoding the selector's value through the
+    /// same decision, so a mismatched threshold makes an equality match on a
+    /// boundary-sized value silently fail.
+    fn matches_selector(&self, selector: &ArtifactSelector<Constrained>, inline_n: usize) -> bool;
 }
 
 impl MatchCandidate for Entry<Key, State<Datum>> {
-    fn matches_selector(&self, selector: &ArtifactSelector<Constrained>) -> bool {
+    fn matches_selector(&self, selector: &ArtifactSelector<Constrained>, inline_n: usize) -> bool {
         // Entity and attribute are stored losslessly, so the key-view match
         // above is exact for every constraint, including prefixes; no datum
         // re-check is needed.
         match self.key.tag() {
-            ENTITY_KEY_TAG => match_selector_and_key_view(selector, EntityKey(&self.key)),
-            ATTRIBUTE_KEY_TAG => match_selector_and_key_view(selector, AttributeKey(&self.key)),
-            VALUE_KEY_TAG => match_selector_and_key_view(selector, ValueKey(&self.key)),
+            ENTITY_KEY_TAG => match_selector_and_key_view(selector, EntityKey(&self.key), inline_n),
+            ATTRIBUTE_KEY_TAG => {
+                match_selector_and_key_view(selector, AttributeKey(&self.key), inline_n)
+            }
+            VALUE_KEY_TAG => match_selector_and_key_view(selector, ValueKey(&self.key), inline_n),
             _ => false,
         }
     }

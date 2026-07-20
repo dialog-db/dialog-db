@@ -106,37 +106,36 @@ pub(crate) fn value_payload(value: &Value, inline_n: usize) -> ValuePayload {
     }
 }
 
-/// The inline-vs-spill threshold for value payloads in keys.
+/// The default inline-vs-spill threshold for value payloads in keys: the one a
+/// tree with no manifest of its own (an empty tree) would be created under.
 ///
-// TODO(m3.2c): the manifest is now persisted into every node's bytes, and the
-// search tree's coin reads the value-spill threshold FROM the tree's own
-// manifest at edit time (see `dialog_search_tree`'s node envelope and the
-// transient reshape path). This fact-build spill decision, however, still reads
-// `Manifest::default()`, because the artifact key builders decide inline-vs-spill
-// before the tree edit and do not have the tree/manifest in scope. Wiring this to
-// the tree's manifest needs the manifest threaded to the key builders (the
-// commit/key-build path), which is deferred; a non-default tree manifest and this
-// default would then disagree on the spill boundary.
-pub(crate) fn inline_threshold() -> usize {
+/// This is a *fallback*, not the answer. The threshold that governs a given
+/// tree is `manifest.inline_n` of that tree, recovered with
+/// [`PersistentTree::manifest`](dialog_search_tree::PersistentTree::manifest)
+/// and threaded to the key builders as `inline_n`. Reach for this default only
+/// where no tree can be in scope, and say why at the call site.
+pub(crate) fn default_inline_threshold() -> usize {
     dialog_search_tree::Manifest::default().inline_n as usize
 }
 
-/// Whether `value` spills (its encoded form exceeds the inline threshold, so
-/// the key carries a reference and the payload must carry the raw bytes).
-/// The single source of truth the payload builder and the key builder share.
-pub(crate) fn value_spills(value: &Value) -> bool {
-    value_payload(value, inline_threshold()).is_reference()
+/// Whether `value` spills under `inline_n` (its encoded form exceeds the
+/// threshold, so the key carries a reference and the payload must carry the raw
+/// bytes). The single source of truth the payload builder and the key builder
+/// share.
+pub(crate) fn value_spills(value: &Value, inline_n: usize) -> bool {
+    value_payload(value, inline_n).is_reference()
 }
 
-/// The exact value-tail bytes a key carries for `value`: the value-type byte
-/// (with the spill flag set when the value spilled) followed by the payload
-/// (inline order-preserving encoding, or the 32-byte spilled reference).
+/// The exact value-tail bytes a key carries for `value` under `inline_n`: the
+/// value-type byte (with the spill flag set when the value spilled) followed by
+/// the payload (inline order-preserving encoding, or the 32-byte spilled
+/// reference).
 ///
 /// This is what makes a [`SortKey`](crate::SortKey) reproduce the tree's byte
 /// order: same-`(the, of, type)` facts sort by this tail exactly as the
 /// EAV/AEV/VAE keys do.
-pub(crate) fn value_tail_bytes(value: &Value) -> Vec<u8> {
-    let payload = value_payload(value, inline_threshold());
+pub(crate) fn value_tail_bytes(value: &Value, inline_n: usize) -> Vec<u8> {
+    let payload = value_payload(value, inline_n);
     let mut type_byte: u8 = value.data_type().into();
     if payload.is_reference() {
         type_byte |= varkey::SPILL_FLAG;
@@ -356,8 +355,13 @@ pub trait KeyViewMut: KeyView {
     fn set_value(self, value_type: ValueDataType, value: ValuePayload) -> Self;
 
     /// Sets the constrained parts of the given [`ArtifactSelector`] to the associated
-    /// components of this [`KeyView`]
-    fn apply_selector(self, selector: &ArtifactSelector<Constrained>) -> Self {
+    /// components of this [`KeyView`].
+    ///
+    /// `inline_n` is the target tree's value inline-vs-spill threshold (its
+    /// `manifest.inline_n`). It must be the threshold the stored facts were
+    /// WRITTEN under, or a value-constrained bound is built with the wrong
+    /// payload shape and the range brackets the wrong keys.
+    fn apply_selector(self, selector: &ArtifactSelector<Constrained>, inline_n: usize) -> Self {
         let mut key = self;
 
         if let Some(entity) = selector.entity() {
@@ -373,7 +377,7 @@ pub trait KeyViewMut: KeyView {
         // the fact-building path uses, so a value range narrows to the exact
         // value. The type and payload (with its spill flag) are set together.
         if let Some(value) = selector.value() {
-            key = key.set_value(value.data_type(), value_payload(value, inline_threshold()));
+            key = key.set_value(value.data_type(), value_payload(value, inline_n));
         }
 
         key
@@ -411,9 +415,10 @@ pub trait KeyView: Sized + Clone {
 /// This trait enables the creation of key views that match the constraints
 /// specified in an artifact selector, used during query range construction.
 pub trait FromSelector: KeyViewConstruct {
-    /// Creates a key view from an artifact selector's constraints.
-    fn from_selector(selector: &ArtifactSelector<Constrained>) -> Self {
-        Self::default().apply_selector(selector)
+    /// Creates a key view from an artifact selector's constraints, under the
+    /// target tree's value inline-vs-spill threshold `inline_n`.
+    fn from_selector(selector: &ArtifactSelector<Constrained>, inline_n: usize) -> Self {
+        Self::default().apply_selector(selector, inline_n)
     }
 }
 
@@ -482,7 +487,8 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        AttributeKey, EntityKey, FromKey, KeyView, ValueKey, inline_threshold, value_payload,
+        AttributeKey, EntityKey, FromKey, KeyView, ValueKey, default_inline_threshold,
+        value_payload,
     };
     use crate::{Artifact, Attribute, Entity, Value, decode_value, key::varkey::ValuePayload};
 
@@ -504,7 +510,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_round_trips_a_small_value_inline() -> anyhow::Result<()> {
         let value = Value::String("Alice".into());
-        let key = EntityKey::from(&fact(value.clone()));
+        let key = EntityKey::from_artifact(&fact(value.clone()), default_inline_threshold());
 
         assert!(!key.value_is_spilled(), "a small value stays inline");
         assert_eq!(key.value_type(), value.data_type());
@@ -523,9 +529,9 @@ mod tests {
         let value = Value::UnsignedInt(1234);
         let fact = fact(value.clone());
 
-        let eav = EntityKey::from(&fact);
-        let aev = AttributeKey::from(&fact);
-        let vae = ValueKey::from(&fact);
+        let eav = EntityKey::from_artifact(&fact, default_inline_threshold());
+        let aev = AttributeKey::from_artifact(&fact, default_inline_threshold());
+        let vae = ValueKey::from_artifact(&fact, default_inline_threshold());
 
         assert_eq!(eav.value_payload(), aev.value_payload());
         assert_eq!(eav.value_payload(), vae.value_payload());
@@ -560,8 +566,8 @@ mod tests {
     /// set and whose payload is the 32-byte reference.
     #[dialog_common::test]
     async fn it_builds_a_spilled_key_with_the_spill_flag() -> anyhow::Result<()> {
-        let value = Value::String("x".repeat(inline_threshold() + 1));
-        let key = EntityKey::from(&fact(value.clone()));
+        let value = Value::String("x".repeat(default_inline_threshold() + 1));
+        let key = EntityKey::from_artifact(&fact(value.clone()), default_inline_threshold());
 
         assert!(key.value_is_spilled(), "an oversized value spills the key");
         assert_eq!(

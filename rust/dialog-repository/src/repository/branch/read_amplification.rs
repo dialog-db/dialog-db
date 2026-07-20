@@ -379,9 +379,16 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     let mut deferred = dialog_search_tree::HitchhikerTree::open(&base);
     let started = Instant::now();
     for i in 0..batches {
-        let (next, _) =
-            write_instructions(deferred, &mut store, &storage, None, stream::iter(batch(i)))
-                .await?;
+        let (next, _) = write_instructions(
+            deferred,
+            &mut store,
+            &storage,
+            None,
+            // The bench tree carries the default manifest.
+            dialog_search_tree::Manifest::default().inline_n as usize,
+            stream::iter(batch(i)),
+        )
+        .await?;
         deferred = next;
     }
     let mut delta = Delta::zero();
