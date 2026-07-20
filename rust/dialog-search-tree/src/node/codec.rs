@@ -8,34 +8,24 @@
 //! ```
 //!
 //! where `shared` counts the bytes an entry's unprefixed key shares with the
-//! previous entry's unprefixed key. Every [`RESTART_INTERVAL`]-th entry is a
-//! *restart*: it encodes `shared = 0` (its whole unprefixed key is in the
-//! stream), so a reader COULD begin decoding at any restart without a cursor
-//! from the start of the node. No reader currently does — every decode path
-//! cursors from offset 0 (point lookups are amortized by the per-buffer
-//! decode memo instead) — so today the restart table costs its bytes
-//! (measured ~1% of the live tree on the production key workload) without a
-//! read-side payoff. Implementing restart-seeking lookups or dropping the
-//! field are both open options; either changes node bytes, so decide before
-//! the format freezes.
+//! previous entry's unprefixed key (the first entry writes its whole
+//! unprefixed key). Decoding is a single forward cursor from the start of
+//! the stream; repeated point lookups are amortized by the per-buffer decode
+//! memo rather than by in-stream seek points. (LevelDB-style restart tables
+//! were written by an earlier revision of this codec but never read —
+//! measured at ~1% of the live tree — and were dropped; if mid-leaf seeking
+//! is ever wanted, it returns behind a manifest format-version bump.)
 //!
 //! The layout is a pure function of the entry list: the prefix is the LCP of
-//! the first and last key (the list is sorted), restarts fall on fixed entry
-//! indices, and shared lengths are exact LCPs. Two nodes holding the same
-//! entries therefore serialize to identical bytes, which the tree's
-//! content-addressing depends on.
+//! the first and last key (the list is sorted) and shared lengths are exact
+//! LCPs. Two nodes holding the same entries therefore serialize to identical
+//! bytes, which the tree's content-addressing depends on.
 //!
 //! Every decode path is bounds-checked and returns an error on malformed
 //! input; nodes arrive from untrusted peers and must be rejected, never
 //! panicked on.
 
 use crate::DialogSearchTreeError;
-
-/// Number of entries per restart block: a restart entry encodes its full
-/// unprefixed key, and at most this many entries decode linearly per lookup.
-/// Trades compression (restart entries repeat shared bytes) against decode
-/// cost. Part of the storage format; changing it changes node bytes.
-pub const RESTART_INTERVAL: usize = 16;
 
 /// Appends `value` to `output` as a LEB128 varint.
 pub fn write_varint(output: &mut Vec<u8>, mut value: u32) {
@@ -83,24 +73,6 @@ pub fn pack_varints(values: &[u32]) -> Vec<u8> {
     out
 }
 
-/// Unpacks `count` LEB128 varints from `bytes`, erroring on truncation or on
-/// leftover bytes (which would mark the column malformed).
-pub fn unpack_varints(bytes: &[u8], count: usize) -> Result<Vec<u32>, DialogSearchTreeError> {
-    let mut out = Vec::with_capacity(count);
-    let mut at = 0usize;
-    for _ in 0..count {
-        let (value, next) = read_varint(bytes, at)?;
-        out.push(value);
-        at = next;
-    }
-    if at != bytes.len() {
-        return Err(DialogSearchTreeError::Encoding(
-            "Trailing bytes after a varint-packed list".into(),
-        ));
-    }
-    Ok(out)
-}
-
 /// Unpacks all LEB128 varints from `bytes` until it is exhausted (count is
 /// implied by the byte length). Used where the number of packed values is
 /// not known independently.
@@ -120,9 +92,8 @@ pub fn common_prefix(left: &[u8], right: &[u8]) -> usize {
     left.iter().zip(right).take_while(|(l, r)| l == r).count()
 }
 
-/// Encodes `keys` into a `(prefix, stream, restarts)` triple: the node-level
-/// prefix stored once, the front-coded stream, and the byte offset of each
-/// restart record within the stream.
+/// Encodes `keys` into a `(prefix, stream)` pair: the node-level prefix
+/// stored once, and the front-coded stream.
 ///
 /// The node prefix is the common prefix of *every* key, not just the first and
 /// last. For a sorted whole-key stream those coincide, but this also encodes
@@ -131,7 +102,7 @@ pub fn common_prefix(left: &[u8], right: &[u8]) -> usize {
 /// earlier than, the first/last pair, so a first/last prefix could exceed a
 /// middle value's length. Folding over all keys keeps the stored prefix a true
 /// prefix of each.
-pub fn encode_keys<K: AsRef<[u8]>>(keys: &[K]) -> (Vec<u8>, Vec<u8>, Vec<u32>) {
+pub fn encode_keys<K: AsRef<[u8]>>(keys: &[K]) -> (Vec<u8>, Vec<u8>) {
     let prefix = match keys.first() {
         Some(first) => {
             let mut length = first.as_ref().len();
@@ -144,24 +115,18 @@ pub fn encode_keys<K: AsRef<[u8]>>(keys: &[K]) -> (Vec<u8>, Vec<u8>, Vec<u32>) {
     };
 
     let mut stream = Vec::new();
-    let mut restarts = Vec::new();
     let mut previous: &[u8] = &[];
 
-    for (index, key) in keys.iter().enumerate() {
+    for key in keys {
         let unprefixed = &key.as_ref()[prefix.len()..];
-        let shared = if index % RESTART_INTERVAL == 0 {
-            restarts.push(stream.len() as u32);
-            0
-        } else {
-            common_prefix(previous, unprefixed)
-        };
+        let shared = common_prefix(previous, unprefixed);
         write_varint(&mut stream, shared as u32);
         write_varint(&mut stream, (unprefixed.len() - shared) as u32);
         stream.extend_from_slice(&unprefixed[shared..]);
         previous = unprefixed;
     }
 
-    (prefix, stream, restarts)
+    (prefix, stream)
 }
 
 /// An incremental decoder over a front-coded key stream.
@@ -233,7 +198,7 @@ mod tests {
 
     use anyhow::Result;
 
-    use super::{KeyCursor, RESTART_INTERVAL, encode_keys, read_varint, write_varint};
+    use super::{KeyCursor, encode_keys, read_varint, write_varint};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -262,7 +227,7 @@ mod tests {
     }
 
     /// Round-trips key lists through the codec, exercising shared prefixes,
-    /// multiple restart blocks, and single-entry nodes.
+    /// long runs, and single-entry nodes.
     #[dialog_common::test]
     async fn it_round_trips_front_coded_keys() -> Result<()> {
         let cases: Vec<Vec<Vec<u8>>> = vec![
@@ -274,8 +239,7 @@ mod tests {
         ];
 
         for keys in cases {
-            let (prefix, stream, restarts) = encode_keys(&keys);
-            assert_eq!(restarts.len(), keys.len().div_ceil(RESTART_INTERVAL));
+            let (prefix, stream) = encode_keys(&keys);
 
             let mut cursor = KeyCursor::new(&prefix, &stream, 0);
             for expected in &keys {
@@ -299,34 +263,18 @@ mod tests {
             b"v".to_vec(),
             b"value-aaaz".to_vec(),
         ];
-        let (prefix, stream, restarts) = encode_keys(&keys);
+        let (prefix, stream) = encode_keys(&keys);
         assert!(
             prefix.len() <= keys.iter().map(|k| k.len()).min().unwrap(),
             "node prefix never exceeds the shortest value"
         );
 
-        let mut cursor = KeyCursor::new(&prefix, &stream, restarts[0] as usize);
+        let mut cursor = KeyCursor::new(&prefix, &stream, 0);
         for expected in &keys {
             cursor.advance()?;
             assert_eq!(cursor.key(), expected.as_slice());
         }
         assert!(cursor.is_done());
-        Ok(())
-    }
-
-    /// Decoding may begin at any restart offset without seeing prior records.
-    #[dialog_common::test]
-    async fn it_decodes_from_restart_offsets() -> Result<()> {
-        let keys: Vec<Vec<u8>> = (0..50u32)
-            .map(|i| format!("entity/{i:04}").into_bytes())
-            .collect();
-        let (prefix, stream, restarts) = encode_keys(&keys);
-
-        for (block, &offset) in restarts.iter().enumerate() {
-            let mut cursor = KeyCursor::new(&prefix, &stream, offset as usize);
-            cursor.advance()?;
-            assert_eq!(cursor.key(), keys[block * RESTART_INTERVAL].as_slice());
-        }
         Ok(())
     }
 
