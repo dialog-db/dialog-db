@@ -484,13 +484,14 @@ where
     {
         let index = self.index.clone();
         let storage = self.storage.clone();
+        let cache = self.spill_cache.clone();
 
         try_stream! {
             // Clone the tree under the read lock to "pin" it at a
             // version for the stream's lifetime, then hand off to the
             // shared `ArtifactTreeExt::scan` for EAV/AEV/VAE dispatch.
             let tree = index.read().await.clone();
-            let scanned = tree.scan(storage, selector);
+            let scanned = tree.scan(storage, cache, selector);
             tokio::pin!(scanned);
             for await artifact in scanned {
                 yield artifact?;

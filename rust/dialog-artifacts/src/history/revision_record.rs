@@ -154,7 +154,7 @@ impl RevisionRecord {
 
         let entity_key = EntityKey::from(&artifact);
         let attribute_key = AttributeKey::from_key(&entity_key);
-        let mut datum = Datum::from(artifact);
+        let mut datum = Datum::for_artifact(&artifact);
         datum.version = Some(version);
         let added = State::Added(datum);
 

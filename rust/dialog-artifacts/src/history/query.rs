@@ -7,6 +7,7 @@ use futures_util::TryStreamExt;
 
 use crate::tree::ArtifactTreeExt as _;
 use crate::tree::{ArtifactTree, TreeStorageBridge};
+use crate::Value;
 use crate::{
     Attribute, DialogArtifactsError, Entity, State, ValueDataType, history_claim_range,
     history_key_version, history_region_range,
@@ -93,7 +94,7 @@ where
     pub async fn records(&self) -> Result<Vec<(Version, Record)>, DialogArtifactsError> {
         let (min, max) = history_region_range();
         let stream = self.tree.stream_range(
-            crate::KeyBytes::from(min)..=crate::KeyBytes::from(max),
+            crate::Key::from(min)..=crate::Key::from(max),
             &self.storage,
         );
         tokio::pin!(stream);
@@ -103,7 +104,7 @@ where
             if let State::Added(datum) = entry.value {
                 records.push((
                     history_key_version(&entry.key)?,
-                    Record::try_from_datum(datum)?,
+                    Record::try_from_key_datum(&entry.key, datum)?,
                 ));
             }
         }
@@ -125,22 +126,18 @@ where
     ) -> Result<Vec<Claim>, DialogArtifactsError> {
         let (min, max) = history_claim_range(version, of, the);
         let stream = self.tree.stream_range(
-            crate::KeyBytes::from(min)..=crate::KeyBytes::from(max),
+            crate::Key::from(min)..=crate::Key::from(max),
             &self.storage,
         );
         tokio::pin!(stream);
 
-        // The range spans the keys' raw entity/attribute heads, which may
-        // be shared beyond their truncation point; re-check the stored
-        // record before decoding it (see `history_claim_range`).
-        let the = the.to_string();
+        // The key is lossless, so `history_claim_range` is exact on
+        // `(version, entity, attribute)`: every hit belongs to this claim and
+        // needs no re-check (the truncated key this replaces did).
         let mut claims = Vec::new();
         while let Some(entry) = stream.try_next().await? {
             if let State::Added(datum) = entry.value {
-                if datum.entity != of.as_str() || datum.attribute != the {
-                    continue;
-                }
-                claims.push(Record::try_from_datum(datum)?.claim().clone());
+                claims.push(Record::try_from_key_datum(&entry.key, datum)?.claim().clone());
             }
         }
         Ok(claims)
@@ -173,12 +170,9 @@ where
             .clone()
             .select_record(self.store.clone(), &of, &the)
             .await?;
-        if candidates.is_empty() {
-            candidates = self.tree.select_data(self.store.clone(), &of, &the).await?;
-        }
-        for datum in candidates {
-            if ValueDataType::from(datum.value_type) == ValueDataType::Record {
-                let record = RevisionRecord::try_from_bytes(&datum.value)?;
+        for artifact in candidates {
+            if let Value::Record(bytes) = &artifact.is {
+                let record = RevisionRecord::try_from_bytes(bytes)?;
                 // Tree blocks may have arrived from an untrusted peer;
                 // a record only counts if it vouches for itself — issuer
                 // signature valid, and derived version matching the slot

@@ -19,7 +19,7 @@
 
 use std::borrow::Cow;
 
-use crate::history::version::VERSION_LENGTH;
+use crate::history::VERSION_LENGTH;
 use crate::{
     ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG, HISTORY_KEY_TAG,
     VALUE_KEY_TAG, ValueDataType, decode_bytes,
@@ -110,6 +110,7 @@ impl KeyParts {
             attribute: Vec::new(),
             value_type: ValueDataType::min(),
             value: ValuePayload::Inline(value),
+            version: None,
         }
     }
 
@@ -139,6 +140,7 @@ impl KeyParts {
             // this dominates every value of the maximum type. `set_value_*`
             // replaces it with a real payload; this is only the unset bound.
             value: ValuePayload::Reference(vec![0xFFu8; VALUE_REFERENCE_LENGTH]),
+            version: None,
         }
     }
 }

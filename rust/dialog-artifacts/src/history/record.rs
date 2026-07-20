@@ -1,7 +1,10 @@
 use std::str::FromStr;
+use std::str::from_utf8;
 
 use serde::{Deserialize, Serialize};
 
+use crate::artifacts::decode_value;
+use crate::key::varkey::{self, ValuePayload};
 use crate::{
     Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value, ValueDataType, coverage_key,
     history_key, make_reference,
@@ -99,11 +102,44 @@ impl Record {
     }
 
     /// Reconstruct a record from its stored [`Datum`] form
-    pub fn try_from_datum(datum: Datum) -> Result<Record, DialogArtifactsError> {
+    /// Reconstruct a record from its stored key and [`Datum`].
+    ///
+    /// The key is lossless (see `key::history`), so entity, attribute and
+    /// value all come from it; the payload carries only the lineage the key
+    /// does not encode (the superseded versions and the record's polarity).
+    /// This mirrors how a fact reconstructs through
+    /// [`Artifact::from_key_datum_with_value`](crate::Artifact::from_key_datum_with_value).
+    ///
+    /// A spilled value is not resolved here: a record's value is compared by
+    /// reference, never by content, so the reference in the key is enough.
+    pub fn try_from_key_datum(key: &Key, datum: Datum) -> Result<Record, DialogArtifactsError> {
+        let parts = varkey::parse_key(key.as_ref()).ok_or_else(|| {
+            DialogArtifactsError::InvalidKey("history key did not parse".to_string())
+        })?;
+        let of = Entity::from_str(from_utf8(&parts.entity).map_err(|error| {
+            DialogArtifactsError::InvalidEntity(format!("entity key is not UTF-8: {error}"))
+        })?)?;
+        let the = Attribute::from_str(from_utf8(&parts.attribute).map_err(|error| {
+            DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
+        })?)?;
+        let is = match &parts.value {
+            ValuePayload::Reference(bytes) => {
+                Value::try_from((parts.value_type, bytes.clone()))?
+            }
+            ValuePayload::Inline(payload) => {
+                decode_value(parts.value_type, payload)
+                    .ok_or_else(|| {
+                        DialogArtifactsError::InvalidKey(
+                            "history key value payload did not decode".to_string(),
+                        )
+                    })?
+                    .0
+            }
+        };
         let claim = Claim {
-            the: Attribute::from_str(&datum.attribute)?,
-            of: Entity::from_str(&datum.entity)?,
-            is: Value::try_from((ValueDataType::from(datum.value_type), datum.value))?,
+            the,
+            of,
+            is,
             cause: Cause::new(datum.supersedes),
         };
         Ok(if datum.retraction {

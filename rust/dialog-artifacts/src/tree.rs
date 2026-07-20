@@ -467,7 +467,7 @@ pub trait ArtifactTreeExt {
         store: S,
         of: &crate::Entity,
         the: &crate::Attribute,
-    ) -> Result<Vec<Datum>, DialogArtifactsError>
+    ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
@@ -842,7 +842,7 @@ impl ArtifactTreeExt for ArtifactTree {
             .into_key();
 
         let stream = self.stream_range(
-            KeyBytes::from(search_start)..=KeyBytes::from(search_end),
+            search_start..=search_end,
             &storage,
         );
         tokio::pin!(stream);
@@ -862,12 +862,13 @@ impl ArtifactTreeExt for ArtifactTree {
         store: S,
         of: &crate::Entity,
         the: &crate::Attribute,
-    ) -> Result<Vec<Datum>, DialogArtifactsError>
+    ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
             + ConditionalSync,
     {
+        let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
 
         let search_start = <AttributeKey<Key> as KeyViewConstruct>::min()
@@ -879,20 +880,24 @@ impl ArtifactTreeExt for ArtifactTree {
             .set_entity(EntityKeyPart::from(of))
             .into_key();
 
-        let stream = self.stream_range(
-            KeyBytes::from(search_start)..=KeyBytes::from(search_end),
-            &storage,
-        );
+        let stream = self.stream_range(search_start..=search_end, &storage);
         tokio::pin!(stream);
 
-        let mut data = Vec::new();
+        // A revision record is a large CBOR value, so it normally spills: the
+        // key carries only its reference and the bytes live as an archive
+        // block. Reconstruct through the same path a fact scan uses so both
+        // the inline and spilled cases resolve.
+        let mut records = Vec::new();
         while let Some(entry) = stream.next().await {
-            if let State::Added(datum) = entry?.value {
-                data.push(datum);
+            let entry = entry?;
+            if let State::Added(datum) = &entry.value {
+                let spilled = fetch_spilled(&raw_store, &entry.key).await?;
+                records.push(Artifact::from_key_datum_with_value(
+                    &entry.key, datum, spilled,
+                )?);
             }
         }
-
-        Ok(data)
+        Ok(records)
     }
 
     async fn record<S>(

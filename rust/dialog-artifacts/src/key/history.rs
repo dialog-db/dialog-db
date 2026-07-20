@@ -50,7 +50,7 @@ use dialog_storage::Blake3Hash;
 
 use crate::history::{EDITION_LENGTH, ORIGIN_LENGTH, VERSION_LENGTH, Version};
 use crate::key::varkey::{KeyParts, ValuePayload, build_key};
-use crate::artifacts::ordkey::encode_bytes;
+use crate::artifacts::encode_bytes;
 use crate::{Attribute, Entity, Key, ValueDataType};
 
 /// The leading tag byte of history region keys

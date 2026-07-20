@@ -52,21 +52,38 @@ use dialog_search_tree::{
 use dialog_storage::{DialogStorageError, StorageBackend};
 
 use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord};
-use crate::key::KEY_LENGTH;
 use crate::tree::ArtifactTree;
 use crate::{
     Attribute, AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
-    ENTITY_KEY_TAG, Entity, EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key, KeyBytes,
+    ENTITY_KEY_TAG, Entity, EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key,
     KeyViewConstruct, KeyViewMut as _, State, VALUE_KEY_TAG, ValueKey,
 };
 
 /// The full key span of one region tag.
-fn tag_span(tag: u8) -> RangeInclusive<KeyBytes> {
-    let mut lo = [u8::MIN; KEY_LENGTH];
-    let mut hi = [u8::MAX; KEY_LENGTH];
-    lo[0] = tag;
-    hi[0] = tag;
-    lo..=hi
+fn tag_span(tag: u8) -> RangeInclusive<Key> {
+    // Variable-length keys: every key under `tag` begins with that byte, so
+    // the region runs from the bare tag to the tag followed by a run of
+    // `0xFF`. `KEY_SPAN_FILLER` bytes of it exceeds any real key's length,
+    // and a longer key with the same prefix still sorts below it.
+    let lo = vec![tag];
+    let mut hi = vec![tag];
+    hi.extend(std::iter::repeat_n(u8::MAX, KEY_SPAN_FILLER));
+    Key::from(lo)..=Key::from(hi)
+}
+
+/// Filler length for an open-ended key span bound. A key never reaches this
+/// many trailing `0xFF` bytes, so a bound built this way is above every key
+/// sharing its prefix.
+const KEY_SPAN_FILLER: usize = 64;
+
+/// The bottom of the key space: the empty key sorts below every other.
+fn bottom_key() -> Key {
+    Key::from(Vec::new())
+}
+
+/// The top of the key space.
+fn top_key() -> Key {
+    Key::from(vec![u8::MAX; KEY_SPAN_FILLER])
 }
 
 /// The history-side key ranges for the first merge pass: the history
@@ -77,19 +94,19 @@ fn tag_span(tag: u8) -> RangeInclusive<KeyBytes> {
 /// Coverage entries screen like any append-only records; the R3 slot
 /// scans fire from the history records, so the mirror never doubles the
 /// coverage work.
-pub fn history_scope() -> [RangeInclusive<KeyBytes>; 2] {
+pub fn history_scope() -> [RangeInclusive<Key>; 2] {
     [tag_span(HISTORY_KEY_TAG), tag_span(COVERAGE_KEY_TAG)]
 }
 
 /// The entire key space as one range, for computing an unscoped tree
 /// difference through the scoped API.
-pub fn full_scope() -> [RangeInclusive<KeyBytes>; 1] {
-    [[u8::MIN; KEY_LENGTH]..=[u8::MAX; KEY_LENGTH]]
+pub fn full_scope() -> [RangeInclusive<Key>; 1] {
+    [bottom_key()..=top_key()]
 }
 
 /// The coverage region's key range: the compact mirror of covering
 /// records, enumerated by graft repair.
-pub fn coverage_scope() -> [RangeInclusive<KeyBytes>; 1] {
+pub fn coverage_scope() -> [RangeInclusive<Key>; 1] {
     [tag_span(COVERAGE_KEY_TAG)]
 }
 
@@ -98,29 +115,32 @@ pub fn coverage_scope() -> [RangeInclusive<KeyBytes>; 1] {
 /// into inclusive spans: an absent lower bound starts at the bottom of
 /// the key space, and an exclusive lower bound becomes the successor
 /// key.
-pub fn spans_from_bounds(
-    bounds: Vec<(Option<KeyBytes>, KeyBytes)>,
-) -> Vec<RangeInclusive<KeyBytes>> {
+pub fn spans_from_bounds(bounds: Vec<(Vec<u8>, Option<Vec<u8>>)>) -> Vec<RangeInclusive<Key>> {
     bounds
         .into_iter()
         .filter_map(|(lower, upper)| {
-            let start = match lower {
-                None => [u8::MIN; KEY_LENGTH],
-                Some(bound) => key_successor(&bound)?,
+            // `lower` is the frontier node's separator: an INCLUSIVE lower
+            // bound (the smallest key the node can hold). `upper` is the next
+            // node's separator, which sorts strictly above this node's maximum
+            // key, so the span ends just below it. The last node has no
+            // successor and runs to the top of the key space.
+            let start = Key::from(lower);
+            let end = match upper {
+                Some(next) => predecessor_of(&Key::from(next))?,
+                None => top_key(),
             };
-            (start <= upper).then_some(start..=upper)
+            (start <= end).then_some(start..=end)
         })
         .collect()
 }
 
 /// The data regions' key ranges (EAV/AEV/VAE and the blob index), for
 /// scoping the second merge pass.
-pub fn data_scope() -> [RangeInclusive<KeyBytes>; 2] {
-    let mut lo = [u8::MIN; KEY_LENGTH];
-    let mut hi = [u8::MAX; KEY_LENGTH];
-    lo[0] = ENTITY_KEY_TAG;
-    hi[0] = VALUE_KEY_TAG;
-    [lo..=hi, tag_span(BLOB_KEY_TAG)]
+pub fn data_scope() -> [RangeInclusive<Key>; 2] {
+    let lo = vec![ENTITY_KEY_TAG];
+    let mut hi = vec![VALUE_KEY_TAG];
+    hi.extend(std::iter::repeat_n(u8::MAX, KEY_SPAN_FILLER));
+    [Key::from(lo)..=Key::from(hi), tag_span(BLOB_KEY_TAG)]
 }
 
 /// The entity-ordered key span of the `(entity, attribute)` slot a
@@ -130,12 +150,24 @@ pub fn data_scope() -> [RangeInclusive<KeyBytes>; 2] {
 /// a replace record supersedes claims of **other** values, and data keys
 /// embed the value hash, so the covered claims live at different keys
 /// than the record's. The whole slot must be scanned.
-pub fn coverage_range(record: &Datum) -> Result<RangeInclusive<KeyBytes>, DialogSearchTreeError> {
+pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTreeError> {
     let decode = |e: crate::DialogArtifactsError| {
         DialogSearchTreeError::Node(format!("history record: {e}"))
     };
-    let of = Entity::from_str(&record.entity).map_err(decode)?;
-    let the = Attribute::from_str(&record.attribute).map_err(decode)?;
+    // The record's entity and attribute live in its key, not its payload.
+    let parts = crate::key::varkey::parse_key(key.as_ref()).ok_or_else(|| {
+        DialogSearchTreeError::Node("history key did not parse".to_string())
+    })?;
+    let of = Entity::from_str(
+        std::str::from_utf8(&parts.entity)
+            .map_err(|e| DialogSearchTreeError::Node(format!("entity is not UTF-8: {e}")))?,
+    )
+    .map_err(decode)?;
+    let the = Attribute::from_str(
+        std::str::from_utf8(&parts.attribute)
+            .map_err(|e| DialogSearchTreeError::Node(format!("attribute is not UTF-8: {e}")))?,
+    )
+    .map_err(decode)?;
     let start = <EntityKey<Key> as KeyViewConstruct>::min()
         .set_entity(EntityKeyPart::from(&of))
         .set_attribute(AttributeKeyPart::from(&the))
@@ -144,7 +176,7 @@ pub fn coverage_range(record: &Datum) -> Result<RangeInclusive<KeyBytes>, Dialog
         .set_entity(EntityKeyPart::from(&of))
         .set_attribute(AttributeKeyPart::from(&the))
         .into_key();
-    Ok(KeyBytes::from(start)..=KeyBytes::from(end))
+    Ok(Key::from(start)..=Key::from(end))
 }
 
 /// Screen the **history-region** slice of an incoming merge
@@ -157,13 +189,13 @@ pub fn screen_history<'a, Backend, C>(
     changes: C,
     local: ArtifactTree,
     storage: ContentAddressedStorage<Backend>,
-) -> impl Differential<KeyBytes, State<Datum>> + 'a
+) -> impl Differential<Key, State<Datum>> + 'a
 where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + Clone
         + dialog_common::ConditionalSync
         + 'a,
-    C: Differential<KeyBytes, State<Datum>> + 'a,
+    C: Differential<Key, State<Datum>> + 'a,
 {
     async_stream::try_stream! {
         futures_util::pin_mut!(changes);
@@ -175,12 +207,14 @@ where
                     // superseded priors both land there — see
                     // `Record::into_entry`). A genesis retraction covers
                     // nothing and needs no scan.
+                    // The slot a record covers is named by its KEY (entity
+                    // and attribute live there now), so carry the key.
                     let covering = match &entry.value {
                         State::Added(datum)
-                            if entry.key[0] == HISTORY_KEY_TAG
+                            if entry.key.as_ref().first() == Some(&HISTORY_KEY_TAG)
                                 && !datum.supersedes.is_empty() =>
                         {
-                            Some(datum.clone())
+                            Some((entry.key.clone(), datum.supersedes.clone()))
                         }
                         _ => None,
                     };
@@ -196,9 +230,9 @@ where
                     // guarded (byte-exact), so a claim the record never
                     // observed (e.g. a later re-assert standing at the
                     // same key) is untouched.
-                    if let Some(record) = covering {
+                    if let Some((record_key, superseded)) = covering {
                         let candidates =
-                            local.stream_range(coverage_range(&record)?, &storage);
+                            local.stream_range(coverage_range(&record_key)?, &storage);
                         futures_util::pin_mut!(candidates);
                         while let Some(candidate) =
                             futures_util::StreamExt::next(&mut candidates).await
@@ -207,7 +241,7 @@ where
                             let covered = match &candidate.value {
                                 State::Added(datum) => datum
                                     .version
-                                    .is_some_and(|version| record.supersedes.contains(&version)),
+                                    .is_some_and(|version| superseded.contains(&version)),
                                 _ => false,
                             };
                             if covered {
@@ -220,7 +254,7 @@ where
                                     value_key.into_key(),
                                 ] {
                                     yield Change::Remove(Entry {
-                                        key: KeyBytes::from(key),
+                                        key: Key::from(key),
                                         value: candidate.value.clone(),
                                     });
                                 }
@@ -244,9 +278,9 @@ where
 pub fn screen_data<'a, C>(
     changes: C,
     context: Context,
-) -> impl Differential<KeyBytes, State<Datum>> + 'a
+) -> impl Differential<Key, State<Datum>> + 'a
 where
-    C: Differential<KeyBytes, State<Datum>> + 'a,
+    C: Differential<Key, State<Datum>> + 'a,
 {
     async_stream::try_stream! {
         futures_util::pin_mut!(changes);
@@ -301,19 +335,27 @@ where
 pub fn observe_revisions<'a, C>(
     changes: C,
     observed: Arc<Mutex<Context>>,
-) -> impl Differential<KeyBytes, State<Datum>> + 'a
+) -> impl Differential<Key, State<Datum>> + 'a
 where
-    C: Differential<KeyBytes, State<Datum>> + 'a,
+    C: Differential<Key, State<Datum>> + 'a,
 {
     async_stream::try_stream! {
         futures_util::pin_mut!(changes);
         while let Some(change) = futures_util::StreamExt::next(&mut changes).await {
             let change = change?;
+            // The attribute and the value both live in the key now, so the
+            // revision record is recognised and decoded from the key rather
+            // than from the payload.
             if let Change::Add(entry) = &change
-                && let State::Added(datum) = &entry.value
-                && datum.attribute == REVISION_ATTRIBUTE
+                && let State::Added(_) = &entry.value
+                && let Some(parts) = crate::key::varkey::parse_key_ref(entry.key.as_ref())
+                && parts.attribute.as_ref() == REVISION_ATTRIBUTE.as_bytes()
             {
-                let record = RevisionRecord::try_from_bytes(&datum.value).map_err(|error| {
+                let bytes = match &parts.value {
+                    crate::key::varkey::ValueRef::Inline(inline) => inline.to_vec(),
+                    crate::key::varkey::ValueRef::Reference(_) => continue,
+                };
+                let record = RevisionRecord::try_from_bytes(&bytes).map_err(|error| {
                     DialogSearchTreeError::Node(format!("revision record: {error}"))
                 })?;
                 observed
@@ -347,30 +389,29 @@ pub enum SpanSource {
 
 /// The immediate successor of a key, or `None` at the top of the key
 /// space.
-fn key_successor(key: &KeyBytes) -> Option<KeyBytes> {
-    let mut next = *key;
-    for byte in next.iter_mut().rev() {
-        if *byte == u8::MAX {
-            *byte = u8::MIN;
-        } else {
-            *byte += 1;
-            return Some(next);
-        }
-    }
-    None
+fn key_successor(key: &Key) -> Option<Key> {
+    // On variable-length keys the successor is just the key with a `0x00`
+    // appended: nothing sorts strictly between the two, and unlike the
+    // fixed-width form there is no carry to overflow.
+    let mut next = key.as_ref().to_vec();
+    next.push(u8::MIN);
+    Some(Key::from(next))
 }
 
 /// Sort and coalesce a list of inclusive spans: overlapping or adjacent
 /// spans fuse into one.
-fn normalize_spans(spans: &[RangeInclusive<KeyBytes>]) -> Vec<RangeInclusive<KeyBytes>> {
+fn normalize_spans(spans: &[RangeInclusive<Key>]) -> Vec<RangeInclusive<Key>> {
     let mut spans: Vec<_> = spans.to_vec();
     spans.sort_by(|a, b| a.start().cmp(b.start()));
-    let mut normalized: Vec<RangeInclusive<KeyBytes>> = Vec::with_capacity(spans.len());
+    let mut normalized: Vec<RangeInclusive<Key>> = Vec::with_capacity(spans.len());
     for span in spans {
         match normalized.last_mut() {
-            Some(last) if *span.start() <= key_successor(last.end()).unwrap_or(*last.end()) => {
+            Some(last)
+                if *span.start()
+                    <= key_successor(last.end()).unwrap_or_else(|| last.end().clone()) =>
+            {
                 if span.end() > last.end() {
-                    *last = *last.start()..=*span.end();
+                    *last = last.start().clone()..=span.end().clone();
                 }
             }
             _ => normalized.push(span),
@@ -388,14 +429,14 @@ fn normalize_spans(spans: &[RangeInclusive<KeyBytes>]) -> Vec<RangeInclusive<Key
 /// and screen paths, never the outcome), typically derived from the
 /// divergent node bounds of two tree differentials.
 pub fn partition_spans(
-    ours: &[RangeInclusive<KeyBytes>],
-    theirs: &[RangeInclusive<KeyBytes>],
-) -> Vec<(RangeInclusive<KeyBytes>, SpanSource)> {
+    ours: &[RangeInclusive<Key>],
+    theirs: &[RangeInclusive<Key>],
+) -> Vec<(RangeInclusive<Key>, SpanSource)> {
     let ours = normalize_spans(ours);
     let theirs = normalize_spans(theirs);
 
-    let mut pieces: Vec<(RangeInclusive<KeyBytes>, SpanSource)> = Vec::new();
-    let mut cursor = [u8::MIN; KEY_LENGTH];
+    let mut pieces: Vec<(RangeInclusive<Key>, SpanSource)> = Vec::new();
+    let mut cursor = bottom_key();
     let mut ours_at = 0;
     let mut theirs_at = 0;
 
@@ -419,27 +460,33 @@ pub fn partition_spans(
         // The current classification holds until the nearest boundary:
         // the end of a span the cursor is inside, or the start of the
         // next span ahead.
-        let mut until = [u8::MAX; KEY_LENGTH];
+        let mut until = top_key();
         if in_ours {
-            until = until.min(*ours[ours_at].end());
+            until = until.min(ours[ours_at].end().clone());
         } else if ours_at < ours.len() {
-            let before = predecessor_of(ours[ours_at].start());
-            until = until.min(before);
+            if let Some(before) = predecessor_of(ours[ours_at].start()) {
+                until = until.min(before);
+            }
         }
         if in_theirs {
-            until = until.min(*theirs[theirs_at].end());
+            until = until.min(theirs[theirs_at].end().clone());
         } else if theirs_at < theirs.len() {
-            let before = predecessor_of(theirs[theirs_at].start());
-            until = until.min(before);
+            if let Some(before) = predecessor_of(theirs[theirs_at].start()) {
+                until = until.min(before);
+            }
         }
 
+        let done = until >= top_key();
         match pieces.last_mut() {
             Some((span, last_source)) if *last_source == source => {
-                *span = *span.start()..=until;
+                *span = span.start().clone()..=until.clone();
             }
-            _ => pieces.push((cursor..=until, source)),
+            _ => pieces.push((cursor.clone()..=until.clone(), source)),
         }
 
+        if done {
+            break;
+        }
         match key_successor(&until) {
             Some(next) => cursor = next,
             None => break,
@@ -452,36 +499,41 @@ pub fn partition_spans(
 /// The immediate predecessor of a key. Only called for span starts that
 /// lie strictly ahead of the cursor, which is at least the minimum key,
 /// so the input is never the minimum.
-fn predecessor_of(key: &KeyBytes) -> KeyBytes {
-    let mut previous = *key;
-    for byte in previous.iter_mut().rev() {
-        if *byte == u8::MIN {
-            *byte = u8::MAX;
-        } else {
-            *byte -= 1;
-            break;
-        }
+fn predecessor_of(key: &Key) -> Option<Key> {
+    // The greatest key strictly below `key`. A key ending in `0x00` loses that
+    // byte (that key is itself the successor of the shorter one); otherwise
+    // decrement the last byte and pad with `0xFF`, which is above every key
+    // sharing the decremented prefix. The empty key has no predecessor.
+    let bytes = key.as_ref();
+    let (&last, head) = bytes.split_last()?;
+    let mut previous = head.to_vec();
+    if last != u8::MIN {
+        previous.push(last - 1);
+        previous.extend(std::iter::repeat_n(u8::MAX, KEY_SPAN_FILLER));
     }
-    previous
+    Some(Key::from(previous))
 }
 
 #[cfg(test)]
 mod span_tests {
     use super::*;
 
-    fn key(at: u8) -> KeyBytes {
-        let mut bytes = [u8::MIN; KEY_LENGTH];
-        bytes[0] = at;
-        bytes
+    fn key(at: u8) -> Key {
+        Key::from(vec![at])
     }
 
-    const TOP: KeyBytes = [u8::MAX; KEY_LENGTH];
-    const BOTTOM: KeyBytes = [u8::MIN; KEY_LENGTH];
+    fn top() -> Key {
+        top_key()
+    }
+
+    fn bottom() -> Key {
+        bottom_key()
+    }
 
     #[test]
     fn it_defaults_the_whole_space_to_theirs() {
         let pieces = partition_spans(&[], &[]);
-        assert_eq!(pieces, vec![(BOTTOM..=TOP, SpanSource::Theirs)]);
+        assert_eq!(pieces, vec![(bottom()..=top(), SpanSource::Theirs)]);
     }
 
     #[test]
@@ -490,9 +542,9 @@ mod span_tests {
         assert_eq!(
             pieces,
             vec![
-                (BOTTOM..=predecessor_of(&key(2)), SpanSource::Theirs),
+                (bottom()..=predecessor_of(&key(2)), SpanSource::Theirs),
                 (key(2)..=key(3), SpanSource::Ours),
-                (key_successor(&key(3)).unwrap()..=TOP, SpanSource::Theirs),
+                (key_successor(&key(3)).unwrap()..=top(), SpanSource::Theirs),
             ]
         );
     }
@@ -503,10 +555,10 @@ mod span_tests {
         assert_eq!(
             pieces,
             vec![
-                (BOTTOM..=predecessor_of(&key(2)), SpanSource::Theirs),
+                (bottom()..=predecessor_of(&key(2)), SpanSource::Theirs),
                 (key(2)..=predecessor_of(&key(4)), SpanSource::Ours),
                 (key(4)..=key(5), SpanSource::Contested),
-                (key_successor(&key(5)).unwrap()..=TOP, SpanSource::Theirs),
+                (key_successor(&key(5)).unwrap()..=top(), SpanSource::Theirs),
             ]
         );
     }
@@ -519,9 +571,9 @@ mod span_tests {
         assert_eq!(
             pieces,
             vec![
-                (BOTTOM..=predecessor_of(&key(6)), SpanSource::Theirs),
+                (bottom()..=predecessor_of(&key(6)), SpanSource::Theirs),
                 (key(6)..=key(6), SpanSource::Ours),
-                (key_successor(&key(6)).unwrap()..=TOP, SpanSource::Theirs),
+                (key_successor(&key(6)).unwrap()..=top(), SpanSource::Theirs),
             ]
         );
     }
@@ -532,9 +584,9 @@ mod span_tests {
         assert_eq!(
             pieces,
             vec![
-                (BOTTOM..=predecessor_of(&key(2)), SpanSource::Theirs),
+                (bottom()..=predecessor_of(&key(2)), SpanSource::Theirs),
                 (key(2)..=key(6), SpanSource::Ours),
-                (key_successor(&key(6)).unwrap()..=TOP, SpanSource::Theirs),
+                (key_successor(&key(6)).unwrap()..=top(), SpanSource::Theirs),
             ]
         );
     }
@@ -546,12 +598,12 @@ mod span_tests {
             &[key(2)..=key(12), key(30)..=key(40)],
         );
         // Gap-free coverage in ascending order, alternating sources.
-        let mut cursor = BOTTOM;
+        let mut cursor = bottom();
         for (span, _) in &pieces {
             assert_eq!(*span.start(), cursor, "no gaps between pieces");
-            cursor = key_successor(span.end()).unwrap_or(TOP);
+            cursor = key_successor(span.end()).unwrap_or(top());
         }
-        assert_eq!(*pieces.last().unwrap().0.end(), TOP);
+        assert_eq!(*pieces.last().unwrap().0.end(), top());
         // No two adjacent pieces share a source.
         for window in pieces.windows(2) {
             assert_ne!(window[0].1, window[1].1, "adjacent pieces coalesce");
