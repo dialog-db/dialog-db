@@ -347,9 +347,23 @@ where
                 && let Some(parts) = crate::key::varkey::parse_key_ref(entry.key.as_ref())
                 && parts.attribute.as_ref() == REVISION_ATTRIBUTE.as_bytes()
             {
-                let bytes = match &parts.value {
-                    crate::key::varkey::ValueRef::Inline(inline) => inline.to_vec(),
-                    crate::key::varkey::ValueRef::Reference(_) => continue,
+                // The inline payload is the ORDER-PRESERVING encoding, not the
+                // raw record bytes: decode it back to a value first. A spilled
+                // record's bytes live in the archive, which this pass does not
+                // read — the observer only needs the versions it can see.
+                let Some(bytes) = (match &parts.value {
+                    crate::key::varkey::ValueRef::Inline(inline) => {
+                        crate::artifacts::decode_value(parts.value_type, inline).and_then(
+                            |(value, _)| match value {
+                                crate::Value::Record(bytes) => Some(bytes),
+                                _ => None,
+                            },
+                        )
+                    }
+                    crate::key::varkey::ValueRef::Reference(_) => None,
+                }) else {
+                    yield change;
+                    continue;
                 };
                 let record = RevisionRecord::try_from_bytes(&bytes).map_err(|error| {
                     DialogSearchTreeError::Node(format!("revision record: {error}"))

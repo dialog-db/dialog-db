@@ -184,7 +184,11 @@ impl<'a> Pull<'a> {
         // the signature is the named issuer's — a forged or tampered head
         // (wrong tree root, reattributed issuer, adjusted edition) is
         // rejected here, before any of its blocks are walked.
-        upstream_revision.verify()?;
+        // Surface head verification as an artifact error, the shape callers
+        // (and the forged-head test) match on.
+        upstream_revision
+            .verify()
+            .map_err(dialog_artifacts::DialogArtifactsError::from)?;
 
         // `base` is the upstream tree at our last sync point with this
         // particular upstream (the divergence marker). If it equals the
