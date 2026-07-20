@@ -444,7 +444,7 @@ impl<'a> Pull<'a> {
                         let mut retire = Vec::new();
                         {
                             let candidates =
-                                stitched.stream_range(merge::coverage_range(record)?, &tree_store);
+                                stitched.stream_range(merge::coverage_range(&entry.key)?, &tree_store);
                             futures_util::pin_mut!(candidates);
                             while let Some(candidate) =
                                 futures_util::StreamExt::next(&mut candidates).await

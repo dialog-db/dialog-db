@@ -6,6 +6,7 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
+use crate::RevisionExt as _;
 use crate::{NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
 use dialog_artifacts::DialogArtifactsError;
 use dialog_artifacts::history::{

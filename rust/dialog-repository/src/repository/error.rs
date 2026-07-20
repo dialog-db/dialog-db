@@ -315,6 +315,10 @@ pub enum CommitError {
 /// Errors specific to a pull operation.
 #[derive(Error, Debug)]
 pub enum PullError {
+    /// A revision head failed signature or lineage verification.
+    #[error(transparent)]
+    History(#[from] dialog_capability::history::HistoryError),
+
     /// Branch has no configured upstream to pull from.
     #[error("Branch {branch} has no upstream to pull from")]
     BranchHasNoUpstream {
