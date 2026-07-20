@@ -49,7 +49,6 @@
 //! queried mid-transaction or after commit — it's part of evaluating a
 //! query, not an optional composition.
 
-use crate::RevisionExt as _;
 use dialog_artifacts::{Changes, DialogArtifactsError};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -164,6 +163,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
 
 #[cfg(test)]
 mod tests {
+    use crate::RevisionExt as _;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -175,6 +175,7 @@ mod tests {
     use dialog_query::{Concept, Query, Term, the};
 
     mod people {
+
         /// `test/name` attribute used by the Person concept tests.
         #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
         #[domain("test")]

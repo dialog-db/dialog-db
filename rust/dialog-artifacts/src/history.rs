@@ -19,21 +19,15 @@
 //!   [`History`] index, determining whether two claims on the same
 //!   `(entity, attribute)` are causally ordered or concurrent.
 
-
-
-
-
 // The identity and clock half of version control lives in dialog-capability
 // (Revision's fields are built from it, and dialog-artifacts depends on that
 // crate). Re-exported here so this module remains the single import site.
 pub use dialog_capability::history::{
     Authority, Context, EDITION_LENGTH, Edition, HistoryError, Issuer, ORIGIN_LENGTH, Origin,
-    Signature,
-    VERSION_LENGTH, Version, ed25519_key_of, verify_issuer_signature,
+    Signature, VERSION_LENGTH, Version, ed25519_key_of, verify_issuer_signature,
 };
 mod cause;
 pub use cause::*;
-
 
 mod revision;
 pub use revision::*;

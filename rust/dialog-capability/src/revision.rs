@@ -221,9 +221,6 @@ impl Revision {
         }
     }
 
-
-
-
     /// The [`Version`] identifying this revision: its origin paired with its
     /// edition. Versions sort by causal depth, and two versions with the
     /// same edition but different origins identify concurrent revisions.
@@ -238,9 +235,6 @@ impl Revision {
     pub fn version_with(&self, origin: Origin) -> Version {
         Version::new(origin, self.edition)
     }
-
-
-
 
     /// The canonical signing payload of this revision: every field except
     /// the signature, deterministically encoded. Variable-width fields are
@@ -302,4 +296,3 @@ impl Revision {
         verify_issuer_signature(self.issuer.as_str(), &self.payload(), &self.signature)
     }
 }
-

@@ -21,8 +21,8 @@
 //!   with the scan's `of` makes the join itself reject a valid record
 //!   replayed at another revision entity.
 
-use dialog_artifacts::history::VersionExt as _;
 use dialog_artifacts::history::RevisionRecord;
+use dialog_artifacts::history::VersionExt as _;
 
 use crate::formula::Input;
 use crate::types::RecordBytes;

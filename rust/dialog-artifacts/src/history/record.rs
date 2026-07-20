@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::artifacts::decode_value;
 use crate::key::varkey::{self, ValuePayload};
 use crate::{
-    Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value, ValueDataType, coverage_key,
-    history_key, make_reference,
+    Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value, coverage_key, history_key,
+    make_reference,
 };
 
 use super::{Cause, Claim, Version};
@@ -123,9 +123,7 @@ impl Record {
             DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
         })?)?;
         let is = match &parts.value {
-            ValuePayload::Reference(bytes) => {
-                Value::try_from((parts.value_type, bytes.clone()))?
-            }
+            ValuePayload::Reference(bytes) => Value::try_from((parts.value_type, bytes.clone()))?,
             ValuePayload::Inline(payload) => {
                 decode_value(parts.value_type, payload)
                     .ok_or_else(|| {

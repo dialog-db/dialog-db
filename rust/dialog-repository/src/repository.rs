@@ -6,7 +6,6 @@
 //! - [`archive`] — CAS adapter bridging capabilities with search tree storage
 //! - [`memory`] — Transactional memory cells with edition tracking
 //! - [`revision`] — Revision tracking and logical timestamps
-use crate::RevisionExt as _;
 use dialog_capability::{Capability, Did, Subject};
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::space::SpaceSubjectExt;
@@ -190,6 +189,7 @@ impl RepositoryExt for SpaceHandle {
 }
 #[cfg(test)]
 mod tests {
+
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -601,6 +601,7 @@ mod tests {
     }
 
     mod delegation_tests {
+
         use super::*;
         use crate::helpers::{test_operator_with_profile, unique_name};
         use dialog_effects::memory as fx_memory;
@@ -747,6 +748,8 @@ mod tests {
     }
 
     mod query_engine {
+
+        use crate::RevisionExt as _;
         use crate::helpers::{test_operator_with_profile, test_repo};
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term};
@@ -1034,12 +1037,15 @@ mod tests {
     }
 
     mod query_session {
+
         use super::query_engine::{Employee, employee};
+        use crate::RevisionExt as _;
         use crate::helpers::{test_operator_with_profile, test_repo};
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
         mod branch_meta {
+
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
             #[domain("app.meta")]
             pub struct Name(pub String);
@@ -1844,6 +1850,7 @@ mod tests {
         }
 
         mod cardinality_one_attr {
+
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
             #[domain("person")]
             pub struct Nickname(pub String);
@@ -2080,6 +2087,7 @@ mod tests {
     }
 
     mod profile_as_repository {
+
         use super::*;
         use crate::helpers::test_operator_with_profile;
         use dialog_query::{Entity, the};

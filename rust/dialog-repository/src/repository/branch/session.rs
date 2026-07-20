@@ -1,4 +1,3 @@
-use crate::RevisionExt as _;
 use std::collections::HashSet;
 
 use dialog_artifacts::selector::Constrained;
@@ -678,6 +677,7 @@ impl Branch {
 /// satisfy.
 #[cfg(test)]
 mod rule_tests {
+    use crate::RevisionExt as _;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 

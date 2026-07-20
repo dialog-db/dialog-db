@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ValueType;
 
-use crate::{Artifact, Cause, history::Version, make_reference};
+use crate::{Artifact, Cause, history::Version};
 
 #[cfg(doc)]
 use crate::{Artifacts, Attribute, Entity, Value};

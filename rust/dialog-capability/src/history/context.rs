@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-
 use super::{Edition, Origin, Version};
 
 /// The causal context of a revision: a per-origin watermark summarizing
@@ -119,8 +118,6 @@ impl Context {
             .sum()
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

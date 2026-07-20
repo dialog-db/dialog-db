@@ -2017,6 +2017,7 @@ fn collect_stream_plan<Key, Value>(
 mod tests {
     #![allow(unexpected_cfgs)]
 
+    use crate::{Distribution, Geometric, Manifest};
     use anyhow::Result;
     use dialog_common::Blake3Hash;
     use dialog_storage::MemoryStorageBackend;
@@ -3151,7 +3152,8 @@ mod tests {
                 );
             }
         }
-
+        Ok(())
+    }
 
     /// Encodes a key big-endian so numeric order matches the byte-wise
     /// lexicographic order the tree sorts by, letting the stitch tests express
@@ -3493,5 +3495,4 @@ mod tests {
         }
         Ok(())
     }
-}
 }

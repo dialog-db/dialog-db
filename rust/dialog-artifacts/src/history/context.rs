@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use dialog_search_tree::Cache;
 use serde::{Deserialize, Serialize};
@@ -6,9 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::DialogArtifactsError;
 
 use super::Context;
-use super::{Edition, History, Origin, Version};
-
-
+use super::{History, Version};
 
 /// Derive the [`Context`] of `head` by walking its ancestry through the
 /// history index's revision records.
@@ -111,6 +109,7 @@ impl ContextCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::{Edition, Origin};
 
     fn version(origin_seed: u8, edition: u64) -> Version {
         Version::new(Origin::from([origin_seed; 32]), Edition::new(edition))

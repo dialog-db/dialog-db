@@ -49,23 +49,20 @@ impl From<ed25519_dalek::Signature> for Signature {
 /// prefix (`0xed 0x01`) followed by the 32 key bytes.
 pub fn ed25519_key_of(did: &str) -> Result<ed25519_dalek::VerifyingKey, HistoryError> {
     use base58::FromBase58 as _;
-    let encoded = did.strip_prefix("did:key:z").ok_or_else(|| {
-        HistoryError::InvalidSignature(format!("Issuer {did} is not a did:key"))
-    })?;
-    let bytes = encoded.from_base58().map_err(|_| {
-        HistoryError::InvalidSignature(format!("Issuer {did} is not valid base58"))
-    })?;
+    let encoded = did
+        .strip_prefix("did:key:z")
+        .ok_or_else(|| HistoryError::InvalidSignature(format!("Issuer {did} is not a did:key")))?;
+    let bytes = encoded
+        .from_base58()
+        .map_err(|_| HistoryError::InvalidSignature(format!("Issuer {did} is not valid base58")))?;
     let key: [u8; 32] = bytes
         .strip_prefix(&[0xed, 0x01])
         .and_then(|key| key.try_into().ok())
         .ok_or_else(|| {
-            HistoryError::InvalidSignature(format!(
-                "Issuer {did} is not an ed25519 did:key"
-            ))
+            HistoryError::InvalidSignature(format!("Issuer {did} is not an ed25519 did:key"))
         })?;
-    ed25519_dalek::VerifyingKey::from_bytes(&key).map_err(|error| {
-        HistoryError::InvalidSignature(format!("Invalid issuer key: {error}"))
-    })
+    ed25519_dalek::VerifyingKey::from_bytes(&key)
+        .map_err(|error| HistoryError::InvalidSignature(format!("Invalid issuer key: {error}")))
 }
 
 /// Verify `signature` as an Ed25519 signature over `payload` by the key the
@@ -83,9 +80,7 @@ pub fn verify_issuer_signature(
         ))
     })?;
     key.verify_strict(payload, &ed25519_dalek::Signature::from_bytes(&signature))
-        .map_err(|error| {
-            HistoryError::InvalidSignature(format!("Signature mismatch: {error}"))
-        })
+        .map_err(|error| HistoryError::InvalidSignature(format!("Signature mismatch: {error}")))
 }
 
 impl Display for Issuer {

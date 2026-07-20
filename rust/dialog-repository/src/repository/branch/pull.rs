@@ -443,8 +443,8 @@ impl<'a> Pull<'a> {
                         // names; delete them at all three orderings.
                         let mut retire = Vec::new();
                         {
-                            let candidates =
-                                stitched.stream_range(merge::coverage_range(&entry.key)?, &tree_store);
+                            let candidates = stitched
+                                .stream_range(merge::coverage_range(&entry.key)?, &tree_store);
                             futures_util::pin_mut!(candidates);
                             while let Some(candidate) =
                                 futures_util::StreamExt::next(&mut candidates).await
@@ -983,6 +983,7 @@ impl PreparedPull<'_> {
 
 #[cfg(test)]
 mod tests {
+
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -1344,6 +1345,7 @@ mod tests {
 
 #[cfg(test)]
 mod history_tests {
+    use crate::RevisionExt as _;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 

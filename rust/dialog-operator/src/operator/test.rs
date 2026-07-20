@@ -619,13 +619,9 @@ mod tests {
     }
 
     mod s3_credential_tests {
-        use super::*;
-        use dialog_capability::Subject;
-        use dialog_common::Blake3Hash;
-        use dialog_common::Buffer;
-        use dialog_effects::archive::prelude::*;
+
         use dialog_effects::credential::Secret;
-        use dialog_effects::memory::prelude::*;
+
         use dialog_network::NetworkAddress as SiteAddress;
         use dialog_remote_s3::helpers::S3Address;
         use dialog_remote_s3::{Address, S3Credential};
@@ -1008,11 +1004,7 @@ mod tests {
     }
 
     mod ucan_fork_tests {
-        use super::*;
-        use dialog_capability::Subject;
-        use dialog_common::{Blake3Hash, Buffer};
-        use dialog_effects::archive::prelude::*;
-        use dialog_effects::memory::prelude::*;
+
         use dialog_network::NetworkAddress as SiteAddress;
         use dialog_remote_ucan_s3::UcanAddress;
         use dialog_remote_ucan_s3::helpers::UcanS3Address;

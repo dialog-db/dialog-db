@@ -5,13 +5,13 @@ use dialog_search_tree::ContentAddressedStorage as NodeStorage;
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::TryStreamExt;
 
+use crate::Value;
 use crate::history::VersionExt as _;
 use crate::tree::ArtifactTreeExt as _;
 use crate::tree::{ArtifactTree, TreeStorageBridge};
-use crate::Value;
 use crate::{
-    Attribute, DialogArtifactsError, Entity, State, ValueDataType, history_claim_range,
-    history_key_version, history_region_range,
+    Attribute, DialogArtifactsError, Entity, State, history_claim_range, history_key_version,
+    history_region_range,
 };
 
 use super::{Claim, History, REVISION_ATTRIBUTE, Record, RevisionRecord, Version};
@@ -94,10 +94,9 @@ where
     /// revision)
     pub async fn records(&self) -> Result<Vec<(Version, Record)>, DialogArtifactsError> {
         let (min, max) = history_region_range();
-        let stream = self.tree.stream_range(
-            crate::Key::from(min)..=crate::Key::from(max),
-            &self.storage,
-        );
+        let stream = self
+            .tree
+            .stream_range(crate::Key::from(min)..=crate::Key::from(max), &self.storage);
         tokio::pin!(stream);
 
         let mut records = Vec::new();
@@ -126,10 +125,9 @@ where
         the: &Attribute,
     ) -> Result<Vec<Claim>, DialogArtifactsError> {
         let (min, max) = history_claim_range(version, of, the);
-        let stream = self.tree.stream_range(
-            crate::Key::from(min)..=crate::Key::from(max),
-            &self.storage,
-        );
+        let stream = self
+            .tree
+            .stream_range(crate::Key::from(min)..=crate::Key::from(max), &self.storage);
         tokio::pin!(stream);
 
         // The key is lossless, so `history_claim_range` is exact on
@@ -138,7 +136,11 @@ where
         let mut claims = Vec::new();
         while let Some(entry) = stream.try_next().await? {
             if let State::Added(datum) = entry.value {
-                claims.push(Record::try_from_key_datum(&entry.key, datum)?.claim().clone());
+                claims.push(
+                    Record::try_from_key_datum(&entry.key, datum)?
+                        .claim()
+                        .clone(),
+                );
             }
         }
         Ok(claims)
@@ -166,7 +168,7 @@ where
         // were single-ordered.
         let of = version.entity();
         let the = Attribute::from_str(REVISION_ATTRIBUTE)?;
-        let mut candidates = self
+        let candidates = self
             .tree
             .clone()
             .select_record(self.store.clone(), &of, &the)

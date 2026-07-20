@@ -631,8 +631,8 @@ impl ArtifactTreeExt for ArtifactTree {
                     // `transient` immutably, so collect into owned vectors in a
                     // scope that ends before the subsequent mutating
                     // reassignments.
-                    let replace_type = u8::from(artifact.is.data_type());
-                    let replace_value = artifact.is.to_bytes();
+                    let _replace_type = u8::from(artifact.is.data_type());
+                    let _replace_value = artifact.is.to_bytes();
                     let mut superseded_keys: Vec<Key> = Vec::new();
                     let mut superseded_versions: Vec<Version> = Vec::new();
                     let mut found_same_value = false;
@@ -841,10 +841,7 @@ impl ArtifactTreeExt for ArtifactTree {
             .set_attribute(AttributeKeyPart::from(the))
             .into_key();
 
-        let stream = self.stream_range(
-            search_start..=search_end,
-            &storage,
-        );
+        let stream = self.stream_range(search_start..=search_end, &storage);
         tokio::pin!(stream);
 
         let mut data = Vec::new();

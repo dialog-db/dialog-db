@@ -353,6 +353,7 @@ pub(crate) type SharedRuleCache = Arc<RuleCache>;
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use dialog_query::session::ProgramAnalysis;
 

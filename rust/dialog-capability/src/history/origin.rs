@@ -10,8 +10,6 @@ use std::fmt::{self, Display};
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 
-
-
 use super::Issuer;
 
 /// Repository membership identifier derived as `Blake3(issuer + subject)`.

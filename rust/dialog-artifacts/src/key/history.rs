@@ -48,9 +48,9 @@
 
 use dialog_storage::Blake3Hash;
 
+use crate::artifacts::encode_bytes;
 use crate::history::{EDITION_LENGTH, ORIGIN_LENGTH, VERSION_LENGTH, Version};
 use crate::key::varkey::{KeyParts, ValuePayload, build_key};
-use crate::artifacts::encode_bytes;
 use crate::{Attribute, Entity, Key, ValueDataType};
 
 /// The leading tag byte of history region keys
@@ -225,12 +225,46 @@ mod tests {
         Version::new(Origin::from([origin; 32]), Edition::new(edition))
     }
 
+    /// The key is lossless: entity and attribute round-trip in full, however
+    /// long. The fixed-width key this replaces truncated both to a raw head
+    /// and leaned on a trailing whole-key hash to tell collisions apart, so a
+    /// reader had to re-check every hit against the stored record.
     #[test]
-    fn it_lays_out_the_full_key_width() {
-        assert_eq!(ATTRIBUTE_OFFSET, ENTITY_OFFSET + ENTITY_RAW_HEAD);
-        assert_eq!(HASH_OFFSET, ATTRIBUTE_OFFSET + HISTORY_ATTRIBUTE_HEAD);
-        assert_eq!(KEY_LENGTH, HASH_OFFSET + HASH_SIZE);
-        assert_eq!(HISTORY_ATTRIBUTE_HEAD, 57);
+    fn it_round_trips_long_entities_and_attributes() -> anyhow::Result<()> {
+        let of = Entity::from_str(&format!("test:{}", "e".repeat(120)))?;
+        let the = Attribute::from_str(&format!("{}/{}", "n".repeat(60), "p".repeat(60)))?;
+        let value = crate::Value::String("value".into());
+        let key = history_key(
+            &version(1, 7),
+            &of,
+            &the,
+            value.data_type(),
+            &value.to_reference(),
+        );
+
+        let parts = crate::key::varkey::parse_key(key.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("history key did not parse"))?;
+        assert_eq!(std::str::from_utf8(&parts.entity)?, of.as_str());
+        assert_eq!(std::str::from_utf8(&parts.attribute)?, the.as_str());
+        Ok(())
+    }
+
+    /// Two claims that share every truncatable prefix but differ in their
+    /// tails land at different keys — no collision, and no disambiguating
+    /// hash needed.
+    #[test]
+    fn it_separates_claims_sharing_a_long_prefix() -> anyhow::Result<()> {
+        let shared = "test:".to_string() + &"e".repeat(120);
+        let left = Entity::from_str(&(shared.clone() + "a"))?;
+        let right = Entity::from_str(&(shared + "b"))?;
+        let the = Attribute::from_str("test/attribute")?;
+        let value = crate::Value::String("value".into());
+        let at = version(1, 7);
+
+        let left_key = history_key(&at, &left, &the, value.data_type(), &value.to_reference());
+        let right_key = history_key(&at, &right, &the, value.data_type(), &value.to_reference());
+        assert_ne!(left_key, right_key);
+        Ok(())
     }
 
     #[test]
@@ -244,10 +278,7 @@ mod tests {
         let late = version(2, 7);
         let early_key = history_key(&early, &of, &the, value.data_type(), &value.to_reference());
         let late_key = history_key(&late, &of, &the, value.data_type(), &value.to_reference());
-        assert_eq!(
-            history_key_version(&Key::from(early_key.clone()))?,
-            early
-        );
+        assert_eq!(history_key_version(&Key::from(early_key.clone()))?, early);
         assert!(
             early_key < late_key,
             "one origin's keys order by edition within its span"
@@ -299,8 +330,9 @@ mod tests {
         assert_ne!(left_key, right_key);
 
         // Two attributes sharing the raw head
+        // Long enough that the pre-M3 fixed-width key would have truncated
+        // both of these to the same raw head.
         let head = "test/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        assert_eq!(head.len(), HISTORY_ATTRIBUTE_HEAD);
         let of = Entity::from_str("test:entity")?;
         let first = Attribute::from_str(&format!("{head}x"))?;
         let second = Attribute::from_str(&format!("{head}y"))?;

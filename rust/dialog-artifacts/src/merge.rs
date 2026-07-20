@@ -155,9 +155,8 @@ pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTree
         DialogSearchTreeError::Node(format!("history record: {e}"))
     };
     // The record's entity and attribute live in its key, not its payload.
-    let parts = crate::key::varkey::parse_key(key.as_ref()).ok_or_else(|| {
-        DialogSearchTreeError::Node("history key did not parse".to_string())
-    })?;
+    let parts = crate::key::varkey::parse_key(key.as_ref())
+        .ok_or_else(|| DialogSearchTreeError::Node("history key did not parse".to_string()))?;
     let of = Entity::from_str(
         std::str::from_utf8(&parts.entity)
             .map_err(|e| DialogSearchTreeError::Node(format!("entity is not UTF-8: {e}")))?,
@@ -275,10 +274,7 @@ where
 /// by the receiver's causal context (R1); incoming guarded removes pass
 /// through (R2). Run — and integrate — after [`screen_history`]'s pass,
 /// so coverage has already retired what causality decided.
-pub fn screen_data<'a, C>(
-    changes: C,
-    context: Context,
-) -> impl Differential<Key, State<Datum>> + 'a
+pub fn screen_data<'a, C>(changes: C, context: Context) -> impl Differential<Key, State<Datum>> + 'a
 where
     C: Differential<Key, State<Datum>> + 'a,
 {
@@ -542,7 +538,10 @@ mod span_tests {
         assert_eq!(
             pieces,
             vec![
-                (bottom()..=predecessor_of(&key(2)), SpanSource::Theirs),
+                (
+                    bottom()..=predecessor_of(&key(2)).expect("a tag key has a predecessor"),
+                    SpanSource::Theirs
+                ),
                 (key(2)..=key(3), SpanSource::Ours),
                 (key_successor(&key(3)).unwrap()..=top(), SpanSource::Theirs),
             ]
@@ -555,8 +554,14 @@ mod span_tests {
         assert_eq!(
             pieces,
             vec![
-                (bottom()..=predecessor_of(&key(2)), SpanSource::Theirs),
-                (key(2)..=predecessor_of(&key(4)), SpanSource::Ours),
+                (
+                    bottom()..=predecessor_of(&key(2)).expect("a tag key has a predecessor"),
+                    SpanSource::Theirs
+                ),
+                (
+                    key(2)..=predecessor_of(&key(4)).expect("a tag key has a predecessor"),
+                    SpanSource::Ours
+                ),
                 (key(4)..=key(5), SpanSource::Contested),
                 (key_successor(&key(5)).unwrap()..=top(), SpanSource::Theirs),
             ]
@@ -571,7 +576,10 @@ mod span_tests {
         assert_eq!(
             pieces,
             vec![
-                (bottom()..=predecessor_of(&key(6)), SpanSource::Theirs),
+                (
+                    bottom()..=predecessor_of(&key(6)).expect("a tag key has a predecessor"),
+                    SpanSource::Theirs
+                ),
                 (key(6)..=key(6), SpanSource::Ours),
                 (key_successor(&key(6)).unwrap()..=top(), SpanSource::Theirs),
             ]
@@ -584,7 +592,10 @@ mod span_tests {
         assert_eq!(
             pieces,
             vec![
-                (bottom()..=predecessor_of(&key(2)), SpanSource::Theirs),
+                (
+                    bottom()..=predecessor_of(&key(2)).expect("a tag key has a predecessor"),
+                    SpanSource::Theirs
+                ),
                 (key(2)..=key(6), SpanSource::Ours),
                 (key_successor(&key(6)).unwrap()..=top(), SpanSource::Theirs),
             ]

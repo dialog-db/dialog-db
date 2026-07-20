@@ -22,8 +22,7 @@ use std::borrow::Cow;
 use crate::history::VERSION_LENGTH;
 use crate::{
     ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG, HISTORY_KEY_TAG,
-    VALUE_KEY_TAG, ValueDataType, decode_bytes,
-    decode_bytes_cow, encode_bytes,
+    VALUE_KEY_TAG, ValueDataType, decode_bytes, decode_bytes_cow, encode_bytes,
 };
 
 /// The length of a spilled value's content-addressed reference.
@@ -695,8 +694,8 @@ mod tests {
             attribute: attribute.to_vec(),
             value_type: ValueDataType::String,
             value: inline_string(&format!("v{value}")),
-                version: None,
-            }
+            version: None,
+        }
     }
 
     /// Every ordering round-trips build -> parse unchanged, including
