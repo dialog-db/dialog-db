@@ -872,6 +872,16 @@ where
         let mut pending: Vec<Instruction> = Vec::new();
         let mut current: Option<String> = None;
 
+        // `DIALOG_REUSE_BRANCH` holds one branch handle across every commit,
+        // so the branch-owned record and node caches (which the skip-table
+        // walk reads through) survive between commits. This isolates how much
+        // of the depth curve is memo-cold ancestry fetches versus genuine
+        // algorithmic growth: a real client committing on one handle keeps
+        // those caches warm, so the per-commit reopen otherwise overstates
+        // the cost.
+        let reuse = env::var("DIALOG_REUSE_BRANCH").is_ok();
+        let mut held: Option<Branch> = None;
+
         for row in rows {
             let width = [txn_at, the_at, of_at, as_at, is_at]
                 .into_iter()
@@ -886,7 +896,8 @@ where
             if current.as_deref() != Some(row[txn_at].as_str()) {
                 if !pending.is_empty() {
                     let commit_start = Instant::now();
-                    self.commit_facts(take(&mut pending)).await?;
+                    self.commit_facts(take(&mut pending), reuse, &mut held)
+                        .await?;
                     let commit_micros = commit_start.elapsed().as_micros();
                     committed += 1;
 
@@ -930,23 +941,37 @@ where
         }
 
         if !pending.is_empty() {
-            self.commit_facts(pending).await?;
+            self.commit_facts(pending, reuse, &mut held).await?;
         }
 
         Ok(entities)
     }
 
-    /// Commit one transaction's worth of instructions. Opens the branch per
-    /// call so each transaction is a distinct commit with the previous one as
-    /// its parent, which is what builds the ancestry.
+    /// Commit one transaction's worth of instructions as a distinct commit,
+    /// each with the previous as its parent, which is what builds the
+    /// ancestry.
+    ///
+    /// With `reuse` the branch handle in `held` is opened once and kept, so
+    /// the branch-owned record and node caches survive across commits; without
+    /// it the branch is reopened per commit, which drops those caches and
+    /// forces the skip-table walk to re-fetch ancestor records from the tree.
     #[cfg(not(target_arch = "wasm32"))]
-    async fn commit_facts(&self, instructions: Vec<Instruction>) -> Result<()> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .open()
-            .perform(&self.operator)
-            .await?;
+    async fn commit_facts(
+        &self,
+        instructions: Vec<Instruction>,
+        reuse: bool,
+        held: &mut Option<Branch>,
+    ) -> Result<()> {
+        if held.is_none() || !reuse {
+            *held = Some(
+                self.repo
+                    .branch(&self.branch)
+                    .open()
+                    .perform(&self.operator)
+                    .await?,
+            );
+        }
+        let branch = held.as_ref().expect("branch handle");
         branch
             .commit(stream::iter(instructions))
             .perform(&self.operator)
