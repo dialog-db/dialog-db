@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Instruction,
-    Select,
+    Select, Value,
 };
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::ConditionalSync;
@@ -51,6 +51,8 @@ use dialog_storage::NativeTempSpace;
 use futures_util::{TryStreamExt as _, stream};
 use std::collections::{BTreeMap, HashSet};
 use std::env;
+use std::mem::take;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::span::Attributes;
@@ -432,6 +434,54 @@ impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
     }
 }
 
+/// Minimal RFC-4180 CSV parse: quoted fields with embedded commas, doubled
+/// quotes, and newlines. The fixtures carry multi-line free text (post bodies,
+/// bug descriptions), so field splitting on `,` silently shreds them. Kept here
+/// rather than pulling a csv dependency into the bench helpers.
+fn parse_csv(text: &str) -> Vec<Vec<String>> {
+    let mut records = Vec::new();
+    let mut record = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                field.push('"');
+                chars.next();
+            }
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => record.push(take(&mut field)),
+            '\n' if !in_quotes => {
+                record.push(take(&mut field));
+                records.push(take(&mut record));
+            }
+            '\r' if !in_quotes => {}
+            _ => field.push(ch),
+        }
+    }
+    if !field.is_empty() || !record.is_empty() {
+        record.push(field);
+        records.push(record);
+    }
+    records
+}
+
+/// A fact log's `as` column to a [`Value`]. Rows whose type this does not
+/// handle are skipped by the caller rather than guessed at.
+fn parse_value(value_type: &str, raw: &str) -> Option<Value> {
+    match value_type {
+        "text" => Some(Value::String(raw.to_owned())),
+        "entity" => Entity::from_str(raw).ok().map(Value::Entity),
+        "natural" => raw.parse().ok().map(Value::UnsignedInt),
+        "integer" => raw.parse().ok().map(Value::SignedInt),
+        "float" => raw.parse().ok().map(Value::Float),
+        "boolean" => bool::from_str(raw).ok().map(Value::Boolean),
+        "attribute" => Attribute::from_str(raw).ok().map(Value::Symbol),
+        _ => None,
+    }
+}
+
 /// A benchmark environment wrapping an operator, repository, and branch.
 ///
 /// Generic over the operator's space type `Env` so the same seeding and
@@ -643,11 +693,6 @@ where
         self.query_stuff().await
     }
 
-    /// Seed a realistic bug-tracker fact base: `count` bugs, each a seven-fact
-    /// [`Bug`] record, with status/priority/assignee drawn from the same
-    /// distribution as the real tonk data (mostly-done/triage, medium priority,
-    /// a few assignees plus many unassigned). Returns the seeded entities so a
-    /// transaction benchmark can update specific bugs. Off the measured path.
     /// Import the real bug records from a `tonk export` CSV (the
     /// `the,of,as,is,cause` layout) into the branch, asserting every
     /// `squash.bug/*` fact — including `detail` (the long free-text
@@ -665,35 +710,6 @@ where
         &self,
         csv_path: &str,
     ) -> Result<Vec<(Entity, String, String)>> {
-        fn parse_csv(text: &str) -> Vec<Vec<String>> {
-            let mut records = Vec::new();
-            let mut record = Vec::new();
-            let mut field = String::new();
-            let mut in_quotes = false;
-            let mut chars = text.chars().peekable();
-            while let Some(ch) = chars.next() {
-                match ch {
-                    '"' if in_quotes && chars.peek() == Some(&'"') => {
-                        field.push('"');
-                        chars.next();
-                    }
-                    '"' => in_quotes = !in_quotes,
-                    ',' if !in_quotes => record.push(std::mem::take(&mut field)),
-                    '\n' if !in_quotes => {
-                        record.push(std::mem::take(&mut field));
-                        records.push(std::mem::take(&mut record));
-                    }
-                    '\r' if !in_quotes => {}
-                    _ => field.push(ch),
-                }
-            }
-            if !field.is_empty() || !record.is_empty() {
-                record.push(field);
-                records.push(record);
-            }
-            records
-        }
-
         let text = std::fs::read_to_string(csv_path)?;
         // Group the flat (the, of, is) rows by entity DID so each bug is a
         // record. The DID strings map to fresh Entities (stable per DID within
@@ -778,6 +794,122 @@ where
             .perform(&self.operator)
             .await?;
         Ok(index)
+    }
+
+    /// Replay a transaction-ordered fact log (`txn,at,the,of,as,is`, produced
+    /// by `scripts/se-transform.py` from a Stack Exchange site dump) as one
+    /// commit per `txn`, in file order.
+    ///
+    /// The point of this fixture is ancestry. Every other seeder here writes
+    /// its whole fact base in one or two transactions, which leaves nothing
+    /// for the version-control paths to walk: skip-table construction,
+    /// ancestry lookups, and context derivation all measure as free when there
+    /// is no history behind a commit. This log carries the source site's real
+    /// edit boundaries (Stack Exchange stamps the rows of one atomic edit with
+    /// a shared `RevisionGUID`, which the transform turns into `txn`), so the
+    /// history it builds is the site's own rather than a shape invented here.
+    ///
+    /// Deliberately NOT canonicalized, unlike
+    /// [`import_bugs_from_csv`](Self::import_bugs_from_csv): the buffered form
+    /// is what a real sequence of commits leaves behind, and flattening it
+    /// would erase the novelty this fixture exists to exercise.
+    ///
+    /// `limit` caps the number of transactions replayed (0 replays all), so a
+    /// depth curve can be walked without re-reading the file per point.
+    /// Returns the entities touched, in first-seen order. Off the measured
+    /// path.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::absolute_paths)]
+    pub async fn import_transaction_log(&self, path: &str, limit: usize) -> Result<Vec<Entity>> {
+        let text = std::fs::read_to_string(path)?;
+        let mut rows = parse_csv(&text).into_iter();
+
+        // Header: locate columns by name rather than position, so the
+        // transform can grow a column without silently shifting the parse.
+        let header = rows.next().unwrap_or_default();
+        let column = |name: &str| header.iter().position(|field| field == name);
+        let (Some(txn_at), Some(the_at), Some(of_at), Some(as_at), Some(is_at)) = (
+            column("txn"),
+            column("the"),
+            column("of"),
+            column("as"),
+            column("is"),
+        ) else {
+            anyhow::bail!("{path} is missing one of the txn,the,of,as,is columns");
+        };
+
+        let mut entities: Vec<Entity> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut committed = 0usize;
+        let mut pending: Vec<Instruction> = Vec::new();
+        let mut current: Option<String> = None;
+
+        for row in rows {
+            let width = [txn_at, the_at, of_at, as_at, is_at]
+                .into_iter()
+                .max()
+                .unwrap_or(0);
+            if row.len() <= width {
+                continue;
+            }
+
+            // A new txn closes the previous one: rows are grouped, so the
+            // boundary is a change in the ordinal rather than a lookahead.
+            if current.as_deref() != Some(row[txn_at].as_str()) {
+                if !pending.is_empty() {
+                    self.commit_facts(take(&mut pending)).await?;
+                    committed += 1;
+                    if limit != 0 && committed >= limit {
+                        return Ok(entities);
+                    }
+                }
+                current = Some(row[txn_at].clone());
+            }
+
+            let Ok(the) = Attribute::from_str(&row[the_at]) else {
+                continue;
+            };
+            let Ok(of) = Entity::from_str(&row[of_at]) else {
+                continue;
+            };
+            let Some(is) = parse_value(&row[as_at], &row[is_at]) else {
+                continue;
+            };
+
+            if seen.insert(row[of_at].clone()) {
+                entities.push(of.clone());
+            }
+            pending.push(Instruction::Assert(Artifact {
+                the,
+                of,
+                is,
+                cause: None,
+            }));
+        }
+
+        if !pending.is_empty() {
+            self.commit_facts(pending).await?;
+        }
+
+        Ok(entities)
+    }
+
+    /// Commit one transaction's worth of instructions. Opens the branch per
+    /// call so each transaction is a distinct commit with the previous one as
+    /// its parent, which is what builds the ancestry.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn commit_facts(&self, instructions: Vec<Instruction>) -> Result<()> {
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .open()
+            .perform(&self.operator)
+            .await?;
+        branch
+            .commit(stream::iter(instructions))
+            .perform(&self.operator)
+            .await?;
+        Ok(())
     }
 
     /// Run the [`Bug`] concept join, optionally pinning `status` and/or
@@ -1268,6 +1400,40 @@ impl BenchEnv<Operator<::dialog_storage::provider::storage::WebSpace>> {
 
 #[cfg(test)]
 mod test {
+
+    /// Replay a real transaction log and report cost against history depth.
+    /// Skipped unless `DIALOG_TXN_LOG` points at a file produced by
+    /// `scripts/se-transform.py`.
+    ///
+    /// This is the fixture with genuine ancestry: one commit per source edit,
+    /// so the per-commit history work (skip-table construction, ancestry
+    /// lookups, context derivation) is measured against real depth rather than
+    /// against the two-commit history every other seeder leaves behind.
+    /// `DIALOG_TXN_LIMIT` caps the replay.
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::absolute_paths)]
+    async fn it_replays_a_transaction_log() -> Result<()> {
+        let Ok(path) = env::var("DIALOG_TXN_LOG") else {
+            eprintln!("DIALOG_TXN_LOG not set; skipping transaction-log replay");
+            return Ok(());
+        };
+        let limit: usize = env::var("DIALOG_TXN_LIMIT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+
+        let env = BenchEnv::temp().await?;
+        let start = Instant::now();
+        let entities = env.import_transaction_log(&path, limit).await?;
+        let elapsed = start.elapsed();
+
+        eprintln!(
+            "TXNLOG replayed limit={limit} entities={} in {elapsed:?}",
+            entities.len()
+        );
+        Ok(())
+    }
 
     /// How does per-commit cost grow with history depth? `#[ignore]`d unless
     /// `DIALOG_DEPTH_BENCH` is set.
