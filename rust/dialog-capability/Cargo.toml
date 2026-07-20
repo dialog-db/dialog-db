@@ -19,6 +19,14 @@ dialog-common = { workspace = true }
 dialog-macros = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
+serde-big-array = { workspace = true }
+# Already in this crate's tree (rkyv via dialog-common, ed25519-dalek via
+# dialog-varsig, blake3 via dialog-common); declared directly so the
+# version-control identity types can derive/verify without a new dependency.
+rkyv = { workspace = true }
+ed25519-dalek = { workspace = true }
+blake3 = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 signature = { workspace = true }

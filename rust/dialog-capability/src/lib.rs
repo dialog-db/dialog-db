@@ -182,6 +182,8 @@ pub use selector::*;
 mod settings;
 pub use settings::*;
 
+pub mod history;
+
 mod revision;
 pub use revision::*;
 
