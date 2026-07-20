@@ -6,6 +6,7 @@
 //! - [`archive`] — CAS adapter bridging capabilities with search tree storage
 //! - [`memory`] — Transactional memory cells with edition tracking
 //! - [`revision`] — Revision tracking and logical timestamps
+use crate::RevisionExt as _;
 use dialog_capability::{Capability, Did, Subject};
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::space::SpaceSubjectExt;

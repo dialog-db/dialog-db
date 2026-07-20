@@ -49,6 +49,7 @@
 //! queried mid-transaction or after commit — it's part of evaluating a
 //! query, not an optional composition.
 
+use crate::RevisionExt as _;
 use dialog_artifacts::{Changes, DialogArtifactsError};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;

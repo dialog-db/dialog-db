@@ -19,6 +19,7 @@ pub const VERSION_LENGTH: usize = EDITION_LENGTH + ORIGIN_LENGTH;
 /// since seeing it would have forced a higher edition.
 #[derive(
     Clone,
+    Copy,
     Debug,
     PartialEq,
     Eq,
@@ -48,7 +49,7 @@ impl Version {
     pub fn key_bytes(&self) -> [u8; VERSION_LENGTH] {
         let mut bytes = [0u8; VERSION_LENGTH];
         bytes[..EDITION_LENGTH].copy_from_slice(&self.edition.key_bytes());
-        bytes[EDITION_LENGTH..].copy_from_slice(self.origin.key_bytes().as_ref());
+        bytes[EDITION_LENGTH..].copy_from_slice(self.origin.key_bytes());
         bytes
     }
 
@@ -70,7 +71,7 @@ impl Version {
         }
 
         let bytes = serde_ipld_dagcbor::to_vec(&RevisionHash::Revision {
-            origin: self.origin.key_bytes().as_ref(),
+            origin: self.origin.key_bytes().as_slice(),
             edition: self.edition.value(),
         })
         .expect("dag-cbor encoding of a version cannot fail");
@@ -92,7 +93,7 @@ impl Version {
         let mut origin = [0u8; ORIGIN_LENGTH];
         origin.copy_from_slice(&bytes[EDITION_LENGTH..]);
         Ok(Self {
-            origin: Origin(origin.into()),
+            origin: Origin(origin),
             edition: Edition::from_key_bytes(edition),
         })
     }

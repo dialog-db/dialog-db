@@ -1,3 +1,4 @@
+use crate::RevisionExt as _;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::DialogArtifactsError;
@@ -469,7 +470,7 @@ impl<'a> Pull<'a> {
                                 value_key.into_key(),
                             ] {
                                 stitched = stitched
-                                    .delete(&dialog_artifacts::KeyBytes::from(key), &tree_store)
+                                    .delete(&dialog_artifacts::Key::from(key), &tree_store)
                                     .await?;
                             }
                         }

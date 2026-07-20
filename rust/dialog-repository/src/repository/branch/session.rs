@@ -1,3 +1,4 @@
+use crate::RevisionExt as _;
 use std::collections::HashSet;
 
 use dialog_artifacts::selector::Constrained;

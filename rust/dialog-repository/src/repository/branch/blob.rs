@@ -21,6 +21,7 @@
 //! let entity = Blob::import(chunks).write(branch.into()).perform(env).await?;
 //! ```
 
+use crate::RevisionExt as _;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, TreeReference, Upstream,

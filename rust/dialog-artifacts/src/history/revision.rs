@@ -94,7 +94,7 @@ impl Revision {
     /// The [`Origin`] of this revision, derived from its issuer and subject.
     /// Stored nowhere; always computed on demand.
     pub fn origin(&self) -> Origin {
-        Origin::derive(&self.issuer, &self.subject)
+        Origin::derive(&self.issuer, self.subject.as_str())
     }
 
     /// The [`Version`] identifying this revision

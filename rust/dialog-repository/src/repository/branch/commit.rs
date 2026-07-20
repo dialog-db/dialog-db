@@ -1,3 +1,4 @@
+use crate::RevisionExt as _;
 use crate::schema;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
@@ -125,7 +126,7 @@ where
             branch.name(),
         )
         .this;
-        let origin = Revision::origin_of(&lineage, &issuer);
+        let origin = crate::origin_of(&lineage, &issuer);
         let version = Version::new(origin, edition);
 
         // Walk forward from the current revision's tree root, or from

@@ -5,6 +5,7 @@ use dialog_search_tree::ContentAddressedStorage as NodeStorage;
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::TryStreamExt;
 
+use crate::history::VersionExt as _;
 use crate::tree::ArtifactTreeExt as _;
 use crate::tree::{ArtifactTree, TreeStorageBridge};
 use crate::Value;

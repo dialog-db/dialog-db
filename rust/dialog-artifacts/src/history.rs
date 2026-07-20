@@ -19,20 +19,21 @@
 //!   [`History`] index, determining whether two claims on the same
 //!   `(entity, attribute)` are causally ordered or concurrent.
 
-mod edition;
-pub use edition::*;
 
-mod origin;
-pub use origin::*;
 
-mod version;
-pub use version::*;
 
+
+// The identity and clock half of version control lives in dialog-capability
+// (Revision's fields are built from it, and dialog-artifacts depends on that
+// crate). Re-exported here so this module remains the single import site.
+pub use dialog_capability::history::{
+    Authority, Context, EDITION_LENGTH, Edition, HistoryError, Issuer, ORIGIN_LENGTH, Origin,
+    Signature,
+    VERSION_LENGTH, Version, ed25519_key_of, verify_issuer_signature,
+};
 mod cause;
 pub use cause::*;
 
-mod principal;
-pub use principal::*;
 
 mod revision;
 pub use revision::*;
@@ -84,3 +85,31 @@ pub const REVISION_ATTRIBUTE: &str = "dialog.db/revision";
 
 #[cfg(test)]
 mod tests;
+
+/// [`Version`] behaviour that needs an [`Entity`](crate::Entity), which lives
+/// in this crate rather than in `dialog-capability`.
+pub trait VersionExt {
+    /// The content-derived entity naming the revision this version
+    /// identifies. Any replica that knows the version derives the same
+    /// entity, so metadata can be attached to (or queried from) a revision
+    /// without holding it.
+    fn entity(&self) -> crate::Entity;
+}
+
+impl VersionExt for Version {
+    fn entity(&self) -> crate::Entity {
+        self.entity_did()
+            .parse()
+            .expect("a did:key URI formed from a 32-byte hash is always a valid entity")
+    }
+}
+
+impl From<HistoryError> for crate::DialogArtifactsError {
+    fn from(error: HistoryError) -> Self {
+        match error {
+            HistoryError::InvalidSignature(message) => Self::InvalidSignature(message),
+            HistoryError::IncompleteHistory(message) => Self::IncompleteHistory(message),
+            HistoryError::InvalidReference(message) => Self::InvalidKey(message),
+        }
+    }
+}

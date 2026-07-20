@@ -59,7 +59,7 @@ impl Context {
     /// its parents' ancestries.
     pub fn merge(&mut self, other: &Context) {
         for (origin, edition) in &other.0 {
-            let entry = self.0.entry(origin.clone()).or_insert(*edition);
+            let entry = self.0.entry(*origin).or_insert(*edition);
             if *edition > *entry {
                 *entry = *edition;
             }

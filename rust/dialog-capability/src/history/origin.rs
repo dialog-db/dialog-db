@@ -1,8 +1,8 @@
 use dialog_common::Blake3Hash;
 
 /// Blake3 of `bytes`, the content reference every derivation here uses.
-fn make_reference<B: AsRef<[u8]>>(bytes: B) -> Blake3Hash {
-    Blake3Hash::hash(bytes.as_ref())
+fn make_reference<B: AsRef<[u8]>>(bytes: B) -> [u8; 32] {
+    *Blake3Hash::hash(bytes.as_ref()).as_bytes()
 }
 
 use std::fmt::{self, Display};
@@ -28,6 +28,7 @@ use super::Issuer;
 /// own issuer key.
 #[derive(
     Clone,
+    Copy,
     PartialEq,
     Eq,
     PartialOrd,
@@ -40,7 +41,7 @@ use super::Issuer;
     rkyv::Deserialize,
 )]
 #[repr(transparent)]
-pub struct Origin(pub Blake3Hash);
+pub struct Origin(pub [u8; 32]);
 
 /// The byte width of an [`Origin`] in key encodings
 pub const ORIGIN_LENGTH: usize = 32;
@@ -79,20 +80,20 @@ impl Origin {
 
     /// The byte representation of this [`Origin`], suitable for use as a key
     /// component
-    pub fn key_bytes(&self) -> &Blake3Hash {
+    pub fn key_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
 
-impl From<Blake3Hash> for Origin {
-    fn from(value: Blake3Hash) -> Self {
+impl From<[u8; 32]> for Origin {
+    fn from(value: [u8; 32]) -> Self {
         Self(value)
     }
 }
 
 impl Display for Origin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.as_ref().to_base58())
+        write!(f, "{}", self.0.to_base58())
     }
 }
 

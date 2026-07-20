@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::history::VersionExt as _;
 use crate::{
     Artifact, Attribute, AttributeKey, Datum, DialogArtifactsError, Entity, EntityKey,
     FromKey as _, Key, State, Value,
@@ -123,7 +124,8 @@ impl RevisionRecord {
                 "Revision record derives version {derived} but was recorded at {version}"
             )));
         }
-        verify_issuer_signature(&self.issuer, &self.payload()?, &self.signature)
+        verify_issuer_signature(&self.issuer, &self.payload()?, &self.signature)?;
+        Ok(())
     }
 
     /// The fact carrying this record: an [`Artifact`] on the revision
