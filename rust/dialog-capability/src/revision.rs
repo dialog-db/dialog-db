@@ -7,7 +7,6 @@
 //! `RevisionRecord` lives in `dialog-repository` as `RevisionExt`, because
 //! those types sit above this crate.
 
-use std::collections::HashSet;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
 use base58::ToBase58;
@@ -83,30 +82,39 @@ impl From<TreeReference> for TreeHash {
 /// edition but different origins are concurrent by inspection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Revision {
-    /// DID of the repository this revision belongs to.
-    pub subject: Did,
-
-    /// DID of the operator (ephemeral session key) that created this revision.
-    pub issuer: Did,
-
-    /// DID of the profile (long-lived key) that authorized this revision.
-    pub authority: Did,
-
-    /// Name of the branch this revision was minted on. Part of the
-    /// revision's [`Origin`] scope: a branch head is an independent
-    /// sequential actor, so two branches advanced by the same issuer must
-    /// not share an origin — otherwise they could mint colliding versions.
+    /// The content-derived identifier of the branch this revision was
+    /// minted on: the repository schema's branch entity URI, folding the
+    /// profile, the repository subject, and the branch name into one
+    /// opaque hash. This and the issuer are the head's whole identity —
+    /// the origin derives from exactly the two — so the head carries
+    /// neither the repository DID nor the profile DID (the branch
+    /// identifier already commits to both, and the in-tree revision
+    /// record carries the attribution readably).
+    ///
+    /// Opaque by design, never the branch name: the name is whatever
+    /// someone privately called their branch and no peer needs it, so it
+    /// does not travel on published heads. (A guessable name is still
+    /// enumerable from the hash by anyone holding the public DIDs —
+    /// opacity hides casual exposure, not a determined probe.)
     #[serde(default)]
     pub branch: String,
+
+    /// DID of the operator (ephemeral session key) that created this
+    /// revision. A branch identifier is shared by every session advancing
+    /// the branch, but an origin must identify a single sequential actor,
+    /// so the issuer disambiguates — and folding it into the origin is
+    /// also what stops a hostile issuer from minting into anyone else's
+    /// origin: an origin is never carried, always recomputed from these
+    /// signed fields.
+    pub issuer: Did,
 
     /// Root of the search tree at this revision.
     pub tree: TreeReference,
 
-    /// Parent tree roots this revision is based on. Empty for the first revision.
-    pub cause: HashSet<TreeReference>,
-
-    /// Causal depth of this revision: `max(cause editions) + 1`, or zero for
-    /// the first revision. Isomorphic to a Lamport timestamp.
+    /// Causal depth of this revision: `max(edition of every revision this
+    /// one builds on) + 1`, or zero for the first revision. Isomorphic to
+    /// a Lamport timestamp. The DAG edges themselves live in the in-tree
+    /// revision record (`RevisionRecord::parents`), not on the head.
     pub edition: Edition,
 
     /// The causal context (per-origin watermark) of this revision's
@@ -136,20 +144,11 @@ pub struct Revision {
 impl Revision {
     /// Build the first revision of a branch, with no causal ancestor and
     /// the genesis edition.
-    pub fn new(
-        tree: TreeReference,
-        subject: Did,
-        branch: impl Into<String>,
-        issuer: Did,
-        authority: Did,
-    ) -> Self {
+    pub fn new(tree: TreeReference, branch: impl Into<String>, issuer: Did) -> Self {
         Self {
-            subject,
-            issuer,
-            authority,
             branch: branch.into(),
+            issuer,
             tree,
-            cause: HashSet::new(),
             edition: Edition::GENESIS,
             context: None,
             signature: Vec::new(),
@@ -159,30 +158,21 @@ impl Revision {
     /// Build the revision that follows `self`, advancing the edition.
     ///
     /// Whoever advances a revision has, by construction, seen it, so the new
-    /// edition is `self + 1` no matter which issuer commits. The previous
-    /// revision's tree root is recorded in `cause`.
+    /// edition is `self + 1` no matter which issuer commits. The DAG edge to
+    /// the previous revision is recorded in the in-tree revision record, not
+    /// on the head.
     ///
-    /// The subject is the minting branch's repository, passed explicitly
+    /// The branch identifier is the minting branch's, passed explicitly
     /// rather than inherited from `self`: a branch may have adopted a head
-    /// minted in a *different* repository (a fast-forward pull from a
-    /// foreign subject), and commits on top of it belong to this branch's
-    /// lineage scope, not the foreign one — otherwise the minted version
-    /// would disagree with the version its own data was tagged with.
-    pub fn advance(
-        &self,
-        tree: TreeReference,
-        subject: Did,
-        branch: impl Into<String>,
-        issuer: Did,
-        authority: Did,
-    ) -> Self {
+    /// minted on a *different* branch or repository (a fast-forward pull),
+    /// and commits on top of it belong to this branch's scope, not the
+    /// foreign one — otherwise the minted version would disagree with the
+    /// version its own data was tagged with.
+    pub fn advance(&self, tree: TreeReference, branch: impl Into<String>, issuer: Did) -> Self {
         Self {
-            subject,
-            issuer,
-            authority,
             branch: branch.into(),
+            issuer,
             tree,
-            cause: HashSet::from([self.tree.clone()]),
             edition: self.edition.successor(),
             context: None,
             signature: Vec::new(),
@@ -192,59 +182,50 @@ impl Revision {
     /// Build a merge revision combining `self` with `upstream`.
     ///
     /// The merge has seen both lineages, so its edition advances past both:
-    /// `max(self, upstream) + 1`. The upstream tree is recorded as the
-    /// causal ancestor; the branch's own prior tree is dropped from `cause`
-    /// because it is now subsumed by the merged tree.
+    /// `max(self, upstream) + 1`. Both DAG edges are recorded in the
+    /// in-tree revision record, not on the head.
     ///
-    /// As with [`Revision::advance`], the subject is the minting branch's
-    /// repository, passed explicitly: either side of the merge may carry a
-    /// foreign subject adopted through an earlier pull.
+    /// As with [`Revision::advance`], the branch identifier is the minting
+    /// branch's, passed explicitly: either side of the merge may carry a
+    /// foreign scope adopted through an earlier pull.
     pub fn merge(
         &self,
         upstream: &Revision,
         tree: TreeReference,
-        subject: Did,
         branch: impl Into<String>,
         issuer: Did,
-        authority: Did,
     ) -> Self {
         Self {
-            subject,
-            issuer,
-            authority,
             branch: branch.into(),
+            issuer,
             tree,
-            cause: HashSet::from([upstream.tree.clone()]),
             edition: self.edition.max(upstream.edition).successor(),
             context: None,
             signature: Vec::new(),
         }
     }
 
-    /// The [`Version`] identifying this revision: its origin paired with its
-    /// edition. Versions sort by causal depth, and two versions with the
-    /// same edition but different origins identify concurrent revisions.
-    /// The [`Version`] identifying this revision under `origin`: the origin
-    /// paired with this revision's edition. Versions sort by causal depth,
-    /// and two versions with the same edition but different origins identify
-    /// concurrent revisions.
-    ///
-    /// The origin is passed in rather than derived here: deriving it needs
-    /// the repository schema's branch entity, which lives above this crate
-    /// (see `RevisionExt::origin` in `dialog-repository`).
-    pub fn version_with(&self, origin: Origin) -> Version {
-        Version::new(origin, self.edition)
+    /// The [`Origin`] of this revision: the branch-scoped identity of its
+    /// issuer, derived from the head's own two identity fields.
+    pub fn origin(&self) -> Origin {
+        Origin::derive_from_identifiers([self.branch.as_str(), self.issuer.as_str()])
+    }
+
+    /// The [`Version`] identifying this revision: its origin paired with
+    /// its edition. Versions sort by causal depth, and two versions with
+    /// the same edition but different origins identify concurrent
+    /// revisions.
+    pub fn version(&self) -> Version {
+        Version::new(self.origin(), self.edition)
     }
 
     /// The canonical signing payload of this revision: every field except
     /// the signature, deterministically encoded. Variable-width fields are
-    /// length-prefixed to keep the encoding injective; the unordered
-    /// `cause` set is sorted.
+    /// length-prefixed to keep the encoding injective.
     ///
     /// ```text
-    /// (length (8, big-endian) ++ UTF-8) for subject, issuer, authority, branch
+    /// (length (8, big-endian) ++ UTF-8) for branch, issuer
     /// tree (32)
-    /// cause count (8, big-endian) ++ roots (32 each, sorted)
     /// edition (8, big-endian)
     /// context, when present:
     ///     0x01 ++ entry count (8, big-endian)
@@ -258,24 +239,12 @@ impl Revision {
     /// length for any fixed prefix, so the encoding stays injective: a
     /// signature over one can never validate the other.
     pub fn payload(&self) -> Vec<u8> {
-        let mut cause: Vec<&TreeReference> = self.cause.iter().collect();
-        cause.sort_by(|left, right| left.hash().cmp(right.hash()));
-
         let mut bytes = Vec::new();
-        for field in [
-            self.subject.as_str(),
-            self.issuer.as_str(),
-            self.authority.as_str(),
-            self.branch.as_str(),
-        ] {
+        for field in [self.branch.as_str(), self.issuer.as_str()] {
             bytes.extend_from_slice(&(field.len() as u64).to_be_bytes());
             bytes.extend_from_slice(field.as_bytes());
         }
         bytes.extend_from_slice(self.tree.hash());
-        bytes.extend_from_slice(&(cause.len() as u64).to_be_bytes());
-        for tree in cause {
-            bytes.extend_from_slice(tree.hash());
-        }
         bytes.extend_from_slice(&self.edition.key_bytes());
         if let Some(context) = &self.context {
             bytes.push(0x01);
@@ -366,13 +335,7 @@ mod tests {
         edit: impl FnOnce(&mut Revision),
     ) -> Revision {
         let did = did_of(issuer);
-        let mut revision = Revision::new(
-            TreeReference::from([7u8; 32]),
-            "did:key:zSubject".parse().unwrap(),
-            "main",
-            did.clone(),
-            did,
-        );
+        let mut revision = Revision::new(TreeReference::from([7u8; 32]), "branch:opaque", did);
         let mut context = Context::new();
         context.record(Version::new(Origin::from([1u8; 32]), Edition::new(4)));
         revision.context = Some(context);

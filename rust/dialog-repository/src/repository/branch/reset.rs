@@ -57,7 +57,6 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use std::collections::HashSet;
 
     use dialog_artifacts::history::Edition;
     use dialog_capability::Subject;
@@ -75,12 +74,9 @@ mod tests {
         assert!(branch.revision().is_none());
 
         let revision = Revision {
-            subject: subject.did().clone(),
-            issuer: subject.did().clone(),
-            authority: subject.did().clone(),
             branch: "main".into(),
+            issuer: subject.did().clone(),
             tree: TreeReference::from(EMPTY_TREE_HASH),
-            cause: HashSet::new(),
             edition: Edition::GENESIS,
             context: None,
             signature: Vec::new(),

@@ -1,5 +1,4 @@
 use crate::RevisionExt as _;
-use crate::schema;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
@@ -121,11 +120,7 @@ where
             .as_ref()
             .map(|base| base.edition.successor())
             .unwrap_or(Edition::GENESIS);
-        let lineage = schema::Branch::new(
-            schema::Origin::new(profile.clone(), branch.of().clone()),
-            branch.name(),
-        )
-        .this;
+        let lineage = crate::lineage_of(branch.of(), &profile, branch.name());
         let origin = crate::origin_of(&lineage, &issuer);
         let version = Version::new(origin, edition);
 
@@ -236,27 +231,15 @@ where
         };
 
         let mut revision = match base_revision {
-            Some(base) => base.advance(
-                TreeReference::default(),
-                branch.of().clone(),
-                branch.name(),
-                issuer,
-                profile,
-            ),
-            None => Revision::new(
-                TreeReference::default(),
-                branch.of().clone(),
-                branch.name(),
-                issuer,
-                profile,
-            ),
+            Some(base) => base.advance(TreeReference::default(), lineage.as_str(), issuer),
+            None => Revision::new(TreeReference::default(), lineage.as_str(), issuer),
         };
         debug_assert_eq!(revision.version(), version);
         // Sign the record before it enters the tree: the issuer's signature
         // covers everything the revision states about itself, and readers
         // (`TreeHistory::revision_record`) refuse records that don't verify
         // against the slot they were found at.
-        let mut record = revision.record(parent.into_iter().collect(), skips);
+        let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
         debug_assert_eq!(record.version(), version);
         tree.record(&mut store, &mut delta, record.entries()?)
@@ -568,7 +551,7 @@ mod history_tests {
         assert_eq!(record.lineage, second.lineage());
         assert_eq!(record.parents, vec![first.version()]);
         assert_eq!(record.issuer, second.issuer.to_string());
-        assert_eq!(record.authority, second.authority.to_string());
+        assert_eq!(record.authority, profile.did().to_string());
         assert_eq!(
             common_ancestor(&second.version(), &first.version(), &history).await?,
             Some(first.version())

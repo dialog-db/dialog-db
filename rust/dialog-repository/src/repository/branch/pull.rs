@@ -542,15 +542,15 @@ impl<'a> Pull<'a> {
                 }
 
                 let authority = Identify.perform(env).await?;
+                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    branch.of().clone(),
-                    branch.name(),
+                    lineage.as_str(),
                     authority.did(),
-                    authority.profile().clone(),
                 );
                 let mut record = revision.record(
+                    authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
                 );
@@ -694,15 +694,15 @@ impl<'a> Pull<'a> {
                 // merged ancestry is both parents', and both watermarks
                 // are in hand.
                 let authority = Identify.perform(env).await?;
+                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    branch.of().clone(),
-                    branch.name(),
+                    lineage.as_str(),
                     authority.did(),
-                    authority.profile().clone(),
                 );
                 let mut record = revision.record(
+                    authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
                 );
@@ -833,13 +833,12 @@ impl<'a> Pull<'a> {
             // root is replaced once those records are in the tree.
             Some(local) => {
                 let authority = Identify.perform(env).await?;
+                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    branch.of().clone(),
-                    branch.name(),
+                    lineage.as_str(),
                     authority.did(),
-                    authority.profile().clone(),
                 );
                 // A merge records no skip table: a skip chain must never
                 // cross a revision with more than one parent, or leaping
@@ -848,6 +847,7 @@ impl<'a> Pull<'a> {
                 // record before it enters the tree, and the head once the
                 // merged root is final — same order as `Commit`.
                 let mut record = revision.record(
+                    authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
                 );
@@ -1974,7 +1974,6 @@ mod history_tests {
         use crate::{Revision, TreeReference};
         use dialog_artifacts::DialogArtifactsError;
         use dialog_artifacts::history::Edition;
-        use std::collections::HashSet;
 
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
@@ -1984,12 +1983,9 @@ mod history_tests {
         // signed by that issuer's key.
         let evil = repo.branch("evil").open().perform(&operator).await?;
         let forged = Revision {
-            subject: evil.of().clone(),
-            issuer: operator.did(),
-            authority: profile.did(),
             branch: "evil".into(),
+            issuer: operator.did(),
             tree: TreeReference::from([9u8; 32]),
-            cause: HashSet::new(),
             edition: Edition::GENESIS,
             context: None,
             signature: Vec::new(),

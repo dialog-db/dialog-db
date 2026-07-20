@@ -15,7 +15,7 @@
 //!     read_amplification -- --ignored --nocapture
 //! ```
 
-use crate::RevisionExt as _;
+use std::env;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -343,14 +343,28 @@ async fn measure_shape(depth: usize) -> Result<()> {
 #[dialog_common::test]
 #[ignore]
 async fn read_amplification_by_depth() -> Result<()> {
+    // The in-memory backend retains every block of every commit (content
+    // addressing never collects), so the deepest fixture holds gigabytes:
+    // depth 10_000 needs a machine with headroom or it dies by OOM kill.
+    // `DIALOG_RA_MAX_DEPTH` caps the sweep (e.g. `=1000`); reads per
+    // scenario are depth-independent by design, so the smaller depths
+    // measure the same table.
+    let cap: usize = env::var("DIALOG_RA_MAX_DEPTH")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10_000);
+    let depths: Vec<usize> = [100, 1_000, 10_000]
+        .into_iter()
+        .filter(|depth| *depth <= cap)
+        .collect();
     let mut samples = Vec::new();
-    for depth in [100, 1_000, 10_000] {
-        measure_depth(depth, &mut samples).await?;
+    for depth in &depths {
+        measure_depth(*depth, &mut samples).await?;
     }
-    for depth in [1_000, 10_000] {
-        measure_triangle(depth, &mut samples).await?;
+    for depth in depths.iter().filter(|depth| **depth >= 1_000) {
+        measure_triangle(*depth, &mut samples).await?;
     }
-    measure_shape(10_000).await?;
+    measure_shape(*depths.last().expect("at least one depth")).await?;
 
     println!("| depth  | scenario                           | block reads | effects | wall ms  |");
     println!("|--------|------------------------------------|-------------|---------|----------|");
