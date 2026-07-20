@@ -87,7 +87,6 @@ where
     }
 }
 
-<<<<<<< ours
 /// Writes a spilling value's raw bytes as a content-addressed block into the
 /// raw archive block `store`, keyed by the value's 32-byte reference. A no-op
 /// for a value that stays inline (its bytes live in the key). Idempotent:
@@ -237,7 +236,8 @@ fn prefix_upper(prefix: &str) -> Vec<u8> {
     let mut bytes = prefix.as_bytes().to_vec();
     bytes.extend(repeat_n(0xFEu8, PREFIX_FILLER));
     bytes
-=======
+}
+
 /// Layers a [`Delta`]'s buffered nodes over a backing store for reads, so
 /// that a tree persisted into the delta but not yet flushed remains
 /// traversable. This lets a caller keep editing a tree across multiple
@@ -279,20 +279,6 @@ where
         }
         self.store.get(key.as_bytes()).await
     }
-}
-
-/// A fixed-width key segment bounding a string prefix: the prefix's
-/// raw bytes (capped at `head` — the order-preserving span of the
-/// segment) followed by `fill`. With `fill = 0x00` this is the
-/// smallest segment any matching value can have, with `fill = 0xFF`
-/// the largest, so the pair brackets the prefix's key range.
-fn prefix_segment<const N: usize>(prefix: &str, head: usize, fill: u8) -> [u8; N] {
-    let mut segment = [fill; N];
-    let raw = prefix.as_bytes();
-    let take = raw.len().min(head).min(N);
-    segment[..take].copy_from_slice(&raw[..take]);
-    segment
->>>>>>> theirs
 }
 
 /// Tighten a scan's `(start, end)` key pair with the selector's
@@ -599,14 +585,11 @@ impl ArtifactTreeExt for ArtifactTree {
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
 
-<<<<<<< ours
                     // Persist a spilling value's bytes as a content-addressed
                     // block before recording the fact; the key holds only the
                     // 32-byte reference to it.
                     store_spilled_value(store, &artifact).await?;
 
-                    let datum = Datum::for_artifact(&artifact);
-=======
                     // A version-tagged assertion records its history: an
                     // assertion is purely additive, so it supersedes nothing.
                     if let Some(version) = &version {
@@ -622,9 +605,8 @@ impl ArtifactTreeExt for ArtifactTree {
                         history_entries.push(record.into_entry(version));
                     }
 
-                    let mut datum = Datum::from(artifact);
+                    let mut datum = Datum::for_artifact(&artifact);
                     datum.version = version;
->>>>>>> theirs
                     let added = State::Added(datum);
                     transient = transient
                         .insert(entity_key.into_key(), added.clone(), &storage)
@@ -668,7 +650,6 @@ impl ArtifactTreeExt for ArtifactTree {
                         tokio::pin!(search_stream);
                         while let Some(candidate) = search_stream.next().await {
                             let candidate = candidate?;
-<<<<<<< ours
                             if let State::Added(current_element) = &candidate.value {
                                 // A prior with a spilled value carries only a
                                 // reference in its key; fetch the block so the
@@ -693,17 +674,11 @@ impl ArtifactTreeExt for ArtifactTree {
                                 if current.is == artifact.is {
                                     found_same_value = true;
                                 } else {
-                                    superseded_keys.push(candidate.key);
-=======
-                            if let State::Added(current_element) = candidate.value {
-                                if current_element.value_type == replace_type
-                                    && current_element.value == replace_value
-                                {
-                                    found_same_value = true;
-                                } else {
-                                    superseded_keys.push(Key::from(candidate.key));
+                                    // The superseded claim's version feeds the
+                                    // replacement record's cause, so a reader
+                                    // can order the two without reading values.
                                     superseded_versions.extend(current_element.version);
->>>>>>> theirs
+                                    superseded_keys.push(candidate.key);
                                 }
                             }
                         }
@@ -759,17 +734,13 @@ impl ArtifactTreeExt for ArtifactTree {
                     let entity_key = EntityKey::from(&artifact);
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
-<<<<<<< ours
 
                     // Persist a spilling value's bytes as a content-addressed
                     // block before recording the fact.
                     store_spilled_value(store, &artifact).await?;
 
-                    let datum = Datum::for_artifact(&artifact);
-=======
-                    let mut datum = Datum::from(artifact);
+                    let mut datum = Datum::for_artifact(&artifact);
                     datum.version = version;
->>>>>>> theirs
                     let added = State::Added(datum);
                     transient = transient
                         .insert(entity_key.into_key(), added.clone(), &storage)
@@ -787,42 +758,6 @@ impl ArtifactTreeExt for ArtifactTree {
                     let value_key = ValueKey::from_key(&entity_key);
                     let attribute_key = AttributeKey::from_key(&entity_key);
 
-<<<<<<< ours
-                    // Was this exact fact committed *before* this batch? Read the
-                    // value key (the fact identity) from the base snapshot, not
-                    // the transient tree — so an assert earlier in this same
-                    // batch doesn't count as a prior.
-                    let committed = matches!(
-                        base.get(&value_key.clone().into_key(), &storage).await?,
-                        Some(State::Added(_))
-                    );
-
-                    if committed {
-                        // Retracting a durable fact: replace it with a `Removed`
-                        // tombstone across all three orderings so the removal
-                        // survives a merge and beats a stale remote assert.
-                        let removed: State<Datum> = State::Removed;
-                        transient = transient
-                            .insert(entity_key.into_key(), removed.clone(), &storage)
-                            .await?;
-                        transient = transient
-                            .insert(attribute_key.into_key(), removed.clone(), &storage)
-                            .await?;
-                        transient = transient
-                            .insert(value_key.into_key(), removed, &storage)
-                            .await?;
-                    } else {
-                        // No committed prior: the fact only exists (if at all) as
-                        // an assert earlier in this batch. Delete the keys so the
-                        // assert and retract cancel to nothing — no tombstone,
-                        // no tree churn. Deleting an absent key is a no-op, so a
-                        // retract of a fact that never existed changes nothing.
-                        transient = transient.delete(&entity_key.into_key(), &storage).await?;
-                        transient = transient
-                            .delete(&attribute_key.into_key(), &storage)
-                            .await?;
-                        transient = transient.delete(&value_key.into_key(), &storage).await?;
-=======
                     // A version-tagged retraction records its history: its
                     // cause is the version of the assertion it withdraws.
                     // An assertion made earlier in this same batch carries
@@ -849,7 +784,6 @@ impl ArtifactTreeExt for ArtifactTree {
                             history_entries.push(coverage);
                         }
                         history_entries.push(record.into_entry(version));
->>>>>>> theirs
                     }
 
                     // Observed-remove semantics: retraction deletes the
