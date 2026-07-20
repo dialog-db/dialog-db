@@ -9,8 +9,15 @@
 //! - **entity, attribute**: `0x00`-escaped, `0x00`-terminated byte strings.
 //!   Lossless (no 32-byte truncation-plus-hash) and variable-length.
 //! - **value type**: one byte.
-//! - **value reference**: 32 bytes (kept for now; the inline order-preserving
-//!   value replaces it in a later step).
+//! - **value slot**: the value's order-preserving encoding (fixed-width for
+//!   numerics, escaped/terminated for byte strings). A value whose encoding
+//!   exceeds the inline threshold spills: its slot carries the encoding of
+//!   its first `spill_prefix` raw bytes — sorting the key INTO its type band
+//!   next to inline values — and the 32-byte whole-value hash is appended at
+//!   the absolute end of the key. The spill signal is exactly that
+//!   remainder: zero bytes after the final component means inline, 32 means
+//!   spilled. The trailing hash keeps distinct large values distinct
+//!   (cardinality-many) and addresses the archive block.
 //!
 //! Because every component is self-delimiting, the components concatenate into
 //! a key and a reader splits them back out by scanning, with no length table
@@ -22,46 +29,59 @@ use std::borrow::Cow;
 use crate::history::VERSION_LENGTH;
 use crate::{
     ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, COVERAGE_KEY_TAG, ENTITY_KEY_TAG, HISTORY_KEY_TAG,
-    VALUE_KEY_TAG, ValueDataType, decode_bytes, decode_bytes_cow, encode_bytes,
+    VALUE_KEY_TAG, ValueDataType, decode_bytes_cow, encode_bytes,
 };
 
 /// The length of a spilled value's content-addressed reference.
 pub const VALUE_REFERENCE_LENGTH: usize = 32;
 
-/// The high bit of a key's value-type byte, marking that the value SPILLED:
-/// its payload is a [`VALUE_REFERENCE_LENGTH`]-byte reference rather than the
-/// inline order-preserving value. The low seven bits still hold the
-/// [`ValueDataType`] discriminant (which is `0..=8`), so a reader knows a
-/// spilled value's type without touching the blob. Spilled values are
-/// equality-only: they only occur above the tree's inline threshold, where
-/// range queries are meaningless, so the broken type-band ordering (all
-/// spilled tails sort above all inline ones) costs nothing.
-pub(crate) const SPILL_FLAG: u8 = 0x80;
-
-/// The payload a key carries for its value: either the inline
-/// order-preserving encoding (range-queryable) or a spilled reference
-/// (equality-only). Which one is chosen is the caller's inline-threshold
-/// decision; the built type byte records it via [`SPILL_FLAG`].
+/// The payload a key carries for its value.
+///
+/// An inline payload is the value's complete order-preserving encoding. A
+/// spilled payload (a value whose encoding exceeds the inline threshold)
+/// carries the order-preserving encoding of the value's first
+/// `spill_prefix` RAW bytes in the value slot — encoded exactly like an
+/// inline value, so spilled values sort INTO their type band next to inline
+/// ones — plus the 32-byte whole-value hash, which the key builder appends
+/// at the ABSOLUTE END of the key (after the ordering's last component).
+///
+/// The trailing hash is what keeps distinct large values distinct keys
+/// (cardinality-many: two values sharing their first `spill_prefix` bytes
+/// must not collapse), and it is the block address for loading the value
+/// from the archive. There is no spill flag anywhere: a key is spilled
+/// exactly when 32 bytes remain after its final component parses (the final
+/// component's own terminator is the signal).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValuePayload {
     /// The value's order-preserving bytes, inline in the key.
     Inline(Vec<u8>),
-    /// A content-addressed reference to a spilled value.
-    Reference(Vec<u8>),
+    /// A spilled value: the encoded key-prefix of the value (self-delimiting,
+    /// exactly like an inline payload) and the whole-value hash appended at
+    /// the key's end.
+    Spilled {
+        /// Order-preserving encoding of the value's first `spill_prefix` raw
+        /// bytes, including its terminator.
+        prefix: Vec<u8>,
+        /// The 32-byte whole-value hash (the archive block address).
+        hash: Vec<u8>,
+    },
 }
 
 impl ValuePayload {
-    /// The raw payload bytes (inline encoding or reference), for the columnar
-    /// value column and for equality comparison.
-    pub fn as_bytes(&self) -> &[u8] {
+    /// The bytes occupying the value SLOT of the key: the full inline
+    /// encoding, or the spilled value's encoded prefix. The trailing hash of
+    /// a spilled payload is NOT part of the slot; it sits at the key's end.
+    pub fn slot_bytes(&self) -> &[u8] {
         match self {
-            ValuePayload::Inline(bytes) | ValuePayload::Reference(bytes) => bytes,
+            ValuePayload::Inline(bytes) => bytes,
+            ValuePayload::Spilled { prefix, .. } => prefix,
         }
     }
 
-    /// Whether this payload spilled (is a reference).
+    /// Whether this payload spilled (the key carries a prefix + trailing
+    /// whole-value hash instead of the complete encoding).
     pub fn is_reference(&self) -> bool {
-        matches!(self, ValuePayload::Reference(_))
+        matches!(self, ValuePayload::Spilled { .. })
     }
 }
 
@@ -134,11 +154,16 @@ impl KeyParts {
             entity: vec![MAX_FILLER_BYTE; MAX_FILLER],
             attribute: vec![MAX_FILLER_BYTE; MAX_FILLER],
             value_type: ValueDataType::max(),
-            // The spilled band (the `SPILL_FLAG` type byte) sorts above every
-            // inline value, and an all-`0xFF` reference is the top of it, so
-            // this dominates every value of the maximum type. `set_value_*`
-            // replaces it with a real payload; this is only the unset bound.
-            value: ValuePayload::Reference(vec![0xFFu8; VALUE_REFERENCE_LENGTH]),
+            // A parseable payload dominating every real value of the maximum
+            // type: `MAX_FILLER_BYTE` exceeds every UTF-8 byte, and real
+            // symbol names are UTF-8. (Like the entity/attribute fillers this
+            // is a bounded synthetic maximum; `set_value_*` replaces it with a
+            // real payload, this is only the unset bound.)
+            value: ValuePayload::Inline({
+                let mut payload = Vec::new();
+                encode_bytes(&[MAX_FILLER_BYTE; MAX_FILLER], &mut payload);
+                payload
+            }),
             version: None,
         }
     }
@@ -194,67 +219,54 @@ pub fn field(bytes: &[u8], _tag: u8, which: Field) -> &[u8] {
     match split_components(bytes) {
         Some(slices) => slices
             .get(index)
-            .map(|s| strip_terminator(s))
+            .map(|s| {
+                // The LAST component of a spilled key carries the trailing
+                // whole-value hash folded into its slice; take only the
+                // terminated segment.
+                let len = terminated_len(s, 0).unwrap_or(s.len());
+                strip_terminator(&s[..len])
+            })
             .unwrap_or(&[]),
         None => &[],
     }
 }
 
-/// The index of the value type-byte component in a split key, by tag.
-fn value_type_index(tag: u8) -> Option<usize> {
-    match tag {
-        ENTITY_KEY_TAG | ATTRIBUTE_KEY_TAG => Some(3),
-        VALUE_KEY_TAG => Some(1),
-        _ => None,
-    }
-}
-
-/// The value type of a key for the given ordering (with the spill flag masked
-/// off), or the minimum when the key does not split cleanly.
+/// The value type of a key for the given ordering, or the minimum when the
+/// key does not parse.
 pub fn value_type(bytes: &[u8], _tag: u8) -> ValueDataType {
-    let Some(index) = bytes.first().copied().and_then(value_type_index) else {
-        return ValueDataType::min();
-    };
-    match split_components(bytes) {
-        Some(slices) => slices
-            .get(index)
-            .and_then(|s| s.first())
-            .map(|&b| ValueDataType::from(b & !SPILL_FLAG))
-            .unwrap_or_else(ValueDataType::min),
-        None => ValueDataType::min(),
-    }
+    parse_key_ref(bytes)
+        .map(|parts| parts.value_type)
+        .unwrap_or_else(ValueDataType::min)
 }
 
-/// Whether a key's value spilled (its payload is a reference, not an inline
-/// order-preserving value).
+/// Whether a key's value spilled (the key carries the value's encoded prefix
+/// in the slot plus a trailing whole-value hash).
 pub fn value_is_spilled(bytes: &[u8], _tag: u8) -> bool {
-    let Some(index) = bytes.first().copied().and_then(value_type_index) else {
-        return false;
-    };
-    match split_components(bytes) {
-        Some(slices) => slices
-            .get(index)
-            .and_then(|s| s.first())
-            .map(|&b| b & SPILL_FLAG != 0)
-            .unwrap_or(false),
-        None => false,
+    parse_key_ref(bytes)
+        .map(|parts| parts.value.is_reference())
+        .unwrap_or(false)
+}
+
+/// Borrows the bytes occupying a key's value SLOT (the full inline encoding,
+/// or a spilled value's encoded prefix), or an empty slice when the key does
+/// not parse. A spilled key's trailing hash is available via
+/// [`value_spill_hash`].
+pub fn value_payload(bytes: &[u8], _tag: u8) -> &[u8] {
+    match parse_key_ref(bytes) {
+        Some(parts) => match parts.value {
+            ValueRef::Inline(payload) => payload,
+            ValueRef::Spilled { prefix, .. } => prefix,
+        },
+        None => &[],
     }
 }
 
-/// Borrows a key's value payload bytes (the inline order-preserving value, or
-/// the spilled reference), or an empty slice when the key does not split
-/// cleanly. The type byte (via [`value_type`]/[`value_is_spilled`]) says how
-/// to interpret them.
-pub fn value_payload(bytes: &[u8], _tag: u8) -> &[u8] {
-    // The payload sits immediately after the type byte.
-    let index = match bytes.first().copied() {
-        Some(ENTITY_KEY_TAG) | Some(ATTRIBUTE_KEY_TAG) => 4,
-        Some(VALUE_KEY_TAG) => 2,
-        _ => return &[],
-    };
-    match split_components(bytes) {
-        Some(slices) => slices.get(index).copied().unwrap_or(&[]),
-        None => &[],
+/// Borrows the 32-byte whole-value hash trailing a spilled key, or `None` for
+/// an inline (or unparseable) key.
+pub fn value_spill_hash(bytes: &[u8], _tag: u8) -> Option<&[u8]> {
+    match parse_key_ref(bytes)?.value {
+        ValueRef::Inline(_) => None,
+        ValueRef::Spilled { hash, .. } => Some(hash),
     }
 }
 
@@ -267,84 +279,96 @@ fn strip_terminator(segment: &[u8]) -> &[u8] {
     }
 }
 
-/// Writes the value tail: the type byte (with [`SPILL_FLAG`] set when the
-/// payload is a reference) followed by the payload bytes.
+/// Writes the value SLOT: the type byte followed by the slot payload (the
+/// full inline encoding, or a spilled value's encoded prefix — byte-identical
+/// in form, so spilled values sort next to inline ones).
 ///
-/// The tail is self-delimiting for a reader that reads the type byte first:
-/// a spilled payload is a fixed [`VALUE_REFERENCE_LENGTH`] bytes; an inline
-/// payload is the order-preserving value encoding, which is itself
-/// self-delimiting (fixed width for numerics, terminated for strings/bytes).
-/// So the tail may sit in a non-terminal key position (the VAE ordering).
-fn write_value_tail(parts: &KeyParts, out: &mut Vec<u8>) {
-    let mut type_byte: u8 = parts.value_type.into();
-    if parts.value.is_reference() {
-        type_byte |= SPILL_FLAG;
-    }
-    out.push(type_byte);
-    out.extend_from_slice(parts.value.as_bytes());
+/// The slot is self-delimiting for a reader that reads the type byte first:
+/// the payload is an order-preserving value encoding, fixed-width for
+/// numerics and `0x00`-terminated for strings/bytes. So the slot may sit in a
+/// non-terminal key position (the VAE ordering). A spilled value's trailing
+/// hash is NOT written here; [`build_key`] appends it at the key's end.
+fn write_value_slot(parts: &KeyParts, out: &mut Vec<u8>) {
+    out.push(parts.value_type.into());
+    out.extend_from_slice(parts.value.slot_bytes());
 }
 
 /// Builds the key bytes for a given ordering tag from the components, encoding
 /// each in the ordering's byte order.
+///
+/// A spilled value's 32-byte whole-value hash goes at the ABSOLUTE END of the
+/// key, after the ordering's last component: the key parses exactly like an
+/// inline key and the 32-byte remainder after the final component is the
+/// spill signal. Placing it last (rather than beside the value slot) keeps
+/// the ordering's interior components (attribute, entity in VAE) sub-sorting
+/// normally within a shared-prefix cluster; the hash only tie-breaks.
 pub fn build_key(parts: &KeyParts) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(parts.tag);
     match parts.tag {
         ENTITY_KEY_TAG => {
-            // EAV: entity, attribute, value tail
+            // EAV: entity, attribute, value slot
             encode_bytes(&parts.entity, &mut out);
             encode_bytes(&parts.attribute, &mut out);
-            write_value_tail(parts, &mut out);
+            write_value_slot(parts, &mut out);
         }
         ATTRIBUTE_KEY_TAG => {
-            // AEV: attribute, entity, value tail
+            // AEV: attribute, entity, value slot
             encode_bytes(&parts.attribute, &mut out);
             encode_bytes(&parts.entity, &mut out);
-            write_value_tail(parts, &mut out);
+            write_value_slot(parts, &mut out);
         }
         VALUE_KEY_TAG => {
-            // VAE: value tail, attribute, entity. The value tail leads so the
+            // VAE: value slot, attribute, entity. The value slot leads so the
             // ordering sorts by value; it is self-delimiting, so the attribute
             // and entity that follow are still recoverable.
-            write_value_tail(parts, &mut out);
+            write_value_slot(parts, &mut out);
             encode_bytes(&parts.attribute, &mut out);
             encode_bytes(&parts.entity, &mut out);
         }
         HISTORY_KEY_TAG | COVERAGE_KEY_TAG => {
-            // History/coverage: version, then entity, attribute, value tail.
+            // History/coverage: version, then entity, attribute, value slot.
             // The version leads so records sort by the revision that produced
             // them (an ancestor's records always precede a descendant's), which
-            // is what makes "every record since a version" a range scan. Unlike
-            // the pre-M3 fixed-width history key, every field here is lossless,
-            // so a record reconstructs from its key alone.
+            // is what makes "every record since a version" a range scan. It is
+            // written raw: fixed-width and already order-preserving, so it
+            // needs no delimiter. Unlike the pre-M3 fixed-width history key,
+            // every field here is lossless, so a record reconstructs from its
+            // key alone.
             if let Some(version) = &parts.version {
                 out.extend_from_slice(version);
             }
             encode_bytes(&parts.entity, &mut out);
             encode_bytes(&parts.attribute, &mut out);
-            write_value_tail(parts, &mut out);
+            write_value_slot(parts, &mut out);
         }
         _ => {
-            // Unknown/other tags: entity then attribute then value tail, a
+            // Unknown/other tags: entity then attribute then value slot, a
             // safe default that stays self-delimiting.
             encode_bytes(&parts.entity, &mut out);
             encode_bytes(&parts.attribute, &mut out);
-            write_value_tail(parts, &mut out);
+            write_value_slot(parts, &mut out);
         }
+    }
+    if let ValuePayload::Spilled { hash, .. } = &parts.value {
+        out.extend_from_slice(hash);
     }
     out
 }
 
-/// The length of a value payload starting at `at`, given its (possibly
-/// spill-flagged) `type_byte`. A spilled payload is a fixed reference; an
-/// inline payload is self-delimited by the order-preserving value encoding:
+/// The length of a value slot payload starting at `at`, given its `type_byte`.
+/// The payload is self-delimited by the order-preserving value encoding:
 /// numerics are fixed-width and strings/bytes are `0x00`-terminated, mirroring
 /// the [`ordvalue`](crate::artifacts::ordvalue) decoders without allocating.
+/// (A spilled value's slot holds its encoded prefix, delimited identically.)
 fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
-    if type_byte & SPILL_FLAG != 0 {
-        return Some(VALUE_REFERENCE_LENGTH);
+    // An unknown discriminant is corruption: reject the key rather than
+    // guessing a width (`ValueDataType::from` would silently default to
+    // Bytes and misparse the tail).
+    if type_byte > u8::from(ValueDataType::Symbol) {
+        return None;
     }
-    match ValueDataType::from(type_byte & !SPILL_FLAG) {
+    match ValueDataType::from(type_byte) {
         // 128-bit integers: 16 big-endian bytes.
         ValueDataType::UnsignedInt | ValueDataType::SignedInt => Some(16),
         // `f64`: 8 big-endian bytes (the order-preserving `encode_f64`), NOT 16
@@ -404,9 +428,9 @@ pub fn split_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
         }};
     }
 
-    // Push the value tail as two components (type byte, then payload). The
-    // payload length is read from the type byte: a spilled payload is a fixed
-    // reference; an inline payload is self-delimited by its value encoding.
+    // Push the value slot as two components (type byte, then payload). The
+    // payload is self-delimited by its value encoding; a spilled value's slot
+    // holds its encoded prefix, delimited identically.
     macro_rules! push_value_tail {
         () => {{
             let &type_byte = bytes.get(at)?;
@@ -447,100 +471,46 @@ pub fn split_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
         _ => return None,
     }
 
-    if at == bytes.len() { Some(out) } else { None }
+    // A spilled key carries the 32-byte whole-value hash after its final
+    // component (the spill signal is exactly this remainder). Fold it into
+    // the LAST component's slice: arena columns are length-delimited by the
+    // leaf codec (not by terminators), so the fold round-trips byte-exactly,
+    // and the component count stays fixed per schema whether or not the
+    // value spilled.
+    match bytes.len() - at {
+        0 => Some(out),
+        VALUE_REFERENCE_LENGTH => {
+            let last = out.pop()?;
+            let start = bytes.len() - VALUE_REFERENCE_LENGTH - last.len();
+            out.push(&bytes[start..]);
+            Some(out)
+        }
+        _ => None,
+    }
 }
 
-/// Parses key bytes back into components, dispatching on the tag. Returns
-/// `None` on malformed input (missing terminator, short value tail).
+/// Parses key bytes back into owned components, dispatching on the tag.
+/// Returns `None` on malformed input (missing terminator, short value tail).
+///
+/// The owned counterpart of [`parse_key_ref`], implemented on top of it so
+/// the two can never diverge; use `parse_key_ref` on read/scan paths that can
+/// borrow.
 pub fn parse_key(bytes: &[u8]) -> Option<KeyParts> {
-    let (&tag, rest) = bytes.split_first()?;
-
-    // Reads a variable value tail: one (possibly spill-flagged) type byte plus
-    // its payload (inline order-preserving value, or a fixed reference). The
-    // type byte's low seven bits are the `ValueDataType`; its high bit records
-    // whether the payload spilled.
-    fn value_tail(bytes: &[u8]) -> Option<(ValueDataType, ValuePayload, &[u8])> {
-        let (&type_byte, rest) = bytes.split_first()?;
-        let payload_len = value_payload_len(type_byte, bytes, 1)?;
-        let (payload, rest) = rest.split_at_checked(payload_len)?;
-        let value_type = ValueDataType::from(type_byte & !SPILL_FLAG);
-        let value = if type_byte & SPILL_FLAG != 0 {
-            ValuePayload::Reference(payload.to_vec())
-        } else {
-            ValuePayload::Inline(payload.to_vec())
-        };
-        Some((value_type, value, rest))
-    }
-
-    let parts = match tag {
-        ENTITY_KEY_TAG => {
-            let (entity, rest) = decode_bytes(rest)?;
-            let (attribute, rest) = decode_bytes(rest)?;
-            let (value_type, value, _rest) = value_tail(rest)?;
-            KeyParts {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-                version: None,
-            }
-        }
-        ATTRIBUTE_KEY_TAG => {
-            let (attribute, rest) = decode_bytes(rest)?;
-            let (entity, rest) = decode_bytes(rest)?;
-            let (value_type, value, _rest) = value_tail(rest)?;
-            KeyParts {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-                version: None,
-            }
-        }
-        HISTORY_KEY_TAG | COVERAGE_KEY_TAG => {
-            let (version, rest) = rest.split_at_checked(VERSION_LENGTH)?;
-            let (entity, rest) = decode_bytes(rest)?;
-            let (attribute, rest) = decode_bytes(rest)?;
-            let (value_type, value, _rest) = value_tail(rest)?;
-            KeyParts {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-                version: Some(version.try_into().ok()?),
-            }
-        }
-        VALUE_KEY_TAG => {
-            let (value_type, value, rest) = value_tail(rest)?;
-            let (attribute, rest) = decode_bytes(rest)?;
-            let (entity, _rest) = decode_bytes(rest)?;
-            KeyParts {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-                version: None,
-            }
-        }
-        _ => {
-            let (entity, rest) = decode_bytes(rest)?;
-            let (attribute, rest) = decode_bytes(rest)?;
-            let (value_type, value, _rest) = value_tail(rest)?;
-            KeyParts {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-                version: None,
-            }
-        }
-    };
-    Some(parts)
+    let parts = parse_key_ref(bytes)?;
+    Some(KeyParts {
+        tag: parts.tag,
+        entity: parts.entity.into_owned(),
+        attribute: parts.attribute.into_owned(),
+        value_type: parts.value_type,
+        value: match parts.value {
+            ValueRef::Inline(payload) => ValuePayload::Inline(payload.to_vec()),
+            ValueRef::Spilled { prefix, hash } => ValuePayload::Spilled {
+                prefix: prefix.to_vec(),
+                hash: hash.to_vec(),
+            },
+        },
+        version: parts.version,
+    })
 }
 
 /// A key's value payload, borrowed from the key bytes where possible. The
@@ -549,21 +519,40 @@ pub fn parse_key(bytes: &[u8]) -> Option<KeyParts> {
 pub enum ValueRef<'a> {
     /// The value's inline order-preserving bytes, borrowed from the key.
     Inline(&'a [u8]),
-    /// A content-addressed reference to a spilled value, borrowed from the key.
-    Reference(&'a [u8]),
+    /// A spilled value: the value's encoded key-prefix (occupying the value
+    /// slot exactly like an inline payload) and the 32-byte whole-value hash
+    /// from the key's end, both borrowed.
+    Spilled {
+        /// The order-preserving encoding of the value's leading raw bytes.
+        prefix: &'a [u8],
+        /// The 32-byte whole-value hash (the archive block address).
+        hash: &'a [u8],
+    },
 }
 
 impl ValueRef<'_> {
-    /// The raw payload bytes (inline encoding or reference).
-    pub fn as_bytes(&self) -> &[u8] {
+    /// The bytes occupying the value SLOT of the key: the full inline
+    /// encoding, or the spilled value's encoded prefix.
+    pub fn slot_bytes(&self) -> &[u8] {
         match self {
-            ValueRef::Inline(bytes) | ValueRef::Reference(bytes) => bytes,
+            ValueRef::Inline(bytes) => bytes,
+            ValueRef::Spilled { prefix, .. } => prefix,
         }
     }
 
-    /// Whether this payload spilled (is a reference).
+    /// Whether this payload spilled (the key carries a prefix + trailing
+    /// whole-value hash instead of the complete encoding).
     pub fn is_reference(&self) -> bool {
-        matches!(self, ValueRef::Reference(_))
+        matches!(self, ValueRef::Spilled { .. })
+    }
+
+    /// The 32-byte whole-value hash of a spilled payload (the archive block
+    /// address), or `None` for an inline payload.
+    pub fn spill_hash(&self) -> Option<&[u8]> {
+        match self {
+            ValueRef::Inline(_) => None,
+            ValueRef::Spilled { hash, .. } => Some(hash),
+        }
     }
 }
 
@@ -589,81 +578,82 @@ pub struct KeyRef<'a> {
     pub value_type: ValueDataType,
     /// The value payload: inline order-preserving bytes or a spilled reference.
     pub value: ValueRef<'a>,
+    /// The fixed-width version prefix carried ONLY by the history and coverage
+    /// orderings. Borrowed analogue of [`KeyParts::version`].
+    pub version: Option<[u8; VERSION_LENGTH]>,
 }
 
 /// Parses key bytes into borrowed components, dispatching on the tag. Like
 /// [`parse_key`] but borrows the entity/attribute/value bytes from `bytes`
 /// (owning only an escaped entity/attribute), so a scan reconstructs entries
 /// without per-field allocation. Returns `None` on malformed input.
+///
+/// The spill signal is the REMAINDER after the ordering's final component:
+/// zero bytes left means an inline value, exactly 32 means the value spilled
+/// and the remainder is its whole-value hash (the slot then holds the
+/// value's encoded prefix). Any other remainder is malformed.
 pub fn parse_key_ref(bytes: &[u8]) -> Option<KeyRef<'_>> {
     let (&tag, rest) = bytes.split_first()?;
 
-    // Reads a variable value tail borrowed from the key: one (possibly
-    // spill-flagged) type byte plus its payload slice.
-    fn value_tail(bytes: &[u8]) -> Option<(ValueDataType, ValueRef<'_>, &[u8])> {
+    // Reads the value slot borrowed from the key: one type byte plus its
+    // self-delimiting payload slice (full inline encoding or spilled prefix).
+    fn value_slot(bytes: &[u8]) -> Option<(ValueDataType, &[u8], &[u8])> {
         let (&type_byte, rest) = bytes.split_first()?;
         let payload_len = value_payload_len(type_byte, bytes, 1)?;
         let (payload, rest) = rest.split_at_checked(payload_len)?;
-        let value_type = ValueDataType::from(type_byte & !SPILL_FLAG);
-        let value = if type_byte & SPILL_FLAG != 0 {
-            ValueRef::Reference(payload)
-        } else {
-            ValueRef::Inline(payload)
-        };
-        Some((value_type, value, rest))
+        Some((ValueDataType::from(type_byte), payload, rest))
     }
 
-    let parts = match tag {
-        ENTITY_KEY_TAG => {
-            let (entity, rest) = decode_bytes_cow(rest)?;
-            let (attribute, rest) = decode_bytes_cow(rest)?;
-            let (value_type, value, _rest) = value_tail(rest)?;
-            KeyRef {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-            }
-        }
+    let (version, entity, attribute, value_type, payload, rest) = match tag {
         ATTRIBUTE_KEY_TAG => {
             let (attribute, rest) = decode_bytes_cow(rest)?;
             let (entity, rest) = decode_bytes_cow(rest)?;
-            let (value_type, value, _rest) = value_tail(rest)?;
-            KeyRef {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-            }
+            let (value_type, payload, rest) = value_slot(rest)?;
+            (None, entity, attribute, value_type, payload, rest)
         }
         VALUE_KEY_TAG => {
-            let (value_type, value, rest) = value_tail(rest)?;
+            let (value_type, payload, rest) = value_slot(rest)?;
             let (attribute, rest) = decode_bytes_cow(rest)?;
-            let (entity, _rest) = decode_bytes_cow(rest)?;
-            KeyRef {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-            }
+            let (entity, rest) = decode_bytes_cow(rest)?;
+            (None, entity, attribute, value_type, payload, rest)
         }
+        HISTORY_KEY_TAG | COVERAGE_KEY_TAG => {
+            // The version leads, read raw: it is fixed-width and already
+            // order-preserving, so it carries no length prefix and no
+            // terminator, and the variable-length fields after it still parse.
+            let (version, rest) = rest.split_at_checked(VERSION_LENGTH)?;
+            let (entity, rest) = decode_bytes_cow(rest)?;
+            let (attribute, rest) = decode_bytes_cow(rest)?;
+            let (value_type, payload, rest) = value_slot(rest)?;
+            let version: [u8; VERSION_LENGTH] = version.try_into().ok()?;
+            (Some(version), entity, attribute, value_type, payload, rest)
+        }
+        // ENTITY_KEY_TAG and unknown tags share the EAV shape, a safe
+        // self-delimiting default.
         _ => {
             let (entity, rest) = decode_bytes_cow(rest)?;
             let (attribute, rest) = decode_bytes_cow(rest)?;
-            let (value_type, value, _rest) = value_tail(rest)?;
-            KeyRef {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-            }
+            let (value_type, payload, rest) = value_slot(rest)?;
+            (None, entity, attribute, value_type, payload, rest)
         }
     };
-    Some(parts)
+
+    let value = match rest.len() {
+        0 => ValueRef::Inline(payload),
+        VALUE_REFERENCE_LENGTH => ValueRef::Spilled {
+            prefix: payload,
+            hash: rest,
+        },
+        _ => return None,
+    };
+    Some(KeyRef {
+        tag,
+        entity,
+        attribute,
+        value_type,
+        value,
+        version,
+    })
 }
 
 #[cfg(test)]
@@ -716,6 +706,44 @@ mod tests {
                 let parsed = parse_key(&bytes).expect("parses");
                 assert_eq!(parsed, original, "tag {tag} round-trip");
             }
+        }
+        Ok(())
+    }
+
+    /// A spilled payload round-trips through every ordering: the value slot
+    /// parses exactly like an inline payload, the trailing 32-byte hash is
+    /// recovered as the spill signal, and `split_components` covers every
+    /// byte with the hash folded into the final component's slice.
+    #[dialog_common::test]
+    async fn it_round_trips_spilled_keys_in_every_ordering() -> anyhow::Result<()> {
+        let mut prefix = Vec::new();
+        crate::encode_bytes(b"leading-bytes-of-a-large-value", &mut prefix);
+        let spilled = KeyParts {
+            tag: ENTITY_KEY_TAG,
+            entity: b"entity:doc".to_vec(),
+            attribute: b"doc/body".to_vec(),
+            value_type: ValueDataType::String,
+            value: ValuePayload::Spilled {
+                prefix,
+                hash: vec![0xAB; VALUE_REFERENCE_LENGTH],
+            },
+            version: None,
+        };
+        for tag in [ENTITY_KEY_TAG, ATTRIBUTE_KEY_TAG, VALUE_KEY_TAG] {
+            let mut original = spilled.clone();
+            original.tag = tag;
+            let bytes = build_key(&original);
+            assert_eq!(
+                &bytes[bytes.len() - VALUE_REFERENCE_LENGTH..],
+                &[0xABu8; VALUE_REFERENCE_LENGTH],
+                "tag {tag}: the hash trails the key"
+            );
+            let parsed = parse_key(&bytes).expect("spilled key parses");
+            assert_eq!(parsed, original, "tag {tag} spilled round-trip");
+
+            let slices = split_components(&bytes).expect("splits with full coverage");
+            let total: usize = slices.iter().map(|slice| slice.len()).sum();
+            assert_eq!(total, bytes.len(), "tag {tag}: slices cover the key");
         }
         Ok(())
     }
@@ -775,8 +803,9 @@ mod tests {
         let attribute = b"person/name";
 
         // The attribute-only scan range, as `selector_range` builds it: min/max
-        // parts with the attribute set. The max parts do not parse, so the mut
-        // path falls back to `max`; we build them directly here.
+        // parts with the attribute set (both sentinels parse — the `0xFE`
+        // filler is a valid field — but building the parts directly keeps the
+        // fixture independent of the `set_*` chain).
         let mut start_parts = KeyParts::min(ATTRIBUTE_KEY_TAG);
         start_parts.attribute = attribute.to_vec();
         let start = build_key(&start_parts);

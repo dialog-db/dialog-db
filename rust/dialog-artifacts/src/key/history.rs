@@ -88,16 +88,28 @@ pub fn history_key(version: &Version, of: &Entity, the: &Attribute, value: &crat
 /// stored: the same layout as [`history_key`] under [`COVERAGE_KEY_TAG`].
 pub fn coverage_key(version: &Version, of: &Entity, the: &Attribute, value: &crate::Value) -> Key {
     // Coverage stays value-free: it matches claims by VERSION, never by
-    // content, so the key carries a 32-byte reference rather than the value.
+    // content, so the key carries the whole-value hash rather than the value.
     // That is what keeps "every deletion or replacement since the sync base"
     // a cheap scoped diff instead of one that streams values.
+    //
+    // Under the in-band spill encoding the "hash only" form is a spilled
+    // payload whose in-key prefix is EMPTY: the value slot holds the encoding
+    // of zero raw bytes (a lone terminator, so the slot is still
+    // self-delimiting and the key parses), and the 32-byte whole-value hash
+    // trails the key as the spill signal. No value bytes are carried, and a
+    // reader recovers the reference through `ValueRef::spill_hash`.
+    let mut prefix = Vec::new();
+    encode_bytes(&[], &mut prefix);
     let parts = tagged_parts(
         COVERAGE_KEY_TAG,
         version,
         of,
         the,
         value.data_type(),
-        ValuePayload::Reference(value.to_reference().as_ref().to_vec()),
+        ValuePayload::Spilled {
+            prefix,
+            hash: value.to_reference().as_ref().to_vec(),
+        },
     );
     Key::from(build_key(&parts))
 }

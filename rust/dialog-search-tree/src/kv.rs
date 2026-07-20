@@ -53,6 +53,11 @@ pub trait Key:
     /// Every key in one leaf has the same layout id (leaves are partitioned
     /// by the leading component), so a leaf's columns are encoded and decoded
     /// under a single schema, recorded once in the leaf.
+    ///
+    /// The id `u8::MAX` is reserved: it marks a leaf that straddles a layout
+    /// boundary (see [`MIXED_LAYOUT`](crate::MIXED_LAYOUT)) and is encoded
+    /// under the opaque whole-key schema. A key type must not use it as a
+    /// real layout id with a multi-component schema.
     fn layout(&self) -> u8 {
         0
     }

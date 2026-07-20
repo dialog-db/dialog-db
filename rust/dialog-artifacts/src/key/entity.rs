@@ -8,7 +8,7 @@ use crate::{
     key::value_payload, key::varkey, key::varkey::KeyParts, key::varkey::ValuePayload,
 };
 
-use super::{Key, KeyView, KeyViewConstruct, KeyViewMut, ValueReferenceKeyPart};
+use super::{Key, KeyView, KeyViewConstruct, KeyViewMut};
 
 /// Tag byte that identifies entity-based index keys
 pub const ENTITY_KEY_TAG: u8 = 0;
@@ -33,21 +33,6 @@ impl KeyViewConstruct for EntityKey<Key> {
 
     fn max() -> Self {
         Self(Key::from(varkey::build_key(&KeyParts::max(ENTITY_KEY_TAG))))
-    }
-
-    fn from_parts(
-        entity: EntityKeyPart,
-        attribute: AttributeKeyPart,
-        value_type: ValueDataType,
-        value_reference: ValueReferenceKeyPart,
-    ) -> Self {
-        Self::default()
-            .set_entity(entity)
-            .set_attribute(attribute)
-            .set_value(
-                value_type,
-                ValuePayload::Reference(value_reference.0.to_vec()),
-            )
     }
 }
 
@@ -81,6 +66,10 @@ where
 
     fn value_is_spilled(&self) -> bool {
         varkey::value_is_spilled(self.0.as_ref(), ENTITY_KEY_TAG)
+    }
+
+    fn value_spill_hash(&self) -> Option<&[u8]> {
+        varkey::value_spill_hash(self.0.as_ref(), ENTITY_KEY_TAG)
     }
 }
 

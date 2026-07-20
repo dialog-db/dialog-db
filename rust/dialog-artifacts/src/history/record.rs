@@ -108,7 +108,7 @@ impl Record {
         let is = match &parts.value {
             // A spilled value's bytes live in the archive under this
             // reference, exactly as for a fact; the caller resolves it.
-            ValuePayload::Reference(_) => {
+            ValuePayload::Spilled { .. } => {
                 return Err(DialogArtifactsError::InvalidKey(
                     "history record value spilled; resolve it through the archive".to_string(),
                 ));

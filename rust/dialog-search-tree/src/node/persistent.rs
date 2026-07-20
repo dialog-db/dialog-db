@@ -257,7 +257,18 @@ impl PersistentIndex {
         let mut ends = Vec::with_capacity(links.len());
         let mut hashes = Vec::with_capacity(links.len());
         for link in links {
-            suffixes.extend_from_slice(&link.separator[prefix_length..]);
+            // Sorted separators make the first/last LCP a prefix of every
+            // middle separator (any middle string is sandwiched between them
+            // and must share it); an unsorted caller breaks the tree invariant
+            // upstream, so surface it as a debug failure and degrade to a
+            // saturated slice rather than panicking at persist time.
+            debug_assert!(
+                link.separator.len() >= prefix_length && link.separator.starts_with(&prefix),
+                "index links must be sorted: separator {:02x?} does not carry the prefix {prefix:02x?}",
+                link.separator
+            );
+            let at = prefix_length.min(link.separator.len());
+            suffixes.extend_from_slice(&link.separator[at..]);
             ends.push(suffixes.len() as u32);
             hashes.push(link.node);
         }
@@ -354,6 +365,23 @@ where
             } else {
                 let mut row = Vec::with_capacity(schema.len());
                 entry.key.components(&mut row);
+                // Enforce the `Key` contract before anything is encoded: the
+                // slice count must match the schema (a surplus slice would
+                // otherwise be silently dropped by the column encoder — data
+                // loss in a content-addressed node) and the slices must cover
+                // the key's comparison bytes exactly.
+                if row.len() != schema.len() {
+                    return Err(DialogSearchTreeError::Node(format!(
+                        "Key split into {} components for a schema of {}",
+                        row.len(),
+                        schema.len()
+                    )));
+                }
+                if row.iter().map(|slice| slice.len()).sum::<usize>() != entry.key.as_ref().len() {
+                    return Err(DialogSearchTreeError::Node(
+                        "Key components do not cover the key's bytes".into(),
+                    ));
+                }
                 rows.push(row);
             }
         }

@@ -34,10 +34,13 @@ const TERMINATOR: u8 = 0x00;
 ///
 /// Composition invariant: within a key, the component FOLLOWING a
 /// terminated byte string must not begin with this escape byte, or the
-/// terminator followed by that first byte reads back as an escaped zero
-/// (and sorts wrong for the same reason). Real artifact keys satisfy this
-/// (UTF-8 fields and small tag bytes never start with `0xFF`); synthetic
-/// bounds must too, which is why `varkey`'s max filler byte is `0xFE`.
+/// terminator followed by that first byte reads back as an escaped zero and
+/// the key no longer parses (byte ORDER is unaffected — the encoding stays
+/// prefix-free — but a parse failure downstream degrades to the max-parts
+/// fallback, which is how the Replace data-loss bug happened). Real artifact
+/// keys satisfy this (UTF-8 fields and small tag bytes never start with
+/// `0xFF`); synthetic bounds must too, which is why `varkey`'s max filler
+/// byte is `0xFE`.
 const ESCAPE: u8 = 0xFF;
 
 /// Encodes a `u128` big-endian: byte order equals numeric order.
@@ -99,10 +102,16 @@ pub fn encode_bool(value: bool, out: &mut Vec<u8>) {
     out.push(u8::from(value));
 }
 
-/// Decodes a bool byte.
+/// Decodes a bool byte. Only the two bytes the encoder emits are valid:
+/// accepting any nonzero byte as `true` would alias byte-distinct persisted
+/// keys onto one logical value.
 pub fn decode_bool(bytes: &[u8]) -> Option<(bool, &[u8])> {
     let (&byte, rest) = bytes.split_first()?;
-    Some((byte != 0, rest))
+    match byte {
+        0 => Some((false, rest)),
+        1 => Some((true, rest)),
+        _ => None,
+    }
 }
 
 /// Encodes a byte string prefix-safely: each `0x00` becomes `0x00 0xFF`, then
@@ -321,6 +330,68 @@ mod tests {
         let mut a_zero = Vec::new();
         encode_bytes(b"a\x00", &mut a_zero);
         assert!(a < a_zero, "escaped zero must sort after the terminator");
+        Ok(())
+    }
+
+    /// The float edges the ordering tests above skip: `-0.0` sorts strictly
+    /// below `+0.0` (two encodings of one numeric value — the scan layer
+    /// widens zero-bounded range edges for this), and both NaN signs order
+    /// consistently at the band extremes and round-trip bit-exactly.
+    #[dialog_common::test]
+    async fn it_orders_zero_signs_and_nans() -> anyhow::Result<()> {
+        assert!(enc_f64(-0.0) < enc_f64(0.0), "-0.0 encodes below +0.0");
+
+        let negative_nan = f64::from_bits(f64::NAN.to_bits() | (1 << 63));
+        assert!(
+            enc_f64(negative_nan) < enc_f64(f64::NEG_INFINITY),
+            "negative NaN sits below -inf"
+        );
+        assert!(
+            enc_f64(f64::NAN) > enc_f64(f64::INFINITY),
+            "positive NaN sits above +inf"
+        );
+        for nan in [f64::NAN, negative_nan] {
+            let encoded = enc_f64(nan);
+            let (decoded, rest) = decode_f64(&encoded).unwrap();
+            assert_eq!(decoded.to_bits(), nan.to_bits(), "NaN bits round-trip");
+            assert!(rest.is_empty());
+        }
+        Ok(())
+    }
+
+    /// Only the encoder's two bool bytes decode; any other byte is corruption
+    /// and must be rejected, not aliased onto `true`.
+    #[dialog_common::test]
+    async fn it_rejects_non_canonical_bool_bytes() -> anyhow::Result<()> {
+        assert_eq!(decode_bool(&[0, 9]), Some((false, &[9u8][..])));
+        assert_eq!(decode_bool(&[1]), Some((true, &[][..])));
+        assert_eq!(decode_bool(&[2]), None);
+        assert_eq!(decode_bool(&[0xFF]), None);
+        assert_eq!(decode_bool(&[]), None);
+        Ok(())
+    }
+
+    /// The zero-copy decoder agrees with the owned decoder on both branches:
+    /// borrowed for escape-free input, owned when an escape must resolve.
+    #[dialog_common::test]
+    async fn it_decodes_cow_identically_to_owned() -> anyhow::Result<()> {
+        use std::borrow::Cow;
+
+        let cases: [&[u8]; 6] = [b"", b"plain", b"\x00", b"a\x00b", b"\x00\x00", b"\xff\xfe"];
+        for case in cases {
+            let mut encoded = Vec::new();
+            encode_bytes(case, &mut encoded);
+            encoded.push(0x77); // trailing follower byte
+            let (owned, owned_rest) = decode_bytes(&encoded).unwrap();
+            let (cow, cow_rest) = decode_bytes_cow(&encoded).unwrap();
+            assert_eq!(cow.as_ref(), owned.as_slice(), "{case:?}");
+            assert_eq!(cow_rest, owned_rest);
+            assert_eq!(
+                matches!(cow, Cow::Owned(_)),
+                case.contains(&0x00),
+                "borrows exactly when escape-free: {case:?}"
+            );
+        }
         Ok(())
     }
 

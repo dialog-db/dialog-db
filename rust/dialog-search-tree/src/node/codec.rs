@@ -10,9 +10,14 @@
 //! where `shared` counts the bytes an entry's unprefixed key shares with the
 //! previous entry's unprefixed key. Every [`RESTART_INTERVAL`]-th entry is a
 //! *restart*: it encodes `shared = 0` (its whole unprefixed key is in the
-//! stream), so a reader can begin decoding at any restart without a cursor
-//! from the start of the node. Lookups binary-search the restart heads and
-//! decode at most one restart block linearly.
+//! stream), so a reader COULD begin decoding at any restart without a cursor
+//! from the start of the node. No reader currently does — every decode path
+//! cursors from offset 0 (point lookups are amortized by the per-buffer
+//! decode memo instead) — so today the restart table costs its bytes
+//! (measured ~1% of the live tree on the production key workload) without a
+//! read-side payoff. Implementing restart-seeking lookups or dropping the
+//! field are both open options; either changes node bytes, so decide before
+//! the format freezes.
 //!
 //! The layout is a pure function of the entry list: the prefix is the LCP of
 //! the first and last key (the list is sorted), restarts fall on fixed entry

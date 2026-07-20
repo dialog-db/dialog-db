@@ -204,9 +204,10 @@ fn reconstruct(
     })?)?;
 
     let is = match parts.value {
-        // The key carries only a reference; the raw value bytes live in a
-        // content-addressed archive block the caller fetched and passed in.
-        ValueRef::Reference(_) => {
+        // The key carries the value's prefix and hash; the raw value bytes
+        // live in a content-addressed archive block the caller fetched and
+        // passed in.
+        ValueRef::Spilled { .. } => {
             let bytes = spilled.ok_or_else(|| {
                 DialogArtifactsError::InvalidValue(
                     "spilled value key has no fetched block bytes".to_string(),
