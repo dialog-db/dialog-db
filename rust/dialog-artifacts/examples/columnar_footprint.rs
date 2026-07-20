@@ -83,11 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for column in segment.columns.iter() {
                     use dialog_search_tree::ArchivedColumnData;
                     columns += match column {
-                        ArchivedColumnData::Arena {
-                            prefix,
-                            stream,
-                            restarts,
-                        } => (prefix.len() + stream.len() + restarts.len()) as u64,
+                        ArchivedColumnData::Arena { prefix, stream } => {
+                            (prefix.len() + stream.len()) as u64
+                        }
                         ArchivedColumnData::Dictionary {
                             table,
                             table_ends,
@@ -106,8 +104,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     whole.push(key.to_vec());
                 }
                 let refs: Vec<&[u8]> = whole.iter().map(|k| k.as_slice()).collect();
-                let (prefix, stream, restarts) = dialog_search_tree::encode_keys_public(&refs);
-                flat_key_bytes += (prefix.len() + stream.len() + restarts.len() * 4) as u64;
+                let (prefix, stream) = dialog_search_tree::encode_keys_public(&refs);
+                flat_key_bytes += (prefix.len() + stream.len()) as u64;
             }
         }
     }

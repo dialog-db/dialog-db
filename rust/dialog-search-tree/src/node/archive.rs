@@ -1,11 +1,10 @@
 use std::cmp::Ordering;
 
 use dialog_common::Blake3Hash;
-use rkyv::{Deserialize, rancor::Strategy};
 
 use crate::{
-    ArchivedIndex, ArchivedSegment, ColumnData, DialogSearchTreeError, Key, Link, Value,
-    node::columnar::{ColumnarLeaf, StreamingLeaf, archived_column_slices},
+    ArchivedIndex, ArchivedSegment, DialogSearchTreeError, Key, Link, Value,
+    node::columnar::{StreamingLeaf, archived_column_slices},
 };
 
 fn malformed(message: &str) -> DialogSearchTreeError {
@@ -156,28 +155,6 @@ where
         Ok(count)
     }
 
-    /// Deserializes the archived columns to owned form and decodes them into
-    /// a [`ColumnarLeaf`], using `Key`'s schema. One decode pass; subsequent
-    /// key access is O(1) slicing.
-    pub fn decode<Key: self::Key>(&self) -> Result<ColumnarLeaf, DialogSearchTreeError> {
-        let count = self.checked_count()?;
-        let columns: Vec<ColumnData> = self
-            .columns
-            .iter()
-            .map(|column| {
-                column
-                    .deserialize(Strategy::<_, rkyv::rancor::Error>::wrap(&mut ()))
-                    .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))
-            })
-            .collect::<Result<_, _>>()?;
-        let schema = if self.layout == crate::MIXED_LAYOUT {
-            crate::Schema::opaque()
-        } else {
-            Key::schema(self.layout)
-        };
-        ColumnarLeaf::decode(&schema, &columns, count)
-    }
-
     /// A streaming decoder over this segment's full keys, in entry order, for a
     /// given key schema. Borrows the archived columns and reconstructs each key
     /// into a single reused buffer — no owned-column deserialize, no row-major
@@ -194,25 +171,49 @@ where
         StreamingLeaf::new(&schema, &columns, count)
     }
 
-    /// The first (minimum) key of this segment, decoded to its bytes.
+    /// The first (minimum) key of this segment, decoded to its bytes: one
+    /// streaming step, no whole-leaf materialization.
     pub fn first_key<Key: self::Key>(&self) -> Result<Vec<u8>, DialogSearchTreeError> {
-        self.decode::<Key>()?.key(0)
+        self.keys::<Key>()?
+            .next_key()?
+            .map(|(_, key)| key.to_vec())
+            .ok_or_else(|| malformed("Segment was unexpectedly empty"))
     }
 
-    /// The last (maximum) key of this segment, decoded to its bytes.
+    /// The last (maximum) key of this segment, decoded to its bytes: one
+    /// streaming pass into a single reused buffer.
     pub fn last_key<Key: self::Key>(&self) -> Result<Vec<u8>, DialogSearchTreeError> {
-        let leaf = self.decode::<Key>()?;
-        let last = leaf
-            .len()
-            .checked_sub(1)
-            .ok_or_else(|| malformed("Segment was unexpectedly empty"))?;
-        leaf.key(last)
+        let mut keys = self.keys::<Key>()?;
+        let mut last: Option<Vec<u8>> = None;
+        while let Some((_, key)) = keys.next_key()? {
+            match &mut last {
+                Some(buffer) => {
+                    buffer.clear();
+                    buffer.extend_from_slice(key);
+                }
+                None => last = Some(key.to_vec()),
+            }
+        }
+        last.ok_or_else(|| malformed("Segment was unexpectedly empty"))
     }
 
-    /// Position of the entry whose key equals `key`, or `None`. Binary
-    /// search via component comparison, no key reconstruction.
-    pub fn find<Key: self::Key>(&self, key: &[u8]) -> Result<Option<usize>, DialogSearchTreeError> {
-        self.decode::<Key>()?.find(key)
+    /// Position of the entry whose key equals `probe`, or `None`. The keys
+    /// stream in sorted order, so the walk stops at the first key past the
+    /// probe — no row-major materialization, no owned-column deserialize, no
+    /// per-entry allocation.
+    pub fn find<Key: self::Key>(
+        &self,
+        probe: &[u8],
+    ) -> Result<Option<usize>, DialogSearchTreeError> {
+        let mut keys = self.keys::<Key>()?;
+        while let Some((at, key)) = keys.next_key()? {
+            match key.cmp(probe) {
+                Ordering::Equal => return Ok(Some(at)),
+                Ordering::Greater => return Ok(None),
+                Ordering::Less => {}
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -363,7 +364,6 @@ mod tests {
             columns: vec![ColumnData::Arena {
                 prefix: vec![],
                 stream: vec![0x80],
-                restarts: vec![0],
             }],
             values: vec![vec![1], vec![2]],
         });
@@ -382,12 +382,12 @@ mod tests {
 
     /// A malformed dictionary column — non-monotone table ends, an end past
     /// the table, or an index past the dictionary — errors at decode rather
-    /// than panicking. Driven through `ColumnarLeaf::decode` with a
-    /// dictionary schema (the opaque test-key schema is arena-only).
+    /// than panicking. Driven through the streaming decoder (the only read
+    /// path) with a dictionary schema (the opaque test-key schema is
+    /// arena-only).
     #[dialog_common::test]
     async fn it_rejects_malformed_dictionary_columns() -> Result<()> {
-        use super::super::columnar::ColumnarLeaf;
-        use crate::{Column, Component, Schema};
+        use crate::{Column, ColumnSlices, Component, Schema, StreamingLeaf};
 
         static DICTIONARY_SCHEMA: &[Component] = &[Component {
             column: Column::Dictionary,
@@ -395,29 +395,41 @@ mod tests {
         }];
         let schema = Schema::new(DICTIONARY_SCHEMA);
 
+        // Streams every entry of a single-column leaf, surfacing whichever
+        // error the decoder raises at construction or during the walk.
+        fn drain(
+            schema: &Schema,
+            column: ColumnSlices<'_>,
+            count: usize,
+        ) -> Result<(), crate::DialogSearchTreeError> {
+            let mut leaf = StreamingLeaf::new(schema, std::slice::from_ref(&column), count)?;
+            while leaf.next_key()?.is_some() {}
+            Ok(())
+        }
+
         // Non-monotone ends.
-        let column = ColumnData::Dictionary {
-            table: b"abcd".to_vec(),
-            table_ends: vec![3, 1],
-            indices: vec![0, 1],
+        let column = ColumnSlices::Dictionary {
+            table: b"abcd",
+            table_ends: &[3, 1],
+            indices: &[0, 1],
         };
-        assert!(ColumnarLeaf::decode(&schema, std::slice::from_ref(&column), 2).is_err());
+        assert!(drain(&schema, column, 2).is_err());
 
         // End past the table.
-        let column = ColumnData::Dictionary {
-            table: b"ab".to_vec(),
-            table_ends: vec![9],
-            indices: vec![0, 0],
+        let column = ColumnSlices::Dictionary {
+            table: b"ab",
+            table_ends: &[9],
+            indices: &[0, 0],
         };
-        assert!(ColumnarLeaf::decode(&schema, std::slice::from_ref(&column), 2).is_err());
+        assert!(drain(&schema, column, 2).is_err());
 
         // Index past the dictionary.
-        let column = ColumnData::Dictionary {
-            table: b"ab".to_vec(),
-            table_ends: vec![2],
-            indices: vec![1, 1],
+        let column = ColumnSlices::Dictionary {
+            table: b"ab",
+            table_ends: &[2],
+            indices: &[1, 1],
         };
-        assert!(ColumnarLeaf::decode(&schema, std::slice::from_ref(&column), 2).is_err());
+        assert!(drain(&schema, column, 2).is_err());
         Ok(())
     }
 
@@ -477,7 +489,6 @@ mod tests {
             columns: vec![ColumnData::Arena {
                 prefix: vec![],
                 stream: vec![],
-                restarts: vec![],
             }],
             values: vec![],
         });
