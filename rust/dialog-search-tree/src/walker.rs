@@ -21,6 +21,19 @@ use crate::{
     into_owned,
 };
 
+/// Whether `key` lies at or above `range`'s upper bound: once one does, no
+/// later key (keys stream in order) can be in range, so a walk can stop even
+/// if the range was never entered. Without this, a range lying entirely below
+/// a subtree's keys would walk every leaf to the subtree's right edge
+/// yielding nothing.
+fn past_end<Key: Ord, R: RangeBounds<Key>>(range: &R, key: &Key) -> bool {
+    match range.end_bound() {
+        Bound::Included(end) => key > end,
+        Bound::Excluded(end) => key >= end,
+        Bound::Unbounded => false,
+    }
+}
+
 /// A traversal mechanism for walking through a tree structure.
 pub struct TreeWalker<Key, Value>
 where
@@ -118,16 +131,29 @@ where
                 // returns `false` on the first touch, `true` from the second on.
                 if node.should_memoize_keys() {
                     let keys = node.memoized_keys()?;
+                    // Resolve the segment at most once per leaf, and only when
+                    // an entry actually yields: `body()` is a full bytecheck
+                    // validation of the node buffer, so resolving per yielded
+                    // entry costs O(entries × node size) on the memoized
+                    // (join) hot path, while resolving eagerly taxes leaves
+                    // the range never enters.
+                    let mut segment = None;
                     for (at, key) in keys.iter().enumerate() {
                         let entry_key = Key::try_from_bytes(key)?;
                         if range.contains(&entry_key) {
                             entered_range = true;
-                            let ArchivedNodeBody::Segment(segment) = node.body()? else {
-                                unreachable!("segment checked above")
+                            let segment = match &segment {
+                                Some(segment) => segment,
+                                None => {
+                                    let ArchivedNodeBody::Segment(resolved) = node.body()? else {
+                                        unreachable!("segment checked above")
+                                    };
+                                    segment.insert(resolved)
+                                }
                             };
                             let value = into_owned(segment.value_at(at)?)?;
                             yield Entry { key: entry_key, value };
-                        } else if entered_range {
+                        } else if entered_range || past_end(&range, &entry_key) {
                             return;
                         }
                     }
@@ -142,7 +168,7 @@ where
                             entered_range = true;
                             let value = into_owned(segment.value_at(at)?)?;
                             yield Entry { key: entry_key, value };
-                        } else if entered_range {
+                        } else if entered_range || past_end(&range, &entry_key) {
                             return;
                         }
                     }

@@ -7,7 +7,7 @@ use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
 use crate::source::SelectRules;
-use crate::type_system::Type as Kind;
+use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, Record};
 use crate::{
     Binding, Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value,
@@ -419,14 +419,18 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                 // variable (e.g. from a `text/starts-with` constraint on it)
                 // becomes a VAE range bound over the inline value. The M3
                 // value-in-key format sorts values order-preservingly, so this
-                // narrows the scan; a spilled value is re-checked per entry.
+                // narrows the scan. Pushed ONLY when the kind admits nothing
+                // but strings: the pushed range brackets the inline String
+                // band, and the scan is the row generator, so a kind that
+                // still admits Symbol or Entity lexical forms (which the
+                // residual refinement would match) must keep the un-narrowed
+                // scan or those rows would be silently dropped.
                 // Conformance-only refinements carry no prefix and add no bound.
-                if let Some(prefix) = from
-                    .is
-                    .kind()
-                    .as_ref()
-                    .and_then(Kind::refinement)
-                    .and_then(|refinement| refinement.prefix.clone())
+                if let Some(kind) = from.is.kind().as_ref()
+                    && kind.primitive_part().required() == Primitive::from(Type::String)
+                    && let Some(prefix) = kind
+                        .refinement()
+                        .and_then(|refinement| refinement.prefix.clone())
                 {
                     selector = Some(match selector {
                         None => ArtifactSelector::new().is_starting_with(prefix),
@@ -519,6 +523,52 @@ mod tests {
         assert_eq!(selector.entity_prefix(), None);
         assert_eq!(selector.attribute_prefix(), None);
         assert_eq!(selector.value_prefix(), None);
+        Ok(())
+    }
+
+    /// A prefix refinement whose kind still admits Symbol (or Entity)
+    /// lexical forms must NOT be pushed into the scan: the pushed range
+    /// brackets only the inline String band of the VAE index, and the scan
+    /// is the row generator, so a symbol row the refinement admits would be
+    /// silently dropped with nothing downstream able to restore it.
+    #[dialog_common::test]
+    async fn it_keeps_symbol_matches_under_prefix_pushdown() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let e = Entity::new()?;
+        let symbol = ArtifactsAttribute::try_from("user/name".to_string())?;
+        branch
+            .transaction()
+            .assert(the!("tag/kind").of(e.clone()).is(symbol))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // The kind a `starts-with` constraint stamps onto a symbol-valued
+        // variable: Symbol membership refined by the prefix.
+        let value_kind = Kind::from(Type::Symbol)
+            .with_prefix("user/")
+            .expect("symbol is textual");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("tag/kind")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(value_kind),
+            Term::var("cause"),
+        );
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
+        assert_eq!(
+            results.len(),
+            1,
+            "a symbol admitted by the refinement must be scanned"
+        );
+        assert_eq!(
+            results[0].is(),
+            &Value::Symbol("user/name".to_string().try_into()?)
+        );
         Ok(())
     }
 

@@ -496,6 +496,99 @@ mod tests {
         }
     }
 
+    /// Every value type's key splits into exactly its schema's component
+    /// count and parses back to the fields it was built from, across all
+    /// three orderings. Pins the whole width table at once: the class of bug
+    /// where an encoder's byte width disagrees with the parser's claimed
+    /// width (the f64 8-vs-16 bug) breaks the split for whichever type
+    /// regressed. (NaN is covered separately in `ordkey`; `Value`'s equality
+    /// cannot compare it.)
+    #[dialog_common::test]
+    async fn it_splits_and_parses_keys_for_every_value_type() -> anyhow::Result<()> {
+        use crate::key::varkey::{ValueRef, parse_key_ref, split_components};
+
+        let values = vec![
+            Value::Bytes(vec![]),
+            Value::Bytes(vec![0x00, 0xFF, 0x7F, 0x00]),
+            Value::Entity(Entity::from_str("did:key:z6MkOther")?),
+            Value::Boolean(false),
+            Value::Boolean(true),
+            Value::String(String::new()),
+            Value::String("hello \u{0} world".into()),
+            Value::UnsignedInt(0),
+            Value::UnsignedInt(u128::MAX),
+            Value::SignedInt(i128::MIN),
+            Value::SignedInt(-1),
+            Value::Float(-0.0),
+            Value::Float(1783112056217.0),
+            Value::Record(vec![1, 2, 3]),
+            Value::Symbol(Attribute::from_str("open/status")?),
+        ];
+        for value in values {
+            let fact = fact(value.clone());
+            let keys = [
+                EntityKey::from(&fact).into_key(),
+                AttributeKey::from(&fact).into_key(),
+                ValueKey::from(&fact).into_key(),
+            ];
+            for key in keys {
+                assert!(
+                    split_components(key.as_ref()).is_some(),
+                    "key must split with full byte coverage: {value:?}"
+                );
+                let parts = parse_key_ref(key.as_ref())
+                    .unwrap_or_else(|| panic!("key must parse: {value:?}"));
+                assert_eq!(parts.entity.as_ref(), fact.of.as_str().as_bytes());
+                assert_eq!(parts.attribute.as_ref(), fact.the.as_str().as_bytes());
+                assert_eq!(parts.value_type, value.data_type());
+                let ValueRef::Inline(payload) = parts.value else {
+                    panic!("small values stay inline: {value:?}");
+                };
+                let (decoded, rest) =
+                    decode_value(parts.value_type, payload).expect("payload decodes");
+                assert!(rest.is_empty(), "payload is exactly one value: {value:?}");
+                assert_eq!(decoded, value, "value round-trips through the key");
+            }
+        }
+        Ok(())
+    }
+
+    /// A spilled key sorts strictly above every inline key of the same
+    /// `(entity, attribute)` — the spill flag lives in the type byte's high
+    /// bit, giving spilled values their own band — and its payload (the
+    /// 32-byte reference) never equals the inline encoding of the same
+    /// logical value.
+    #[dialog_common::test]
+    async fn it_separates_the_spilled_band_from_inline_bands() -> anyhow::Result<()> {
+        let content = "z".repeat(inline_threshold() + 1);
+        let spilled = fact(Value::String(content.clone()));
+        let spilled_key = EntityKey::from(&spilled).into_key();
+
+        let inline_values = [
+            Value::Bytes(vec![0xFF; 8]),
+            Value::String("zzzz".into()),
+            Value::UnsignedInt(u128::MAX),
+            Value::Float(f64::INFINITY),
+            Value::Symbol(Attribute::from_str("zz/zz")?),
+        ];
+        for value in inline_values {
+            let inline_key = EntityKey::from(&fact(value.clone())).into_key();
+            assert!(
+                inline_key < spilled_key,
+                "inline {value:?} must sort below the spilled band"
+            );
+        }
+
+        let key = EntityKey(&spilled_key);
+        assert!(key.value_is_spilled());
+        assert_ne!(
+            key.value_payload(),
+            content.as_bytes(),
+            "the key carries a reference, not the value bytes"
+        );
+        Ok(())
+    }
+
     /// A small value round-trips through a key inline: the key carries the
     /// value's order-preserving bytes (not spilled), and decoding the payload
     /// by its type reproduces the original [`Value`].

@@ -19,7 +19,7 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, KeyView,
+    DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, KeyView, State,
     tree::{ArtifactTree, TreeStorageBridge},
 };
 
@@ -56,6 +56,16 @@ where
             let Change::Add(entry) = change? else {
                 continue;
             };
+            // Only asserted facts need their block shipped. A retraction
+            // writes a TOMBSTONE at the same spilled key: it is never read
+            // through the spill store (readers check `State::Added` before
+            // fetching), and a replica can legitimately hold a tombstone for
+            // a block it never replicated (pull ships tree nodes, not value
+            // blocks) — requiring the block here would wedge that replica's
+            // push forever.
+            if !matches!(entry.value, State::Added(_)) {
+                continue;
+            }
             let key = entry.key;
             // Count each spilled value once, via the EAV ordering only.
             if key.tag() != ENTITY_KEY_TAG {
@@ -134,6 +144,54 @@ mod tests {
             refs,
             vec![reference],
             "a spilled value shared by EAV/AEV/VAE surfaces exactly once"
+        );
+        Ok(())
+    }
+
+    /// Retracting a spilled fact writes tombstones at the same spilled keys;
+    /// those additions must NOT surface the value reference. A tombstone is
+    /// never read through the spill store, and a replica can legitimately
+    /// hold one for a block it never replicated (pull ships tree nodes, not
+    /// value blocks) — requiring the block at push would wedge that replica's
+    /// push forever.
+    #[dialog_common::test]
+    async fn it_ignores_tombstones_at_spilled_keys() -> Result<(), DialogArtifactsError> {
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let artifact = Artifact {
+            the: "doc/body".parse().unwrap(),
+            of: "doc:1".parse().unwrap(),
+            is: Value::String("z".repeat(inline_n + 1)),
+            cause: None,
+        };
+
+        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
+        let mut delta = Delta::zero();
+
+        // Base: the spilled fact is asserted.
+        let mut base = ArtifactTree::empty();
+        base.apply(
+            &mut store,
+            &mut delta,
+            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+        )
+        .await?;
+        flush(&mut store, &mut delta).await?;
+
+        // Current: the fact is retracted (tombstones at the spilled keys).
+        let mut current = base.clone();
+        current
+            .apply(
+                &mut store,
+                &mut delta,
+                stream::iter(vec![Instruction::Retract(artifact)]),
+            )
+            .await?;
+        flush(&mut store, &mut delta).await?;
+
+        let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
+        assert!(
+            refs.is_empty(),
+            "a retraction ships no spilled blocks: {refs:?}"
         );
         Ok(())
     }

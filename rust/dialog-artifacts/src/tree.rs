@@ -37,9 +37,9 @@ use std::ops::RangeInclusive;
 use crate::{
     Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum, DialogArtifactsError,
     EntityKey, EntityKeyPart, FromKey, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut,
-    State, ValueDataType, ValueKey, encode_value_owned,
-    key::value_spills,
+    State, Value, ValueDataType, ValueKey, encode_value_owned,
     key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
+    key::{inline_threshold, value_spills},
     match_selector_and_key_ref,
     selector::Constrained,
 };
@@ -126,7 +126,11 @@ pub fn spill_cache() -> SpillCache {
 /// reference bytes from one parse rather than re-splitting the key per accessor.
 fn spilled_reference(key: &Key) -> Result<Option<Blake3Hash>, DialogArtifactsError> {
     let Some(parts) = varkey::parse_key(key.as_ref()) else {
-        return Ok(None);
+        // An unparseable key is corruption, not an inline value: classifying
+        // it as "no spill" would silently read a wrong value.
+        return Err(DialogArtifactsError::InvalidKey(
+            "key does not parse while resolving its spill reference".to_string(),
+        ));
     };
     let ValuePayload::Reference(payload) = parts.value else {
         return Ok(None);
@@ -235,9 +239,8 @@ fn prefix_upper(prefix: &str) -> Vec<u8> {
 /// constraint is skipped — the exact value is already in the keys
 /// and is strictly tighter. Applying a prefix to a non-leading key
 /// dimension is sound (the range stays a superset of the matches;
-/// [`MatchCandidate::matches_selector`] filters the rest) and
-/// tightens the range whenever every more-significant dimension is
-/// exact.
+/// [`match_selector_and_key_ref`] filters the rest) and tightens the
+/// range whenever every more-significant dimension is exact.
 fn apply_prefix_bounds<K: KeyViewMut>(
     start: K,
     end: K,
@@ -261,6 +264,7 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         start = start.set_entity(EntityKeyPart(&lo));
         end = end.set_entity(EntityKeyPart(&hi));
     }
+    let has_value_bounds = selector.value_lower().is_some() || selector.value_upper().is_some();
     // A value prefix bounds the value tail directly: the payload's inline
     // order-preserving bytes for a string are the raw UTF-8, so the prefix's
     // raw bytes are the lower bound and `prefix ‖ 0xFE…` the upper (mirroring
@@ -268,7 +272,16 @@ fn apply_prefix_bounds<K: KeyViewMut>(
     // takes precedence and skips this. Only sound on the VAE ordering, where
     // the value tail leads the key; on EAV/AEV the value is trailing, so
     // `selector_range` routes a value-prefix scan to `ValueKey`.
+    //
+    // When explicit value bounds are ALSO present they take the value slot
+    // instead (below) and the prefix stays a per-entry filter: the prefix's
+    // range payload is an unterminated fragment, so a later `set_value` on
+    // top of it cannot re-parse the key and would fall back to
+    // `KeyParts::max`, discarding every previously set field. The bound
+    // range is a superset of the intersection, so results are exact either
+    // way.
     if selector.value().is_none()
+        && !has_value_bounds
         && let Some(prefix) = selector.value_prefix()
     {
         let lo = prefix_lower(prefix);
@@ -282,9 +295,7 @@ fn apply_prefix_bounds<K: KeyViewMut>(
     // value). Exclusive bounds (`>`/`<`) still set the key edge at the bound
     // value — the range stays a superset and the per-entry re-check drops the
     // boundary value. An exact value takes precedence and skips this.
-    if selector.value().is_none()
-        && (selector.value_lower().is_some() || selector.value_upper().is_some())
-    {
+    if selector.value().is_none() && has_value_bounds {
         // Both edges must sit in the same type band, so derive the band type
         // from whichever bound is present (they share a type when both are).
         let band = selector
@@ -292,12 +303,22 @@ fn apply_prefix_bounds<K: KeyViewMut>(
             .or(selector.value_upper())
             .map(|bound| bound.value.data_type())
             .unwrap_or_else(ValueDataType::min);
+        // A float zero is one semantic value with two encodings (`-0.0` sorts
+        // strictly below `+0.0`): widen the edge to the far side of the zero
+        // cluster so both encodings fall inside the range; the per-entry
+        // semantic re-check keeps the result exact.
         let lo = match selector.value_lower() {
-            Some(bound) => encode_value_owned(&bound.value),
+            Some(bound) => match &bound.value {
+                Value::Float(float) if *float == 0.0 => encode_value_owned(&Value::Float(-0.0)),
+                value => encode_value_owned(value),
+            },
             None => value_band_min(band),
         };
         let hi = match selector.value_upper() {
-            Some(bound) => encode_value_owned(&bound.value),
+            Some(bound) => match &bound.value {
+                Value::Float(float) if *float == 0.0 => encode_value_owned(&Value::Float(0.0)),
+                value => encode_value_owned(value),
+            },
             None => value_band_max(band),
         };
         start = start.set_value(band, ValuePayload::Inline(lo));
@@ -306,24 +327,36 @@ fn apply_prefix_bounds<K: KeyViewMut>(
     (start, end)
 }
 
-/// The lowest inline value byte-encoding of a numeric type's band: all-zero
-/// bytes of the type's fixed width. Order-preserving encodings put the type's
-/// minimum at the bottom of its band, so this is the lower edge when only an
-/// upper value bound is set.
+/// The lowest inline value byte-encoding of a type's band: all-zero bytes of
+/// the type's fixed width for numerics, or the terminated empty encoding
+/// (`[0x00]`) for variable-length types — the smallest VALID payload, so the
+/// bound key still parses (an empty payload would let the following key
+/// component slide into the value position and corrupt the range edge).
 fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
-    vec![0x00; numeric_width(value_type)]
+    match numeric_width(value_type) {
+        0 => vec![0x00],
+        width => vec![0x00; width],
+    }
 }
 
-/// The highest inline value byte-encoding of a numeric type's band: all-`0xFF`
-/// bytes of the type's fixed width, the upper edge when only a lower bound is
-/// set.
+/// The highest inline value byte-encoding of a type's band: all-`0xFF` bytes
+/// of the type's fixed width for numerics. For variable-length types, a run
+/// of `0xFF` one longer than the inline threshold: every inline payload is at
+/// most `threshold + 1` encoded bytes (value bytes plus terminator) and its
+/// terminator (`0x00`) sorts below `0xFF`, so this sits above the whole
+/// band. Used only as a raw range edge; it deliberately does not parse (it
+/// is the last field set on the bound).
 fn value_band_max(value_type: ValueDataType) -> Vec<u8> {
-    vec![0xFF; numeric_width(value_type)]
+    match numeric_width(value_type) {
+        0 => vec![0xFF; inline_threshold() + 2],
+        width => vec![0xFF; width],
+    }
 }
 
 /// The fixed inline width of a numeric value type's order-preserving encoding.
-/// Non-numeric types have no fixed width; they return 0 (a value range over a
-/// non-numeric type is not expressible and the caller never constructs one).
+/// Variable-length types (strings, bytes, symbols) have no fixed width and
+/// return 0; their band edges come from the terminated-empty / over-long
+/// `0xFF` forms above.
 fn numeric_width(value_type: ValueDataType) -> usize {
     match value_type {
         ValueDataType::UnsignedInt | ValueDataType::SignedInt => 16,
@@ -626,9 +659,14 @@ impl ArtifactTreeExt for ArtifactTree {
                 // again in the spill lookup, again in reconstruction); on the
                 // variable-length M3 key that per-entry re-splitting dominated
                 // scan cost.
-                let Some(parts) = parse_key_ref(raw.key.as_ref()) else {
-                    continue;
-                };
+                // A key that does not parse is corruption; dropping it
+                // silently would make the corrupt entry vanish from results
+                // with no signal.
+                let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                    DialogArtifactsError::InvalidKey(
+                        "scanned entry's key does not parse".to_string(),
+                    )
+                })?;
                 if !match_selector_and_key_ref(&selector, &parts) {
                     continue;
                 }

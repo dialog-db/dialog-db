@@ -12,11 +12,19 @@
 //! The manifest is a handful of bytes, identical across every node in a tree,
 //! so front coding and structural sharing store it once in practice.
 //!
-//! The `format_version` pins interpretation: a peer reading a node with a
-//! version it knows uses the exact matching constants; an unknown version is
-//! rejected rather than silently misread. Changing a constant means bumping
+//! The `version` pins interpretation: a peer reading a node with a version it
+//! knows uses the exact matching constants. Changing a constant means bumping
 //! the version, which changes every node hash — a visible, intentional fork
 //! rather than a silent one.
+//!
+//! Enforcement today is at the EDIT boundary: loading a root whose header
+//! differs from the edit's manifest (including an unknown version) fails
+//! loudly (see `TransientTree::load`), because an edit under the wrong
+//! parameters would re-coin the touched spine and silently break shape
+//! convergence. Pure reads do not check the header — the node encoding is
+//! self-delimiting and version 1 is the only shipped format. Adopting the
+//! loaded root's manifest for edits (instead of rejecting) is the tracked
+//! follow-up on `TransientTree::manifest`.
 
 use rkyv::{Archive, Deserialize, Serialize};
 

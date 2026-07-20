@@ -20,7 +20,7 @@
 use std::borrow::Cow;
 
 use crate::{
-    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, ENTITY_KEY_TAG, VALUE_KEY_TAG, ValueDataType, decode_bytes,
+    ATTRIBUTE_KEY_TAG, BLOB_KEY_TAG, ENTITY_KEY_TAG, VALUE_KEY_TAG, ValueDataType,
     decode_bytes_cow, encode_bytes,
 };
 
@@ -318,6 +318,12 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
     if type_byte & SPILL_FLAG != 0 {
         return Some(VALUE_REFERENCE_LENGTH);
     }
+    // An unknown discriminant is corruption: reject the key rather than
+    // guessing a width (`ValueDataType::from` would silently default to
+    // Bytes and misparse the tail).
+    if (type_byte & !SPILL_FLAG) > u8::from(ValueDataType::Symbol) {
+        return None;
+    }
     match ValueDataType::from(type_byte & !SPILL_FLAG) {
         // 128-bit integers: 16 big-endian bytes.
         ValueDataType::UnsignedInt | ValueDataType::SignedInt => Some(16),
@@ -424,79 +430,24 @@ pub fn split_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
     if at == bytes.len() { Some(out) } else { None }
 }
 
-/// Parses key bytes back into components, dispatching on the tag. Returns
-/// `None` on malformed input (missing terminator, short value tail).
+/// Parses key bytes back into owned components, dispatching on the tag.
+/// Returns `None` on malformed input (missing terminator, short value tail).
+///
+/// The owned counterpart of [`parse_key_ref`], implemented on top of it so
+/// the two can never diverge; use `parse_key_ref` on read/scan paths that can
+/// borrow.
 pub fn parse_key(bytes: &[u8]) -> Option<KeyParts> {
-    let (&tag, rest) = bytes.split_first()?;
-
-    // Reads a variable value tail: one (possibly spill-flagged) type byte plus
-    // its payload (inline order-preserving value, or a fixed reference). The
-    // type byte's low seven bits are the `ValueDataType`; its high bit records
-    // whether the payload spilled.
-    fn value_tail(bytes: &[u8]) -> Option<(ValueDataType, ValuePayload, &[u8])> {
-        let (&type_byte, rest) = bytes.split_first()?;
-        let payload_len = value_payload_len(type_byte, bytes, 1)?;
-        let (payload, rest) = rest.split_at_checked(payload_len)?;
-        let value_type = ValueDataType::from(type_byte & !SPILL_FLAG);
-        let value = if type_byte & SPILL_FLAG != 0 {
-            ValuePayload::Reference(payload.to_vec())
-        } else {
-            ValuePayload::Inline(payload.to_vec())
-        };
-        Some((value_type, value, rest))
-    }
-
-    let parts = match tag {
-        ENTITY_KEY_TAG => {
-            let (entity, rest) = decode_bytes(rest)?;
-            let (attribute, rest) = decode_bytes(rest)?;
-            let (value_type, value, _rest) = value_tail(rest)?;
-            KeyParts {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-            }
-        }
-        ATTRIBUTE_KEY_TAG => {
-            let (attribute, rest) = decode_bytes(rest)?;
-            let (entity, rest) = decode_bytes(rest)?;
-            let (value_type, value, _rest) = value_tail(rest)?;
-            KeyParts {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-            }
-        }
-        VALUE_KEY_TAG => {
-            let (value_type, value, rest) = value_tail(rest)?;
-            let (attribute, rest) = decode_bytes(rest)?;
-            let (entity, _rest) = decode_bytes(rest)?;
-            KeyParts {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-            }
-        }
-        _ => {
-            let (entity, rest) = decode_bytes(rest)?;
-            let (attribute, rest) = decode_bytes(rest)?;
-            let (value_type, value, _rest) = value_tail(rest)?;
-            KeyParts {
-                tag,
-                entity,
-                attribute,
-                value_type,
-                value,
-            }
-        }
-    };
-    Some(parts)
+    let parts = parse_key_ref(bytes)?;
+    Some(KeyParts {
+        tag: parts.tag,
+        entity: parts.entity.into_owned(),
+        attribute: parts.attribute.into_owned(),
+        value_type: parts.value_type,
+        value: match parts.value {
+            ValueRef::Inline(payload) => ValuePayload::Inline(payload.to_vec()),
+            ValueRef::Reference(payload) => ValuePayload::Reference(payload.to_vec()),
+        },
+    })
 }
 
 /// A key's value payload, borrowed from the key bytes where possible. The
@@ -730,8 +681,9 @@ mod tests {
         let attribute = b"person/name";
 
         // The attribute-only scan range, as `selector_range` builds it: min/max
-        // parts with the attribute set. The max parts do not parse, so the mut
-        // path falls back to `max`; we build them directly here.
+        // parts with the attribute set (both sentinels parse — the `0xFE`
+        // filler is a valid field — but building the parts directly keeps the
+        // fixture independent of the `set_*` chain).
         let mut start_parts = KeyParts::min(ATTRIBUTE_KEY_TAG);
         start_parts.attribute = attribute.to_vec();
         let start = build_key(&start_parts);
