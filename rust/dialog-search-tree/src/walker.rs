@@ -21,12 +21,12 @@ use crate::{
     Value, into_owned,
 };
 
-/// Whether `key` sorts past the end of `range`, so an ascending walk can stop.
-fn past_range_end<Key, R>(range: &R, key: &Key) -> bool
-where
-    Key: Ord,
-    R: RangeBounds<Key>,
-{
+/// Whether `key` lies at or above `range`'s upper bound: once one does, no
+/// later key (keys stream in order) can be in range, so a walk can stop even
+/// if the range was never entered. Without this, a range lying entirely below
+/// a subtree's keys would walk every leaf to the subtree's right edge
+/// yielding nothing.
+fn past_end<Key: Ord, R: RangeBounds<Key>>(range: &R, key: &Key) -> bool {
     match range.end_bound() {
         Bound::Included(end) => key > end,
         Bound::Excluded(end) => key >= end,
@@ -290,6 +290,13 @@ where
                 // stored keys are obtained differs.
                 if node.should_memoize_keys() {
                     let keys = node.memoized_keys()?;
+                    // Resolve the segment at most once per leaf, and only when
+                    // an entry actually yields: `body()` is a full bytecheck
+                    // validation of the node buffer, so resolving per yielded
+                    // entry costs O(entries × node size) on the memoized
+                    // (join) hot path, while resolving eagerly taxes leaves
+                    // the range never enters.
+                    let mut segment = None;
                     for (at, key) in keys.iter().enumerate() {
                         // Buffered inserts sorting before this entry.
                         while let Some((buffered_key, _)) = buffered.peek() {
@@ -322,22 +329,24 @@ where
                         let entry_key = Key::try_from_bytes(key)?;
                         if range.contains(&entry_key) {
                             entered_range = true;
-                            let ArchivedNodeBody::Segment(segment) = node.body()? else {
-                                unreachable!("segment checked above")
+                            let segment = match &segment {
+                                Some(segment) => segment,
+                                None => {
+                                    let ArchivedNodeBody::Segment(resolved) = node.body()? else {
+                                        unreachable!("segment checked above")
+                                    };
+                                    segment.insert(resolved)
+                                }
                             };
                             let value = into_owned(segment.value_at(at)?)?;
                             yield Entry { key: entry_key, value };
-                        } else if past_range_end(&range, &entry_key) {
-                            // Past the end: entries only ascend from here, so
-                            // nothing further can match.
-                            //
-                            // This must not be gated on having already matched
-                            // something. A scan whose range hits no stored
-                            // entry would otherwise never exit and would walk
-                            // the rest of the tree, making an empty lookup cost
-                            // the size of the database.
-                            return;
-                        } else if entered_range {
+                        // Entries only ascend, so a key past the range's end
+                        // ends the walk. The `past_end` half must NOT be gated
+                        // on `entered_range`: a scan whose range hits no stored
+                        // entry would otherwise never exit and would walk the
+                        // rest of the tree, making an empty lookup cost the
+                        // size of the database.
+                        } else if entered_range || past_end(&range, &entry_key) {
                             return;
                         }
                     }
@@ -380,12 +389,10 @@ where
                             entered_range = true;
                             let value = into_owned(segment.value_at(at)?)?;
                             yield Entry { key: entry_key, value };
-                        } else if past_range_end(&range, &entry_key) {
-                            // See the memoized arm above: this exit must not be
-                            // gated on `entered_range`, or a range matching no
-                            // stored entry walks the rest of the tree.
-                            return;
-                        } else if entered_range {
+                        // See the memoized arm above: the `past_end` half must
+                        // not be gated on `entered_range`, or a range matching
+                        // no stored entry walks the rest of the tree.
+                        } else if entered_range || past_end(&range, &entry_key) {
                             return;
                         }
                     }

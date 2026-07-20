@@ -7,9 +7,9 @@ use anyhow::Result;
 use dialog_storage::MemoryStorageBackend;
 use ed25519_dalek::SigningKey;
 
-use crate::key::default_inline_threshold;
+use crate::key::default_manifest;
 use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
-use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value};
+use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value, encode_bytes};
 
 use super::{
     Authority, Causality, CausalityCache, Cause, Claim, Edition, History, MemoryHistory, Origin,
@@ -1137,18 +1137,10 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     let mut delta = Delta::zero();
-    tree.record(
-        &mut store,
-        &mut delta,
-        signed.entries(default_inline_threshold())?,
-    )
-    .await?;
-    tree.record(
-        &mut store,
-        &mut delta,
-        forged.entries(default_inline_threshold())?,
-    )
-    .await?;
+    tree.record(&mut store, &mut delta, signed.entries(&default_manifest())?)
+        .await?;
+    tree.record(&mut store, &mut delta, forged.entries(&default_manifest())?)
+        .await?;
     for (digest, buffer) in delta.flush() {
         store.set(*digest.as_bytes(), buffer.into_vec()).await?;
     }
@@ -1498,14 +1490,20 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
         let State::Added(datum) = &entry.value else {
             panic!("coverage entries are plain adds");
         };
-        // Coverage stays value-free: the key carries a 32-byte value
-        // reference (coverage matches claims by version, never by content),
-        // and the payload carries only the lineage.
+        // Coverage stays value-free: the key carries the 32-byte whole-value
+        // hash (coverage matches claims by version, never by content), and the
+        // payload carries only the lineage. Under the in-band spill encoding
+        // that is a spilled payload whose in-key prefix is EMPTY: the value
+        // slot holds the encoding of zero raw bytes, so the key still parses,
+        // and no value bytes ride along.
         let parts = parse_key(entry.key.as_ref()).expect("coverage key parses");
-        assert!(
-            matches!(parts.value, ValuePayload::Reference(_)),
-            "coverage carries a value reference, never value bytes"
-        );
+        let ValuePayload::Spilled { prefix, hash } = &parts.value else {
+            panic!("coverage carries the whole-value hash, never value bytes");
+        };
+        let mut empty = Vec::new();
+        encode_bytes(&[], &mut empty);
+        assert_eq!(prefix, &empty, "coverage carries no value bytes");
+        assert_eq!(hash.len(), 32, "coverage carries the whole-value hash");
         assert!(!datum.supersedes.is_empty(), "coverage names its versions");
     }
     let State::Added(replace) = &entries[0].value else {

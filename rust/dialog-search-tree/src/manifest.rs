@@ -12,11 +12,19 @@
 //! The manifest is a handful of bytes, identical across every node in a tree,
 //! so front coding and structural sharing store it once in practice.
 //!
-//! The `format_version` pins interpretation: a peer reading a node with a
-//! version it knows uses the exact matching constants; an unknown version is
-//! rejected rather than silently misread. Changing a constant means bumping
+//! The `version` pins interpretation: a peer reading a node with a version it
+//! knows uses the exact matching constants. Changing a constant means bumping
 //! the version, which changes every node hash — a visible, intentional fork
 //! rather than a silent one.
+//!
+//! Enforcement today is at the EDIT boundary: loading a root whose header
+//! differs from the edit's manifest (including an unknown version) fails
+//! loudly (see `TransientTree::load`), because an edit under the wrong
+//! parameters would re-coin the touched spine and silently break shape
+//! convergence. Pure reads do not check the header — the node encoding is
+//! self-delimiting and version 1 is the only shipped format. Adopting the
+//! loaded root's manifest for edits (instead of rejecting) is the tracked
+//! follow-up on `TransientTree::manifest`.
 
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -35,10 +43,17 @@ pub const DEFAULT_FANOUT_N: u8 = 8;
 pub const DEFAULT_MAX_SEPARATOR: u32 = 512;
 
 /// Default value inline-vs-spill threshold (plan 3.1/4): values whose encoded
-/// form exceeds this go to the block store as a reference; smaller values
-/// inline in order-preserving form and remain range-queryable. Sized for a
-/// networked store with large nodes, not a 4 KiB disk page.
+/// form exceeds this go to the block store, addressed by the whole-value
+/// hash appended to the key; smaller values inline in order-preserving form.
+/// Sized for a networked store with large nodes, not a 4 KiB disk page.
 pub const DEFAULT_INLINE_N: u32 = 4096;
+
+/// Default spilled-value key-prefix length: a spilled value's key carries the
+/// order-preserving encoding of this many leading raw value bytes, so spilled
+/// values sort INTO their type band next to inline values and prefix/range
+/// predicates decide from the key whenever the answer lies within this many
+/// bytes (beyond it, the scan loads the block and post-filters).
+pub const DEFAULT_SPILL_PREFIX: u16 = 64;
 
 /// The self-describing format constants of a tree, inlined into every node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
@@ -50,8 +65,12 @@ pub struct Manifest {
     pub fanout_n: u8,
     /// Keys longer than this never become boundaries (separator bound).
     pub max_separator: u32,
-    /// Values longer than this spill to the block store as a reference.
+    /// Values longer than this spill to the block store, leaving a key-prefix
+    /// plus whole-value hash in the key.
     pub inline_n: u32,
+    /// How many leading raw value bytes a spilled value's key carries as its
+    /// order-preserving prefix.
+    pub spill_prefix: u16,
 }
 
 impl Default for Manifest {
@@ -61,6 +80,7 @@ impl Default for Manifest {
             fanout_n: DEFAULT_FANOUT_N,
             max_separator: DEFAULT_MAX_SEPARATOR,
             inline_n: DEFAULT_INLINE_N,
+            spill_prefix: DEFAULT_SPILL_PREFIX,
         }
     }
 }
@@ -147,6 +167,7 @@ mod tests {
             fanout_n: 8,
             max_separator: 512,
             inline_n: 4096,
+            spill_prefix: 64,
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&manifest)?;
         let decoded: Manifest = rkyv::from_bytes::<Manifest, rkyv::rancor::Error>(&bytes)?;

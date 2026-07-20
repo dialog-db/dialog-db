@@ -4,9 +4,10 @@ use crate::KeyType;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, ValueReferenceKeyPart,
-    key::value_payload, key::varkey, key::varkey::KeyParts, key::varkey::ValuePayload,
+    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, key::value_payload, key::varkey,
+    key::varkey::KeyParts, key::varkey::ValuePayload,
 };
+use dialog_search_tree::Manifest;
 
 use super::{Key, KeyView, KeyViewConstruct, KeyViewMut};
 
@@ -33,21 +34,6 @@ impl KeyViewConstruct for ValueKey<Key> {
 
     fn max() -> Self {
         Self(Key::from(varkey::build_key(&KeyParts::max(VALUE_KEY_TAG))))
-    }
-
-    fn from_parts(
-        entity: EntityKeyPart,
-        attribute: AttributeKeyPart,
-        value_type: ValueDataType,
-        value_reference: ValueReferenceKeyPart,
-    ) -> Self {
-        Self::default()
-            .set_entity(entity)
-            .set_attribute(attribute)
-            .set_value(
-                value_type,
-                ValuePayload::Reference(value_reference.0.to_vec()),
-            )
     }
 }
 
@@ -81,6 +67,10 @@ where
 
     fn value_is_spilled(&self) -> bool {
         varkey::value_is_spilled(self.0.as_ref(), VALUE_KEY_TAG)
+    }
+
+    fn value_spill_hash(&self) -> Option<&[u8]> {
+        varkey::value_spill_hash(self.0.as_ref(), VALUE_KEY_TAG)
     }
 }
 
@@ -143,19 +133,18 @@ where
 }
 
 impl ValueKey<Key> {
-    /// Builds the key for `fact` under the target tree's value inline-vs-spill
-    /// threshold `inline_n` (its `manifest.inline_n`).
+    /// Builds the key for `fact` under the target tree's format `manifest`.
     ///
-    /// The threshold is a parameter rather than a global because it is a
-    /// property of the tree being written, not of the process: a fact written
-    /// into a tree whose manifest says one threshold must be looked up under
-    /// that same threshold, or a boundary-sized value inlines on one path and
-    /// spills on the other and the lookup misses.
-    pub fn from_artifact(fact: &Artifact, inline_n: usize) -> Self {
+    /// The format is a parameter rather than a global because it is a property
+    /// of the tree being written, not of the process: a fact written into a
+    /// tree must be looked up under that same manifest, or a boundary-sized
+    /// value inlines on one path and spills on the other and the lookup
+    /// misses.
+    pub fn from_artifact(fact: &Artifact, manifest: &Manifest) -> Self {
         ValueKey::<Key>::default()
             .set_entity(EntityKeyPart::from(&fact.of))
             .set_attribute(AttributeKeyPart::from(&fact.the))
-            .set_value(fact.is.data_type(), value_payload(&fact.is, inline_n))
+            .set_value(fact.is.data_type(), value_payload(&fact.is, manifest))
     }
 }
 

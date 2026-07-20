@@ -8,6 +8,7 @@ use crate::key::varkey::{self, ValuePayload};
 use crate::{
     Attribute, Datum, DialogArtifactsError, Entity, Key, State, coverage_key, history_key,
 };
+use dialog_search_tree::Manifest;
 
 use super::{Cause, Claim, Version};
 
@@ -44,15 +45,15 @@ impl Record {
     /// the claim in [`Datum`] form with the supersedes/retraction fields
     /// carrying what [`Claim::cause`] and the record polarity express.
     ///
-    /// `inline_n` is the target tree's value inline-vs-spill threshold; the
+    /// `manifest` is the target tree's format; the
     /// key carries the claim's value through that decision (see
     /// [`history_key`]), so it must be the tree's own.
-    pub fn into_entry(self, version: &Version, inline_n: usize) -> (Key, State<Datum>) {
+    pub fn into_entry(self, version: &Version, manifest: &Manifest) -> (Key, State<Datum>) {
         let retraction = !self.is_assertion();
         let claim = match self {
             Record::Assert(claim) | Record::Retract(claim) => claim,
         };
-        let key = history_key(version, &claim.of, &claim.the, &claim.is, inline_n);
+        let key = history_key(version, &claim.of, &claim.the, &claim.is, manifest);
         let datum = Datum {
             cause: None,
             blob: None,
@@ -112,7 +113,7 @@ impl Record {
         let is = match &parts.value {
             // A spilled value's bytes live in the archive under this
             // reference, exactly as for a fact; the caller resolves it.
-            ValuePayload::Reference(_) => {
+            ValuePayload::Spilled { .. } => {
                 return Err(DialogArtifactsError::InvalidKey(
                     "history record value spilled; resolve it through the archive".to_string(),
                 ));

@@ -9,8 +9,6 @@ use crate::{Attribute, Entity, Value};
 #[cfg(doc)]
 use crate::ArtifactStore;
 
-use super::Blake3Hash;
-
 /// A marker type that represents a totally open-ended [`ArtifactSelector`]
 #[derive(Clone)]
 pub struct Unconstrained;
@@ -58,13 +56,10 @@ where
     attribute: Option<Attribute>,
     value: Option<Value>,
 
-    value_reference: Option<Blake3Hash>,
-
     /// Prefix bound on the entity URI: selected [`Artifact`]s'
     /// entities must have URIs beginning with this string. The
-    /// entity key stores the first 32 URI bytes raw (the rest is
-    /// hashed), so scans range over the raw head and re-check
-    /// longer prefixes against the stored datum.
+    /// entity key stores the full URI raw, so this bound is an
+    /// exact key range.
     entity_prefix: Option<String>,
     /// Prefix bound on the attribute name: selected [`Artifact`]s'
     /// attributes must have names beginning with this string. The
@@ -72,11 +67,14 @@ where
     /// this bound is an exact key range.
     attribute_prefix: Option<String>,
     /// Prefix bound on the value: selected [`Artifact`]s' values must
-    /// be textual (string/bytes) and begin with this string. The M3
-    /// value-in-key format stores the value order-preservingly in the
-    /// VAE index, so this is an exact key range over the value dimension
-    /// (subject to per-entry re-checking for spilled values, whose key
-    /// carries a reference rather than the inline prefix).
+    /// be strings beginning with this string. The M3 value-in-key
+    /// format stores the value order-preservingly in the VAE index, so
+    /// this is an exact key range over the value dimension. Spilled
+    /// values participate through the leading bytes their key carries:
+    /// a prefix within that in-key prefix decides from the key alone,
+    /// and a longer one loads the value and post-filters. A prefix
+    /// containing a NUL byte cannot match past the NUL (the inline
+    /// payload escapes `0x00`).
     value_prefix: Option<String>,
     /// Lower bound on the value: selected [`Artifact`]s' values must be
     /// `>=` (or `>`, when not inclusive) this. The value sorts
@@ -104,7 +102,6 @@ impl ArtifactSelector<Unconstrained> {
             entity: None,
             attribute: None,
             value: None,
-            value_reference: None,
             entity_prefix: None,
             attribute_prefix: None,
             value_prefix: None,
@@ -132,11 +129,6 @@ where
     /// The [`Value`] (or object) that selected [`Artifact`]s should refer to.
     pub fn value(&self) -> Option<&Value> {
         self.value.as_ref()
-    }
-
-    /// The [`Blake3Hash`] of the configured [`Value`], if any
-    pub fn value_reference(&self) -> Option<&Blake3Hash> {
-        self.value_reference.as_ref()
     }
 
     /// The prefix bound on entity URIs, if any
@@ -169,7 +161,6 @@ where
         ArtifactSelector::<Constrained> {
             attribute: Some(attribute),
             entity: self.entity,
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
@@ -185,7 +176,6 @@ where
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: Some(entity),
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
@@ -201,7 +191,6 @@ where
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
-            value_reference: Some(value.to_reference()),
             value: Some(value),
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
@@ -220,7 +209,6 @@ where
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: Some(prefix.into()),
@@ -239,7 +227,6 @@ where
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: Some(prefix.into()),
             attribute_prefix: self.attribute_prefix,
@@ -250,20 +237,20 @@ where
         }
     }
 
-    /// Constrain selected [`Artifact`]s to textual values (string/bytes)
-    /// beginning with `prefix`. A prefix is a constraint, so the resulting
-    /// selector is [`Constrained`]; an exact value set via
-    /// [`ArtifactSelector::is`] takes precedence during scans.
+    /// Constrain selected [`Artifact`]s to string values beginning with
+    /// `prefix`. A prefix is a constraint, so the resulting selector is
+    /// [`Constrained`]; an exact value set via [`ArtifactSelector::is`] takes
+    /// precedence during scans.
     ///
     /// The M3 value-in-key format stores the value order-preservingly in the
     /// VAE index, so this narrows the scan to the value sub-range whose keys
-    /// begin with `prefix` (a spilled value, whose key carries a reference
-    /// rather than the inline bytes, is re-checked per entry).
+    /// begin with `prefix`. A spilled value participates through the leading
+    /// bytes its key carries: a probe within that in-key prefix decides from
+    /// the key alone, and a longer probe loads the value and post-filters.
     pub fn is_starting_with(self, prefix: impl Into<String>) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
@@ -321,7 +308,6 @@ where
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
@@ -336,7 +322,6 @@ where
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,

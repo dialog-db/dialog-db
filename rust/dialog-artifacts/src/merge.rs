@@ -365,7 +365,7 @@ where
                             },
                         )
                     }
-                    ValueRef::Reference(_) => None,
+                    ValueRef::Spilled { .. } => None,
                 }) else {
                     yield change;
                     continue;

@@ -258,15 +258,15 @@ where
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-    // Keys are built under the target tree's own value-spill threshold, read
-    // from the manifest its root node carries.
-    let inline_n = tree.manifest(&storage).await?.inline_n as usize;
+    // Keys are built under the target tree's own format, read from the
+    // manifest its root node carries.
+    let manifest = tree.manifest(&storage).await?;
     let (buffered, changed) = write_instructions(
         HitchhikerTree::open(tree),
         store,
         &storage,
         version,
-        inline_n,
+        &manifest,
         instructions,
     )
     .await?;
@@ -294,7 +294,7 @@ mod tests {
 
     use super::apply_buffered;
     use crate::history::{Edition, Origin, Version};
-    use crate::key::default_inline_threshold;
+    use crate::key::default_manifest;
     use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
     use crate::{Artifact, Instruction, Value};
 
@@ -423,7 +423,7 @@ mod tests {
                 is: Value::String(format!("{i}")),
                 cause: None,
             };
-            let entity_key = crate::EntityKey::from_artifact(&artifact, default_inline_threshold());
+            let entity_key = crate::EntityKey::from_artifact(&artifact, &default_manifest());
             let attribute_key = crate::AttributeKey::from_key(&entity_key);
             let added = crate::State::Added(crate::Datum::for_artifact(&artifact));
             tree.record(

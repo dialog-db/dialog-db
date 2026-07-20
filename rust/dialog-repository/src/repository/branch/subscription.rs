@@ -89,7 +89,8 @@ use futures_util::TryStreamExt as _;
 use super::session::{QueryEnv, QueryLayer};
 use crate::layer::tombstones_from;
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Revision,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt as _, Revision, Upstream,
 };
 
 /// The demand cover of one evaluation: every index key range the
@@ -111,11 +112,11 @@ pub struct Demand {
 /// sorted list of disjoint intervals, so it cannot grow beyond the
 /// number of genuinely distinct demanded regions no matter how many
 /// (nested, repeated) selectors record into it.
-/// The default value inline-vs-spill threshold, used where a demand range must
-/// be built without a storage handle to read the tree's real manifest. See
-/// [`Demand::record`] for why that is sound today and what it costs later.
-fn default_inline_n() -> usize {
-    dialog_search_tree::Manifest::default().inline_n as usize
+/// The default key format, used where a demand range must be built without a
+/// storage handle to read the tree's real manifest. See [`Demand::record`] for
+/// why that is sound today and what it costs later.
+fn default_manifest() -> dialog_search_tree::Manifest {
+    dialog_search_tree::Manifest::default()
 }
 
 fn record_range(ranges: &Mutex<Vec<RangeInclusive<Key>>>, range: RangeInclusive<Key>) {
@@ -146,24 +147,24 @@ impl Demand {
     /// everything the selector's scan would touch — including where
     /// no entries exist, so misses are demanded too.
     ///
-    /// The range is built under the DEFAULT value inline-vs-spill threshold
-    /// rather than the branch tree's own. `Demand` is built by the synchronous
+    /// The range is built under the DEFAULT format [`Manifest`] rather than the
+    /// branch tree's own. `Demand` is built by the synchronous
     /// [`Branch::subscribe`](crate::Branch::subscribe), which has no storage
     /// handle and so cannot read a manifest. This is sound only while every
     /// tree carries the default manifest, which is the case today (nothing
     /// constructs another). Making manifests configurable requires the
-    /// subscription to carry its branch's `inline_threshold` instead: a demand
-    /// range built under the wrong threshold brackets the wrong keys for a
-    /// value-constrained selector, so a write inside the real scanned range
-    /// would fail to invalidate the reader.
+    /// subscription to carry its branch's manifest instead: a demand range
+    /// built under the wrong `inline_n` or `spill_prefix` brackets the wrong
+    /// keys for a value-constrained selector, so a write inside the real
+    /// scanned range would fail to invalidate the reader.
     pub(crate) fn record(&self, selector: &ArtifactSelector<Constrained>) {
-        record_range(&self.facts, selector_range(selector, default_inline_n()));
+        record_range(&self.facts, selector_range(selector, &default_manifest()));
     }
 
     /// Record a rule-discovery scan's demanded range.
-    /// Carries the same default-threshold caveat as [`Demand::record`].
+    /// Carries the same default-manifest caveat as [`Demand::record`].
     pub(crate) fn record_rules(&self, selector: &ArtifactSelector<Constrained>) {
-        record_range(&self.rules, selector_range(selector, default_inline_n()));
+        record_range(&self.rules, selector_range(selector, &default_manifest()));
     }
 
     /// Whether the key falls inside any recorded range.
@@ -499,7 +500,24 @@ where
             return Ok(Touched::Nothing);
         }
 
-        let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), None);
+        // Load the remote if the branch tracks one, exactly as a select does:
+        // a pull replicates tree nodes along changed paths but never spilled
+        // value blocks, so the first poll after a pull that lands a spilled
+        // fact inside the cover must be able to read the block through the
+        // remote. Failing to load the remote (e.g. no credentials) is
+        // non-fatal — the local archive alone may still satisfy the poll.
+        let remote = match self.branch.upstream() {
+            Some(Upstream::Remote { remote: name, .. }) => self
+                .branch
+                .subject()
+                .remote(name)
+                .load()
+                .perform(env)
+                .await
+                .ok(),
+            _ => None,
+        };
+        let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), remote);
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));

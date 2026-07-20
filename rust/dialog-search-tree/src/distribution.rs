@@ -49,8 +49,12 @@ pub trait Distribution {
     /// The default applies the key coin to the separator bytes, which is the
     /// right choice for any hash-based distribution (the two coins stay
     /// independent because their inputs never collide: a separator sorts
-    /// strictly between two keys). Separators are already bounded, so the
-    /// length guard never fires here.
+    /// strictly between two keys). Separators are bounded by construction at
+    /// `max_separator + 1` bytes (a prefix of the right key one byte past
+    /// the divergence from a boundary key of at most `max_separator` bytes),
+    /// so the length guard can fire only on that one-byte edge, forcing that
+    /// seam quiet — deterministic on both build and rebuild, so canonical
+    /// form is unaffected.
     fn seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
         Self::rank(separator, manifest)
     }
@@ -156,13 +160,13 @@ pub mod geometric {
 
     use super::Rank;
 
-    /// The branch factor of the trees built from this distribution: the
-    /// average number of children per node.
-    pub const BRANCH_FACTOR: u64 = 254;
-
-    /// Computes the rank of a node from its hash using a geometric distribution.
+    /// Computes the rank of a node from its hash using a geometric
+    /// distribution with the default [`Manifest`](crate::Manifest)'s branch
+    /// factor — the same modulus [`Geometric`](super::Geometric) uses for a
+    /// default-manifest tree, so callers (test oracles, diagnostics)
+    /// classify boundaries exactly as the tree does.
     pub fn rank(hash: &Blake3Hash) -> Rank {
-        compute_geometric_rank(hash, BRANCH_FACTOR)
+        compute_geometric_rank(hash, crate::Manifest::default().branch_factor())
     }
 
     /// Compute the rank of a hash using a threshold-based geometric
@@ -185,7 +189,7 @@ pub mod geometric {
     ///
     /// The loop terminates on its own: integer division drives the threshold
     /// to zero after `floor(log_m(2^64))` steps, and no prefix is below zero,
-    /// so ranks naturally top out at `floor(log_m(2^64)) + 1` (9 for m=254,
+    /// so ranks naturally top out at `floor(log_m(2^64)) + 1` (9 for m=256,
     /// enough for trees with ~10^19 entries).
     pub(crate) fn compute_geometric_rank(hash: &Blake3Hash, m: u64) -> Rank {
         debug_assert!(m >= 2, "branch factor must be at least 2, got {m}");

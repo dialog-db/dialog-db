@@ -144,10 +144,23 @@ where
             .ok_or_else(|| malformed("Segment entry out of range"))
     }
 
+    /// The entry count claimed by the node's `count` field, validated against
+    /// the rkyv-checked value table before it is used for anything — the raw
+    /// integer arrives from untrusted bytes, so an unchecked large count is a
+    /// pre-allocation exhaustion vector and a small one silently hides entries.
+    fn checked_count(&self) -> Result<usize, DialogSearchTreeError> {
+        let count = self.count.to_native() as usize;
+        if count != self.values.len() {
+            return Err(malformed("Segment count disagrees with its value table"));
+        }
+        Ok(count)
+    }
+
     /// Deserializes the archived columns to owned form and decodes them into
     /// a [`ColumnarLeaf`], using `Key`'s schema. One decode pass; subsequent
     /// key access is O(1) slicing.
     pub fn decode<Key: self::Key>(&self) -> Result<ColumnarLeaf, DialogSearchTreeError> {
+        let count = self.checked_count()?;
         let columns: Vec<ColumnData> = self
             .columns
             .iter()
@@ -162,7 +175,7 @@ where
         } else {
             Key::schema(self.layout)
         };
-        ColumnarLeaf::decode(&schema, &columns, self.count.to_native() as usize)
+        ColumnarLeaf::decode(&schema, &columns, count)
     }
 
     /// A streaming decoder over this segment's full keys, in entry order, for a
@@ -171,13 +184,14 @@ where
     /// materialization, no per-entry allocation. This is the scan hot path; see
     /// [`StreamingLeaf`].
     pub fn keys<Key: self::Key>(&self) -> Result<StreamingLeaf<'_>, DialogSearchTreeError> {
+        let count = self.checked_count()?;
         let schema = if self.layout == crate::MIXED_LAYOUT {
             crate::Schema::opaque()
         } else {
             Key::schema(self.layout)
         };
         let columns: Vec<_> = self.columns.iter().map(archived_column_slices).collect();
-        StreamingLeaf::new(&schema, &columns, self.count.to_native() as usize)
+        StreamingLeaf::new(&schema, &columns, count)
     }
 
     /// The first (minimum) key of this segment, decoded to its bytes.
@@ -355,9 +369,164 @@ mod tests {
         });
         let node = TestNode::new(Buffer::from(body.as_bytes()?));
         let segment = node.as_segment()?;
-        assert!(segment.keys::<[u8; 8]>().is_err() || segment.first_key::<[u8; 8]>().is_err());
+        // The streaming decoder constructs lazily, so its error surfaces on
+        // the first key read; the materializing paths error outright. Each
+        // path is asserted on its own so none can silently rot.
+        let mut keys = segment.keys::<[u8; 8]>()?;
+        assert!(keys.next_key().is_err());
+        assert!(segment.first_key::<[u8; 8]>().is_err());
         assert!(segment.last_key::<[u8; 8]>().is_err());
         assert!(segment.find::<[u8; 8]>(b"anything").is_err());
+        Ok(())
+    }
+
+    /// A malformed dictionary column — non-monotone table ends, an end past
+    /// the table, or an index past the dictionary — errors at decode rather
+    /// than panicking. Driven through `ColumnarLeaf::decode` with a
+    /// dictionary schema (the opaque test-key schema is arena-only).
+    #[dialog_common::test]
+    async fn it_rejects_malformed_dictionary_columns() -> Result<()> {
+        use super::super::columnar::ColumnarLeaf;
+        use crate::{Column, Component, Schema};
+
+        static DICTIONARY_SCHEMA: &[Component] = &[Component {
+            column: Column::Dictionary,
+            width: None,
+        }];
+        let schema = Schema::new(DICTIONARY_SCHEMA);
+
+        // Non-monotone ends.
+        let column = ColumnData::Dictionary {
+            table: b"abcd".to_vec(),
+            table_ends: vec![3, 1],
+            indices: vec![0, 1],
+        };
+        assert!(ColumnarLeaf::decode(&schema, std::slice::from_ref(&column), 2).is_err());
+
+        // End past the table.
+        let column = ColumnData::Dictionary {
+            table: b"ab".to_vec(),
+            table_ends: vec![9],
+            indices: vec![0, 0],
+        };
+        assert!(ColumnarLeaf::decode(&schema, std::slice::from_ref(&column), 2).is_err());
+
+        // Index past the dictionary.
+        let column = ColumnData::Dictionary {
+            table: b"ab".to_vec(),
+            table_ends: vec![2],
+            indices: vec![1, 1],
+        };
+        assert!(ColumnarLeaf::decode(&schema, std::slice::from_ref(&column), 2).is_err());
+        Ok(())
+    }
+
+    /// Content addressing requires canonical bytes: two nodes built from
+    /// equal logical content must serialize byte-identically, for segments
+    /// and indexes alike.
+    #[dialog_common::test]
+    async fn it_serializes_equal_content_to_equal_bytes() -> Result<()> {
+        let keys: Vec<[u8; 8]> = (0..30u32).map(|i| key(&format!("k{i:04}"))).collect();
+        let a = segment_node(&keys)?;
+        let b = segment_node(&keys)?;
+        assert_eq!(a.hash(), b.hash(), "equal segments hash equally");
+
+        let separators: Vec<&[u8]> = vec![b"", b"dog", b"dot", b"how"];
+        let a = index_node(&separators)?;
+        let b = index_node(&separators)?;
+        assert_eq!(a.hash(), b.hash(), "equal indexes hash equally");
+        Ok(())
+    }
+
+    /// A segment whose `count` disagrees with its value table is corrupt and
+    /// must error at access, never silently hide entries (count too small
+    /// truncates scans) or pre-allocate by the claimed count (count too large
+    /// is a memory-exhaustion vector before any bounds check).
+    #[dialog_common::test]
+    async fn it_rejects_a_count_that_disagrees_with_the_value_table() -> Result<()> {
+        // A well-formed two-entry segment, re-stamped with count: 1. Today the
+        // decode paths trust `count` and silently drop the second entry.
+        let entries: Vec<Entry<[u8; 8], Vec<u8>>> = [key("a"), key("b")]
+            .into_iter()
+            .map(|k| Entry {
+                key: k,
+                value: k.to_vec(),
+            })
+            .collect();
+        let body = PersistentNodeBody::segment_from_entries(entries, Manifest::default())?;
+        let PersistentNodeBody::Segment(mut segment) = body else {
+            panic!("expected a segment body");
+        };
+        segment.count = 1;
+        let node = TestNode::new(Buffer::from(
+            PersistentNodeBody::Segment(segment).as_bytes()?,
+        ));
+        let segment = node.as_segment()?;
+        assert!(segment.keys::<[u8; 8]>().is_err());
+        assert!(segment.first_key::<[u8; 8]>().is_err());
+        assert!(segment.last_key::<[u8; 8]>().is_err());
+        assert!(segment.find::<[u8; 8]>(key("b").as_slice()).is_err());
+
+        // A hostile count with a tiny value table must error before any
+        // count-sized allocation happens (u32::MAX would be ~100 GB of row
+        // spine if trusted).
+        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Segment(PersistentSegment {
+            header: Manifest::default(),
+            count: u32::MAX,
+            layout: 0,
+            columns: vec![ColumnData::Arena {
+                prefix: vec![],
+                stream: vec![],
+                restarts: vec![],
+            }],
+            values: vec![],
+        });
+        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let segment = node.as_segment()?;
+        assert!(segment.keys::<[u8; 8]>().is_err());
+        assert!(segment.first_key::<[u8; 8]>().is_err());
+        assert!(segment.find::<[u8; 8]>(b"anything").is_err());
+        Ok(())
+    }
+
+    /// A key type violating the components/schema contract (two slices under
+    /// the default one-component opaque schema) must be rejected at encode
+    /// time: a surplus slice would otherwise be silently dropped from the
+    /// content-addressed node bytes.
+    #[dialog_common::test]
+    async fn it_rejects_keys_whose_components_violate_their_schema() -> Result<()> {
+        #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+        struct BadKey([u8; 4]);
+        impl AsRef<[u8]> for BadKey {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+        impl crate::Key for BadKey {
+            fn try_from_bytes(bytes: &[u8]) -> Result<Self, crate::DialogSearchTreeError> {
+                Ok(BadKey(bytes.try_into().map_err(|_| {
+                    crate::DialogSearchTreeError::Encoding("bad key length".into())
+                })?))
+            }
+            fn min() -> Self {
+                BadKey([u8::MIN; 4])
+            }
+            fn max() -> Self {
+                BadKey([u8::MAX; 4])
+            }
+            // Two slices, but `schema` stays the default single-component
+            // opaque layout: the contract violation under test.
+            fn components<'a>(&'a self, out: &mut Vec<&'a [u8]>) {
+                out.push(&self.0[..2]);
+                out.push(&self.0[2..]);
+            }
+        }
+
+        let entries = vec![Entry {
+            key: BadKey([1, 2, 3, 4]),
+            value: vec![0u8],
+        }];
+        assert!(PersistentSegment::from_entries(entries, Manifest::default()).is_err());
         Ok(())
     }
 
@@ -383,6 +552,7 @@ mod tests {
             fanout_n: 4,
             max_separator: 128,
             inline_n: 64,
+            spill_prefix: 16,
         };
         let entries: Vec<Entry<[u8; 8], Vec<u8>>> = [key("x")]
             .into_iter()

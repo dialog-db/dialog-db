@@ -1,9 +1,6 @@
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
-use crate::{
-    Attribute, DialogArtifactsError, Entity, MAXIMUM_VALUE_REFERENCE, MINIMUM_VALUE_REFERENCE,
-    VALUE_REFERENCE_LENGTH,
-};
+use crate::{Attribute, DialogArtifactsError, Entity};
 
 /// The empty byte string: the minimum value of any variable-length component.
 const EMPTY: &[u8] = &[];
@@ -77,27 +74,5 @@ impl<'a> TryFrom<AttributeKeyPart<'a>> for Attribute {
 impl Display for AttributeKeyPart<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", String::from_utf8_lossy(self.0))
-    }
-}
-
-/// A wrapper around a slice reference that corresponds to the [`Value`]
-/// part of a [`KeyType`]
-#[repr(transparent)]
-pub struct ValueReferenceKeyPart<'a>(pub &'a [u8; VALUE_REFERENCE_LENGTH]);
-
-impl ValueReferenceKeyPart<'_> {
-    /// A [`ValueReferenceKeyPart`] where all bits are zero
-    pub fn min() -> Self {
-        Self(&MINIMUM_VALUE_REFERENCE)
-    }
-
-    /// A [`ValueReferenceKeyPart`] where all bits are one
-    pub fn max() -> Self {
-        Self(&MAXIMUM_VALUE_REFERENCE)
-    }
-
-    /// The internal array represented by this [`ValueReferenceKeyPart`]
-    pub fn raw(&self) -> &[u8; VALUE_REFERENCE_LENGTH] {
-        self.0
     }
 }

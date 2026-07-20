@@ -237,13 +237,17 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             ValueDataType::Float => Value::Float(f64::from_le_bytes(value.try_into().map_err(
                 |value: Vec<u8>| {
                     DialogArtifactsError::InvalidValue(format!(
-                        "Wrong number of bytes for f64 (expected 16, got {})",
+                        "Wrong number of bytes for f64 (expected 8, got {})",
                         value.len()
                     ))
                 },
             )?)),
             // A record is opaque bytes at this layer; interpretation is the
-            // reader's concern (see e.g. `history::RevisionRecord`).
+            // reader's concern (see e.g. `history::RevisionRecord`). Its byte
+            // representation is its raw bytes (`to_bytes` returns them
+            // verbatim), so reconstruction is the identity. This is also the
+            // spilled-value read-back path: a record above the inline
+            // threshold must round-trip, not panic.
             ValueDataType::Record => Value::Record(value),
             ValueDataType::Symbol => match String::from_utf8(value) {
                 Ok(value) => Value::Symbol(Attribute::try_from(
@@ -915,12 +919,11 @@ impl From<&u8> for ValueDataType {
             6 => ValueDataType::Float,
             7 => ValueDataType::Record,
             8 => ValueDataType::Symbol,
-            _ => {
-                println!(
-                    "WARNING! Encountered unsupported value tag '{value}'; defaulting to bytes..."
-                );
-                ValueDataType::Bytes
-            }
+            // A lossy fallback for infallible callers; the key-parse path
+            // rejects unknown discriminants before reaching this (see
+            // `varkey::value_payload_len`), so no persisted-byte path relies
+            // on the default.
+            _ => ValueDataType::Bytes,
         }
     }
 }

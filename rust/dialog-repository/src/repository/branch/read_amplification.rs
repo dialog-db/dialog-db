@@ -385,7 +385,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
             &storage,
             None,
             // The bench tree carries the default manifest.
-            dialog_search_tree::Manifest::default().inline_n as usize,
+            &dialog_search_tree::Manifest::default(),
             stream::iter(batch(i)),
         )
         .await?;
