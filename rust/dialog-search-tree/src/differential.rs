@@ -653,6 +653,31 @@ where
     /// Returns a stream of entry-level changes that transform the source
     /// tree into the target tree.
     ///
+    /// The conservative key spans this difference confines all changes to,
+    /// as `(exclusive lower bound, inclusive upper bound)` pairs: one per
+    /// remaining frontier node on either side, in frontier order per side.
+    /// A `None` lower bound means the span starts at the bottom of the key
+    /// space.
+    ///
+    /// Conservative means superset: every changed key lies inside some
+    /// span, but a span may also cover unchanged keys (shared nodes
+    /// pruned between two divergent ones widen the reported spans, and a
+    /// node's true lower bound is unknowable after its left siblings were
+    /// pruned). Callers partitioning work by these spans over-include,
+    /// never miss. Costs no reads: bounds come from the frontier links.
+    pub fn divergent_bounds(&self) -> Vec<(Option<Key>, Key)> {
+        let mut bounds = Vec::new();
+        for tree in [&self.source, &self.target] {
+            let mut previous: Option<Key> = None;
+            for node in &tree.nodes {
+                let upper = node.upper_bound().clone();
+                bounds.push((previous.clone(), upper.clone()));
+                previous = Some(upper);
+            }
+        }
+        bounds
+    }
+
     /// Performs a two-cursor walk over the entries of both differing
     /// regions: keys only on the source side yield [`Change::Remove`], keys
     /// only on the target side yield [`Change::Add`], and keys present on

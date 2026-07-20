@@ -49,6 +49,9 @@ pub struct Header {
 /// stream logic; [`Negate`](Plan::Negate) wraps a nested `Plan` so
 /// negation filters against the lowered inner step.
 #[derive(Debug, Clone, PartialEq)]
+// The `Formula` variant inherits `FormulaQuery`'s width (see its allow
+// note); plans are transient per-query values, not bulk storage.
+#[allow(clippy::large_enum_variant)]
 pub enum Plan {
     /// Positive attribute lookup: an EAV/AEV/VAE scan with
     /// cardinality-aware winner selection folded into the wrapped

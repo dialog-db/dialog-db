@@ -434,4 +434,131 @@ mod tests {
         );
         Ok(())
     }
+    /// The transaction view resolves the built-in derived concepts —
+    /// including the recursive ancestry closure — exactly like a
+    /// branch query, because both run on the same single-branch
+    /// [`QueryEnv`](crate::repository::branch::session::QueryEnv).
+    #[dialog_common::test]
+    async fn it_resolves_derived_revision_concepts_in_a_transaction() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut revisions = Vec::new();
+        for name in ["Alice", "Bob", "Carol"] {
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+            revisions.push(branch.revision().expect("branch has a revision"));
+        }
+        let [first, second, third] = &revisions[..] else {
+            unreachable!("three commits were made");
+        };
+
+        // An open, uncommitted transaction with its own pending write.
+        let tx = branch
+            .transaction()
+            .assert(the!("user/name").of(Entity::new()?).is("Dave".to_string()));
+
+        // The DAG edge projects from the tx view...
+        let edges: Vec<schema::RevisionParent> = tx
+            .query()
+            .select(Query::<schema::RevisionParent> {
+                this: third.entity().into(),
+                parent: Term::var("parent"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].parent.0, second.entity());
+
+        // ... and so does the recursive closure: the fixpoint runs
+        // through the transaction environment.
+        let mut reachable: Vec<Entity> = tx
+            .query()
+            .select(Query::<schema::RevisionAncestor> {
+                this: third.entity().into(),
+                ancestor: Term::var("ancestor"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|row| row.ancestor.0)
+            .collect();
+        reachable.sort();
+        let mut expected = vec![first.entity(), second.entity()];
+        expected.sort();
+        assert_eq!(reachable, expected, "the head reaches both priors");
+
+        Ok(())
+    }
+
+    /// A rule whose `db.rule/*` facts are pending in the transaction
+    /// resolves as a transient overlay rule: the uncommitted view
+    /// derives through it without the rule (or the data) ever being
+    /// committed.
+    #[dialog_common::test]
+    async fn it_resolves_rules_pending_in_the_transaction() -> anyhow::Result<()> {
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        use dialog_query::{ConceptQuery, Parameters};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // employee(this, name) :- person-name(this, name)
+        let rule = {
+            let json = serde_json::json!({
+                "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+                "when": [{
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                }]
+            });
+            let descriptor: DeductiveRuleDescriptor =
+                serde_json::from_value(json).expect("descriptor parses");
+            descriptor.compile().expect("rule compiles")
+        };
+        let employee = rule.conclusion().clone();
+
+        let alice: Entity = "id:alice".parse()?;
+        let tx = branch
+            .transaction()
+            .assert(
+                the!("db.rule/conclusion")
+                    .of(rule.this())
+                    .is(employee.this()),
+            )
+            .assert(the!("db.rule/source").of(rule.this()).is(rule.encode()))
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            );
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let rows = tx
+            .query()
+            .select(ConceptQuery {
+                predicate: employee,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "the pending rule derives the pending fact");
+        assert_eq!(*rows[0].entity(), alice);
+
+        Ok(())
+    }
 }

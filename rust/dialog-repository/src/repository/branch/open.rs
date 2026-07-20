@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::rules::RuleCache;
 use crate::{Branch, BranchReference, Overlay, ResolveError};
+use dialog_artifacts::history::{CausalityCache, ContextCache};
 use dialog_artifacts::tree::spill_cache;
 use dialog_capability::Provider;
 use dialog_effects::memory::Resolve;
@@ -40,6 +41,9 @@ impl OpenBranch {
             spill_cache: spill_cache(),
             rule_cache: Arc::new(RuleCache::new()),
             plan_cache: PlanCache::default(),
+            causality_cache: CausalityCache::new(),
+            context_cache: ContextCache::new(),
+            record_cache: dialog_search_tree::Cache::new(),
             overlay: Overlay::default(),
         })
     }

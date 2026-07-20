@@ -242,7 +242,9 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
                     ))
                 },
             )?)),
-            ValueDataType::Record => unimplemented!("TBD but probably flatbuffers?"),
+            // A record is opaque bytes at this layer; interpretation is the
+            // reader's concern (see e.g. `history::RevisionRecord`).
+            ValueDataType::Record => Value::Record(value),
             ValueDataType::Symbol => match String::from_utf8(value) {
                 Ok(value) => Value::Symbol(Attribute::try_from(
                     value.split('\u{0000}').take(1).collect::<String>(),

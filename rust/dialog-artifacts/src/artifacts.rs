@@ -355,17 +355,21 @@ where
 
         Ok(())
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> ArtifactStore for Artifacts<Backend>
-where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync
-        + 'static,
-{
-    fn select(
+    /// Get the currently asserted [`Datum`]s recorded for the given entity
+    /// and attribute. Multiple data are possible for attributes with more
+    /// than one asserted value.
+    pub async fn select_data(
+        &self,
+        of: &Entity,
+        the: &Attribute,
+    ) -> Result<Vec<Datum>, DialogArtifactsError> {
+        let index = self.index.read().await;
+        index.select_data(self.storage.clone(), of, the).await
+    }
+
+    /// Stream every [`Artifact`] matching `selector`.
+    pub fn select(
         &self,
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
@@ -386,17 +390,13 @@ where
             }
         }
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> ArtifactStoreMut for Artifacts<Backend>
-where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync
-        + 'static,
-{
-    async fn commit<Instructions>(
+    /// Commit the given instructions to the store's indexes.
+    ///
+    /// Data committed this way carries no [`Version`](crate::history::Version)
+    /// tag and records no history — version-controlled writes go through the
+    /// branch commit path in `dialog-repository` instead.
+    async fn commit_instructions<Instructions>(
         &mut self,
         instructions: Instructions,
     ) -> Result<Blake3Hash, DialogArtifactsError>
@@ -410,8 +410,8 @@ where
 
             // The per-instruction EAV/AEV/VAE key writes (and
             // cardinality-one supersession) are the shared
-            // `ArtifactTreeExt::apply`. `commit` adds only the
-            // surrounding transaction bookkeeping — base-revision
+            // `ArtifactTreeExt::apply`. This method adds only
+            // the surrounding transaction bookkeeping — base-revision
             // capture, revision persistence, pointer advance, and the
             // rollback below.
             let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
@@ -466,6 +466,55 @@ where
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> ArtifactStore for Artifacts<Backend>
+where
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync
+        + 'static,
+{
+    fn select(
+        &self,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        let index = self.index.clone();
+        let storage = self.storage.clone();
+
+        try_stream! {
+            // Clone the tree under the read lock to "pin" it at a
+            // version for the stream's lifetime, then hand off to the
+            // shared `ArtifactTreeExt::scan` for EAV/AEV/VAE dispatch.
+            let tree = index.read().await.clone();
+            let scanned = tree.scan(storage, selector);
+            tokio::pin!(scanned);
+            for await artifact in scanned {
+                yield artifact?;
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> ArtifactStoreMut for Artifacts<Backend>
+where
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync
+        + 'static,
+{
+    async fn commit<Instructions>(
+        &mut self,
+        instructions: Instructions,
+    ) -> Result<Blake3Hash, DialogArtifactsError>
+    where
+        Instructions: Stream<Item = Instruction> + ConditionalSend,
+    {
+        self.commit_instructions(instructions).await
     }
 }
 
@@ -1097,13 +1146,13 @@ mod tests {
         Ok(())
     }
 
-    /// Assert + retract of a fact whose value was **already committed** ends in
-    /// a retraction: a `Removed` tombstone replaces the live value, so the tree
-    /// changes (the removal must propagate on merge and beat a stale remote
-    /// assert) and the fact is no longer queryable.
+    /// Retracting a fact whose value was **already committed** deletes it
+    /// from the active indexes — no tombstone (deletion now travels as a
+    /// history record; see `crate::merge`). The tree still changes, since
+    /// the fact's keys are gone, and the fact is no longer queryable.
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_tombstones_when_retracting_a_fact_that_had_a_committed_value() -> Result<()> {
+    async fn it_deletes_from_the_indexes_when_retracting_a_committed_fact() -> Result<()> {
         let (storage_backend, _temp) = make_target_storage().await?;
         let mut facts = Artifacts::anonymous(storage_backend).await?;
 
@@ -1125,10 +1174,11 @@ mod tests {
             .commit(once(Instruction::Retract(alice.clone())))
             .await?;
 
-        // The retraction changed the tree (a tombstone replaced the value).
+        // The retraction changed the tree: the fact's keys were deleted
+        // (and a retract record was appended to the history region).
         assert_ne!(
             committed_root, after_root,
-            "retracting a committed fact must write a tombstone (tree changes)"
+            "retracting a committed fact removes it from the indexes (tree changes)"
         );
         // The fact is gone from queries.
         let hits: Vec<Artifact> = facts
@@ -1137,7 +1187,7 @@ mod tests {
             .await?;
         assert!(
             hits.is_empty(),
-            "the retracted fact must not be queryable after the tombstone"
+            "the retracted fact must not be queryable after deletion"
         );
         Ok(())
     }
