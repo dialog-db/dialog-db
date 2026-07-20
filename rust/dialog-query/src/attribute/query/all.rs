@@ -1,8 +1,9 @@
 use crate::Cardinality;
 use crate::Claim;
-use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
+use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained, decode_value};
 use crate::attribute::The;
 use crate::environment::Environment;
+use crate::formula::number::Numeric;
 use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
@@ -440,12 +441,92 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                         Some(s) => s.is_starting_with(prefix),
                     });
                 }
+                // An interval refinement (from a comparison predicate on the
+                // value variable) becomes VAE range bounds. Pushed ONLY when
+                // the kind admits exactly one numeric type: a comparison
+                // adapts its literal to each ROW's type, so a NUMERIC-wide
+                // kind admits rows of other numeric types that a single-band
+                // range would silently drop. The bound literal adapts to the
+                // scanned type exactly as the row filter would; a literal
+                // that cannot adapt losslessly pushes nothing (the residual
+                // comparison filters every row of that type anyway).
+                if let Some(kind) = from.is.kind().as_ref()
+                    && let Some(interval) = kind
+                        .refinement()
+                        .and_then(|refinement| refinement.interval.as_ref())
+                    && let Some(data_type) = single_numeric_type(kind.primitive_part().required())
+                {
+                    if let Some(bound) = &interval.lower
+                        && let Some(value) =
+                            adapt_bound(interval.value_type, &bound.encoded, data_type)
+                    {
+                        selector = Some(push_bound(selector.take(), value, bound.inclusive, true));
+                    }
+                    if let Some(bound) = &interval.upper
+                        && let Some(value) =
+                            adapt_bound(interval.value_type, &bound.encoded, data_type)
+                    {
+                        selector = Some(push_bound(selector.take(), value, bound.inclusive, false));
+                    }
+                }
             }
         }
 
         selector.ok_or_else(|| EvaluationError::EmptySelector {
             message: "At least one field must be constrained".to_string(),
         })
+    }
+}
+
+/// The single numeric type a primitive set admits, or `None` when it admits
+/// none, several, or any non-numeric member — the gate for pushing an
+/// interval bound into a scan range (see the pushdown comment above).
+fn single_numeric_type(primitive: Primitive) -> Option<Type> {
+    [Type::UnsignedInt, Type::SignedInt, Type::Float]
+        .into_iter()
+        .find(|numeric| primitive == Primitive::from(*numeric))
+}
+
+/// Decodes an interval bound's literal and adapts it LOSSLESSLY to the
+/// scanned column's type, exactly as the comparison predicate adapts its
+/// literal per row. `None` means no push: an unadaptable literal (`1.5`
+/// against integer data) admits no row of that type, and the residual
+/// comparison already filters them all.
+fn adapt_bound(literal_type: Type, encoded: &[u8], data_type: Type) -> Option<Value> {
+    let (value, rest) = decode_value(literal_type, encoded)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    if literal_type == data_type {
+        return Some(value);
+    }
+    Numeric::try_from(value)
+        .ok()?
+        .instantiate(data_type)
+        .map(Value::from)
+}
+
+/// Extends `selector` with one interval bound, choosing the matching
+/// range constructor.
+fn push_bound(
+    selector: Option<ArtifactSelector<Constrained>>,
+    value: Value,
+    inclusive: bool,
+    lower: bool,
+) -> ArtifactSelector<Constrained> {
+    match selector {
+        Some(constrained) => match (lower, inclusive) {
+            (true, true) => constrained.is_at_least(value),
+            (true, false) => constrained.is_greater_than(value),
+            (false, true) => constrained.is_at_most(value),
+            (false, false) => constrained.is_less_than(value),
+        },
+        None => match (lower, inclusive) {
+            (true, true) => ArtifactSelector::new().is_at_least(value),
+            (true, false) => ArtifactSelector::new().is_greater_than(value),
+            (false, true) => ArtifactSelector::new().is_at_most(value),
+            (false, false) => ArtifactSelector::new().is_less_than(value),
+        },
     }
 }
 
@@ -526,6 +607,184 @@ mod tests {
         assert_eq!(selector.entity_prefix(), None);
         assert_eq!(selector.attribute_prefix(), None);
         assert_eq!(selector.value_prefix(), None);
+        Ok(())
+    }
+
+    /// An interval refinement stamped onto a single-numeric-typed value
+    /// variable becomes VAE range bounds on the selector; the bound
+    /// literal adapts to the scanned type exactly as the residual
+    /// comparison adapts per row.
+    #[dialog_common::test]
+    fn it_pushes_interval_refinements_into_the_selector() -> anyhow::Result<()> {
+        // A same-type bound is pushed verbatim.
+        let kind = Kind::from(Type::UnsignedInt)
+            .with_interval(&Value::UnsignedInt(30), true, true)
+            .expect("numeric admits an interval");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(kind),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let lower = selector.value_lower().expect("the bound is pushed");
+        assert_eq!(lower.value, Value::UnsignedInt(30));
+        assert!(lower.inclusive);
+        assert!(selector.value_upper().is_none());
+
+        // An integer literal bounding float data adapts to `30.0`.
+        let kind = Kind::from(Type::Float)
+            .with_interval(&Value::UnsignedInt(30), false, false)
+            .expect("numeric admits an interval");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(kind),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let upper = selector.value_upper().expect("the bound is pushed");
+        assert_eq!(upper.value, Value::Float(30.0));
+        assert!(!upper.inclusive);
+        assert!(selector.value_lower().is_none());
+
+        // Both sides of a two-sided interval push together.
+        let kind = Kind::from(Type::UnsignedInt)
+            .with_interval(&Value::UnsignedInt(10), true, true)
+            .expect("numeric admits an interval")
+            .with_interval(&Value::UnsignedInt(20), false, false)
+            .expect("the meet keeps both bounds");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(kind),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert_eq!(
+            selector.value_lower().expect("lower pushed").value,
+            Value::UnsignedInt(10)
+        );
+        assert_eq!(
+            selector.value_upper().expect("upper pushed").value,
+            Value::UnsignedInt(20)
+        );
+        Ok(())
+    }
+
+    /// The single-numeric-type gate: a NUMERIC-wide kind pushes no
+    /// bound (rows of the other numeric types would be silently
+    /// dropped from the scan), and an unadaptable literal pushes no
+    /// bound (no row of the scanned type satisfies it; the residual
+    /// comparison filters every one).
+    #[dialog_common::test]
+    fn it_gates_interval_pushdown_to_single_numeric_kinds() -> anyhow::Result<()> {
+        let wide = Kind::from(Primitive::NUMERIC)
+            .with_interval(&Value::UnsignedInt(30), true, true)
+            .expect("numeric admits an interval");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(wide),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert!(
+            selector.value_lower().is_none() && selector.value_upper().is_none(),
+            "a kind admitting several numeric types pushes nothing"
+        );
+
+        let unadaptable = Kind::from(Type::UnsignedInt)
+            .with_interval(&Value::Float(1.5), true, true)
+            .expect("numeric admits an interval");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(unadaptable),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert!(
+            selector.value_lower().is_none() && selector.value_upper().is_none(),
+            "a literal that cannot adapt losslessly pushes nothing"
+        );
+        Ok(())
+    }
+
+    /// A pushed interval bound scans the right rows from a real tree,
+    /// bound-equal rows included.
+    #[dialog_common::test]
+    async fn it_scans_with_pushed_interval_bounds() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(the!("person/age").of(Entity::new()?).is(10u64))
+            .assert(the!("person/age").of(Entity::new()?).is(30u64))
+            .assert(the!("person/age").of(Entity::new()?).is(50u64))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let kind = Kind::from(Type::UnsignedInt)
+            .with_interval(&Value::UnsignedInt(30), true, true)
+            .expect("numeric admits an interval");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(kind),
+            Term::var("cause"),
+        );
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
+        let values: Vec<&Value> = results.iter().map(|artifact| artifact.is()).collect();
+        assert_eq!(values.len(), 2, "10 is below the bound");
+        assert!(
+            values.contains(&&Value::UnsignedInt(30)),
+            "the range starts at the inclusive bound"
+        );
+        assert!(values.contains(&&Value::UnsignedInt(50)));
+        Ok(())
+    }
+
+    /// Mixed numeric rows under a NUMERIC-wide kind: nothing is
+    /// pushed, so every numeric row reaches the residual comparison —
+    /// the scan produces no false negatives.
+    #[dialog_common::test]
+    async fn it_keeps_mixed_numeric_rows_without_single_type_kind() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(the!("score/value").of(Entity::new()?).is(5u64))
+            .assert(the!("score/value").of(Entity::new()?).is(2.5f64))
+            .assert(the!("score/value").of(Entity::new()?).is(-3i64))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let wide = Kind::from(Primitive::NUMERIC)
+            .with_interval(&Value::UnsignedInt(1), true, true)
+            .expect("numeric admits an interval");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("score/value")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(wide),
+            Term::var("cause"),
+        );
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
+        assert_eq!(
+            results.len(),
+            3,
+            "the un-narrowed scan yields every numeric row"
+        );
         Ok(())
     }
 

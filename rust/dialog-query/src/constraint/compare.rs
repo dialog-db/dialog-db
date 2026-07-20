@@ -63,7 +63,8 @@ fn ordering(
 macro_rules! define_comparison {
     (
         $(#[$doc:meta])*
-        $name:ident, $symbol:literal, [$($accepts:pat),+], $sugar:ident
+        $name:ident, $symbol:literal, [$($accepts:pat),+], $sugar:ident,
+        lower: $lower:literal, inclusive: $inclusive:literal
     ) => {
         $(#[$doc])*
         ///
@@ -85,13 +86,44 @@ macro_rules! define_comparison {
             /// Schema: both sides are *hard* requirements (the
             /// predicate consumes bound values; the planner orders
             /// it after the premises binding them), bounded NUMERIC.
+            ///
+            /// A constant side additionally proves an interval bound
+            /// on the OTHER side, carried as a
+            /// [`Refinement`](crate::type_system::Refinement) — how
+            /// the bound travels through inference to the scan-range
+            /// pushdown. The interval records the literal's own type;
+            /// consumers must honor the per-row literal adaptation
+            /// (see the pushdown's single-numeric-type gate).
             pub fn schema(&self) -> Schema {
+                let numeric = Kind::from(Primitive::NUMERIC);
+                let (of_content, with_content) =
+                    match (self.of.as_constant(), self.with.as_constant()) {
+                        // `of REL bound`: the bound constrains `of` on
+                        // this relation's own side.
+                        (None, Some(bound)) => (
+                            numeric
+                                .clone()
+                                .with_interval(bound, $inclusive, $lower)
+                                .unwrap_or_else(|| numeric.clone()),
+                            numeric.clone(),
+                        ),
+                        // `bound REL with`: mirrored — the bound sits on
+                        // the opposite side of `with`.
+                        (Some(bound), None) => (
+                            numeric.clone(),
+                            numeric
+                                .clone()
+                                .with_interval(bound, $inclusive, !$lower)
+                                .unwrap_or_else(|| numeric.clone()),
+                        ),
+                        _ => (numeric.clone(), numeric.clone()),
+                    };
                 let mut schema = Schema::new();
                 schema.insert(
                     "of".to_string(),
                     Field {
                         description: "Left side of the comparison".to_string(),
-                        content_type: Some(Kind::from(Primitive::NUMERIC)),
+                        content_type: Some(of_content),
                         requirement: Requirement::required(),
                         cardinality: Cardinality::One,
                     },
@@ -100,7 +132,7 @@ macro_rules! define_comparison {
                     "with".to_string(),
                     Field {
                         description: "Right side of the comparison".to_string(),
-                        content_type: Some(Kind::from(Primitive::NUMERIC)),
+                        content_type: Some(with_content),
                         requirement: Requirement::required(),
                         cardinality: Cardinality::One,
                     },
@@ -195,22 +227,26 @@ macro_rules! define_comparison {
 
 define_comparison!(
     /// Range predicate: `of` is strictly less than `with`.
-    LessThan, "<", [Ordering::Less], less_than
+    LessThan, "<", [Ordering::Less], less_than,
+    lower: false, inclusive: false
 );
 
 define_comparison!(
     /// Range predicate: `of` is less than or equal to `with`.
-    AtMost, "<=", [Ordering::Less, Ordering::Equal], at_most
+    AtMost, "<=", [Ordering::Less, Ordering::Equal], at_most,
+    lower: false, inclusive: true
 );
 
 define_comparison!(
     /// Range predicate: `of` is strictly greater than `with`.
-    GreaterThan, ">", [Ordering::Greater], greater_than
+    GreaterThan, ">", [Ordering::Greater], greater_than,
+    lower: true, inclusive: false
 );
 
 define_comparison!(
     /// Range predicate: `of` is greater than or equal to `with`.
-    AtLeast, ">=", [Ordering::Greater, Ordering::Equal], at_least
+    AtLeast, ">=", [Ordering::Greater, Ordering::Equal], at_least,
+    lower: true, inclusive: true
 );
 
 #[cfg(test)]
@@ -219,6 +255,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::artifact::{Type as ValueType, decode_value};
     use crate::rule::TypeEnv;
     use crate::selection::Match;
     use crate::types::Scalar;
@@ -338,6 +375,83 @@ mod tests {
                 env.get(var).expect("inferred").primitive_part(),
                 Primitive::NUMERIC,
                 "{var} is bounded by the comparison"
+            );
+        }
+        Ok(())
+    }
+
+    /// A constant side proves an interval on the variable side,
+    /// carried through inference as a refinement — the vehicle for
+    /// scan-range pushdown. The mirrored operand order flips the
+    /// bound onto the opposite side of the relation.
+    #[dialog_common::test]
+    fn it_stamps_interval_refinements_via_inference() -> anyhow::Result<()> {
+        // `x >= 5`: an inclusive lower bound on `x`.
+        let premises = vec![Term::<Any>::var("x").at_least(Term::constant(5u64))];
+        let env = TypeEnv::infer(&premises)?;
+        let interval = env
+            .get("x")
+            .expect("inferred")
+            .refinement()
+            .expect("refined")
+            .interval
+            .clone()
+            .expect("interval recorded");
+        assert_eq!(interval.value_type, ValueType::UnsignedInt);
+        let lower = interval.lower.expect("lower bound");
+        assert!(lower.inclusive, ">= is inclusive");
+        assert!(interval.upper.is_none());
+        assert_eq!(
+            decode_value(ValueType::UnsignedInt, &lower.encoded).map(|(value, _)| value),
+            Some(Value::UnsignedInt(5)),
+            "the bound round-trips through the order-preserving encoding"
+        );
+
+        // `5 < x` mirrors to an exclusive lower bound on `x`.
+        let premises = vec![Term::<Any>::constant(5u64).less_than(Term::<Any>::var("x"))];
+        let env = TypeEnv::infer(&premises)?;
+        let interval = env
+            .get("x")
+            .expect("inferred")
+            .refinement()
+            .expect("refined")
+            .interval
+            .clone()
+            .expect("interval recorded");
+        let lower = interval
+            .lower
+            .expect("the mirrored bound lands on the lower side");
+        assert!(!lower.inclusive, "a strict relation stays strict");
+        assert!(interval.upper.is_none());
+
+        // `x <= 9.5`: an inclusive upper bound recording the
+        // literal's own type.
+        let premises = vec![Term::<Any>::var("x").at_most(Term::constant(9.5f64))];
+        let env = TypeEnv::infer(&premises)?;
+        let interval = env
+            .get("x")
+            .expect("inferred")
+            .refinement()
+            .expect("refined")
+            .interval
+            .clone()
+            .expect("interval recorded");
+        assert_eq!(interval.value_type, ValueType::Float);
+        assert!(interval.lower.is_none());
+        assert!(interval.upper.expect("upper bound").inclusive);
+        Ok(())
+    }
+
+    /// Two variable sides prove no interval: the bound must be a
+    /// constant the schema can encode.
+    #[dialog_common::test]
+    fn it_stamps_no_interval_without_a_constant_side() -> anyhow::Result<()> {
+        let premises = vec![Term::<Any>::var("x").less_than(Term::<Any>::var("y"))];
+        let env = TypeEnv::infer(&premises)?;
+        for var in ["x", "y"] {
+            assert!(
+                env.get(var).expect("inferred").refinement().is_none(),
+                "{var} carries no interval from a variable-variable comparison"
             );
         }
         Ok(())

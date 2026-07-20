@@ -24,7 +24,9 @@ pub mod unifier;
 
 use crate::artifact::Type as ValueType;
 use crate::artifact::Value;
+use crate::artifact::{decode_value, encode_value_owned};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
@@ -325,13 +327,13 @@ impl Display for ConceptRef {
 /// constraints), the join their weakest common implication — see
 /// [`Refinement::meet`] and [`Refinement::join`].
 ///
-/// Two constraints exist: a lexical prefix over the TEXTUAL kinds,
-/// and a conformance set over Entity — the value must satisfy a
-/// concept-typed field's target concepts. Numeric intervals extend
-/// this struct the same way rather than adding lattice variants.
+/// Three constraints exist: a lexical prefix over the TEXTUAL kinds,
+/// a conformance set over Entity, and a numeric interval proved by
+/// the comparison predicates.
 ///
-/// Invariant: never empty (no prefix and no conformance is no
-/// refinement; the constructors collapse it to an unrefined type).
+/// Invariant: never empty (no prefix, no conformance, and no
+/// interval is no refinement; the constructors collapse it to an
+/// unrefined type).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Refinement {
     /// Lexical prefix every admitted value must begin with.
@@ -346,6 +348,164 @@ pub struct Refinement {
     /// diagnostics.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub conforms: BTreeSet<ConceptRef>,
+    /// A numeric interval a comparison predicate proved about the
+    /// value. Carried as *information*, like `conforms`: enforcement
+    /// stays with the comparison premise itself (whose literal-
+    /// adaptation semantics [`Refinement::admits`] deliberately does
+    /// not reproduce), while this feeds the scan-range pushdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<Box<Interval>>,
+}
+
+/// A numeric interval over a single value type, proved by comparison
+/// predicates on a variable: at most one lower and one upper bound.
+///
+/// Bounds are stored in the value's ORDER-PRESERVING encoding (see
+/// `dialog_artifacts::encode_value_owned`), so within one
+/// `value_type` the lattice operations are plain byte comparisons and
+/// the struct stays `Eq`/`Ord`/`Hash` for the type lattice (a raw
+/// `Value` would not, floats being only partially ordered).
+///
+/// The interval records the LITERAL's own type. A comparison adapts
+/// its literal to each row's type, so an interval typed `UnsignedInt`
+/// still admits floats; consumers that cannot honor that (the scan
+/// pushdown) must gate on the variable's kind being exactly one
+/// numeric type and adapt the bound, as the comparison would.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Interval {
+    /// The numeric type the bound literals were written in.
+    pub value_type: ValueType,
+    /// The lower bound, if one was proved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lower: Option<IntervalBound>,
+    /// The upper bound, if one was proved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper: Option<IntervalBound>,
+}
+
+/// One side of an [`Interval`]: the bound value's order-preserving
+/// encoding and whether the bound itself is admitted.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct IntervalBound {
+    /// The bound value's order-preserving encoding.
+    pub encoded: Vec<u8>,
+    /// Whether the bound is inclusive (`>=`/`<=`) rather than strict.
+    pub inclusive: bool,
+}
+
+impl Interval {
+    /// The interval a single comparison proves: one bound of one side.
+    fn bound(value_type: ValueType, encoded: Vec<u8>, inclusive: bool, lower: bool) -> Interval {
+        let bound = Some(IntervalBound { encoded, inclusive });
+        Interval {
+            value_type,
+            lower: if lower { bound.clone() } else { None },
+            upper: if lower { None } else { bound },
+        }
+    }
+
+    /// Meet: the conjunction. Same-typed intervals intersect
+    /// (byte order equals numeric order within one type: the higher
+    /// lower bound and the lower upper bound win; equal encodings
+    /// keep the STRICTER inclusivity). Differently-typed intervals
+    /// cannot be compared without per-row adaptation, so the meet
+    /// conservatively keeps neither — a weaker refinement is always
+    /// sound, because enforcement lives with the comparison premises
+    /// themselves.
+    fn meet(&self, other: &Interval) -> Option<Interval> {
+        if self.value_type != other.value_type {
+            return None;
+        }
+        let lower = match (&self.lower, &other.lower) {
+            (Some(a), Some(b)) => Some(pick(a, b, Ordering::Greater, true)),
+            (Some(bound), None) | (None, Some(bound)) => Some(bound.clone()),
+            (None, None) => None,
+        };
+        let upper = match (&self.upper, &other.upper) {
+            (Some(a), Some(b)) => Some(pick(a, b, Ordering::Less, true)),
+            (Some(bound), None) | (None, Some(bound)) => Some(bound.clone()),
+            (None, None) => None,
+        };
+        Some(Interval {
+            value_type: self.value_type,
+            lower,
+            upper,
+        })
+    }
+
+    /// Join: the weakest interval both sides imply — same-typed
+    /// intervals take the convex hull; differently-typed intervals
+    /// share no interval.
+    fn join(&self, other: &Interval) -> Option<Interval> {
+        if self.value_type != other.value_type {
+            return None;
+        }
+        let lower = match (&self.lower, &other.lower) {
+            (Some(a), Some(b)) => Some(pick(a, b, Ordering::Less, false)),
+            _ => None,
+        };
+        let upper = match (&self.upper, &other.upper) {
+            (Some(a), Some(b)) => Some(pick(a, b, Ordering::Greater, false)),
+            _ => None,
+        };
+        if lower.is_none() && upper.is_none() {
+            return None;
+        }
+        Some(Interval {
+            value_type: self.value_type,
+            lower,
+            upper,
+        })
+    }
+
+    /// True when `other` implies `self`: same type, and `other`'s
+    /// bounds sit within `self`'s. Conservative (differently-typed
+    /// intervals are treated as unrelated), which only weakens
+    /// subsumption, never soundness.
+    fn implied_by(&self, other: &Interval) -> bool {
+        if self.value_type != other.value_type {
+            return false;
+        }
+        let lower_implied = match (&self.lower, &other.lower) {
+            (Some(a), Some(b)) => match a.encoded.cmp(&b.encoded) {
+                Ordering::Less => true,
+                Ordering::Equal => a.inclusive || !b.inclusive,
+                Ordering::Greater => false,
+            },
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        let upper_implied = match (&self.upper, &other.upper) {
+            (Some(a), Some(b)) => match a.encoded.cmp(&b.encoded) {
+                Ordering::Greater => true,
+                Ordering::Equal => a.inclusive || !b.inclusive,
+                Ordering::Less => false,
+            },
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        lower_implied && upper_implied
+    }
+}
+
+/// Of two same-side bounds, the one whose encoding wins `prefer` (for
+/// a meet: the greater lower bound / the lesser upper bound; reversed
+/// for a join). Equal encodings resolve by inclusivity: a meet
+/// (`strict`) admits the bound only if BOTH sides do; a join admits
+/// it if EITHER does.
+fn pick(a: &IntervalBound, b: &IntervalBound, prefer: Ordering, strict: bool) -> IntervalBound {
+    match a.encoded.cmp(&b.encoded) {
+        Ordering::Equal => IntervalBound {
+            encoded: a.encoded.clone(),
+            inclusive: if strict {
+                a.inclusive && b.inclusive
+            } else {
+                a.inclusive || b.inclusive
+            },
+        },
+        ordering if ordering == prefer => a.clone(),
+        _ => b.clone(),
+    }
 }
 
 impl Refinement {
@@ -354,19 +514,34 @@ impl Refinement {
         Refinement {
             prefix: Some(prefix),
             conforms: BTreeSet::new(),
+            interval: None,
+        }
+    }
+
+    /// An interval-only refinement.
+    fn interval(interval: Interval) -> Refinement {
+        Refinement {
+            prefix: None,
+            conforms: BTreeSet::new(),
+            // Boxed: the interval's bounds would otherwise dominate the
+            // size of every `Type` (and every error carrying one).
+            interval: Some(Box::new(interval)),
         }
     }
 
     /// True when the refinement constrains nothing — the shape the
     /// constructors collapse to an unrefined type.
     fn is_empty(&self) -> bool {
-        self.prefix.is_none() && self.conforms.is_empty()
+        self.prefix.is_none() && self.conforms.is_empty() && self.interval.is_none()
     }
 
     /// Meet: the conjunction of both constraints. Two prefixes are
     /// jointly satisfiable iff one extends the other (the meet is
     /// the longer; disjoint prefixes admit nothing); conformance
-    /// sets union — the value must satisfy both sides' concepts.
+    /// sets union — the value must satisfy both sides' concepts;
+    /// same-typed intervals intersect, and differently-typed ones
+    /// conservatively drop (the interval is advisory — see the field
+    /// doc — so a weaker meet is sound).
     fn meet(&self, other: &Refinement) -> Option<Refinement> {
         let prefix = match (&self.prefix, &other.prefix) {
             (Some(a), Some(b)) => {
@@ -382,7 +557,16 @@ impl Refinement {
             (None, None) => None,
         };
         let conforms = self.conforms.union(&other.conforms).cloned().collect();
-        Some(Refinement { prefix, conforms })
+        let interval = match (&self.interval, &other.interval) {
+            (Some(a), Some(b)) => a.meet(b).map(Box::new),
+            (Some(interval), None) | (None, Some(interval)) => Some(interval.clone()),
+            (None, None) => None,
+        };
+        Some(Refinement {
+            prefix,
+            conforms,
+            interval,
+        })
     }
 
     /// Join: the weakest constraint both sides imply — the longest
@@ -411,7 +595,15 @@ impl Refinement {
             .intersection(&other.conforms)
             .cloned()
             .collect();
-        let joined = Refinement { prefix, conforms };
+        let interval = match (&self.interval, &other.interval) {
+            (Some(a), Some(b)) => a.join(b).map(Box::new),
+            _ => None,
+        };
+        let joined = Refinement {
+            prefix,
+            conforms,
+            interval,
+        };
         if joined.is_empty() {
             None
         } else {
@@ -428,7 +620,12 @@ impl Refinement {
             (Some(_), None) => false,
             (None, _) => true,
         };
-        prefix_implied && self.conforms.is_subset(&other.conforms)
+        let interval_implied = match (&self.interval, &other.interval) {
+            (Some(a), Some(b)) => a.implied_by(b),
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        prefix_implied && interval_implied && self.conforms.is_subset(&other.conforms)
     }
 
     /// True when the value satisfies the row-locally checkable half
@@ -459,6 +656,28 @@ impl Display for Refinement {
             }
             write!(f, "conforms-to {concept}")?;
             separate = true;
+        }
+        if let Some(interval) = &self.interval {
+            let mut side = |bound: &Option<IntervalBound>,
+                            strict: &str,
+                            inclusive: &str,
+                            separate: &mut bool|
+             -> FmtResult {
+                if let Some(bound) = bound {
+                    if *separate {
+                        write!(f, " & ")?;
+                    }
+                    let relation = if bound.inclusive { inclusive } else { strict };
+                    match decode_value(interval.value_type, &bound.encoded) {
+                        Some((value, [])) => write!(f, "{relation} {value:?}")?,
+                        _ => write!(f, "{relation} <{} bytes>", bound.encoded.len())?,
+                    }
+                    *separate = true;
+                }
+                Ok(())
+            };
+            side(&interval.lower, ">", ">=", &mut separate)?;
+            side(&interval.upper, "<", "<=", &mut separate)?;
         }
         Ok(())
     }
@@ -543,6 +762,39 @@ impl Type {
         Some(Type::Refined(membership, refinement))
     }
 
+    /// Refine this type with one side of a numeric interval, as a
+    /// comparison predicate proves it: `lower` selects which side,
+    /// `inclusive` whether the bound itself is admitted.
+    ///
+    /// The membership narrows to the NUMERIC kinds (plus a riding
+    /// `Nothing` bit); the interval records the LITERAL's own type,
+    /// because a comparison adapts its literal to each row's type —
+    /// an interval typed `UnsignedInt` still admits floats. Returns
+    /// `None` when no member could be numeric — an empty meet. A
+    /// non-numeric bound value is no constraint and returns the type
+    /// unchanged (the comparison itself will filter every row).
+    pub fn with_interval(self, bound: &Value, inclusive: bool, lower: bool) -> Option<Type> {
+        let value_type = bound.data_type();
+        if !matches!(
+            value_type,
+            ValueType::UnsignedInt | ValueType::SignedInt | ValueType::Float
+        ) {
+            return Some(self);
+        }
+        let membership = self
+            .primitive_part()
+            .intersect(Primitive::NUMERIC.union(Primitive::NOTHING))?;
+        if membership.required().is_empty() {
+            return None;
+        }
+        let interval = Interval::bound(value_type, encode_value_owned(bound), inclusive, lower);
+        let refinement = match &self {
+            Type::Refined(_, existing) => existing.meet(&Refinement::interval(interval))?,
+            _ => Refinement::interval(interval),
+        };
+        Some(Type::Refined(membership, refinement))
+    }
+
     /// Constrain this type's values to entities conforming to the
     /// given concept — the lattice form of a concept-typed field.
     ///
@@ -601,8 +853,10 @@ impl Type {
             (None, None) => None,
         };
         Some(match refinement {
-            Some(refinement) => Type::Refined(p, refinement),
-            None => Type::Primitive(p),
+            // A meet can leave nothing behind (mixed-type intervals drop
+            // conservatively); uphold the never-empty refinement invariant.
+            Some(refinement) if !refinement.is_empty() => Type::Refined(p, refinement),
+            _ => Type::Primitive(p),
         })
     }
 
@@ -676,6 +930,86 @@ mod tests {
     }
     fn o(vt: ValueType) -> Type {
         Type::from(vt).optional()
+    }
+
+    /// Interval refinements meet by intersection and join by convex hull
+    /// within one literal type; the membership narrows to NUMERIC and a
+    /// non-numeric member set is an empty meet.
+    #[dialog_common::test]
+    fn it_meets_and_joins_intervals() {
+        let base = Type::from(Primitive::NUMERIC);
+        let ge2 = base
+            .clone()
+            .with_interval(&Value::UnsignedInt(2), true, true)
+            .expect("numeric admits an interval");
+        let ge5 = base
+            .clone()
+            .with_interval(&Value::UnsignedInt(5), true, true)
+            .unwrap();
+        let le9 = base
+            .clone()
+            .with_interval(&Value::UnsignedInt(9), true, false)
+            .unwrap();
+
+        // meet(x >= 2, x >= 5) keeps the tighter lower bound.
+        let met = ge2.clone().intersect(&ge5).expect("compatible");
+        assert_eq!(
+            met.refinement().unwrap().interval,
+            ge5.refinement().unwrap().interval,
+        );
+
+        // meet of a lower with an upper carries both sides.
+        let both = ge5.clone().intersect(&le9).expect("compatible");
+        let interval = both.refinement().unwrap().interval.clone().unwrap();
+        assert!(interval.lower.is_some() && interval.upper.is_some());
+
+        // join(x >= 2, x >= 5) keeps the weaker bound.
+        let joined = ge2.clone().union(&ge5);
+        assert_eq!(
+            joined.refinement().unwrap().interval,
+            ge2.refinement().unwrap().interval,
+        );
+
+        // Inclusion: `x >= 5` implies `x >= 2`, not vice versa.
+        assert!(ge2.includes(&ge5));
+        assert!(!ge5.includes(&ge2));
+
+        // A known non-numeric membership is an empty meet.
+        assert!(
+            Type::from(ValueType::String)
+                .with_interval(&Value::UnsignedInt(1), true, true)
+                .is_none()
+        );
+        // A non-numeric bound refines nothing.
+        let unchanged = base
+            .clone()
+            .with_interval(&Value::String("x".into()), true, true)
+            .unwrap();
+        assert!(unchanged.refinement().is_none());
+    }
+
+    /// Differently-typed intervals cannot be compared without per-row
+    /// literal adaptation, so the lattice treats them conservatively:
+    /// the meet keeps neither (weaker is sound — enforcement lives with
+    /// the comparison premises) and inclusion says "unrelated".
+    #[dialog_common::test]
+    fn it_drops_mixed_type_intervals_conservatively() {
+        let base = Type::from(Primitive::NUMERIC);
+        let ge_int = base
+            .clone()
+            .with_interval(&Value::UnsignedInt(1), true, true)
+            .unwrap();
+        let le_float = base
+            .clone()
+            .with_interval(&Value::Float(10.5), true, false)
+            .unwrap();
+
+        let met = ge_int.clone().intersect(&le_float).expect("compatible");
+        assert!(
+            met.refinement().is_none(),
+            "mixed-type intervals drop rather than conflict: {met}"
+        );
+        assert!(!ge_int.includes(&le_float));
     }
 
     #[dialog_common::test]
