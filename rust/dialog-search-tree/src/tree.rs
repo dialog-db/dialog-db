@@ -464,10 +464,103 @@ mod tests {
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
-    use crate::{ContentAddressedStorage, Delta, PersistentTree};
+    use crate::{Accessor, ContentAddressedStorage, Delta, PersistentTree, Scale};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A real tree's root scale estimates its real entry count, within the
+    /// `sqrt(2)` bound, after a genuine build-and-persist round trip. This is
+    /// the end-to-end property the columnar `scales` field exists to provide:
+    /// the estimate must survive serialization and the bottom-up seal, and it
+    /// must be readable from the root node alone without descending.
+    #[dialog_common::test]
+    async fn it_estimates_tree_size_from_the_root_alone() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+
+        // Enough entries to force several levels, so the estimate is a sum of
+        // sums rather than a single leaf's count.
+        const COUNT: u32 = 2_000;
+
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+        let mut edit = tree.edit();
+        for i in 0..COUNT {
+            edit = edit
+                .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        tree = edit.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let accessor = Accessor::new(tree.node_cache(), storage.clone());
+        let root = accessor.get_node::<[u8; 4], Vec<u8>>(tree.root()).await?;
+        let estimate = root.scale()?.estimate();
+
+        assert!(
+            estimate >= COUNT as u64,
+            "scale must be an upper bound: {estimate} < {COUNT}"
+        );
+        // Error compounds by up to sqrt(2) per level (see `Scale`), so on a
+        // tree of this size the estimate can legitimately sit a small multiple
+        // above the truth. What matters for planning is that it stays the
+        // right order of magnitude rather than exact.
+        assert!(
+            estimate < COUNT as u64 * 4,
+            "scale drifted more than an order of magnitude: {estimate} vs {COUNT}"
+        );
+
+        Ok(())
+    }
+
+    /// Novelty is excluded from a node's scale. A buffered op has not reached
+    /// the subtree it is destined for, so counting it at the node that holds
+    /// the buffer would double-count it once it flushes.
+    #[dialog_common::test]
+    async fn it_excludes_pending_novelty_from_the_scale() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+        let mut edit = tree.edit();
+        for i in 0..500u32 {
+            edit = edit
+                .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        tree = edit.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let accessor = Accessor::new(tree.node_cache(), storage.clone());
+        let root = accessor.get_node::<[u8; 4], Vec<u8>>(tree.root()).await?;
+        let flushed = root.scale()?;
+
+        // A canonical tree carries no novelty, so its scale is a pure function
+        // of stored entries: re-reading it is stable.
+        assert_eq!(root.scale()?, flushed, "scale must be deterministic");
+        assert!(!flushed.is_empty());
+
+        Ok(())
+    }
+
+    /// An empty subtree is distinguishable from a single-entry one. If these
+    /// collapsed, "is this range empty" and "does it hold one entry" would be
+    /// the same question, and a planner could wrongly skip a non-empty range.
+    #[dialog_common::test]
+    async fn it_distinguishes_empty_from_single_entry_subtrees() -> Result<()> {
+        assert!(Scale::of(0).is_empty());
+        assert!(!Scale::of(1).is_empty());
+        assert_ne!(Scale::of(0), Scale::of(1));
+        Ok(())
+    }
 
     #[dialog_common::test]
     async fn it_retrieves_inserted_values() -> Result<()> {

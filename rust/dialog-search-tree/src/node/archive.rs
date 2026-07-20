@@ -11,7 +11,7 @@ use rkyv::{
 
 use crate::{
     ArchivedIndex, ArchivedNoveltyBuffer, ArchivedSegment, DialogSearchTreeError, Key, Link,
-    NoveltyEntry, NoveltyOp, Value, into_owned,
+    NoveltyEntry, NoveltyOp, Scale, Value, into_owned,
     node::columnar::{StreamingLeaf, archived_column_slices},
 };
 
@@ -73,11 +73,22 @@ where
             .ok_or_else(|| malformed("Index child out of range"))
     }
 
+    /// The rough size of the child subtree at `at`, for query planning.
+    ///
+    /// Advisory only; see [`Scale`].
+    pub fn scale_at(&self, at: usize) -> Result<Scale, DialogSearchTreeError> {
+        self.scales
+            .get(at)
+            .map(Scale::from)
+            .ok_or_else(|| malformed("Index child out of range"))
+    }
+
     /// The child at `at`, materialized as an owned [`Link`].
     pub fn link_at(&self, at: usize) -> Result<Link, DialogSearchTreeError> {
         Ok(Link {
             separator: self.separator(at)?,
             node: self.hash_at(at)?.clone(),
+            scale: self.scale_at(at)?,
         })
     }
 
@@ -436,7 +447,7 @@ mod tests {
 
     use crate::{
         Buffer, ColumnData, Entry, Link, MIXED_LAYOUT, Manifest, NoveltyBuffer, NoveltyEntry,
-        NoveltyOp, PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment,
+        NoveltyOp, PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment, Scale,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -468,6 +479,7 @@ mod tests {
             .map(|separator| Link {
                 separator: separator.to_vec(),
                 node: Blake3Hash::hash(separator),
+                scale: Scale::EMPTY,
             })
             .collect();
         let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::index_from_links::<[u8; 8]>(
@@ -544,6 +556,7 @@ mod tests {
             suffixes: b"abcd".to_vec(),
             ends: vec![3, 1],
             hashes: vec![Blake3Hash::hash(b"x"), Blake3Hash::hash(b"y")],
+            scales: vec![Scale::of(1), Scale::of(1)],
             novelty: Vec::new(),
         });
         let node = TestNode::new(Buffer::from(body.as_bytes()?));
@@ -557,10 +570,36 @@ mod tests {
             suffixes: b"ab".to_vec(),
             ends: vec![9],
             hashes: vec![Blake3Hash::hash(b"x")],
+            scales: vec![Scale::of(1)],
             novelty: Vec::new(),
         });
         let node = TestNode::new(Buffer::from(body.as_bytes()?));
         assert!(node.as_index()?.separator(0).is_err());
+        Ok(())
+    }
+
+    /// A scales column shorter than the child list is malformed input, not a
+    /// panic: like every other column, it arrives from untrusted peers and
+    /// must fail at access.
+    #[dialog_common::test]
+    async fn it_rejects_a_truncated_scales_column() -> Result<()> {
+        let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Index(PersistentIndex {
+            header: Manifest::default(),
+            prefix: vec![],
+            suffixes: b"ab".to_vec(),
+            ends: vec![1, 2],
+            hashes: vec![Blake3Hash::hash(b"x"), Blake3Hash::hash(b"y")],
+            scales: vec![Scale::of(1)],
+            novelty: Vec::new(),
+        });
+        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+
+        assert!(node.as_index()?.scale_at(0).is_ok());
+        assert!(
+            node.as_index()?.scale_at(1).is_err(),
+            "a child with no scale must error, not panic or read past the column"
+        );
+        assert!(node.as_index()?.link_at(1).is_err());
         Ok(())
     }
 
@@ -827,6 +866,7 @@ mod tests {
             .map(|separator| Link {
                 separator: separator.to_vec(),
                 node: Blake3Hash::hash(separator),
+                scale: Scale::EMPTY,
             })
             .collect();
         let body: PersistentNodeBody<Vec<u8>> =
@@ -1025,6 +1065,7 @@ mod tests {
             let links = vec![Link {
                 separator: Vec::new(),
                 node: Blake3Hash::hash(b"child"),
+                scale: Scale::EMPTY,
             }];
             let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::index_from_links::<
                 TaggedKey,
@@ -1051,10 +1092,12 @@ mod tests {
                     Link {
                         separator: b"".to_vec(),
                         node: Blake3Hash::hash(b"left"),
+                        scale: Scale::EMPTY,
                     },
                     Link {
                         separator: b"g".to_vec(),
                         node: Blake3Hash::hash(b"right"),
+                        scale: Scale::EMPTY,
                     },
                 ],
                 Manifest::default(),

@@ -152,6 +152,9 @@ pub use manifest::*;
 mod link;
 pub use link::*;
 
+mod scale;
+pub use scale::*;
+
 mod entry;
 pub use entry::*;
 
