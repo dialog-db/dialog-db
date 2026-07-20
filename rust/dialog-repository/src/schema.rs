@@ -163,8 +163,10 @@ pub mod branch {
 ///
 /// All attributes here live under the `dialog.origin` domain.
 /// No `Name` field — dialog's `Origin` is identity-only. Downstream
-/// code that wants a display name can additionally assert
-/// `dialog.meta/name` on the same `Origin.this`.
+/// code that wants a display name can additionally assert a name
+/// attribute of its own (e.g. `app.meta/name`) on the same
+/// `Origin.this`; the `dialog.` namespace itself is reserved and
+/// user instructions cannot write into it.
 pub mod origin {
     use super::{Attribute, Entity};
 
@@ -338,7 +340,8 @@ enum BranchHash<'a> {
 /// # No name field
 ///
 /// Dialog's `Origin` carries identity (`subject`, `profile`) only.
-/// Downstream that wants a display name can assert `dialog.meta/name`
+/// Downstream that wants a display name can assert a name attribute of
+/// its own (e.g. `app.meta/name` — the `dialog.` namespace is reserved)
 /// on the same `Origin.this`; that attribute composes at query time
 /// without affecting identity.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

@@ -292,7 +292,142 @@ impl Revision {
     /// `did:key`. This is the check a replica runs before adopting a head
     /// it did not mint (e.g. on pull): a forged or tampered head — wrong
     /// tree root, reattributed issuer, adjusted edition — fails here.
+    ///
+    /// Beyond the signature, the head's editions must sit below
+    /// [`EDITION_CEILING`]: a validly *signed* head can still carry a
+    /// hostile edition, and accepting one near `u64::MAX` would make the
+    /// saturating successor mint the same version twice (breaking the
+    /// one-origin-one-sequence rule) while pinning the watermark at a
+    /// value that silently drops every future write from that origin.
     pub fn verify(&self) -> Result<(), HistoryError> {
-        verify_issuer_signature(self.issuer.as_str(), &self.payload(), &self.signature)
+        verify_issuer_signature(self.issuer.as_str(), &self.payload(), &self.signature)?;
+        let ceiling = |edition: &Edition, what: &str| {
+            if edition.value() >= EDITION_CEILING {
+                return Err(HistoryError::InvalidReference(format!(
+                    "{what} edition {edition} exceeds the protocol ceiling; \
+                     no legitimate chain reaches it"
+                )));
+            }
+            Ok(())
+        };
+        ceiling(&self.edition, "head")?;
+        if let Some(context) = &self.context {
+            for (_, edition) in context.iter() {
+                ceiling(edition, "watermark")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The highest edition a verified head (or any watermark entry it
+/// publishes) may carry. Editions grow by one per commit or merge, so no
+/// legitimate chain approaches 2^62 sequential operations; anything at or
+/// above it is protocol corruption, refused at the trust boundary before
+/// the saturating successor arithmetic could ever be reached.
+pub const EDITION_CEILING: u64 = 1 << 62;
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use base58::ToBase58;
+    use ed25519_dalek::Signer as _;
+
+    use super::*;
+    use crate::history::{Origin, Version};
+
+    fn key(seed: u8) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn did_of(key: &ed25519_dalek::SigningKey) -> Did {
+        let mut bytes = vec![0xed, 0x01];
+        bytes.extend_from_slice(key.verifying_key().as_bytes());
+        format!("did:key:z{}", bytes.to_base58()).parse().unwrap()
+    }
+
+    fn signed_head(
+        issuer: &ed25519_dalek::SigningKey,
+        edit: impl FnOnce(&mut Revision),
+    ) -> Revision {
+        let did = did_of(issuer);
+        let mut revision = Revision::new(
+            TreeReference::from([7u8; 32]),
+            "did:key:zSubject".parse().unwrap(),
+            "main",
+            did.clone(),
+            did,
+        );
+        let mut context = Context::new();
+        context.record(Version::new(
+            Origin::from([1u8; 32]),
+            Edition::new(4),
+        ));
+        revision.context = Some(context);
+        edit(&mut revision);
+        revision.signature = issuer.sign(&revision.payload()).to_bytes().to_vec();
+        revision
+    }
+
+    /// A signed head with a published watermark verifies, and it survives
+    /// the dag-cbor wire byte-for-byte: the context encodes as an ordered
+    /// array of (byte-string origin, edition) pairs — a shape the IPLD
+    /// spec permits — and the decoded head still carries a valid
+    /// signature. This pins the wire format before heads proliferate.
+    #[test]
+    fn it_roundtrips_a_signed_head_through_dagcbor() {
+        let head = signed_head(&key(1), |_| {});
+        head.verify().expect("a signed head verifies");
+
+        let bytes = serde_ipld_dagcbor::to_vec(&head).expect("head encodes");
+        let decoded: Revision = serde_ipld_dagcbor::from_slice(&bytes).expect("head decodes");
+        assert_eq!(decoded, head, "the wire round-trip is lossless");
+        decoded
+            .verify()
+            .expect("the decoded head still carries a valid signature");
+    }
+
+    /// A validly SIGNED head whose edition sits at the protocol ceiling is
+    /// refused at verification: nothing legitimate reaches 2^62 sequential
+    /// operations, and accepting it would let the saturating successor
+    /// mint one version twice while pinning the watermark so high that
+    /// every future write from the origin is silently dropped as seen.
+    #[test]
+    fn it_refuses_a_head_edition_at_the_ceiling() {
+        let sane = signed_head(&key(1), |head| {
+            head.edition = Edition::new(EDITION_CEILING - 1);
+        });
+        sane.verify()
+            .expect("editions below the ceiling verify, however deep");
+
+        for hostile in [EDITION_CEILING, u64::MAX] {
+            let head = signed_head(&key(1), |head| {
+                head.edition = Edition::new(hostile);
+            });
+            assert!(
+                head.verify().is_err(),
+                "edition {hostile} must be refused despite the valid signature"
+            );
+        }
+    }
+
+    /// The ceiling guards the published watermark too: a hostile entry at
+    /// `u64::MAX` would pin that origin as fully seen forever on every
+    /// replica that merges the context.
+    #[test]
+    fn it_refuses_a_watermark_entry_at_the_ceiling() {
+        let head = signed_head(&key(1), |head| {
+            let mut context = Context::new();
+            context.record(Version::new(
+                Origin::from([2u8; 32]),
+                Edition::new(u64::MAX),
+            ));
+            head.context = Some(context);
+        });
+        assert!(
+            head.verify().is_err(),
+            "a hostile watermark entry must be refused despite the valid signature"
+        );
     }
 }

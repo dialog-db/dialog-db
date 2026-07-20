@@ -32,14 +32,35 @@ use super::Issuer;
     PartialOrd,
     Ord,
     Hash,
-    Serialize,
-    Deserialize,
     rkyv::Archive,
     rkyv::Serialize,
     rkyv::Deserialize,
 )]
 #[repr(transparent)]
 pub struct Origin(pub [u8; 32]);
+
+/// Serde encodes an [`Origin`] as a byte string, NOT as the derive's
+/// 32-element integer array: heads and revision records travel as
+/// dag-cbor, whose spec has no integer-array byte encoding, and the byte
+/// string is also a third of the size. (The rkyv derives above are the
+/// tree's in-node encoding and are unaffected.)
+impl Serialize for Origin {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Origin {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let bytes = serde_bytes::ByteBuf::deserialize(deserializer)?;
+        let bytes: [u8; 32] = bytes
+            .as_ref()
+            .try_into()
+            .map_err(|_| D::Error::invalid_length(bytes.len(), &"a 32-byte origin hash"))?;
+        Ok(Self(bytes))
+    }
+}
 
 /// The byte width of an [`Origin`] in key encodings
 pub const ORIGIN_LENGTH: usize = 32;

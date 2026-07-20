@@ -26,7 +26,7 @@ use crate::{
 /// a merge routes to the direct replay or screen instead of the graft:
 /// tiny deltas fragment into per-key spans, and the stitch's seam work
 /// then exceeds simply walking the few entries.
-const SMALL_DIVERGENCE: u64 = 8;
+pub(crate) const SMALL_DIVERGENCE: u64 = 8;
 
 /// Command struct for pulling from upstream (auto-dispatches local/remote).
 pub struct Pull<'a> {
@@ -71,9 +71,26 @@ impl<'a> Pull<'a> {
     /// cell-advancing step while the (network-bound) fetch + rebase run
     /// lock-free, drive the two phases separately:
     ///
-    /// ```ignore
-    /// let prepared = branch.pull().prepare(&env).await?; // fetch + rebase, no cell writes
-    /// let revision = prepared.commit(&env).await?;       // advance the cells
+    /// ```no_run
+    /// # use dialog_repository::{Branch, PullError};
+    /// # async fn example<Env>(branch: &Branch, env: &Env) -> Result<(), PullError>
+    /// # where
+    /// #     Env: dialog_capability::Provider<dialog_effects::archive::Get>
+    /// #         + dialog_capability::Provider<dialog_effects::archive::Put>
+    /// #         + dialog_capability::Provider<dialog_effects::archive::Import>
+    /// #         + dialog_capability::Provider<dialog_effects::memory::Resolve>
+    /// #         + dialog_capability::Provider<dialog_effects::memory::Publish>
+    /// #         + dialog_capability::Provider<dialog_effects::authority::Identify>
+    /// #         + dialog_capability::Provider<dialog_effects::authority::Attest>
+    /// #         + dialog_capability::Provider<dialog_capability::Fork<dialog_repository::RemoteSite, dialog_effects::archive::Get>>
+    /// #         + dialog_capability::Provider<dialog_capability::Fork<dialog_repository::RemoteSite, dialog_effects::memory::Resolve>>
+    /// #         + dialog_common::ConditionalSync
+    /// #         + 'static,
+    /// # {
+    /// let prepared = branch.pull().prepare(env).await?; // fetch + rebase, no cell writes
+    /// let revision = prepared.commit(env).await?;       // advance the cells
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
     where
@@ -933,7 +950,19 @@ impl PreparedPull<'_> {
         // On success the checkpoint updates the shared cache, so the branch
         // handle sees the new head. The caller refreshes and re-pulls to
         // reconcile a mismatch.
-        head.publish(new_revision.clone(), env).await?;
+        //
+        // The "head stands" arms (the scenario-2 skip and the keep-ours
+        // merge outcomes) publish nothing: the merged revision IS the
+        // current head, and rewriting the cell with identical bytes would
+        // still bump its version — failing any commit racing through
+        // another checkpoint for no reason. (An auto-sync loop hits the
+        // skip arm once per upstream movement; in a mesh, once per peer.)
+        // The verdict stays valid even if a commit advances the head
+        // meanwhile: a newer local head's context only grows, so "nothing
+        // new from this upstream" cannot be invalidated by it.
+        if branch.revision().as_ref() != Some(&new_revision) {
+            head.publish(new_revision.clone(), env).await?;
+        }
 
         // Advance the pulled upstream's recorded sync base to the tree we
         // just merged in, so the next pull/push against it uses that as the
@@ -1346,6 +1375,7 @@ mod tests {
 
 #[cfg(test)]
 mod history_tests {
+    use super::SMALL_DIVERGENCE;
     use crate::RevisionExt as _;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1356,6 +1386,57 @@ mod history_tests {
     use dialog_artifacts::history::{Causality, History as _, causality, common_ancestor};
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::stream;
+
+    /// A scenario-2 pull ("upstream moved, but with things we already
+    /// know") keeps the head and advances only the sync base — and it must
+    /// not TOUCH the head cell doing so: republishing an identical head
+    /// still bumps the cell version, so a commit racing through another
+    /// handle's checkpoint would fail `VersionMismatch` even though the
+    /// head value never changed. An auto-sync loop hits this arm once per
+    /// upstream movement.
+    #[dialog_common::test]
+    async fn it_keeps_the_head_cell_untouched_on_a_nothing_new_pull() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        feature
+            .commit(stream::iter(vec![assert_one(
+                "user/name",
+                "user:1",
+                "Alice",
+            )]))
+            .perform(&operator)
+            .await?;
+
+        // Main adopts feature's head, so feature's next pull of main is
+        // the scenario-2 skip: main moved, but only with feature's own
+        // work.
+        main.pull().from(&feature).perform(&operator).await?;
+
+        // A second handle of feature, its head checkpoint taken BEFORE
+        // the pull below.
+        let racer = repo.branch("feature").open().perform(&operator).await?;
+
+        feature.pull().perform(&operator).await?;
+
+        // The pull kept the head and must not have bumped the head cell:
+        // the racer's commit still lands against its pre-pull checkpoint.
+        racer
+            .commit(stream::iter(vec![assert_one(
+                "user/email",
+                "user:1",
+                "alice@example.com",
+            )]))
+            .perform(&operator)
+            .await
+            .expect("a nothing-new pull must not invalidate a racing commit's checkpoint");
+
+        Ok(())
+    }
 
     fn assert_one(the: &str, of: &str, value: &str) -> Instruction {
         Instruction::Assert(Artifact {
@@ -3203,9 +3284,14 @@ mod history_tests {
         .perform(&env)
         .await?;
 
-        // Bob moves by three commits; we pull him. The old replay walked
+        // Bob moves by a dozen commits; we pull him. The old replay walked
         // our whole divergence (the adopted bulk); the graft must not.
-        for i in 0..3 {
+        // TWELVE commits, not a couple: the graft gate requires BOTH
+        // sides' divergence masses above `SMALL_DIVERGENCE` (8), and a
+        // smaller fixture silently routes through scenario 5's screened
+        // direction — which also stays under the read bound, so the graft
+        // body would be exercised by no test at all.
+        for i in 0..12 {
             bob.commit(stream::iter(vec![assert_one(
                 "city/name",
                 &format!("city:{i}"),
@@ -3214,11 +3300,31 @@ mod history_tests {
             .perform(&env)
             .await?;
         }
+
+        // Pin the routing, not just the cost: the divergence-mass gate
+        // must actually select the graft for this fixture.
+        let ours = us
+            .revision()
+            .expect("we have a head")
+            .context
+            .expect("our head publishes its watermark");
+        let theirs = bob
+            .revision()
+            .expect("bob has a head")
+            .context
+            .expect("bob's head publishes its watermark");
+        assert!(
+            ours.divergence(&theirs).min(theirs.divergence(&ours)) > SMALL_DIVERGENCE,
+            "fixture must route to the graft: ours-beyond {} theirs-beyond {}",
+            ours.divergence(&theirs),
+            theirs.divergence(&ours)
+        );
+
         env.reset();
         us.pull().from(&bob).perform(&env).await?.expect("merged");
         let reads = env.block_reads();
         assert!(
-            reads <= 80,
+            reads <= 120,
             "a graft merge must not walk the adopted bulk (got {reads} reads): {:?}",
             env.snapshot()
         );
@@ -3243,8 +3349,155 @@ mod history_tests {
             }
         };
         assert_eq!(count("user/name").await?, 200, "the adopted bulk survives");
-        assert_eq!(count("city/name").await?, 3, "bob's novelty lands");
+        assert_eq!(count("city/name").await?, 12, "bob's novelty lands");
         assert_eq!(count("post/title").await?, 2, "seed and our own fact stand");
+
+        Ok(())
+    }
+
+    /// Deletions hold across the GRAFT merge specifically (spec D5,
+    /// scenario 4): both sides carry graft-sized divergence, each side
+    /// retracted a fact the other still holds live from the shared base,
+    /// and the stitched-and-repaired tree keeps both facts dead. Every
+    /// other deletion test routes through the small-delta paths, so the
+    /// graft's stitch + contested integrate + coverage repair had no
+    /// deletion pin at all.
+    #[dialog_common::test]
+    async fn it_propagates_deletions_across_a_graft_merge() -> Result<()> {
+        use crate::RepositoryExt as _;
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = profile
+            .repository(unique_name("repo"))
+            .open()
+            .perform(&operator)
+            .await?;
+
+        // The shared base carries two victims, one for each side to kill.
+        let seed = repo.branch("seed").open().perform(&operator).await?;
+        seed.commit(stream::iter(vec![
+            assert_one("task/label", "task:bobs-victim", "urgent"),
+            assert_one("task/label", "task:ours-victim", "blocked"),
+        ]))
+        .perform(&operator)
+        .await?;
+
+        let bob = repo.branch("bob").open().perform(&operator).await?;
+        bob.set_upstream(&seed).perform(&operator).await?;
+        bob.pull().perform(&operator).await?;
+
+        let us = repo.branch("us").open().perform(&operator).await?;
+        us.set_upstream(&seed).perform(&operator).await?;
+        us.pull().perform(&operator).await?;
+        us.pull().from(&bob).perform(&operator).await?;
+
+        // Both sides now diverge past the graft threshold: a dozen churn
+        // commits each, plus one retraction each of a base fact the
+        // other side still holds live.
+        for i in 0..12 {
+            bob.commit(stream::iter(vec![assert_one(
+                "city/name",
+                &format!("city:{i}"),
+                "bobton",
+            )]))
+            .perform(&operator)
+            .await?;
+            us.commit(stream::iter(vec![assert_one(
+                "user/name",
+                &format!("user:{i}"),
+                "resident",
+            )]))
+            .perform(&operator)
+            .await?;
+        }
+        bob.commit(stream::iter(vec![Instruction::Retract(Artifact {
+            the: "task/label".parse()?,
+            of: "task:bobs-victim".parse()?,
+            is: Value::String("urgent".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+        us.commit(stream::iter(vec![Instruction::Retract(Artifact {
+            the: "task/label".parse()?,
+            of: "task:ours-victim".parse()?,
+            is: Value::String("blocked".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+        // The fixture must route to the graft, not a small-delta path.
+        let ours = us
+            .revision()
+            .expect("we have a head")
+            .context
+            .expect("our head publishes its watermark");
+        let theirs = bob
+            .revision()
+            .expect("bob has a head")
+            .context
+            .expect("bob's head publishes its watermark");
+        assert!(
+            ours.divergence(&theirs).min(theirs.divergence(&ours)) > SMALL_DIVERGENCE,
+            "fixture must route to the graft: ours-beyond {} theirs-beyond {}",
+            ours.divergence(&theirs),
+            theirs.divergence(&ours)
+        );
+
+        us.pull()
+            .from(&bob)
+            .perform(&operator)
+            .await?
+            .expect("merged");
+
+        let labels: Vec<_> = us
+            .claims()
+            .select(ArtifactSelector::new().the("task/label".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            labels.is_empty(),
+            "both retractions hold across the graft: {labels:?}"
+        );
+
+        // Both sides' churn crossed the merge intact.
+        let count = |the: &str| {
+            let the: dialog_artifacts::Attribute = the.parse().unwrap();
+            let us = us.clone();
+            let operator = &operator;
+            async move {
+                anyhow::Ok(
+                    us.claims()
+                        .select(ArtifactSelector::new().the(the))
+                        .perform(operator)
+                        .await?
+                        .collect::<Vec<_>>()
+                        .await
+                        .into_iter()
+                        .collect::<Result<Vec<_>, _>>()?
+                        .len(),
+                )
+            }
+        };
+        assert_eq!(count("city/name").await?, 12, "bob's churn lands");
+        assert_eq!(count("user/name").await?, 12, "our churn survives");
+
+        // And the merge quiesces: pulling the same upstream again keeps
+        // the head (only bookkeeping may advance).
+        let settled = us.revision().expect("merged head");
+        us.pull().from(&bob).perform(&operator).await?;
+        assert_eq!(
+            us.revision().expect("head stands"),
+            settled,
+            "a repeated pull of the same upstream mints nothing new"
+        );
 
         Ok(())
     }

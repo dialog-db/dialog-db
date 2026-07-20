@@ -39,7 +39,7 @@ fn assert_fact(entity: usize, value: &str) -> Instruction {
 
 struct Sample {
     depth: usize,
-    scenario: &'static str,
+    scenario: String,
     block_reads: u64,
     effects: u64,
     millis: u128,
@@ -48,22 +48,57 @@ struct Sample {
 impl Sample {
     fn row(&self) -> String {
         format!(
-            "| {:>6} | {:<26} | {:>11} | {:>7} | {:>8} |",
+            "| {:>6} | {:<34} | {:>11} | {:>7} | {:>8} |",
             self.depth, self.scenario, self.block_reads, self.effects, self.millis
         )
+    }
+}
+
+/// Which cascade path the two published watermarks route a tracked pull
+/// to, mirroring the gate arithmetic in `Pull::prepare` (tree-vs-base
+/// equality aside). Rows print this next to the scenario name so the
+/// table is self-labeling — the harness once claimed a "graft" row that
+/// the threshold actually routed through the screened path.
+fn routed(
+    ours: &dialog_artifacts::history::Context,
+    theirs: &dialog_artifacts::history::Context,
+) -> &'static str {
+    if ours.includes(theirs) {
+        "skip"
+    } else if theirs.includes(ours) {
+        "ff/adopt"
+    } else if ours.divergence(theirs).min(theirs.divergence(ours)) > super::pull::SMALL_DIVERGENCE {
+        "graft"
+    } else if ours.divergence(theirs) <= theirs.divergence(ours) {
+        "replay-ours"
+    } else {
+        "screen-theirs"
+    }
+}
+
+/// The `routed` label for a pull of `upstream` into `branch`, from their
+/// published heads; "legacy" when either head predates watermarks.
+fn routed_label(branch: &crate::Branch, upstream: &crate::Branch) -> &'static str {
+    match (
+        branch.revision().and_then(|r| r.context),
+        upstream.revision().and_then(|r| r.context),
+    ) {
+        (Some(ours), Some(theirs)) => routed(&ours, &theirs),
+        _ => "legacy",
     }
 }
 
 /// One measured operation: reset the tally, run, record reads/effects
 /// and wall time.
 macro_rules! measured {
-    ($samples:expr, $env:expr, $depth:expr, $name:literal, $op:expr) => {{
+    ($samples:expr, $env:expr, $depth:expr, $name:expr, $op:expr) => {{
+        let scenario = String::from($name);
         $env.reset();
         let started = Instant::now();
         let outcome = $op;
         $samples.push(Sample {
             depth: $depth,
-            scenario: $name,
+            scenario,
             block_reads: $env.block_reads(),
             effects: $env.snapshot().values().sum(),
             millis: started.elapsed().as_millis(),
@@ -215,14 +250,37 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
         samples,
         env,
         depth,
-        "triangle: adopt alice",
+        format!("triangle: adopt alice [{}]", routed_label(&us, &alice)),
         us.pull().from(&alice).perform(&env).await?
     );
+    // A 3-commit late delta sits under the graft threshold: this row
+    // measures the screened direction.
     measured!(
         samples,
         env,
         depth,
-        "triangle: tracked bob after",
+        format!("triangle: bob small [{}]", routed_label(&us, &bob)),
+        us.pull().from(&bob).perform(&env).await?
+    );
+    // A dozen more late commits push Bob's delta past the threshold:
+    // this row measures the graft itself (partition, stitch, contested
+    // integrate, coverage repair).
+    for i in 0..12 {
+        bob.commit(stream::iter(vec![assert_fact(
+            depth + 30 + i,
+            "bob later",
+        )]))
+        .perform(&env)
+        .await?;
+    }
+    us.commit(stream::iter(vec![assert_fact(depth + 50, "ours late")]))
+        .perform(&env)
+        .await?;
+    measured!(
+        samples,
+        env,
+        depth,
+        format!("triangle: bob bulky [{}]", routed_label(&us, &bob)),
         us.pull().from(&bob).perform(&env).await?
     );
 
@@ -300,8 +358,8 @@ async fn read_amplification_by_depth() -> Result<()> {
     }
     measure_shape(10_000).await?;
 
-    println!("| depth  | scenario                   | block reads | effects | wall ms  |");
-    println!("|--------|----------------------------|-------------|---------|----------|");
+    println!("| depth  | scenario                           | block reads | effects | wall ms  |");
+    println!("|--------|------------------------------------|-------------|---------|----------|");
     for sample in &samples {
         println!("{}", sample.row());
     }

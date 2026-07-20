@@ -371,11 +371,20 @@ where
         let head = branch.revision.checkpoint();
         let base_revision = branch.revision();
 
-        let remote = match branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => {
-                branch.subject().remote(name).load().perform(env).await.ok()
-            }
-            _ => None,
+        // Same remote-fallback selection as `commit`: the first remote among
+        // ALL tracked upstreams, not only a remote default — a branch whose
+        // default upstream is local but which tracks a remote must still be
+        // able to hydrate blocks it holds by reference.
+        let upstreams = branch.upstreams();
+        let remote = match upstreams.remote_name() {
+            Some(name) => branch
+                .subject()
+                .remote(name.to_string())
+                .load()
+                .perform(env)
+                .await
+                .ok(),
+            None => None,
         };
         let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 

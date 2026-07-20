@@ -31,7 +31,7 @@ use dialog_search_tree::{
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::iter::repeat_n;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
@@ -697,9 +697,40 @@ impl ArtifactTreeExt for ArtifactTree {
 
         // History records are buffered and only written if the batch changed
         // the indexes: a batch of pure no-ops must leave the tree untouched,
-        // history region included.
-        let mut history_entries: Vec<(Key, State<Datum>)> = Vec::new();
+        // history region included. Buffering is per history key, folding
+        // collisions: two instructions on the same (entity, attribute, value)
+        // in one batch land at ONE history key, and last-write-wins would
+        // silently drop the earlier record's lineage — a retract-then-re-assert
+        // of one value lost the retract's cause from the log (while its
+        // coverage mirror survived), so the screened merge path never retired
+        // a stale peer's copy while the graft path did. The fold keeps the
+        // later record's polarity and unions the superseded versions: a
+        // re-assert citing what it overrode.
+        let mut history_records: BTreeMap<Key, Record> = BTreeMap::new();
         let mut changed = false;
+        let buffer_record =
+            |records: &mut BTreeMap<Key, Record>, record: Record, version: &Version| {
+                let (key, _) = record.clone().into_entry(version);
+                match records.remove(&key) {
+                    None => {
+                        records.insert(key, record);
+                    }
+                    Some(earlier) => {
+                        let mut versions = earlier.claim().cause.versions().to_vec();
+                        versions.extend_from_slice(record.claim().cause.versions());
+                        let claim = Claim {
+                            cause: HistoryCause::new(versions),
+                            ..record.claim().clone()
+                        };
+                        let folded = if record.is_assertion() {
+                            Record::Assert(claim)
+                        } else {
+                            Record::Retract(claim)
+                        };
+                        records.insert(key, folded);
+                    }
+                }
+            };
 
         tokio::pin!(instructions);
         while let Some(instruction) = instructions.next().await {
@@ -738,10 +769,7 @@ impl ArtifactTreeExt for ArtifactTree {
                             is: artifact.is.clone(),
                             cause: HistoryCause::genesis(),
                         });
-                        if let Some(coverage) = record.coverage_entry(version) {
-                            history_entries.push(coverage);
-                        }
-                        history_entries.push(record.into_entry(version));
+                        buffer_record(&mut history_records, record, version);
                     }
 
                     let mut datum = Datum::for_artifact(&artifact);
@@ -762,14 +790,10 @@ impl ArtifactTreeExt for ArtifactTree {
                     // in-flight transient tree, so writes from earlier
                     // instructions in this batch are visible. Same-valued priors
                     // already represent the desired state; only different-valued
-                    // ones need superseding. Sameness is compared on the raw
-                    // stored form — (value_type, bytes) — sparing a full
-                    // `Artifact` parse per candidate. The scan borrows
+                    // ones need superseding. The scan borrows
                     // `transient` immutably, so collect into owned vectors in a
                     // scope that ends before the subsequent mutating
                     // reassignments.
-                    let _replace_type = u8::from(artifact.is.data_type());
-                    let _replace_value = artifact.is.to_bytes();
                     let mut superseded_keys: Vec<Key> = Vec::new();
                     let mut superseded_versions: Vec<Version> = Vec::new();
                     let mut found_same_value = false;
@@ -854,10 +878,7 @@ impl ArtifactTreeExt for ArtifactTree {
                             is: artifact.is.clone(),
                             cause: HistoryCause::new(superseded_versions),
                         });
-                        if let Some(coverage) = record.coverage_entry(version) {
-                            history_entries.push(coverage);
-                        }
-                        history_entries.push(record.into_entry(version));
+                        buffer_record(&mut history_records, record, version);
                     }
 
                     if found_same_value {
@@ -882,8 +903,21 @@ impl ArtifactTreeExt for ArtifactTree {
                     transient = transient.insert(value_key, added, &storage).await?;
                 }
                 Instruction::Retract(artifact) => {
-                    changed = true;
                     let (entity_key, attribute_key, value_key) = artifact_index_keys(&artifact);
+
+                    // The standing datum decides everything below: whether
+                    // the retract changes anything at all, and which version
+                    // it withdraws. Retracting a fact that is not there is a
+                    // no-op, spec'd as such: no index change, no record, no
+                    // minted revision. (A same-batch assert of the same fact
+                    // IS visible here — the transient carries it — so
+                    // assert+retract still cancels through the deletes
+                    // below, and the record fold nets their lineage.)
+                    let Some(State::Added(standing)) = transient.get(&entity_key, &storage).await?
+                    else {
+                        continue;
+                    };
+                    changed = true;
 
                     // A version-tagged retraction records its history: its
                     // cause is the version of the assertion it withdraws.
@@ -892,22 +926,14 @@ impl ArtifactTreeExt for ArtifactTree {
                     // itself as its cause, so that degenerates to a genesis
                     // retraction.
                     if let Some(version) = &version {
-                        let withdrawn = match transient.get(&entity_key, &storage).await? {
-                            Some(State::Added(datum)) => {
-                                datum.version.filter(|withdrawn| withdrawn != version)
-                            }
-                            _ => None,
-                        };
+                        let withdrawn = standing.version.filter(|withdrawn| withdrawn != version);
                         let record = Record::Retract(Claim {
                             the: artifact.the.clone(),
                             of: artifact.of.clone(),
                             is: artifact.is.clone(),
                             cause: withdrawn.into_iter().collect(),
                         });
-                        if let Some(coverage) = record.coverage_entry(version) {
-                            history_entries.push(coverage);
-                        }
-                        history_entries.push(record.into_entry(version));
+                        buffer_record(&mut history_records, record, version);
                     }
 
                     // Observed-remove semantics: retraction deletes the
@@ -916,10 +942,7 @@ impl ArtifactTreeExt for ArtifactTree {
                     // deletion (it replicates as history), and a replica's
                     // causal context is what stops a stale peer's copy from
                     // resurrecting the fact at merge time (see
-                    // `notes/version-control.md`). Deleting an absent
-                    // key is a no-op, so a same-batch assert+retract cancels
-                    // to nothing and a retract of a fact that never existed
-                    // changes nothing in the indexes.
+                    // `notes/version-control.md`).
                     transient = transient.delete(&entity_key, &storage).await?;
                     transient = transient.delete(&attribute_key, &storage).await?;
                     transient = transient.delete(&value_key, &storage).await?;
@@ -927,8 +950,20 @@ impl ArtifactTreeExt for ArtifactTree {
             }
         }
 
-        for (key, entry) in history_entries {
-            transient = transient.insert(key, entry, &storage).await?;
+        // Write the folded records and their coverage mirrors. Emitting
+        // coverage from the FOLDED record (rather than per instruction)
+        // keeps the mirror consistent with the log when a batch touched
+        // one (entity, attribute, value) twice: the coverage entry's key
+        // collides exactly when the record key does, and both then carry
+        // the same folded lineage.
+        if let Some(version) = &version {
+            for record in history_records.into_values() {
+                if let Some((key, entry)) = record.coverage_entry(version) {
+                    transient = transient.insert(key, entry, &storage).await?;
+                }
+                let (key, entry) = record.into_entry(version);
+                transient = transient.insert(key, entry, &storage).await?;
+            }
         }
 
         // Seal the whole batch with a single bottom-up persist into the

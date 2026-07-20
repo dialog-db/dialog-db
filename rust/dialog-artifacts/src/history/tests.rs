@@ -846,6 +846,296 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
     Ok(())
 }
 
+/// A claim on a value that spilled out of its key (larger than the inline
+/// threshold) must still read back through the history API: the raw bytes
+/// live in the archive under the key's 32-byte reference, and the reader
+/// resolves them. Tier-2 conflict detection walks supersedes chains
+/// through `claims_at`, so an unresolvable spilled claim broke causality
+/// for any chain passing through a large value.
+#[dialog_common::test]
+async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::stream;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+    let big = Value::String("z".repeat(inline_n + 1));
+    let entity = Entity::new()?;
+    let the: Attribute = "doc/body".parse()?;
+    let doc = |value: Value| Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: value,
+        cause: None,
+    };
+    let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+    let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
+
+    let mut tree = ArtifactTree::empty();
+    for (version, instruction) in [
+        (first, Instruction::Assert(doc(big.clone()))),
+        (
+            second,
+            Instruction::Replace(doc(Value::String("v2".into()))),
+        ),
+    ] {
+        let mut delta = Delta::zero();
+        tree.apply_versioned(
+            &mut store,
+            &mut delta,
+            Some(version),
+            stream::iter(vec![instruction]),
+        )
+        .await?;
+        for (digest, buffer) in delta.flush() {
+            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+        }
+    }
+
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let claims = history.claims_at(&first, &entity, &the).await?;
+    assert_eq!(claims.len(), 1, "the spilled claim reads back");
+    assert_eq!(claims[0].is, big, "with its full value resolved");
+
+    let records = history.records().await?;
+    assert_eq!(records.len(), 2, "the whole log lists, spilled or not");
+    Ok(())
+}
+
+/// Retracting a fact that was never asserted is a no-op, exactly as the
+/// spec states: no index change, no history record, and `changed` stays
+/// false so no revision is minted. An idempotent "delete if present"
+/// issued twice must not grow the log or advance the edition.
+#[dialog_common::test]
+async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::stream;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let entity = Entity::new()?;
+    let the: Attribute = "post/title".parse()?;
+    let title = Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::String("Hej".into()),
+        cause: None,
+    };
+    let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+
+    let mut tree = ArtifactTree::empty();
+    let empty_root = tree.root().clone();
+    let mut delta = Delta::zero();
+    let changed = tree
+        .apply_versioned(
+            &mut store,
+            &mut delta,
+            Some(version),
+            stream::iter(vec![Instruction::Retract(title)]),
+        )
+        .await?;
+    assert!(!changed, "retracting a nonexistent fact changes nothing");
+    assert_eq!(*tree.root(), empty_root, "the tree root must not move");
+    for (digest, buffer) in delta.flush() {
+        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+    }
+
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    assert!(
+        history.records().await?.is_empty(),
+        "no record is minted for a withdrawal that never happened"
+    );
+    Ok(())
+}
+
+/// Two instructions on the same (entity, attribute, value) in one batch
+/// land at ONE history key; last-write-wins there silently dropped the
+/// earlier record's lineage. A retract-then-re-assert of one value lost
+/// the retract's cause from the log while its coverage mirror survived,
+/// so the screened merge path (which fires R3 from history records) never
+/// retired a stale peer's copy while the graft path (which fires from
+/// coverage) did — path-dependent merge outcomes. The fold keeps the
+/// later polarity and unions the causes: a re-assert citing what it
+/// overrode, with log and mirror agreeing.
+#[dialog_common::test]
+async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
+    use dialog_search_tree::{ContentAddressedStorage, Delta};
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::{StreamExt as _, stream};
+
+    use crate::State;
+    use crate::merge::coverage_scope;
+    use crate::tree::TreeStorageBridge;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let entity = Entity::new()?;
+    let the: Attribute = "post/title".parse()?;
+    let title = Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::String("Hej".into()),
+        cause: None,
+    };
+    let old = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+    let new = Version::new(Origin::from([7u8; 32]), Edition::new(1));
+
+    let mut tree = ArtifactTree::empty();
+    for (version, instructions) in [
+        (old, vec![Instruction::Assert(title.clone())]),
+        (
+            new,
+            vec![
+                Instruction::Retract(title.clone()),
+                Instruction::Assert(title.clone()),
+            ],
+        ),
+    ] {
+        let mut delta = Delta::zero();
+        tree.apply_versioned(
+            &mut store,
+            &mut delta,
+            Some(version),
+            stream::iter(instructions),
+        )
+        .await?;
+        for (digest, buffer) in delta.flush() {
+            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+        }
+    }
+
+    // The fact stands, re-asserted under the new version.
+    let data = tree.select_data(store.clone(), &entity, &the).await?;
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0].version, Some(new));
+
+    // The log holds ONE record at the new version for this claim: an
+    // assertion citing the version it overrode — not a genesis assert
+    // that forgot the retract's cause.
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let records = history.records().await?;
+    let at_new: Vec<_> = records
+        .iter()
+        .filter(|(version, _)| *version == new)
+        .collect();
+    assert_eq!(at_new.len(), 1, "one folded record for the batch");
+    let (_, record) = at_new[0];
+    assert!(record.is_assertion(), "the later polarity stands");
+    assert_eq!(
+        record.claim().cause.versions(),
+        &[old],
+        "the fold keeps the withdrawn version as the cause"
+    );
+
+    // The coverage mirror agrees with the folded log record.
+    let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let scope = coverage_scope();
+    let entries: Vec<_> = tree
+        .stream_range(scope[0].clone(), &storage)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(entries.len(), 1, "one covering write, one mirror entry");
+    let State::Added(mirror) = &entries[0].value else {
+        panic!("coverage entries are plain adds");
+    };
+    assert_eq!(mirror.supersedes, vec![old]);
+    assert_eq!(mirror.version, Some(new));
+    assert!(!mirror.retraction, "the mirror carries the folded polarity");
+
+    Ok(())
+}
+
+/// KNOWN GAP (spec D3): a retraction must cover every claim of the fact
+/// its author observed, but the standing datum remembers only ONE
+/// version — whichever write landed last (in-branch) or won the hash
+/// race (at merge). Two observed claims of the SAME value therefore
+/// leave the retract record citing one of them, and the uncovered claim
+/// can resurrect the fact through a later merge (the four-writer D3
+/// scenario with Mallory asserting the identical value). Ignored until
+/// the design lands: covering the full observed set needs either the
+/// datum to carry collapsed versions or the retract path to consult the
+/// log.
+#[dialog_common::test]
+#[ignore = "pending design: retract coverage of same-value claims collapsed at one key"]
+async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::stream;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let entity = Entity::new()?;
+    let the: Attribute = "task/label".parse()?;
+    let urgent = Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::String("urgent".into()),
+        cause: None,
+    };
+    // Two writers assert the IDENTICAL value; both claims are observed
+    // here (both records enter the log), but the fact's index keys are
+    // value-addressed, so the standing datum keeps only the later
+    // version.
+    let bob = Version::new(Origin::from([1u8; 32]), Edition::new(0));
+    let mallory = Version::new(Origin::from([2u8; 32]), Edition::new(1));
+    let retractor = Version::new(Origin::from([3u8; 32]), Edition::new(2));
+
+    let mut tree = ArtifactTree::empty();
+    for (version, instruction) in [
+        (bob, Instruction::Assert(urgent.clone())),
+        (mallory, Instruction::Assert(urgent.clone())),
+        (retractor, Instruction::Retract(urgent.clone())),
+    ] {
+        let mut delta = Delta::zero();
+        tree.apply_versioned(
+            &mut store,
+            &mut delta,
+            Some(version),
+            stream::iter(vec![instruction]),
+        )
+        .await?;
+        for (digest, buffer) in delta.flush() {
+            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+        }
+    }
+
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let retract = history
+        .records()
+        .await?
+        .into_iter()
+        .find_map(|(version, record)| {
+            (version == retractor && !record.is_assertion()).then_some(record)
+        })
+        .expect("the retraction is recorded");
+    let mut covered = retract.claim().cause.versions().to_vec();
+    covered.sort();
+    assert_eq!(
+        covered,
+        vec![bob, mallory],
+        "a retraction covers every observed claim of the value, not just \
+         the one the standing datum remembered"
+    );
+    Ok(())
+}
+
 /// A replacement over a cardinality-many anomaly — several values standing
 /// at one (entity, attribute), one of them already the replacement's value
 /// — supersedes exactly the different-valued claims: they are removed and

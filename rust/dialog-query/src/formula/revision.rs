@@ -21,19 +21,56 @@
 //!   with the scan's `of` makes the join itself reject a valid record
 //!   replayed at another revision entity.
 
-use dialog_artifacts::history::RevisionRecord;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use dialog_artifacts::history::VersionExt as _;
+use dialog_artifacts::history::{RevisionRecord, verify_issuer_signature};
+use dialog_common::Blake3Hash;
 
 use crate::formula::Input;
 use crate::types::RecordBytes;
 use crate::{Entity, Formula};
 
+/// Entries the verified-record memo holds before it resets. Entries are
+/// re-verifiable, so an occasional refill only costs the verification it
+/// would have paid anyway.
+const VERIFIED_MEMO_BOUND: usize = 4096;
+
 /// Decode and verify the [`RevisionRecord`] carried by `of`, or `None`
 /// if the record is malformed or does not vouch for itself.
+///
+/// Memoized by the blake3 of the record bytes: Ed25519 verification
+/// dominates projecting a record, and the fixpoint evaluator re-applies
+/// these formulas to the same records across delta rounds — an ancestry
+/// closure over n revisions otherwise pays O(n · rounds) verifications.
+/// Record bytes are immutable, so an entry (positive or negative) never
+/// invalidates.
+///
+/// Only the signature is checked here: the slot binding
+/// [`RevisionRecord::verify`] adds compares the derived version against
+/// the slot a record was FOUND at, and a formula holds only the bytes —
+/// replay rejection happens in the join on `this` instead (see the
+/// module docs).
 fn verified(of: &RecordBytes) -> Option<RevisionRecord> {
-    let record = RevisionRecord::try_from_bytes(&of.0).ok()?;
-    record.verify(&record.version()).ok()?;
-    Some(record)
+    static MEMO: OnceLock<Mutex<HashMap<[u8; 32], Option<RevisionRecord>>>> = OnceLock::new();
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = *Blake3Hash::hash(&of.0).as_bytes();
+    if let Some(hit) = memo.lock().expect("verified-record memo lock").get(&key) {
+        return hit.clone();
+    }
+    let record = (|| {
+        let record = RevisionRecord::try_from_bytes(&of.0).ok()?;
+        verify_issuer_signature(&record.issuer, &record.payload().ok()?, &record.signature)
+            .ok()?;
+        Some(record)
+    })();
+    let mut memo = memo.lock().expect("verified-record memo lock");
+    if memo.len() >= VERIFIED_MEMO_BOUND {
+        memo.clear();
+    }
+    memo.insert(key, record.clone());
+    record
 }
 
 /// Projects the scalar fields of a revision record: attribution
@@ -103,15 +140,19 @@ pub struct RevisionParent {
 
 impl RevisionParent {
     /// Project one row per parent; a record that does not verify
-    /// projects nothing.
+    /// projects nothing. Parents are deduplicated: a duplicate entry in
+    /// a (self-signed) record is one DAG edge, not two rows — and a
+    /// hostile record repeating one parent must not multiply output.
     pub fn compute(input: Input<Self>) -> Vec<Self> {
         let Some(record) = verified(&input.of) else {
             return Vec::new();
         };
         let this = record.version().entity();
+        let mut seen = std::collections::HashSet::new();
         record
             .parents
             .iter()
+            .filter(|parent| seen.insert(**parent))
             .map(|parent| RevisionParent {
                 of: input.of.clone(),
                 this: this.clone(),

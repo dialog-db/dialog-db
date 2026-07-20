@@ -13,7 +13,7 @@ use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use crate::{
-    Branch, Index, LocalIndex, PushError, RemoteSite, RepositoryArchiveExt as _,
+    Branch, Index, LocalIndex, PublishError, PushError, RemoteSite, RepositoryArchiveExt as _,
     RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
 
@@ -66,7 +66,13 @@ impl Push<'_> {
     ///   the last sync; pull to integrate before pushing again.
     ///
     /// For remote upstream, novel tree blocks are uploaded before the
-    /// revision is published.
+    /// revision is published, so a published head never references bytes
+    /// the remote is missing. A known limit: the novelty diff reads the
+    /// LOCAL archive only, so a head carrying subtrees adopted by
+    /// reference from a *different* remote (a scenario-3 pull) cannot be
+    /// pushed to a second remote until those blocks are hydrated locally
+    /// — the push fails loudly on the missing blocks rather than
+    /// publishing a head the target cannot serve.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PushError>
     where
         Env: Provider<Get>
@@ -168,6 +174,16 @@ impl Push<'_> {
                 // check sees the latest upstream tree, not whatever
                 // was in our last snapshot.
                 upstream.fetch().perform(env).await?;
+
+                // The trust boundary, same as pull's: this head was minted
+                // elsewhere, and every gate below (the fast-forward check,
+                // the novelty diff, the upload) acts on it. A forged or
+                // tampered head is rejected before a single byte moves.
+                if let Some(fetched) = upstream.revision() {
+                    fetched
+                        .verify()
+                        .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+                }
 
                 let current = upstream.revision().map(|r| r.tree).unwrap_or_default();
                 if current != base {
@@ -273,9 +289,44 @@ impl Push<'_> {
         // Advance this upstream's recorded sync point to the just-pushed
         // tree. A target pushed explicitly for the first time gets tracked
         // here (appended, not made the default).
+        //
+        // Same tracking-cell protocol as the pull commit: this write races
+        // other syncs of the cell (a pull, a push to another upstream, a
+        // set_upstream through another handle), and a plain publish from a
+        // stale snapshot would either fail the whole push AFTER the target
+        // already advanced — leaving the base behind so every retried push
+        // reads as non-fast-forward until a pull — or silently drop a
+        // concurrent writer's entry. On a version mismatch, re-read: if our
+        // entry is untouched, fold our advance into the current state and
+        // publish once more; if our own entry moved, a concurrent sync of
+        // this same upstream already recorded a consistent pair, so yield
+        // rather than regress it.
+        let advanced = upstream_state.with_tree(revision.tree.clone());
+        let marker = branch.upstream.checkpoint();
         let mut upstreams = branch.upstreams();
-        upstreams.upsert(upstream_state.with_tree(revision.tree.clone()));
-        branch.upstream.publish(upstreams).perform(env).await?;
+        upstreams.upsert(advanced.clone());
+        let publish = marker.publish(upstreams, env).await;
+        if let Err(PublishError::VersionMismatch { .. }) = publish {
+            branch.upstream.resolve().perform(env).await?;
+            let marker = branch.upstream.checkpoint();
+            let mut upstreams = branch.upstreams();
+            let ours_untouched = match upstreams.find(&advanced) {
+                None => true,
+                Some(entry) => *entry.tree() == base,
+            };
+            if ours_untouched {
+                upstreams.upsert(advanced);
+                match marker.publish(upstreams, env).await {
+                    // The cell is contended; give up on the marker
+                    // advance — the push itself landed, the next sync
+                    // is just heavier.
+                    Err(PublishError::VersionMismatch { .. }) => {}
+                    other => other?,
+                }
+            }
+        } else {
+            publish?;
+        }
 
         Ok(Some(revision))
     }

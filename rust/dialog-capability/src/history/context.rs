@@ -25,8 +25,33 @@ use super::{Edition, Origin, Version};
 ///
 /// In CRDT terms this is the causal context of an optimized OR-set,
 /// with `(Origin, Edition)` versions as its dots.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Context(BTreeMap<Origin, Edition>);
+
+/// Serde encodes a [`Context`] as an ordered array of `(origin, edition)`
+/// pairs, NOT as the derive's map: heads travel as dag-cbor, whose spec
+/// allows only string map keys, while a derive-encoded `BTreeMap<Origin,
+/// Edition>` produces byte-string keys that today's lenient encoder
+/// accepts and a spec-enforcing one (or any other IPLD tooling) rejects.
+/// The array iterates the map in ascending origin order, so the encoding
+/// stays deterministic — which the head signature relies on.
+impl Serialize for Context {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
+        for entry in &self.0 {
+            seq.serialize_element(&entry)?;
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Context {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let entries = Vec::<(Origin, Edition)>::deserialize(deserializer)?;
+        Ok(Self(entries.into_iter().collect()))
+    }
+}
 
 impl Context {
     /// An empty context: observes nothing.
@@ -99,23 +124,33 @@ impl Context {
     }
 
     /// How far this context reaches beyond `other`: the summed per-origin
-    /// edition excess. Editions count writes, so this is a zero-read
-    /// proxy for the size of the delta a replica holding this context
-    /// would have to send a replica holding `other` — which is what lets
-    /// a first-contact pull pick the cheaper merge direction from the
-    /// two published watermarks alone.
+    /// edition excess. This is a zero-read proxy for the size of the
+    /// delta a replica holding this context would have to send a replica
+    /// holding `other` — which is what lets a first-contact pull pick the
+    /// cheaper merge direction from the two published watermarks alone.
+    ///
+    /// An origin absent from `other` contributes its full revision count,
+    /// `edition + 1`: edition 0 is a real revision, and counting it 0
+    /// would make `divergence == 0` coexist with `includes == false`
+    /// (two disjoint genesis-only contexts diverge by nothing while
+    /// neither includes the other).
+    ///
+    /// A known bias, documented rather than solved: editions are Lamport
+    /// depths, not per-origin write counts, so for an origin `other` has
+    /// never seen the excess measures how deep in history that origin
+    /// writes, not how much it wrote. One fresh-session commit atop a
+    /// deep adopted history weighs as the whole depth. The proxy stays a
+    /// routing heuristic — soundness never depends on it — but the
+    /// misrouting costs reads; a per-origin size hint on published heads
+    /// would remove the bias.
     pub fn divergence(&self, other: &Context) -> u64 {
         self.0
             .iter()
-            .map(|(origin, edition)| {
-                let seen = other
-                    .0
-                    .get(origin)
-                    .map(|edition| edition.value())
-                    .unwrap_or(0);
-                edition.value().saturating_sub(seen)
+            .map(|(origin, edition)| match other.0.get(origin) {
+                Some(seen) => edition.value().saturating_sub(seen.value()),
+                None => edition.value().saturating_add(1),
             })
-            .sum()
+            .fold(0u64, u64::saturating_add)
     }
 }
 
@@ -138,6 +173,64 @@ mod tests {
         assert!(!context.observes(&version(1, 4)), "the future is not");
         assert!(context.observes(&version(2, 1)));
         assert!(!context.observes(&version(3, 0)), "unknown origin is not");
+    }
+
+    /// `includes` is presence-based at the equality boundary: an equal
+    /// watermark includes, one edition short does not, and an origin
+    /// absent from `self` fails inclusion even at edition 0 (a genesis
+    /// revision is a real revision the other side has not seen).
+    #[test]
+    fn it_gates_inclusion_on_presence_and_the_equality_boundary() {
+        let mut ours = Context::new();
+        ours.record(version(1, 3));
+        let mut theirs = Context::new();
+        theirs.record(version(1, 3));
+
+        assert!(ours.includes(&theirs), "equal watermarks include");
+        assert!(ours.includes(&Context::new()), "everything includes empty");
+        assert!(!Context::new().includes(&ours), "empty includes only empty");
+
+        theirs.record(version(1, 4));
+        assert!(!ours.includes(&theirs), "one edition short fails");
+
+        let mut genesis_only = Context::new();
+        genesis_only.record(version(2, 0));
+        assert!(
+            !ours.includes(&genesis_only),
+            "an unseen origin fails inclusion even at edition 0"
+        );
+    }
+
+    /// Divergence counts an origin absent from the other side at its full
+    /// revision count (`edition + 1`): edition 0 is a real revision, and
+    /// counting it as 0 made `divergence == 0` coexist with
+    /// `includes == false`.
+    #[test]
+    fn it_counts_unseen_origins_in_full_in_the_divergence() {
+        let mut ours = Context::new();
+        ours.record(version(1, 0));
+        assert_eq!(
+            ours.divergence(&Context::new()),
+            1,
+            "an unseen genesis revision diverges by one"
+        );
+
+        let mut theirs = Context::new();
+        theirs.record(version(2, 0));
+        assert_eq!(ours.divergence(&theirs), 1);
+        assert_eq!(theirs.divergence(&ours), 1);
+        assert!(
+            !ours.includes(&theirs) && !theirs.includes(&ours),
+            "disjoint contexts diverge both ways and include neither way"
+        );
+
+        // Partially seen origins count only the excess.
+        let mut ahead = Context::new();
+        ahead.record(version(1, 5));
+        let mut behind = Context::new();
+        behind.record(version(1, 2));
+        assert_eq!(ahead.divergence(&behind), 3);
+        assert_eq!(behind.divergence(&ahead), 0);
     }
 
     #[test]

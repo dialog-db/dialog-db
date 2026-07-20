@@ -8,7 +8,7 @@ use futures_util::TryStreamExt;
 use crate::Value;
 use crate::history::VersionExt as _;
 use crate::tree::ArtifactTreeExt as _;
-use crate::tree::{ArtifactTree, TreeStorageBridge};
+use crate::tree::{ArtifactTree, SpillCache, TreeStorageBridge, fetch_spilled_cached, spill_cache};
 use crate::{
     Attribute, DialogArtifactsError, Entity, State, history_claim_range, history_key_version,
     history_region_range,
@@ -38,6 +38,9 @@ where
     /// cache across readers with
     /// [`with_record_cache`](TreeHistory::with_record_cache).
     records: dialog_search_tree::Cache<Version, RevisionRecord>,
+    /// Cached spilled value blocks, so a claim on a value that spilled
+    /// out of its key reads its archive block once across lookups.
+    spill: SpillCache,
 }
 
 impl<S> TreeHistory<S>
@@ -55,6 +58,7 @@ where
             tree,
             store: store.clone(),
             storage: NodeStorage::new(TreeStorageBridge(store)),
+            spill: spill_cache(),
         }
     }
 
@@ -100,9 +104,10 @@ where
         let mut records = Vec::new();
         while let Some(entry) = stream.try_next().await? {
             if let State::Added(datum) = entry.value {
+                let spilled = fetch_spilled_cached(&self.store, &self.spill, &entry.key).await?;
                 records.push((
                     history_key_version(&entry.key)?,
-                    Record::try_from_key_datum(&entry.key, datum)?,
+                    Record::try_from_key_datum_with_value(&entry.key, datum, spilled)?,
                 ));
             }
         }
@@ -132,8 +137,9 @@ where
         let mut claims = Vec::new();
         while let Some(entry) = stream.try_next().await? {
             if let State::Added(datum) = entry.value {
+                let spilled = fetch_spilled_cached(&self.store, &self.spill, &entry.key).await?;
                 claims.push(
-                    Record::try_from_key_datum(&entry.key, datum)?
+                    Record::try_from_key_datum_with_value(&entry.key, datum, spilled)?
                         .claim()
                         .clone(),
                 );
@@ -169,18 +175,31 @@ where
             .clone()
             .select_record(self.store.clone(), &of, &the)
             .await?;
+        // Tree blocks may have arrived from an untrusted peer; a record
+        // only counts if it vouches for itself — issuer signature valid,
+        // and derived version matching the slot it was found at. A
+        // candidate that fails is SKIPPED, not fatal: a hostile peer can
+        // plant a second, garbage-signed record at a genuine slot (same
+        // lineage/issuer/parents derive the same version), and one bad
+        // candidate must not veto the good one. Only when no candidate
+        // verifies does the first failure surface.
+        let mut failure = None;
         for artifact in candidates {
             if let Value::Record(bytes) = &artifact.is {
-                let record = RevisionRecord::try_from_bytes(bytes)?;
-                // Tree blocks may have arrived from an untrusted peer;
-                // a record only counts if it vouches for itself — issuer
-                // signature valid, and derived version matching the slot
-                // it was found at.
-                record.verify(version)?;
-                self.records.insert(*version, record.clone());
-                return Ok(Some(record));
+                let verified = RevisionRecord::try_from_bytes(bytes)
+                    .and_then(|record| record.verify(version).map(|()| record));
+                match verified {
+                    Ok(record) => {
+                        self.records.insert(*version, record.clone());
+                        return Ok(Some(record));
+                    }
+                    Err(error) => failure = failure.or(Some(error)),
+                }
             }
         }
-        Ok(None)
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
     }
 }

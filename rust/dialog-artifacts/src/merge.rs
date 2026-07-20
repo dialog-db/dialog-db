@@ -353,22 +353,31 @@ where
                 && parts.attribute.as_ref() == REVISION_ATTRIBUTE.as_bytes()
             {
                 // The inline payload is the ORDER-PRESERVING encoding, not the
-                // raw record bytes: decode it back to a value first. A spilled
-                // record's bytes live in the archive, which this pass does not
-                // read — the observer only needs the versions it can see.
-                let Some(bytes) = (match &parts.value {
+                // raw record bytes: decode it back to a value first. Every
+                // arm that cannot produce the record's version FAILS the
+                // merge rather than skipping: the context derived here is
+                // published under the merged head's signature, and a
+                // silently omitted version understates the watermark — a
+                // later pull would then treat facts this head has seen as
+                // news and resurrect deletions. A revision record is a few
+                // hundred bytes, far under the default inline threshold, so
+                // a spilled one means a non-default manifest this pass does
+                // not support yet (reading it back needs the archive).
+                let bytes = match &parts.value {
                     ValueRef::Inline(inline) => {
-                        decode_value(parts.value_type, inline).and_then(
-                            |(value, _)| match value {
-                                Value::Record(bytes) => Some(bytes),
-                                _ => None,
-                            },
-                        )
+                        match decode_value(parts.value_type, inline) {
+                            Some((Value::Record(bytes), _)) => bytes,
+                            _ => Err(DialogSearchTreeError::Node(
+                                "revision record payload does not decode to a record value"
+                                    .to_string(),
+                            ))?,
+                        }
                     }
-                    ValueRef::Spilled { .. } => None,
-                }) else {
-                    yield change;
-                    continue;
+                    ValueRef::Spilled { .. } => Err(DialogSearchTreeError::Node(
+                        "revision record spilled out of its key; the merged context cannot \
+                         be derived without reading it back"
+                            .to_string(),
+                    ))?,
                 };
                 let record = RevisionRecord::try_from_bytes(&bytes).map_err(|error| {
                     DialogSearchTreeError::Node(format!("revision record: {error}"))
@@ -409,6 +418,14 @@ fn key_successor(key: &Key) -> Option<Key> {
     // `below(k)` for the key that drops the tail and increments the byte
     // before it; anything else gains a `0x00` (nothing sorts between).
     let bytes = key.as_ref();
+    if bytes.len() >= KEY_SPAN_FILLER && bytes.iter().all(|byte| *byte == u8::MAX) {
+        // `top_key()` (or above): nothing sorts higher. Returning a
+        // successor here would hand `partition_spans` a cursor above the
+        // top, closing a degenerate final piece whose start sorts above
+        // its end — and a divergence span reaching the top is the common
+        // case, since the coverage region is the highest region.
+        return None;
+    }
     let filler_at = bytes.len().checked_sub(KEY_SPAN_FILLER);
     if let Some(at) = filler_at
         && at > 0
@@ -552,22 +569,11 @@ fn below(key: &Key) -> Key {
     }
 }
 
-/// The immediate predecessor of a key. Only called for span starts that
-/// lie strictly ahead of the cursor, which is at least the minimum key,
-/// so the input is never the minimum.
+/// The immediate predecessor of a key, or `None` for the empty key (the
+/// bottom of the key space). [`below`] restricted to keys that have a
+/// predecessor.
 fn predecessor_of(key: &Key) -> Option<Key> {
-    // The greatest key strictly below `key`. A key ending in `0x00` loses that
-    // byte (that key is itself the successor of the shorter one); otherwise
-    // decrement the last byte and pad with `0xFF`, which is above every key
-    // sharing the decremented prefix. The empty key has no predecessor.
-    let bytes = key.as_ref();
-    let (&last, head) = bytes.split_last()?;
-    let mut previous = head.to_vec();
-    if last != u8::MIN {
-        previous.push(last - 1);
-        previous.extend(repeat_n(u8::MAX, KEY_SPAN_FILLER));
-    }
-    Some(Key::from(previous))
+    (!key.as_ref().is_empty()).then(|| below(key))
 }
 
 #[cfg(test)]
@@ -660,6 +666,26 @@ mod span_tests {
                 (key_successor(&key(6)).unwrap()..=top(), SpanSource::Theirs),
             ]
         );
+    }
+
+    /// A divergence span that reaches the top of the key space is the
+    /// common case, not an edge: the coverage region is the highest
+    /// region, so any covering write since base puts the rightmost node
+    /// in the diff frontier and the span closes at `top_key()`. The
+    /// partition must not emit a degenerate trailing piece whose start
+    /// sorts above its end.
+    #[test]
+    fn it_partitions_spans_reaching_the_top_of_the_key_space() {
+        let pieces = partition_spans(&[key(5)..=top()], &[]);
+        for (span, _) in &pieces {
+            assert!(
+                span.start() <= span.end(),
+                "no degenerate piece: {:?} > {:?}",
+                span.start(),
+                span.end()
+            );
+        }
+        assert_eq!(*pieces.last().unwrap().0.end(), top());
     }
 
     #[test]
