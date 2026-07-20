@@ -328,8 +328,8 @@ impl Display for ConceptRef {
 /// [`Refinement::meet`] and [`Refinement::join`].
 ///
 /// Three constraints exist: a lexical prefix over the TEXTUAL kinds,
-/// a conformance set over Entity, and a numeric interval proved by
-/// the comparison predicates.
+/// a conformance set over Entity, and an interval over the
+/// COMPARABLE kinds proved by the comparison predicates.
 ///
 /// Invariant: never empty (no prefix, no conformance, and no
 /// interval is no refinement; the constructors collapse it to an
@@ -348,7 +348,7 @@ pub struct Refinement {
     /// diagnostics.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub conforms: BTreeSet<ConceptRef>,
-    /// A numeric interval a comparison predicate proved about the
+    /// An interval a comparison predicate proved about the
     /// value. Carried as *information*, like `conforms`: enforcement
     /// stays with the comparison premise itself (whose literal-
     /// adaptation semantics [`Refinement::admits`] deliberately does
@@ -357,8 +357,9 @@ pub struct Refinement {
     pub interval: Option<Box<Interval>>,
 }
 
-/// A numeric interval over a single value type, proved by comparison
-/// predicates on a variable: at most one lower and one upper bound.
+/// An interval over a single COMPARABLE value type, proved by
+/// comparison predicates on a variable: at most one lower and one
+/// upper bound.
 ///
 /// Bounds are stored in the value's ORDER-PRESERVING encoding (see
 /// `dialog_artifacts::encode_value_owned`), so within one
@@ -366,11 +367,12 @@ pub struct Refinement {
 /// the struct stays `Eq`/`Ord`/`Hash` for the type lattice (a raw
 /// `Value` would not, floats being only partially ordered).
 ///
-/// The interval records the LITERAL's own type. A comparison adapts
-/// its literal to each row's type, so an interval typed `UnsignedInt`
-/// still admits floats; consumers that cannot honor that (the scan
-/// pushdown) must gate on the variable's kind being exactly one
-/// numeric type and adapt the bound, as the comparison would.
+/// The interval records the LITERAL's own type. A NUMERIC comparison
+/// adapts its literal to each row's type, so an interval typed
+/// `UnsignedInt` still admits floats; consumers that cannot honor
+/// that (the scan pushdown) must gate on the variable's kind being
+/// exactly one comparable type and adapt the bound, as the comparison
+/// would.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Interval {
     /// The numeric type the bound literals were written in.
@@ -762,28 +764,36 @@ impl Type {
         Some(Type::Refined(membership, refinement))
     }
 
-    /// Refine this type with one side of a numeric interval, as a
+    /// Refine this type with one side of an interval, as a
     /// comparison predicate proves it: `lower` selects which side,
     /// `inclusive` whether the bound itself is admitted.
     ///
-    /// The membership narrows to the NUMERIC kinds (plus a riding
+    /// The membership narrows to the COMPARABLE kinds (plus a riding
     /// `Nothing` bit); the interval records the LITERAL's own type,
-    /// because a comparison adapts its literal to each row's type —
-    /// an interval typed `UnsignedInt` still admits floats. Returns
-    /// `None` when no member could be numeric — an empty meet. A
-    /// non-numeric bound value is no constraint and returns the type
-    /// unchanged (the comparison itself will filter every row).
+    /// because a NUMERIC comparison adapts its literal to each row's
+    /// type — an interval typed `UnsignedInt` still admits floats.
+    /// (Non-numeric literals never adapt, but the interval stays
+    /// advisory either way — see the field doc.) Returns `None` when
+    /// no member could be comparable — an empty meet. A
+    /// non-comparable bound value is no constraint and returns the
+    /// type unchanged (the comparison itself will filter every row).
     pub fn with_interval(self, bound: &Value, inclusive: bool, lower: bool) -> Option<Type> {
         let value_type = bound.data_type();
-        if !matches!(
-            value_type,
-            ValueType::UnsignedInt | ValueType::SignedInt | ValueType::Float
-        ) {
+        if !Primitive::COMPARABLE.contains(value_type) {
             return Some(self);
         }
+        // A numeric literal adapts to each row's numeric type, so any
+        // numeric member may still match; a non-numeric literal never
+        // adapts, so only rows of the literal's own type can order
+        // against it and the membership narrows to exactly that type.
+        let admissible = if Primitive::NUMERIC.contains(value_type) {
+            Primitive::NUMERIC
+        } else {
+            Primitive::singleton(value_type)
+        };
         let membership = self
             .primitive_part()
-            .intersect(Primitive::NUMERIC.union(Primitive::NOTHING))?;
+            .intersect(admissible.union(Primitive::NOTHING))?;
         if membership.required().is_empty() {
             return None;
         }
@@ -974,16 +984,32 @@ mod tests {
         assert!(ge2.includes(&ge5));
         assert!(!ge5.includes(&ge2));
 
-        // A known non-numeric membership is an empty meet.
+        // A numeric bound on a known non-numeric membership is an
+        // empty meet.
         assert!(
             Type::from(ValueType::String)
                 .with_interval(&Value::UnsignedInt(1), true, true)
                 .is_none()
         );
-        // A non-numeric bound refines nothing.
-        let unchanged = base
-            .clone()
+        // A non-numeric bound never adapts, so it narrows membership
+        // to the literal's own type...
+        let narrowed = Type::from(Primitive::ALL)
             .with_interval(&Value::String("x".into()), true, true)
+            .expect("string rows remain");
+        assert_eq!(
+            narrowed.primitive_part(),
+            Primitive::from(ValueType::String)
+        );
+        assert!(narrowed.refinement().expect("refined").interval.is_some());
+        // ...and meets empty against a membership that excludes it.
+        assert!(
+            base.clone()
+                .with_interval(&Value::String("x".into()), true, true)
+                .is_none()
+        );
+        // A non-comparable bound value is no constraint at all.
+        let unchanged = base
+            .with_interval(&Value::Boolean(true), true, true)
             .unwrap();
         assert!(unchanged.refinement().is_none());
     }

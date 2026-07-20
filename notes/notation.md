@@ -654,6 +654,83 @@ An equality constraint asserts that two terms must hold equal values. It can fil
 </pre>
 </details>
 
+##### Range
+
+Range constraints — `<`, `<=`, `>`, `>=` — assert that the `of` term stands in the relation to the `with` term. They order values of the comparable types: numbers, text, symbols, entities, and bytes. Both sides must hold values (the planner orders the constraint after the premises binding them); a row whose sides cannot be ordered — a non-comparable value, a differently-typed pair, a NaN — is a non-match, never an error.
+
+Within numbers, a *constant* side is a polymorphic literal that adapts losslessly to the data's type per row: `1` compares against float data as `1.0`, while `1.5` against integer data matches nothing (no integer is `1.5`). Data is never adapted, and non-numeric literals never adapt — a text bound orders only against text values.
+
+Like Datomic's range predicates, these take direct advantage of the value index: when a variable's type narrows to a single comparable type, the bound becomes an index range and the scan never reads values outside it.
+
+```json
+{
+  "when": [
+    {
+      "assert": {
+        "with": {
+          "name": { "the": "org.employee/name", "as": "Text" }
+        }
+      },
+      "where": {
+        "this": { "?": { "name": "person" } },
+        "name": { "?": { "name": "name" } }
+      }
+    },
+    {
+      "assert": ">=",
+      "where": {
+        "of": { "?": { "name": "name" } },
+        "with": "Q"
+      }
+    }
+  ]
+}
+```
+
+<details>
+<summary>RangeConstraint</summary>
+<pre>
+{
+  "<": {
+    "type": "object",
+    "description": "Asserts `of` is strictly less than `with`, over the comparable types.",
+    "properties": {
+      "of":   { "$ref": "#/$defs/Term", "description": "Left-hand term." },
+      "with": { "$ref": "#/$defs/Term", "description": "Right-hand term." }
+    },
+    "required": ["of", "with"]
+  },
+  "<=": {
+    "type": "object",
+    "description": "Asserts `of` is less than or equal to `with`, over the comparable types.",
+    "properties": {
+      "of":   { "$ref": "#/$defs/Term", "description": "Left-hand term." },
+      "with": { "$ref": "#/$defs/Term", "description": "Right-hand term." }
+    },
+    "required": ["of", "with"]
+  },
+  ">": {
+    "type": "object",
+    "description": "Asserts `of` is strictly greater than `with`, over the comparable types.",
+    "properties": {
+      "of":   { "$ref": "#/$defs/Term", "description": "Left-hand term." },
+      "with": { "$ref": "#/$defs/Term", "description": "Right-hand term." }
+    },
+    "required": ["of", "with"]
+  },
+  ">=": {
+    "type": "object",
+    "description": "Asserts `of` is greater than or equal to `with`, over the comparable types.",
+    "properties": {
+      "of":   { "$ref": "#/$defs/Term", "description": "Left-hand term." },
+      "with": { "$ref": "#/$defs/Term", "description": "Right-hand term." }
+    },
+    "required": ["of", "with"]
+  }
+}
+</pre>
+</details>
+
 #### Formulas
 
 A pure computation, similar to formulas in a spreadsheet. Given bound input fields, a formula derives output fields. Formulas can be used within rules and queries to compute values, filter matches, or transform data without leaving the query engine.
@@ -1584,6 +1661,58 @@ Expands to:
       "where": {
         "this": { "?": { "name": "name" } },
         "is": "Alice"
+      }
+    }
+  ]
+}
+```
+
+The range constraints `<`, `<=`, `>`, `>=` order the `of` term against the `with` term, over the comparable types (numbers, text, symbols, entities, bytes):
+
+```yaml
+org.example:
+  senior:
+    deduce:
+      Senior:
+        name: ?name
+        age: ?age
+    when:
+      - org.example/Person:
+          name: ?name
+          age: ?age
+      - '>=':
+          of: ?age
+          with: 65
+```
+
+Expands to:
+
+```json
+{
+  "deduce": {
+    "with": {
+      "name": { "the": "org.example.senior/name" },
+      "age": { "the": "org.example.senior/age" }
+    }
+  },
+  "when": [
+    {
+      "assert": {
+        "with": {
+          "name": { "the": "org.example.person/name" },
+          "age": { "the": "org.example.person/age" }
+        }
+      },
+      "where": {
+        "name": { "?": { "name": "name" } },
+        "age": { "?": { "name": "age" } }
+      }
+    },
+    {
+      "assert": ">=",
+      "where": {
+        "of": { "?": { "name": "age" } },
+        "with": 65
       }
     }
   ]

@@ -443,18 +443,22 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                 }
                 // An interval refinement (from a comparison predicate on the
                 // value variable) becomes VAE range bounds. Pushed ONLY when
-                // the kind admits exactly one numeric type: a comparison
-                // adapts its literal to each ROW's type, so a NUMERIC-wide
-                // kind admits rows of other numeric types that a single-band
-                // range would silently drop. The bound literal adapts to the
-                // scanned type exactly as the row filter would; a literal
-                // that cannot adapt losslessly pushes nothing (the residual
-                // comparison filters every row of that type anyway).
+                // the kind admits exactly one comparable type: a numeric
+                // comparison adapts its literal to each ROW's type, so a
+                // NUMERIC-wide kind admits rows of other numeric types that a
+                // single-band range would silently drop (and a STRING_LIKE-
+                // wide kind admits symbol rows a String band would drop). The
+                // bound literal adapts to the scanned type exactly as the row
+                // filter would — numeric literals losslessly, non-numeric
+                // literals only to their own type; a bound that cannot adapt
+                // pushes nothing (the residual comparison filters every row
+                // of that type anyway).
                 if let Some(kind) = from.is.kind().as_ref()
                     && let Some(interval) = kind
                         .refinement()
                         .and_then(|refinement| refinement.interval.as_ref())
-                    && let Some(data_type) = single_numeric_type(kind.primitive_part().required())
+                    && let Some(data_type) =
+                        single_comparable_type(kind.primitive_part().required())
                 {
                     if let Some(bound) = &interval.lower
                         && let Some(value) =
@@ -478,20 +482,31 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
     }
 }
 
-/// The single numeric type a primitive set admits, or `None` when it admits
-/// none, several, or any non-numeric member — the gate for pushing an
-/// interval bound into a scan range (see the pushdown comment above).
-fn single_numeric_type(primitive: Primitive) -> Option<Type> {
-    [Type::UnsignedInt, Type::SignedInt, Type::Float]
-        .into_iter()
-        .find(|numeric| primitive == Primitive::from(*numeric))
+/// The single comparable type a primitive set admits, or `None` when it
+/// admits none, several, or any non-comparable member — the gate for
+/// pushing an interval bound into a scan range (see the pushdown comment
+/// above).
+fn single_comparable_type(primitive: Primitive) -> Option<Type> {
+    [
+        Type::UnsignedInt,
+        Type::SignedInt,
+        Type::Float,
+        Type::String,
+        Type::Symbol,
+        Type::Entity,
+        Type::Bytes,
+    ]
+    .into_iter()
+    .find(|comparable| primitive == Primitive::from(*comparable))
 }
 
-/// Decodes an interval bound's literal and adapts it LOSSLESSLY to the
-/// scanned column's type, exactly as the comparison predicate adapts its
-/// literal per row. `None` means no push: an unadaptable literal (`1.5`
-/// against integer data) admits no row of that type, and the residual
-/// comparison already filters them all.
+/// Decodes an interval bound's literal and adapts it to the scanned
+/// column's type, exactly as the comparison predicate adapts its literal
+/// per row: a same-type bound passes through, a numeric literal adapts
+/// LOSSLESSLY across the numeric types, and nothing else adapts. `None`
+/// means no push: an unadaptable literal (`1.5` against integer data, a
+/// string against a symbol column) admits no row of that type, and the
+/// residual comparison already filters them all.
 fn adapt_bound(literal_type: Type, encoded: &[u8], data_type: Type) -> Option<Value> {
     let (value, rest) = decode_value(literal_type, encoded)?;
     if !rest.is_empty() {
@@ -547,11 +562,14 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::artifact::encode_value_owned;
     use crate::query::Output;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
+    use crate::type_system::{Interval, IntervalBound, Refinement};
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use std::collections::BTreeSet;
 
     /// A prefix refinement stamped onto a variable term becomes a
     /// range bound on the selector — the end of the
@@ -672,13 +690,34 @@ mod tests {
         Ok(())
     }
 
-    /// The single-numeric-type gate: a NUMERIC-wide kind pushes no
-    /// bound (rows of the other numeric types would be silently
-    /// dropped from the scan), and an unadaptable literal pushes no
-    /// bound (no row of the scanned type satisfies it; the residual
-    /// comparison filters every one).
+    /// A string (or other non-numeric comparable) bound pushes when
+    /// the kind admits exactly that one type, Datomic's
+    /// `[(<= "Q" ?name)]` shape.
     #[dialog_common::test]
-    fn it_gates_interval_pushdown_to_single_numeric_kinds() -> anyhow::Result<()> {
+    fn it_pushes_string_interval_refinements_into_the_selector() -> anyhow::Result<()> {
+        let kind = Kind::from(Type::String)
+            .with_interval(&Value::String("Q".into()), true, true)
+            .expect("string is comparable");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(kind),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        let lower = selector.value_lower().expect("the bound is pushed");
+        assert_eq!(lower.value, Value::String("Q".into()));
+        assert!(lower.inclusive);
+        Ok(())
+    }
+
+    /// The single-comparable-type gate: a kind admitting several
+    /// types pushes no bound (rows of the other types would be
+    /// silently dropped from the scan), and an unadaptable literal
+    /// pushes no bound (no row of the scanned type satisfies it; the
+    /// residual comparison filters every one).
+    #[dialog_common::test]
+    fn it_gates_interval_pushdown_to_single_comparable_kinds() -> anyhow::Result<()> {
         let wide = Kind::from(Primitive::NUMERIC)
             .with_interval(&Value::UnsignedInt(30), true, true)
             .expect("numeric admits an interval");
@@ -694,6 +733,54 @@ mod tests {
             "a kind admitting several numeric types pushes nothing"
         );
 
+        // A String bound on a STRING_LIKE kind narrows the membership
+        // to String (a non-numeric literal never adapts, so symbol
+        // rows could never match), which makes it pushable.
+        let narrowed = Kind::from(Primitive::STRING_LIKE)
+            .with_interval(&Value::String("Q".into()), true, true)
+            .expect("strings are comparable");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(narrowed),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert!(
+            selector.value_lower().is_some(),
+            "the narrowed membership admits only String, so the bound pushes"
+        );
+
+        // A hand-built (e.g. deserialized) kind that stayed wide must
+        // still gate: a String band would drop the symbol rows it
+        // admits.
+        let string_like = Kind::Refined(
+            Primitive::STRING_LIKE,
+            Refinement {
+                prefix: None,
+                conforms: BTreeSet::default(),
+                interval: Some(Box::new(Interval {
+                    value_type: Type::String,
+                    lower: Some(IntervalBound {
+                        encoded: encode_value_owned(&Value::String("Q".into())),
+                        inclusive: true,
+                    }),
+                    upper: None,
+                })),
+            },
+        );
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(string_like),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert!(
+            selector.value_lower().is_none() && selector.value_upper().is_none(),
+            "a kind still admitting Symbol pushes no String bound"
+        );
+
         let unadaptable = Kind::from(Type::UnsignedInt)
             .with_interval(&Value::Float(1.5), true, true)
             .expect("numeric admits an interval");
@@ -707,6 +794,37 @@ mod tests {
         assert!(
             selector.value_lower().is_none() && selector.value_upper().is_none(),
             "a literal that cannot adapt losslessly pushes nothing"
+        );
+
+        // Defense in depth: `with_interval` can no longer construct a
+        // kind whose interval type disagrees with its membership (the
+        // meet is empty), but a hand-built or deserialized kind still
+        // can — the adaptation gate must hold on its own.
+        let cross_type = Kind::Refined(
+            Primitive::from(Type::Symbol),
+            Refinement {
+                prefix: None,
+                conforms: BTreeSet::default(),
+                interval: Some(Box::new(Interval {
+                    value_type: Type::String,
+                    lower: Some(IntervalBound {
+                        encoded: encode_value_owned(&Value::String("Q".into())),
+                        inclusive: true,
+                    }),
+                    upper: None,
+                })),
+            },
+        );
+        let query = AttributeQueryAll::new(
+            Term::from(the!("tag/kind")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(cross_type),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert!(
+            selector.value_lower().is_none() && selector.value_upper().is_none(),
+            "a string literal never adapts to a symbol column"
         );
         Ok(())
     }
@@ -747,6 +865,50 @@ mod tests {
             "the range starts at the inclusive bound"
         );
         assert!(values.contains(&&Value::UnsignedInt(50)));
+        Ok(())
+    }
+
+    /// A pushed string bound scans the right rows from a real tree —
+    /// the Datomic `[(<= "Q" ?name)]` example, index-accelerated.
+    #[dialog_common::test]
+    async fn it_scans_with_pushed_string_bounds() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .assert(
+                the!("person/name")
+                    .of(Entity::new()?)
+                    .is("Quinn".to_string()),
+            )
+            .assert(the!("person/name").of(Entity::new()?).is("Zed".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let kind = Kind::from(Type::String)
+            .with_interval(&Value::String("Q".into()), true, true)
+            .expect("string is comparable");
+        let query = AttributeQueryAll::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("e"),
+            Term::var("v").with_kind(kind),
+            Term::var("cause"),
+        );
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results = query.perform(&source).try_vec().await?;
+        let values: Vec<&Value> = results.iter().map(|artifact| artifact.is()).collect();
+        assert_eq!(values.len(), 2, "Alice sorts below the bound");
+        assert!(values.contains(&&Value::String("Quinn".into())));
+        assert!(values.contains(&&Value::String("Zed".into())));
         Ok(())
     }
 
