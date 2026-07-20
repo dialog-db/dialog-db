@@ -3024,6 +3024,61 @@ mod tests {
         distribution::geometric::rank(&Blake3Hash::hash(key))
     }
 
+    /// Every key longer than `max_separator` is demoted to rank 0 (plan
+    /// 5.7a), so none of them can become a boundary. A whole run of such keys
+    /// therefore produces no split point among themselves: this pins that the
+    /// tree still round-trips every entry in that case, rather than degrading
+    /// into one unbounded segment that loses or misorders entries.
+    ///
+    /// This is the case the fixed-width key tests cannot reach, and the one
+    /// the history region is closest to: a history key carries a 40-byte
+    /// version prefix on top of entity + attribute + value, so it crosses the
+    /// separator bound sooner than the fact key for the same fact.
+    #[dialog_common::test]
+    async fn it_round_trips_keys_longer_than_the_separator_bound() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = Manifest::default();
+
+        // Keys comfortably above `max_separator`, so every one of them is
+        // rank 0 by the length guard.
+        let width = manifest.max_separator as usize + 64;
+        let mut keys: Vec<VarKey> = Vec::new();
+        for n in 0..64u32 {
+            let mut bytes = format!("{n:08}").into_bytes();
+            bytes.resize(width, b'x');
+            assert_eq!(
+                <Geometric as Distribution>::rank(&bytes, &manifest),
+                0,
+                "a key of {width} bytes must be demoted to rank 0"
+            );
+            keys.push(VarKey(bytes));
+        }
+
+        let mut tree = VarTree::empty();
+        let mut delta = Delta::zero();
+        for key in &keys {
+            tree = tree
+                .edit()
+                .insert(key.clone(), key.0.clone(), &mut storage)
+                .await?
+                .persist(&mut delta)?;
+            for (hash, buffer) in delta.flush() {
+                storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            }
+            delta = Delta::zero();
+        }
+
+        for key in &keys {
+            let found = tree.get(key, &storage).await?;
+            assert_eq!(
+                found.as_deref(),
+                Some(key.0.as_slice()),
+                "every oversized key must still be readable"
+            );
+        }
+        Ok(())
+    }
+
     /// Regression: inserting a NEW MINIMUM variable-length key into a
     /// single-entry tree must not drop the existing entry. Mirrors the
     /// artifact two-commit bug where a second entity whose key sorts before
