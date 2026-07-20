@@ -21,7 +21,7 @@ These must be **pinned and hard-rejected on mismatch**, not made settable. The m
 
 **Merely forks** (new bytes differ, old data still decodes):
 
-- `RESTART_INTERVAL = 16` (`search-tree/node/codec.rs:33`) - entries per restart block in the front-coded key stream. Its own doc says "Part of the storage format; changing it changes node bytes." Restart offsets are *stored*, not recomputed, so a decoder does not need the value to read. Needs a `>= 1` guard (`index % 0` panics).
+- ~~`RESTART_INTERVAL = 16`~~ **RESOLVED by deletion**, not by moving it into the manifest (commit 962a1f14 on `feat/truncated-separators`). The audit called this the cleanest manifest candidate; the better answer turned out to be that nothing ever read the restart table. Every decode path cursors from the stream start, and repeated lookups are amortized by the per-buffer decode memo, so the table and its recompression seams cost ~1% of footprint (346.0 -> 342.9 B/fact on the 100k-fact workload) for zero read-side payoff. Deleted along with the row-major `ColumnarLeaf`, leaving one streaming decoded-leaf form; point lookups improved 77-97%. If mid-leaf seeking is ever wanted it returns behind a format-version bump. **Lesson worth carrying into the rest of this list: "make it configurable" is not the only fix for a constant that shapes stored data. "Delete it because nothing depends on it" is better when it applies.**
 - The hitchhiker triple: `DEFAULT_OP_BUF_SIZE = 256`, `FlushPolicy`, `FlushTrigger` (`search-tree/hitchhiker.rs:60,87,106`)
 - `BOTTOM_RANK = 1` (`search-tree/node/transient.rs:20`)
 
