@@ -51,6 +51,7 @@ use dialog_storage::NativeTempSpace;
 use futures_util::{TryStreamExt as _, stream};
 use std::collections::{BTreeMap, HashSet};
 use std::env;
+use std::fs::read_to_string;
 use std::mem::take;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -710,7 +711,7 @@ where
         &self,
         csv_path: &str,
     ) -> Result<Vec<(Entity, String, String)>> {
-        let text = std::fs::read_to_string(csv_path)?;
+        let text = read_to_string(csv_path)?;
         // Group the flat (the, of, is) rows by entity DID so each bug is a
         // record. The DID strings map to fresh Entities (stable per DID within
         // this import) so the concept join has real, distinct entities.
@@ -819,9 +820,36 @@ where
     /// Returns the entities touched, in first-seen order. Off the measured
     /// path.
     #[cfg(not(target_arch = "wasm32"))]
-    #[allow(clippy::absolute_paths)]
     pub async fn import_transaction_log(&self, path: &str, limit: usize) -> Result<Vec<Entity>> {
-        let text = std::fs::read_to_string(path)?;
+        self.replay_transaction_log(path, limit, false).await
+    }
+
+    /// Replay a transaction log, sampling per-commit time AND a fixed query's
+    /// read cost at each power-of-two commit depth.
+    ///
+    /// This answers whether cost grows on the commit path only or on reads
+    /// too: the same `se.post/title` scan runs at depth 8, 16, 32, ... over
+    /// the SAME growing tree, so a rising read count is history the query has
+    /// to see through (buffered novelty projected over the leaves, deeper
+    /// spine), while a flat one says the growth is commit-only. Prints
+    /// `TXNCURVE` lines. Returns the entities touched.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn replay_transaction_log_with_curve(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> Result<Vec<Entity>> {
+        self.replay_transaction_log(path, limit, true).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn replay_transaction_log(
+        &self,
+        path: &str,
+        limit: usize,
+        curve: bool,
+    ) -> Result<Vec<Entity>> {
+        let text = read_to_string(path)?;
         let mut rows = parse_csv(&text).into_iter();
 
         // Header: locate columns by name rather than position, so the
@@ -857,8 +885,22 @@ where
             // boundary is a change in the ordinal rather than a lookahead.
             if current.as_deref() != Some(row[txn_at].as_str()) {
                 if !pending.is_empty() {
+                    let commit_start = Instant::now();
                     self.commit_facts(take(&mut pending)).await?;
+                    let commit_micros = commit_start.elapsed().as_micros();
                     committed += 1;
+
+                    if curve && committed.is_power_of_two() && committed >= 8 {
+                        let run = self.run_query("se.post/title").await?;
+                        eprintln!(
+                            "TXNCURVE depth={committed:<7} commit_us={commit_micros:<7} \
+                             query_reads={:<5} query_unique={:<5} query_results={}",
+                            run.reads,
+                            run.unique_reads,
+                            run.results.len(),
+                        );
+                    }
+
                     if limit != 0 && committed >= limit {
                         return Ok(entities);
                     }
@@ -1412,7 +1454,6 @@ mod test {
     /// `DIALOG_TXN_LIMIT` caps the replay.
     #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
     #[cfg(not(target_arch = "wasm32"))]
-    #[allow(clippy::absolute_paths)]
     async fn it_replays_a_transaction_log() -> Result<()> {
         let Ok(path) = env::var("DIALOG_TXN_LOG") else {
             eprintln!("DIALOG_TXN_LOG not set; skipping transaction-log replay");
@@ -1425,7 +1466,13 @@ mod test {
 
         let env = BenchEnv::temp().await?;
         let start = Instant::now();
-        let entities = env.import_transaction_log(&path, limit).await?;
+        // `DIALOG_TXN_CURVE` interleaves a fixed query at each power-of-two
+        // depth, so one run reports both the commit curve and the query curve.
+        let entities = if env::var("DIALOG_TXN_CURVE").is_ok() {
+            env.replay_transaction_log_with_curve(&path, limit).await?
+        } else {
+            env.import_transaction_log(&path, limit).await?
+        };
         let elapsed = start.elapsed();
 
         eprintln!(
