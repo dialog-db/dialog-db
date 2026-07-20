@@ -1752,13 +1752,21 @@ mod tests {
              (3 indexes), {blocks_per_fact:.3} blocks/fact"
         );
 
-        // Regression guard against the pre-M3 flat baseline of ~172 B/entry
-        // (which duplicated the whole fact in the payload). After the value is
-        // in the key and the payload is just `State<Cause>`, an entry is well
-        // under that.
+        // Regression guard. Three measured points on this fixture:
+        //
+        //   pre-M3 (value-hash key, whole fact in payload)  ~172 B/entry
+        //   value-in-key alone (#393)                        118 B/entry
+        //   value-in-key + version control (this branch)     186 B/entry
+        //
+        // Version control adds a history record and a coverage entry per
+        // write, so it costs ~68 B/entry over #393 on this synthetic fixture
+        // (every fact is a distinct entity, which is the worst case for the
+        // history region: nothing shares a lineage). The guard tracks the
+        // combined figure — the number that matters is the one users pay.
         assert!(
-            bytes_per_entry < 172.0,
-            "per-entry size regressed to {bytes_per_entry:.1} bytes/entry (pre-M3 was ~172)"
+            bytes_per_entry < 200.0,
+            "per-entry size regressed to {bytes_per_entry:.1} bytes/entry \
+             (value-in-key alone is 118, with version control ~186)"
         );
 
         Ok(())

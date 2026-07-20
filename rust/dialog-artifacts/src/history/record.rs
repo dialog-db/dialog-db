@@ -49,15 +49,7 @@ impl Record {
         let claim = match self {
             Record::Assert(claim) | Record::Retract(claim) => claim,
         };
-        let value_type = claim.is.data_type();
-        let value = claim.is.to_bytes();
-        let key = history_key(
-            version,
-            &claim.of,
-            &claim.the,
-            value_type,
-            &make_reference(&value),
-        );
+        let key = history_key(version, &claim.of, &claim.the, &claim.is);
         let datum = Datum {
             cause: None,
             blob: None,
@@ -82,15 +74,7 @@ impl Record {
         if claim.cause.versions().is_empty() {
             return None;
         }
-        let value_type = claim.is.data_type();
-        let value = claim.is.to_bytes();
-        let key = coverage_key(
-            version,
-            &claim.of,
-            &claim.the,
-            value_type,
-            &make_reference(&value),
-        );
+        let key = coverage_key(version, &claim.of, &claim.the, &claim.is);
         let datum = Datum {
             cause: None,
             blob: None,
@@ -123,7 +107,13 @@ impl Record {
             DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
         })?)?;
         let is = match &parts.value {
-            ValuePayload::Reference(bytes) => Value::try_from((parts.value_type, bytes.clone()))?,
+            // A spilled value's bytes live in the archive under this
+            // reference, exactly as for a fact; the caller resolves it.
+            ValuePayload::Reference(_) => {
+                return Err(DialogArtifactsError::InvalidKey(
+                    "history record value spilled; resolve it through the archive".to_string(),
+                ));
+            }
             ValuePayload::Inline(payload) => {
                 decode_value(parts.value_type, payload)
                     .ok_or_else(|| {

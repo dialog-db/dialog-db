@@ -386,10 +386,21 @@ pub enum SpanSource {
 /// The immediate successor of a key, or `None` at the top of the key
 /// space.
 fn key_successor(key: &Key) -> Option<Key> {
-    // On variable-length keys the successor is just the key with a `0x00`
-    // appended: nothing sorts strictly between the two, and unlike the
-    // fixed-width form there is no carry to overflow.
-    let mut next = key.as_ref().to_vec();
+    // The inverse of [`below`]. A key ending in the maximal filler tail is
+    // `below(k)` for the key that drops the tail and increments the byte
+    // before it; anything else gains a `0x00` (nothing sorts between).
+    let bytes = key.as_ref();
+    let filler_at = bytes.len().checked_sub(KEY_SPAN_FILLER);
+    if let Some(at) = filler_at
+        && at > 0
+        && bytes[at..].iter().all(|byte| *byte == u8::MAX)
+    {
+        let mut next = bytes[..at].to_vec();
+        let last = next.len() - 1;
+        next[last] += 1;
+        return Some(Key::from(next));
+    }
+    let mut next = bytes.to_vec();
     next.push(u8::MIN);
     Some(Key::from(next))
 }
@@ -431,13 +442,19 @@ pub fn partition_spans(
     let ours = normalize_spans(ours);
     let theirs = normalize_spans(theirs);
 
-    let mut pieces: Vec<(RangeInclusive<Key>, SpanSource)> = Vec::new();
+    // Work in EXCLUSIVE upper bounds internally. On a variable-length key
+    // there is no general predecessor (`key_successor` appends `0x00`, and not
+    // every key is some other key's successor), so deriving an inclusive end
+    // from a boundary is lossy. Collecting `[start, end)` pieces and closing
+    // them at the end keeps the tiling exact: each piece's inclusive end is
+    // the previous byte-string below the next piece's start, which is exactly
+    // what `key_successor` inverts.
+    let mut cuts: Vec<(Key, SpanSource)> = Vec::new();
     let mut cursor = bottom_key();
     let mut ours_at = 0;
     let mut theirs_at = 0;
 
     loop {
-        // Advance past spans that end before the cursor.
         while ours_at < ours.len() && ours[ours_at].end() < &cursor {
             ours_at += 1;
         }
@@ -453,43 +470,67 @@ pub fn partition_spans(
             _ => SpanSource::Theirs,
         };
 
-        // The current classification holds until the nearest boundary:
-        // the end of a span the cursor is inside, or the start of the
-        // next span ahead.
-        let mut until = top_key();
-        if in_ours {
-            until = until.min(ours[ours_at].end().clone());
-        } else if ours_at < ours.len() {
-            if let Some(before) = predecessor_of(ours[ours_at].start()) {
-                until = until.min(before);
-            }
-        }
-        if in_theirs {
-            until = until.min(theirs[theirs_at].end().clone());
-        } else if theirs_at < theirs.len() {
-            if let Some(before) = predecessor_of(theirs[theirs_at].start()) {
-                until = until.min(before);
-            }
+        match cuts.last() {
+            Some((_, last)) if *last == source => {}
+            _ => cuts.push((cursor.clone(), source)),
         }
 
-        let done = until >= top_key();
-        match pieces.last_mut() {
-            Some((span, last_source)) if *last_source == source => {
-                *span = span.start().clone()..=until.clone();
-            }
-            _ => pieces.push((cursor.clone()..=until.clone(), source)),
-        }
+        // The classification holds until the next boundary: the key just past
+        // the end of a span the cursor is inside, or the start of the next
+        // span ahead. Taken from the spans themselves, never by stepping the
+        // key — the byte successor never overtakes a span start, so stepping
+        // would not terminate.
+        let next = [
+            in_ours
+                .then(|| key_successor(ours[ours_at].end()))
+                .flatten(),
+            (!in_ours && ours_at < ours.len()).then(|| ours[ours_at].start().clone()),
+            in_theirs
+                .then(|| key_successor(theirs[theirs_at].end()))
+                .flatten(),
+            (!in_theirs && theirs_at < theirs.len()).then(|| theirs[theirs_at].start().clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|candidate| candidate > &cursor)
+        .min();
 
-        if done {
-            break;
-        }
-        match key_successor(&until) {
+        match next {
             Some(next) => cursor = next,
             None => break,
         }
     }
 
+    // Close each piece just below the next one's start, and the last at the
+    // top of the key space.
+    let mut pieces = Vec::with_capacity(cuts.len());
+    for (at, (start, source)) in cuts.iter().enumerate() {
+        let end = match cuts.get(at + 1) {
+            Some((next_start, _)) => below(next_start),
+            None => top_key(),
+        };
+        pieces.push((start.clone()..=end, *source));
+    }
     pieces
+}
+
+/// The greatest key strictly below `key`, as the inverse of
+/// [`key_successor`]: that function appends `0x00`, so a key ending in `0x00`
+/// is the successor of the key without it. Any other key is not a successor,
+/// and the key below it is itself with a maximal filler tail appended to the
+/// decremented last byte.
+fn below(key: &Key) -> Key {
+    let bytes = key.as_ref();
+    match bytes.split_last() {
+        None => Key::from(Vec::new()),
+        Some((0x00, head)) => Key::from(head.to_vec()),
+        Some((last, head)) => {
+            let mut previous = head.to_vec();
+            previous.push(last - 1);
+            previous.extend(std::iter::repeat_n(u8::MAX, KEY_SPAN_FILLER));
+            Key::from(previous)
+        }
+    }
 }
 
 /// The immediate predecessor of a key. Only called for span starts that

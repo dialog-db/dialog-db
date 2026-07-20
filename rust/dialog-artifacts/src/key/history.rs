@@ -67,6 +67,11 @@ pub const HISTORY_KEY_TAG: u8 = 3;
 /// proportional to the coverage since base, not the write churn.
 pub const COVERAGE_KEY_TAG: u8 = 5;
 
+/// Filler width for the value-tail upper bound of a claim range. A value
+/// payload never reaches this many trailing `0xFF` bytes, so a bound built
+/// this way sorts above every record of the claim.
+const VALUE_TAIL_BOUND: usize = 64;
+
 /// Byte offset of the version prefix within a history/coverage key: it
 /// follows the single tag byte.
 const VERSION_OFFSET: usize = 1;
@@ -74,40 +79,26 @@ const VERSION_OFFSET: usize = 1;
 /// The key at which the record of a claim on `(of, the)` with the given
 /// value type and reference, produced by the revision identified by
 /// `version`, is stored
-pub fn history_key(
-    version: &Version,
-    of: &Entity,
-    the: &Attribute,
-    value_type: ValueDataType,
-    value_reference: &Blake3Hash,
-) -> Key {
-    tagged_key(
-        HISTORY_KEY_TAG,
-        version,
-        of,
-        the,
-        value_type,
-        value_reference,
-    )
+pub fn history_key(version: &Version, of: &Entity, the: &Attribute, value: &crate::Value) -> Key {
+    tagged_key(HISTORY_KEY_TAG, version, of, the, value)
 }
 
 /// The key at which the coverage entry mirroring a covering record is
 /// stored: the same layout as [`history_key`] under [`COVERAGE_KEY_TAG`].
-pub fn coverage_key(
-    version: &Version,
-    of: &Entity,
-    the: &Attribute,
-    value_type: ValueDataType,
-    value_reference: &Blake3Hash,
-) -> Key {
-    tagged_key(
+pub fn coverage_key(version: &Version, of: &Entity, the: &Attribute, value: &crate::Value) -> Key {
+    // Coverage stays value-free: it matches claims by VERSION, never by
+    // content, so the key carries a 32-byte reference rather than the value.
+    // That is what keeps "every deletion or replacement since the sync base"
+    // a cheap scoped diff instead of one that streams values.
+    let parts = tagged_parts(
         COVERAGE_KEY_TAG,
         version,
         of,
         the,
-        value_type,
-        value_reference,
-    )
+        value.data_type(),
+        ValuePayload::Reference(value.to_reference().as_ref().to_vec()),
+    );
+    Key::from(build_key(&parts))
 }
 
 /// The version bytes as they appear in a history/coverage key:
@@ -152,17 +143,15 @@ fn tagged_key(
     version: &Version,
     of: &Entity,
     the: &Attribute,
-    value_type: ValueDataType,
-    value_reference: &Blake3Hash,
+    value: &crate::Value,
 ) -> Key {
-    let parts = tagged_parts(
-        tag,
-        version,
-        of,
-        the,
-        value_type,
-        ValuePayload::Reference(value_reference.as_ref().to_vec()),
-    );
+    // The value rides the key inline exactly as it does in the fact
+    // orderings, through the same inline-vs-spill decision, so a record
+    // reconstructs its claim from its key. Storing a bare reference here
+    // would make the value unrecoverable: unlike a spilled fact (whose bytes
+    // live in the archive under that reference), nothing else carries it.
+    let payload = crate::key::value_payload(value, crate::key::inline_threshold());
+    let parts = tagged_parts(tag, version, of, the, value.data_type(), payload);
     Key::from(build_key(&parts))
 }
 
@@ -178,11 +167,12 @@ pub fn history_claim_range(version: &Version, of: &Entity, the: &Attribute) -> (
     min.extend_from_slice(&version_prefix(version));
     encode_bytes(of.as_str().as_bytes(), &mut min);
     encode_bytes(the.as_str().as_bytes(), &mut min);
-    // The value tail follows; bracket it between the smallest and largest
-    // possible tails so the range spans exactly this claim's records.
+    // The value tail follows: a type byte then the payload. Bracket it from
+    // the smallest type byte to above every value of the largest, so the
+    // range spans exactly this claim's records whatever their values.
     let mut max = min.clone();
     min.push(u8::MIN);
-    max.push(u8::MAX);
+    max.extend(std::iter::repeat_n(u8::MAX, 1 + VALUE_TAIL_BOUND));
     (Key::from(min), Key::from(max))
 }
 
@@ -232,15 +222,11 @@ mod tests {
     #[test]
     fn it_round_trips_long_entities_and_attributes() -> anyhow::Result<()> {
         let of = Entity::from_str(&format!("test:{}", "e".repeat(120)))?;
-        let the = Attribute::from_str(&format!("{}/{}", "n".repeat(60), "p".repeat(60)))?;
+        // At the attribute cap (64 bytes), which the fixed-width key
+        // truncated to its 57-byte raw head.
+        let the = Attribute::from_str(&format!("{}/{}", "n".repeat(31), "p".repeat(32)))?;
         let value = crate::Value::String("value".into());
-        let key = history_key(
-            &version(1, 7),
-            &of,
-            &the,
-            value.data_type(),
-            &value.to_reference(),
-        );
+        let key = history_key(&version(1, 7), &of, &the, &value);
 
         let parts = crate::key::varkey::parse_key(key.as_ref())
             .ok_or_else(|| anyhow::anyhow!("history key did not parse"))?;
@@ -261,8 +247,8 @@ mod tests {
         let value = crate::Value::String("value".into());
         let at = version(1, 7);
 
-        let left_key = history_key(&at, &left, &the, value.data_type(), &value.to_reference());
-        let right_key = history_key(&at, &right, &the, value.data_type(), &value.to_reference());
+        let left_key = history_key(&at, &left, &the, &value);
+        let right_key = history_key(&at, &right, &the, &value);
         assert_ne!(left_key, right_key);
         Ok(())
     }
@@ -276,8 +262,8 @@ mod tests {
         // One writer's records order by edition within its span.
         let early = version(1, 7);
         let late = version(2, 7);
-        let early_key = history_key(&early, &of, &the, value.data_type(), &value.to_reference());
-        let late_key = history_key(&late, &of, &the, value.data_type(), &value.to_reference());
+        let early_key = history_key(&early, &of, &the, &value);
+        let late_key = history_key(&late, &of, &the, &value);
         assert_eq!(history_key_version(&Key::from(early_key.clone()))?, early);
         assert!(
             early_key < late_key,
@@ -289,13 +275,7 @@ mod tests {
         // earlier one. This per-writer contiguity is what a graft merge
         // adopts logs by.
         let low_origin_late = version(9, 5);
-        let clustered = history_key(
-            &low_origin_late,
-            &of,
-            &the,
-            value.data_type(),
-            &value.to_reference(),
-        );
+        let clustered = history_key(&low_origin_late, &of, &the, &value);
         assert!(
             clustered < early_key,
             "origins cluster before editions order"
@@ -313,20 +293,8 @@ mod tests {
         let left = Entity::from_str(&format!("{shared}left"))?;
         let right = Entity::from_str(&format!("{shared}right"))?;
         let the = Attribute::from_str("test/attribute")?;
-        let left_key = history_key(
-            &version,
-            &left,
-            &the,
-            value.data_type(),
-            &value.to_reference(),
-        );
-        let right_key = history_key(
-            &version,
-            &right,
-            &the,
-            value.data_type(),
-            &value.to_reference(),
-        );
+        let left_key = history_key(&version, &left, &the, &value);
+        let right_key = history_key(&version, &right, &the, &value);
         assert_ne!(left_key, right_key);
 
         // Two attributes sharing the raw head
@@ -336,47 +304,29 @@ mod tests {
         let of = Entity::from_str("test:entity")?;
         let first = Attribute::from_str(&format!("{head}x"))?;
         let second = Attribute::from_str(&format!("{head}y"))?;
-        let first_key = history_key(
-            &version,
-            &of,
-            &first,
-            value.data_type(),
-            &value.to_reference(),
-        );
-        let second_key = history_key(
-            &version,
-            &of,
-            &second,
-            value.data_type(),
-            &value.to_reference(),
-        );
+        let first_key = history_key(&version, &of, &first, &value);
+        let second_key = history_key(&version, &of, &second, &value);
         assert_ne!(first_key, second_key);
 
         // Same value bytes under a different value type
         let string = crate::Value::String("a".into());
         let bytes = crate::Value::Bytes(vec![b'a']);
         assert_eq!(string.to_reference(), bytes.to_reference());
-        let string_key = history_key(
-            &version,
-            &of,
-            &the,
-            string.data_type(),
-            &string.to_reference(),
-        );
-        let bytes_key = history_key(
-            &version,
-            &of,
-            &the,
-            bytes.data_type(),
-            &bytes.to_reference(),
-        );
+        let string_key = history_key(&version, &of, &the, &string);
+        let bytes_key = history_key(&version, &of, &the, &bytes);
         assert_ne!(string_key, bytes_key);
 
-        // Truncation-colliding keys still land inside their claim range,
-        // where readers re-check against the stored record
+        // Each claim's range now contains exactly its own records. Under the
+        // pre-M3 truncated key both entities shared a raw head, so both keys
+        // fell inside either range and readers had to re-check every hit
+        // against the stored record; the lossless key makes the range exact.
         let (min, max) = history_claim_range(&version, &left, &the);
         let inside = |key: &Key| *key >= min && *key <= max;
-        assert!(inside(&left_key) && inside(&right_key));
+        assert!(inside(&left_key), "a claim range contains its own record");
+        assert!(
+            !inside(&right_key),
+            "and excludes another entity's, with no re-check needed"
+        );
         Ok(())
     }
 }
