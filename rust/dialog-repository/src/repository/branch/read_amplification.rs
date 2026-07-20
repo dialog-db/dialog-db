@@ -380,7 +380,8 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     let started = Instant::now();
     for i in 0..batches {
         let (next, _) =
-            write_instructions(deferred, &storage, None, stream::iter(batch(i))).await?;
+            write_instructions(deferred, &mut store, &storage, None, stream::iter(batch(i)))
+                .await?;
         deferred = next;
     }
     let mut delta = Delta::zero();

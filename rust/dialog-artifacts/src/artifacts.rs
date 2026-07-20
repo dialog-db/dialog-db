@@ -732,8 +732,17 @@ mod tests {
 
         let text = std::fs::read_to_string(&csv_path)?;
         let mut artifacts_in = Vec::new();
+        let mut reserved_skipped = 0usize;
         for record in parse_csv(&text).into_iter().skip(1) {
             if record.len() < 4 {
+                continue;
+            }
+            // The `dialog.` namespace is reserved for version-control
+            // records on this branch, so real-world facts under it cannot be
+            // asserted through the public API. Skip them and report the count,
+            // so the footprint is over the facts actually imported.
+            if record[0].starts_with("dialog.") {
+                reserved_skipped += 1;
                 continue;
             }
             let Ok(the) = Attribute::from_str(&record[0]) else {
@@ -878,7 +887,7 @@ mod tests {
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         eprintln!(
-            "REALDATA facts={fact_count} \
+            "REALDATA facts={fact_count} reserved_skipped={reserved_skipped} \
              on_disk={on_disk_bytes}B ({on_disk_files} files, {:.1} B/fact, {:.1} B/entry) \
              write_bytes={write_bytes} writes={writes} \
              commit={commit_elapsed:?}",
@@ -2619,170 +2628,6 @@ mod tests {
             "equality-by-spilled-value returns one fact"
         );
         assert_eq!(results[0].is, wanted);
-        Ok(())
-    }
-
-    /// Real-data footprint on an on-disk backend. Gated on `DIALOG_IMPORT_CSV`.
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    #[cfg(not(target_arch = "wasm32"))]
-    #[allow(clippy::absolute_paths)]
-    async fn it_reports_real_data_footprint() -> anyhow::Result<()> {
-        use std::str::FromStr;
-        use std::sync::Arc;
-
-        let Ok(csv_path) = std::env::var("DIALOG_IMPORT_CSV") else {
-            eprintln!("DIALOG_IMPORT_CSV not set; skipping real-data footprint harness");
-            return Ok(());
-        };
-
-        // Parse the CSV into artifacts (the columns are the,of,as,is,cause;
-        // `as` is the value type). A minimal RFC-4180 parser handling quoted
-        // fields with embedded commas, doubled quotes, and newlines (the tonk
-        // export puts multi-line HTML/CSS in the `is` column), so the harness
-        // has no CSV dependency and runs unchanged on the old tag.
-        fn parse_csv(text: &str) -> Vec<Vec<String>> {
-            let mut records = Vec::new();
-            let mut record = Vec::new();
-            let mut field = String::new();
-            let mut in_quotes = false;
-            let mut chars = text.chars().peekable();
-            while let Some(ch) = chars.next() {
-                match ch {
-                    '"' if in_quotes && chars.peek() == Some(&'"') => {
-                        field.push('"');
-                        chars.next();
-                    }
-                    '"' => in_quotes = !in_quotes,
-                    ',' if !in_quotes => record.push(std::mem::take(&mut field)),
-                    '\n' if !in_quotes => {
-                        record.push(std::mem::take(&mut field));
-                        records.push(std::mem::take(&mut record));
-                    }
-                    '\r' if !in_quotes => {}
-                    _ => field.push(ch),
-                }
-            }
-            if !field.is_empty() || !record.is_empty() {
-                record.push(field);
-                records.push(record);
-            }
-            records
-        }
-
-        let text = std::fs::read_to_string(&csv_path)?;
-        let mut artifacts_in = Vec::new();
-        let mut reserved_skipped = 0usize;
-        for record in parse_csv(&text).into_iter().skip(1) {
-            if record.len() < 4 {
-                continue;
-            }
-            // The `dialog.` namespace is reserved for version-control
-            // records on this branch, so real-world facts under it cannot be
-            // asserted through the public API. Skip them and report the count,
-            // so the footprint is over the facts actually imported.
-            if record[0].starts_with("dialog.") {
-                reserved_skipped += 1;
-                continue;
-            }
-            let Ok(the) = Attribute::from_str(&record[0]) else {
-                continue;
-            };
-            let Ok(of) = Entity::from_str(&record[1]) else {
-                continue;
-            };
-            let value_type = record[2].as_str();
-            let raw = record[3].as_str();
-            let parsed = match value_type {
-                "text" => Some(Value::String(raw.to_owned())),
-                "entity" => Entity::from_str(raw).ok().map(Value::Entity),
-                "natural" => raw.parse().ok().map(Value::UnsignedInt),
-                "integer" => raw.parse().ok().map(Value::SignedInt),
-                "float" => raw.parse().ok().map(Value::Float),
-                "boolean" => bool::from_str(raw).ok().map(Value::Boolean),
-                "attribute" => Attribute::from_str(raw).ok().map(Value::Symbol),
-                // Skip rows whose value type this minimal parser does not
-                // handle (bytes/record are base58 and not needed for a size
-                // comparison of the common text/entity/numeric mix).
-                _ => None,
-            };
-            let Some(is) = parsed else {
-                continue;
-            };
-            artifacts_in.push(Artifact {
-                the,
-                of,
-                is,
-                cause: None,
-            });
-        }
-        let fact_count = artifacts_in.len();
-
-        let root = tempfile::tempdir()?;
-        let backend = dialog_storage::FileSystemStorageBackend::<crate::Blake3Hash, Vec<u8>>::new(
-            root.path(),
-        )
-        .await?;
-        let measured = Arc::new(tokio::sync::Mutex::new(
-            dialog_storage::MeasuredStorage::new(backend),
-        ));
-        let mut facts = Artifacts::anonymous(measured.clone()).await?;
-
-        // Commit incrementally so a malformed key names the artifact that
-        // produced it (set DIALOG_IMPORT_BISECT to enable; otherwise commit in
-        // one batch for the timing figure).
-        let commit_start = std::time::Instant::now();
-        if std::env::var("DIALOG_IMPORT_BISECT").is_ok() {
-            for (index, artifact) in artifacts_in.iter().enumerate() {
-                if let Err(error) = facts
-                    .commit(std::iter::once(Instruction::Assert(artifact.clone())))
-                    .await
-                {
-                    panic!(
-                        "commit failed at row {index}: {error}\n  the={} of={} is={:?}",
-                        artifact.the, artifact.of, artifact.is
-                    );
-                }
-            }
-        } else {
-            facts
-                .commit(artifacts_in.iter().cloned().map(Instruction::Assert))
-                .await?;
-        }
-        let commit_elapsed = commit_start.elapsed();
-
-        let (write_bytes, writes) = {
-            let storage = measured.lock().await;
-            (storage.write_bytes(), storage.writes())
-        };
-
-        // Time a scan over the most common attribute in the data set.
-        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for artifact in &artifacts_in {
-            *counts.entry(artifact.the.to_string()).or_default() += 1;
-        }
-        let (top_attribute, top_count) = counts
-            .into_iter()
-            .max_by_key(|(_, count)| *count)
-            .unwrap_or_default();
-
-        let scan_start = std::time::Instant::now();
-        let selected: Vec<Artifact> = facts
-            .select(ArtifactSelector::new().the(Attribute::from_str(&top_attribute)?))
-            .try_collect()
-            .await?;
-        let scan_elapsed = scan_start.elapsed();
-
-        eprintln!(
-            "REALDATA facts={fact_count} reserved_skipped={reserved_skipped} write_bytes={write_bytes} writes={writes} \
-             bytes/fact={:.1} bytes/entry={:.1} blocks/fact={:.3} \
-             commit={commit_elapsed:?} \
-             scan(the={top_attribute} n={top_count})={scan_elapsed:?} results={}",
-            write_bytes as f64 / fact_count as f64,
-            write_bytes as f64 / fact_count as f64 / 3.0,
-            writes as f64 / fact_count as f64,
-            selected.len(),
-        );
-
         Ok(())
     }
 }

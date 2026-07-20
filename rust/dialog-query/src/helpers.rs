@@ -174,55 +174,6 @@ pub struct Stuff {
 }
 
 /// Attributes of the bug-tracker benchmark concept.
-pub mod bug {
-    use ::dialog_query::Attribute;
-
-    /// Bug status (triage / todo / in-progress / done / canceled).
-    #[derive(Attribute, Clone, PartialEq)]
-    #[domain("squash.bug")]
-    pub struct Status(pub String);
-
-    /// Bug priority (low / medium / high / urgent).
-    #[derive(Attribute, Clone, PartialEq)]
-    #[domain("squash.bug")]
-    pub struct Priority(pub String);
-
-    /// Bug assignee (a DID string, or empty for unassigned).
-    #[derive(Attribute, Clone, PartialEq)]
-    #[domain("squash.bug")]
-    pub struct Assignee(pub String);
-
-    /// Bug title.
-    #[derive(Attribute, Clone, PartialEq)]
-    #[domain("squash.bug")]
-    pub struct Title(pub String);
-
-    /// LexoRank-style ordering key. Float in the real schema — the field that
-    /// would have tripped the float-key width bug in a concept join.
-    #[derive(Attribute, Clone, PartialEq)]
-    #[domain("squash.bug")]
-    pub struct Ordering(pub f64);
-}
-
-/// A realistic bug-tracker record: the seven-way join the tonk bug app runs.
-/// Fewer fields than the real seven (detail/ident omitted) is enough to
-/// exercise a real multi-premise concept join with a `Float` field.
-#[derive(Clone, Debug, PartialEq, Concept)]
-pub struct Bug {
-    /// The bug entity.
-    pub this: Entity,
-    /// Its status.
-    pub status: bug::Status,
-    /// Its priority.
-    pub priority: bug::Priority,
-    /// Its assignee.
-    pub assignee: bug::Assignee,
-    /// Its title.
-    pub title: bug::Title,
-    /// Its ordering key (Float).
-    pub ordering: bug::Ordering,
-}
-
 /// Per-span accumulated `(micros, calls)`, shared between the subscriber
 /// layer that records them and the report that prints them.
 #[cfg(not(target_arch = "wasm32"))]
@@ -999,6 +950,139 @@ where
         Ok(())
     }
 
+    /// Seed a realistic bug-tracker fact base: `count` bugs, each a seven-fact
+    /// [`Bug`] record, with status/priority/assignee drawn from the same
+    /// distribution as the real tonk data (mostly-done/triage, medium priority,
+    /// a few assignees plus many unassigned). Returns the seeded entities so a
+    /// transaction benchmark can update specific bugs. Off the measured path.
+    pub async fn seed_bugs(&self, count: usize) -> Result<Vec<Entity>> {
+        const STATUSES: &[&str] = &["done", "triage", "todo", "canceled", "in-progress"];
+        const PRIORITIES: &[&str] = &["medium", "high", "low", "urgent"];
+        const ASSIGNEES: &[&str] = &[
+            "",
+            "did:key:z6MkDQtgLHmp664Wf8wn32G9MT79GpKncnQkcJmLYYu6HEJz",
+            "did:key:z6MkAoFSTzm7XMv6wc1X9H5iND4YSfEaHw2LYWiTR2xDPfu8",
+            "did:key:z6MkGSesqrS3iyekKGrhMCmHyp82RxJaohuvnNMmdQXG9kza",
+        ];
+
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .open()
+            .perform(&self.operator)
+            .await?;
+
+        let mut entities = Vec::with_capacity(count);
+        let mut transaction = branch.transaction();
+        for index in 0..count {
+            let entity = Entity::new()?;
+            entities.push(entity.clone());
+            transaction = transaction.assert(Bug {
+                this: entity,
+                status: bug::Status(STATUSES[index % STATUSES.len()].to_string()),
+                priority: bug::Priority(PRIORITIES[index % PRIORITIES.len()].to_string()),
+                assignee: bug::Assignee(ASSIGNEES[index % ASSIGNEES.len()].to_string()),
+                title: bug::Title(format!("Bug #{index}: something is off")),
+                ordering: bug::Ordering(index as f64 * 1000.0),
+            });
+        }
+        transaction.commit().perform(&self.operator).await?;
+        Ok(entities)
+    }
+
+    /// Run the public [`Bug`] concept query, optionally pinning `status` to a
+    /// constant (the "bugs with status X" query the app issues; `None` leaves
+    /// status free for an all-bugs join). Reports the join's block reads.
+    pub async fn query_bugs_by_status(&self, status: Option<&str>) -> Result<JoinRun> {
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .load()
+            .perform(&self.operator)
+            .await?;
+
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules: RuleRegistry::new(),
+            journal: ReadJournal::default(),
+        };
+
+        let status_term = match status {
+            Some(value) => Term::from(value.to_string()),
+            None => Term::var("status"),
+        };
+
+        env.journal().clear();
+        let results = Query::<Bug> {
+            this: Term::var("this"),
+            status: status_term,
+            priority: Term::var("priority"),
+            assignee: Term::var("assignee"),
+            title: Term::var("title"),
+            ordering: Term::var("ordering"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
+
+        Ok(JoinRun {
+            results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+
+    /// Update a bug's status (the "close a bug" transaction): assert a new
+    /// status on the entity. Cardinality-one means the assertion supersedes the
+    /// prior status. Returns the committed revision hash's presence.
+    pub async fn update_bug_status(&self, entity: &Entity, status: &str) -> Result<()> {
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .open()
+            .perform(&self.operator)
+            .await?;
+        branch
+            .transaction()
+            .assert(
+                ::dialog_query::the!("squash.bug/status")
+                    .of(entity.clone())
+                    .is(status.to_string()),
+            )
+            .commit()
+            .perform(&self.operator)
+            .await?;
+        Ok(())
+    }
+
+    /// Reassign a bug and set its status in one transaction (the "update
+    /// assignee + status" flow).
+    pub async fn reassign_bug(&self, entity: &Entity, assignee: &str, status: &str) -> Result<()> {
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .open()
+            .perform(&self.operator)
+            .await?;
+        branch
+            .transaction()
+            .assert(
+                ::dialog_query::the!("squash.bug/assignee")
+                    .of(entity.clone())
+                    .is(assignee.to_string()),
+            )
+            .assert(
+                ::dialog_query::the!("squash.bug/status")
+                    .of(entity.clone())
+                    .is(status.to_string()),
+            )
+            .commit()
+            .perform(&self.operator)
+            .await?;
+        Ok(())
+    }
+
     /// per bug, then a status change and a reassignment on a share of them.
     ///
     /// The single-transaction [`seed_bugs`](Self::seed_bugs) leaves a history
@@ -1425,39 +1509,6 @@ mod test {
         assert!(done.reads > 0);
 
         Ok(())
-    }
-
-    /// On-demand realistic bug-tracker benchmark. Skipped unless
-    /// `DIALOG_BUG_BENCH` is set. Seeds a bug fact base and reports reads +
-    /// wall-clock for the queries the app issues (all bugs, bugs by status,
-    /// open bugs) and the transactions (file a bug, close, reassign) — run it
-    /// on this revision and the old tag to compare formats on a realistic
-    /// concept-join workload. Native only.
-    // A gated, on-demand benchmark: fully-qualified std paths keep it
-    // self-contained without adding imports the rest of the module doesn't use.
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    #[cfg(not(target_arch = "wasm32"))]
-    #[allow(clippy::absolute_paths)]
-    async fn it_benchmarks_bug_tracker() -> Result<()> {
-        if std::env::var("DIALOG_BUG_BENCH").is_err() {
-            eprintln!("DIALOG_BUG_BENCH not set; skipping bug-tracker benchmark");
-            return Ok(());
-        }
-        let count: usize = std::env::var("DIALOG_BUG_COUNT")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(300);
-
-        // `DIALOG_BUG_DISK=1` runs against a real on-disk filesystem backend
-        // (the realistic case: reads are actual I/O); the default is the
-        // in-memory backend (engine-CPU isolation).
-        if std::env::var("DIALOG_BUG_DISK").is_ok() {
-            eprintln!("BUGBENCH backend=disk");
-            BenchEnv::temp().await?.run_bug_bench(count).await
-        } else {
-            eprintln!("BUGBENCH backend=memory");
-            BenchEnv::volatile().await?.run_bug_bench(count).await
-        }
     }
 
     /// On-demand benchmark of the real bug-tracker workload against the

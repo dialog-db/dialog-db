@@ -43,7 +43,7 @@ use std::ops::RangeInclusive;
 
 use crate::history::Version;
 use crate::tree::{ArtifactTree, TreeStorageBridge, write_instructions};
-use crate::{Datum, DialogArtifactsError, Instruction, KeyBytes, State};
+use crate::{Datum, DialogArtifactsError, Instruction, Key, State};
 
 /// The buffered counterpart of [`ArtifactTree`].
 ///
@@ -51,7 +51,7 @@ use crate::{Datum, DialogArtifactsError, Instruction, KeyBytes, State};
 /// buffers instead of reshaping the tree, so a commit does not rebuild and
 /// re-hash the large leaves it touches. The reshape is deferred to
 /// [`canonicalize`](Self::canonicalize).
-pub type BufferedArtifactTree = HitchhikerTree<KeyBytes, State<Datum>>;
+pub type BufferedArtifactTree = HitchhikerTree<Key, State<Datum>>;
 
 /// A target the instruction loop can write into.
 ///
@@ -68,7 +68,7 @@ pub trait ArtifactWriter: Sized {
     /// Insert (or overwrite) `value` at `key`.
     async fn write<S>(
         self,
-        key: KeyBytes,
+        key: Key,
         value: State<Datum>,
         storage: &ContentAddressedStorage<S>,
     ) -> Result<Self, DialogSearchTreeError>
@@ -79,7 +79,7 @@ pub trait ArtifactWriter: Sized {
     /// Remove `key`, if present.
     async fn erase<S>(
         self,
-        key: &KeyBytes,
+        key: &Key,
         storage: &ContentAddressedStorage<S>,
     ) -> Result<Self, DialogSearchTreeError>
     where
@@ -89,7 +89,7 @@ pub trait ArtifactWriter: Sized {
     /// Read the value at `key`, seeing this batch's own pending writes.
     async fn read<S>(
         &self,
-        key: &KeyBytes,
+        key: &Key,
         storage: &ContentAddressedStorage<S>,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
@@ -104,9 +104,9 @@ pub trait ArtifactWriter: Sized {
     /// emit a claim whose lineage skips what it replaced.
     fn scan<'a, S>(
         &'a self,
-        range: RangeInclusive<KeyBytes>,
+        range: RangeInclusive<Key>,
         storage: &'a ContentAddressedStorage<S>,
-    ) -> impl Stream<Item = Result<Entry<KeyBytes, State<Datum>>, DialogSearchTreeError>> + 'a
+    ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
         S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync;
@@ -114,10 +114,10 @@ pub trait ArtifactWriter: Sized {
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl ArtifactWriter for TransientTree<KeyBytes, State<Datum>> {
+impl ArtifactWriter for TransientTree<Key, State<Datum>> {
     async fn write<S>(
         self,
-        key: KeyBytes,
+        key: Key,
         value: State<Datum>,
         storage: &ContentAddressedStorage<S>,
     ) -> Result<Self, DialogSearchTreeError>
@@ -130,7 +130,7 @@ impl ArtifactWriter for TransientTree<KeyBytes, State<Datum>> {
 
     async fn erase<S>(
         self,
-        key: &KeyBytes,
+        key: &Key,
         storage: &ContentAddressedStorage<S>,
     ) -> Result<Self, DialogSearchTreeError>
     where
@@ -142,7 +142,7 @@ impl ArtifactWriter for TransientTree<KeyBytes, State<Datum>> {
 
     async fn read<S>(
         &self,
-        key: &KeyBytes,
+        key: &Key,
         storage: &ContentAddressedStorage<S>,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
@@ -154,9 +154,9 @@ impl ArtifactWriter for TransientTree<KeyBytes, State<Datum>> {
 
     fn scan<'a, S>(
         &'a self,
-        range: RangeInclusive<KeyBytes>,
+        range: RangeInclusive<Key>,
         storage: &'a ContentAddressedStorage<S>,
-    ) -> impl Stream<Item = Result<Entry<KeyBytes, State<Datum>>, DialogSearchTreeError>> + 'a
+    ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
         S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
@@ -170,7 +170,7 @@ impl ArtifactWriter for TransientTree<KeyBytes, State<Datum>> {
 impl ArtifactWriter for BufferedArtifactTree {
     async fn write<S>(
         self,
-        key: KeyBytes,
+        key: Key,
         value: State<Datum>,
         storage: &ContentAddressedStorage<S>,
     ) -> Result<Self, DialogSearchTreeError>
@@ -183,19 +183,19 @@ impl ArtifactWriter for BufferedArtifactTree {
 
     async fn erase<S>(
         self,
-        key: &KeyBytes,
+        key: &Key,
         storage: &ContentAddressedStorage<S>,
     ) -> Result<Self, DialogSearchTreeError>
     where
         S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
-        self.delete(*key, storage).await
+        self.delete(key.clone(), storage).await
     }
 
     async fn read<S>(
         &self,
-        key: &KeyBytes,
+        key: &Key,
         storage: &ContentAddressedStorage<S>,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
@@ -207,9 +207,9 @@ impl ArtifactWriter for BufferedArtifactTree {
 
     fn scan<'a, S>(
         &'a self,
-        range: RangeInclusive<KeyBytes>,
+        range: RangeInclusive<Key>,
         storage: &'a ContentAddressedStorage<S>,
-    ) -> impl Stream<Item = Result<Entry<KeyBytes, State<Datum>>, DialogSearchTreeError>> + 'a
+    ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
         S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
@@ -258,8 +258,14 @@ where
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-    let (buffered, changed) =
-        write_instructions(HitchhikerTree::open(tree), &storage, version, instructions).await?;
+    let (buffered, changed) = write_instructions(
+        HitchhikerTree::open(tree),
+        store,
+        &storage,
+        version,
+        instructions,
+    )
+    .await?;
     *tree = if canonicalize {
         buffered.canonicalize(&storage, delta).await?
     } else {
@@ -414,7 +420,7 @@ mod tests {
             };
             let entity_key = crate::EntityKey::from(&artifact);
             let attribute_key = crate::AttributeKey::from_key(&entity_key);
-            let added = crate::State::Added(crate::Datum::from(artifact));
+            let added = crate::State::Added(crate::Datum::for_artifact(&artifact));
             tree.record(
                 &mut store,
                 &mut delta,

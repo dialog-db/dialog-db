@@ -405,20 +405,22 @@ where
             return Ok(false);
         }
 
-        let ours = match &self.nodes[at] {
-            SparseTreeNode::Loaded { node, .. } => node.clone(),
-            SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
-                Self::load(self.storage, &link.node).await?
-            }
-            SparseTreeNode::Settled { .. } => return Ok(false),
+        // Settling must be free. Loading an unloaded node to discover that it
+        // cannot settle would charge a read for a check that answered "no",
+        // which is exactly the read the differential exists to avoid: on
+        // canonical trees (no novelty anywhere) settling never applies, so
+        // every such load would be pure waste and would show up as a
+        // difference reading blocks it should have pruned. Both sides must
+        // already be loaded, or the caller falls through to the descent that
+        // would load them anyway.
+        let (
+            SparseTreeNode::Loaded { node: ours, .. },
+            SparseTreeNode::Loaded { node: theirs, .. },
+        ) = (&self.nodes[at], &other.nodes[other_at])
+        else {
+            return Ok(false);
         };
-        let theirs = match &other.nodes[other_at] {
-            SparseTreeNode::Loaded { node, .. } => node.clone(),
-            SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
-                Self::load(other.storage, &link.node).await?
-            }
-            SparseTreeNode::Settled { .. } => return Ok(false),
-        };
+        let (ours, theirs) = (ours.clone(), theirs.clone());
 
         let (ArchivedNodeBody::Index(ours_index), ArchivedNodeBody::Index(theirs_index)) =
             (ours.body()?, theirs.body()?)
@@ -685,12 +687,10 @@ where
                     let mut resolved: Vec<(Vec<u8>, Value)> = Vec::new();
                     for entry in ops {
                         // Last op wins, matching how a flush replays them.
-                        if let Some(op) = resolve_pending(ops, &entry.key) {
-                            if let NoveltyOp::Assert(value) = op {
-                                if !resolved.iter().any(|(key, _)| key == &entry.key) {
-                                    resolved.push((entry.key.clone(), value.clone()));
-                                }
-                            }
+                        if let Some(NoveltyOp::Assert(value)) = resolve_pending(ops, &entry.key)
+                            && !resolved.iter().any(|(key, _)| key == &entry.key)
+                        {
+                            resolved.push((entry.key.clone(), value.clone()));
                         }
                     }
                     resolved.sort_by(|(left, _), (right, _)| left.cmp(right));

@@ -4570,8 +4570,10 @@ mod buffer_edit_interaction_tests {
         (from..from + 200_000)
             .find(|candidate| {
                 !avoid.contains(candidate)
-                    && <crate::Geometric as crate::Distribution>::rank(&candidate.to_be_bytes(), &crate::Manifest::default())
-                        > crate::BOTTOM_RANK
+                    && <crate::Geometric as crate::Distribution>::rank(
+                        &candidate.to_be_bytes(),
+                        &crate::Manifest::default(),
+                    ) > crate::BOTTOM_RANK
             })
             .expect("a boundary-ranked key exists in range")
     }
@@ -4591,8 +4593,10 @@ mod buffer_edit_interaction_tests {
         // open run.
         let base_keys: Vec<u32> = (0..400u32)
             .filter(|k| {
-                <crate::Geometric as crate::Distribution>::rank(&k.to_be_bytes(), &crate::Manifest::default())
-                    <= crate::BOTTOM_RANK
+                <crate::Geometric as crate::Distribution>::rank(
+                    &k.to_be_bytes(),
+                    &crate::Manifest::default(),
+                ) <= crate::BOTTOM_RANK
             })
             .collect();
         let mut base = Tree::empty();
@@ -4680,8 +4684,10 @@ mod buffer_edit_interaction_tests {
             .copied()
             .find(|k| {
                 *k < 399
-                    && <crate::Geometric as crate::Distribution>::rank(&k.to_be_bytes(), &crate::Manifest::default())
-                        > crate::BOTTOM_RANK
+                    && <crate::Geometric as crate::Distribution>::rank(
+                        &k.to_be_bytes(),
+                        &crate::Manifest::default(),
+                    ) > crate::BOTTOM_RANK
             })
             .expect("the base contains a non-final boundary key");
 
