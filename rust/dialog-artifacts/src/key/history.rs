@@ -46,11 +46,12 @@
 //! tree would drop the trim-and-hash and carry the raw key through — the
 //! head layout here is exactly that future key's prefix.
 
-use dialog_storage::Blake3Hash;
+use std::iter::repeat_n;
 
 use crate::artifacts::encode_bytes;
 use crate::history::{EDITION_LENGTH, ORIGIN_LENGTH, VERSION_LENGTH, Version};
 use crate::key::varkey::{KeyParts, ValuePayload, build_key};
+use crate::key::{inline_threshold, value_payload};
 use crate::{Attribute, Entity, Key, ValueDataType};
 
 /// The leading tag byte of history region keys
@@ -150,7 +151,7 @@ fn tagged_key(
     // reconstructs its claim from its key. Storing a bare reference here
     // would make the value unrecoverable: unlike a spilled fact (whose bytes
     // live in the archive under that reference), nothing else carries it.
-    let payload = crate::key::value_payload(value, crate::key::inline_threshold());
+    let payload = value_payload(value, inline_threshold());
     let parts = tagged_parts(tag, version, of, the, value.data_type(), payload);
     Key::from(build_key(&parts))
 }
@@ -172,7 +173,7 @@ pub fn history_claim_range(version: &Version, of: &Entity, the: &Attribute) -> (
     // range spans exactly this claim's records whatever their values.
     let mut max = min.clone();
     min.push(u8::MIN);
-    max.extend(std::iter::repeat_n(u8::MAX, 1 + VALUE_TAIL_BOUND));
+    max.extend(repeat_n(u8::MAX, 1 + VALUE_TAIL_BOUND));
     (Key::from(min), Key::from(max))
 }
 
@@ -208,7 +209,9 @@ pub fn history_key_version(key: &Key) -> Result<Version, crate::DialogArtifactsE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key::varkey::parse_key;
     use std::str::FromStr;
+    use std::str::from_utf8;
 
     fn version(edition: u64, origin: u8) -> Version {
         use crate::history::{Edition, Origin};
@@ -228,10 +231,10 @@ mod tests {
         let value = crate::Value::String("value".into());
         let key = history_key(&version(1, 7), &of, &the, &value);
 
-        let parts = crate::key::varkey::parse_key(key.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("history key did not parse"))?;
-        assert_eq!(std::str::from_utf8(&parts.entity)?, of.as_str());
-        assert_eq!(std::str::from_utf8(&parts.attribute)?, the.as_str());
+        let parts =
+            parse_key(key.as_ref()).ok_or_else(|| anyhow::anyhow!("history key did not parse"))?;
+        assert_eq!(from_utf8(&parts.entity)?, of.as_str());
+        assert_eq!(from_utf8(&parts.attribute)?, the.as_str());
         Ok(())
     }
 
@@ -264,7 +267,7 @@ mod tests {
         let late = version(2, 7);
         let early_key = history_key(&early, &of, &the, &value);
         let late_key = history_key(&late, &of, &the, &value);
-        assert_eq!(history_key_version(&Key::from(early_key.clone()))?, early);
+        assert_eq!(history_key_version(&early_key.clone())?, early);
         assert!(
             early_key < late_key,
             "one origin's keys order by edition within its span"

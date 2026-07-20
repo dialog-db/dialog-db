@@ -749,7 +749,6 @@ mod tests {
 
     mod query_engine {
 
-        use crate::RevisionExt as _;
         use crate::helpers::{test_operator_with_profile, test_repo};
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term};

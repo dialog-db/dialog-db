@@ -463,8 +463,7 @@ impl<'a> Pull<'a> {
                             }
                         }
                         for key in retire {
-                            let entity_key =
-                                dialog_artifacts::EntityKey(dialog_artifacts::Key::from(key));
+                            let entity_key = dialog_artifacts::EntityKey(key);
                             let attribute_key =
                                 dialog_artifacts::AttributeKey::from_key(&entity_key);
                             let value_key = dialog_artifacts::ValueKey::from_key(&entity_key);
@@ -473,9 +472,7 @@ impl<'a> Pull<'a> {
                                 attribute_key.into_key(),
                                 value_key.into_key(),
                             ] {
-                                stitched = stitched
-                                    .delete(&dialog_artifacts::Key::from(key), &tree_store)
-                                    .await?;
+                                stitched = stitched.delete(&key, &tree_store).await?;
                             }
                         }
                     }

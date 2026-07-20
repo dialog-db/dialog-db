@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::artifacts::decode_value;
 use crate::key::varkey::{self, ValuePayload};
 use crate::{
-    Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value, coverage_key, history_key,
-    make_reference,
+    Attribute, Datum, DialogArtifactsError, Entity, Key, State, coverage_key, history_key,
 };
 
 use super::{Cause, Claim, Version};

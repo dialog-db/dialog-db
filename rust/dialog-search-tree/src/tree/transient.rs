@@ -3080,7 +3080,7 @@ mod tests {
         for key in &keys {
             tree = tree
                 .edit()
-                .insert(key.clone(), key.0.clone(), &mut storage)
+                .insert(key.clone(), key.0.clone(), &storage)
                 .await?
                 .persist(&mut delta)?;
             for (hash, buffer) in delta.flush() {

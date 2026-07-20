@@ -1432,6 +1432,8 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
     use futures_util::{StreamExt as _, stream};
 
     use crate::State;
+    use crate::key::varkey::{ValuePayload, parse_key};
+    use crate::merge::coverage_scope;
     use crate::tree::TreeStorageBridge;
 
     let mut store = Storage {
@@ -1472,7 +1474,7 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
     }
 
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-    let scope = crate::merge::coverage_scope();
+    let scope = coverage_scope();
     let entries: Vec<_> = tree
         .stream_range(scope[0].clone(), &storage)
         .collect::<Vec<_>>()
@@ -1490,9 +1492,9 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
         // Coverage stays value-free: the key carries a 32-byte value
         // reference (coverage matches claims by version, never by content),
         // and the payload carries only the lineage.
-        let parts = crate::key::varkey::parse_key(entry.key.as_ref()).expect("coverage key parses");
+        let parts = parse_key(entry.key.as_ref()).expect("coverage key parses");
         assert!(
-            matches!(parts.value, crate::key::varkey::ValuePayload::Reference(_)),
+            matches!(parts.value, ValuePayload::Reference(_)),
             "coverage carries a value reference, never value bytes"
         );
         assert!(!datum.supersedes.is_empty(), "coverage names its versions");

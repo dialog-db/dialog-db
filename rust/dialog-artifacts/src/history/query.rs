@@ -94,9 +94,7 @@ where
     /// revision)
     pub async fn records(&self) -> Result<Vec<(Version, Record)>, DialogArtifactsError> {
         let (min, max) = history_region_range();
-        let stream = self
-            .tree
-            .stream_range(crate::Key::from(min)..=crate::Key::from(max), &self.storage);
+        let stream = self.tree.stream_range(min..=max, &self.storage);
         tokio::pin!(stream);
 
         let mut records = Vec::new();
@@ -125,9 +123,7 @@ where
         the: &Attribute,
     ) -> Result<Vec<Claim>, DialogArtifactsError> {
         let (min, max) = history_claim_range(version, of, the);
-        let stream = self
-            .tree
-            .stream_range(crate::Key::from(min)..=crate::Key::from(max), &self.storage);
+        let stream = self.tree.stream_range(min..=max, &self.storage);
         tokio::pin!(stream);
 
         // The key is lossless, so `history_claim_range` is exact on

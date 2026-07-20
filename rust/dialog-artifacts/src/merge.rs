@@ -42,7 +42,9 @@
 //! state beyond the differential itself.
 
 use core::ops::RangeInclusive;
+use std::iter::repeat_n;
 use std::str::FromStr;
+use std::str::from_utf8;
 use std::sync::{Arc, Mutex};
 
 use dialog_common::Blake3Hash;
@@ -51,7 +53,10 @@ use dialog_search_tree::{
 };
 use dialog_storage::{DialogStorageError, StorageBackend};
 
+use crate::Value;
+use crate::artifacts::decode_value;
 use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord};
+use crate::key::varkey::{ValueRef, parse_key, parse_key_ref};
 use crate::tree::ArtifactTree;
 use crate::{
     Attribute, AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
@@ -67,7 +72,7 @@ fn tag_span(tag: u8) -> RangeInclusive<Key> {
     // and a longer key with the same prefix still sorts below it.
     let lo = vec![tag];
     let mut hi = vec![tag];
-    hi.extend(std::iter::repeat_n(u8::MAX, KEY_SPAN_FILLER));
+    hi.extend(repeat_n(u8::MAX, KEY_SPAN_FILLER));
     Key::from(lo)..=Key::from(hi)
 }
 
@@ -139,7 +144,7 @@ pub fn spans_from_bounds(bounds: Vec<(Vec<u8>, Option<Vec<u8>>)>) -> Vec<RangeIn
 pub fn data_scope() -> [RangeInclusive<Key>; 2] {
     let lo = vec![ENTITY_KEY_TAG];
     let mut hi = vec![VALUE_KEY_TAG];
-    hi.extend(std::iter::repeat_n(u8::MAX, KEY_SPAN_FILLER));
+    hi.extend(repeat_n(u8::MAX, KEY_SPAN_FILLER));
     [Key::from(lo)..=Key::from(hi), tag_span(BLOB_KEY_TAG)]
 }
 
@@ -155,15 +160,15 @@ pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTree
         DialogSearchTreeError::Node(format!("history record: {e}"))
     };
     // The record's entity and attribute live in its key, not its payload.
-    let parts = crate::key::varkey::parse_key(key.as_ref())
+    let parts = parse_key(key.as_ref())
         .ok_or_else(|| DialogSearchTreeError::Node("history key did not parse".to_string()))?;
     let of = Entity::from_str(
-        std::str::from_utf8(&parts.entity)
+        from_utf8(&parts.entity)
             .map_err(|e| DialogSearchTreeError::Node(format!("entity is not UTF-8: {e}")))?,
     )
     .map_err(decode)?;
     let the = Attribute::from_str(
-        std::str::from_utf8(&parts.attribute)
+        from_utf8(&parts.attribute)
             .map_err(|e| DialogSearchTreeError::Node(format!("attribute is not UTF-8: {e}")))?,
     )
     .map_err(decode)?;
@@ -175,7 +180,7 @@ pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTree
         .set_entity(EntityKeyPart::from(&of))
         .set_attribute(AttributeKeyPart::from(&the))
         .into_key();
-    Ok(Key::from(start)..=Key::from(end))
+    Ok(start..=end)
 }
 
 /// Screen the **history-region** slice of an incoming merge
@@ -244,7 +249,7 @@ where
                                 _ => false,
                             };
                             if covered {
-                                let entity_key = EntityKey(Key::from(candidate.key));
+                                let entity_key = EntityKey(candidate.key);
                                 let attribute_key = AttributeKey::from_key(&entity_key);
                                 let value_key = ValueKey::from_key(&entity_key);
                                 for key in [
@@ -253,7 +258,7 @@ where
                                     value_key.into_key(),
                                 ] {
                                     yield Change::Remove(Entry {
-                                        key: Key::from(key),
+                                        key,
                                         value: candidate.value.clone(),
                                     });
                                 }
@@ -344,7 +349,7 @@ where
             // than from the payload.
             if let Change::Add(entry) = &change
                 && let State::Added(_) = &entry.value
-                && let Some(parts) = crate::key::varkey::parse_key_ref(entry.key.as_ref())
+                && let Some(parts) = parse_key_ref(entry.key.as_ref())
                 && parts.attribute.as_ref() == REVISION_ATTRIBUTE.as_bytes()
             {
                 // The inline payload is the ORDER-PRESERVING encoding, not the
@@ -352,15 +357,15 @@ where
                 // record's bytes live in the archive, which this pass does not
                 // read — the observer only needs the versions it can see.
                 let Some(bytes) = (match &parts.value {
-                    crate::key::varkey::ValueRef::Inline(inline) => {
-                        crate::artifacts::decode_value(parts.value_type, inline).and_then(
+                    ValueRef::Inline(inline) => {
+                        decode_value(parts.value_type, inline).and_then(
                             |(value, _)| match value {
-                                crate::Value::Record(bytes) => Some(bytes),
+                                Value::Record(bytes) => Some(bytes),
                                 _ => None,
                             },
                         )
                     }
-                    crate::key::varkey::ValueRef::Reference(_) => None,
+                    ValueRef::Reference(_) => None,
                 }) else {
                     yield change;
                     continue;
@@ -541,7 +546,7 @@ fn below(key: &Key) -> Key {
         Some((last, head)) => {
             let mut previous = head.to_vec();
             previous.push(last - 1);
-            previous.extend(std::iter::repeat_n(u8::MAX, KEY_SPAN_FILLER));
+            previous.extend(repeat_n(u8::MAX, KEY_SPAN_FILLER));
             Key::from(previous)
         }
     }
@@ -560,7 +565,7 @@ fn predecessor_of(key: &Key) -> Option<Key> {
     let mut previous = head.to_vec();
     if last != u8::MIN {
         previous.push(last - 1);
-        previous.extend(std::iter::repeat_n(u8::MAX, KEY_SPAN_FILLER));
+        previous.extend(repeat_n(u8::MAX, KEY_SPAN_FILLER));
     }
     Some(Key::from(previous))
 }

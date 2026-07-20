@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use dialog_search_tree::Cache;
-use serde::{Deserialize, Serialize};
 
 use crate::DialogArtifactsError;
 

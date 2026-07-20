@@ -766,7 +766,7 @@ impl ArtifactTreeExt for ArtifactTree {
                     // retraction.
                     if let Some(version) = &version {
                         let withdrawn = match transient
-                            .get(&entity_key.clone().into_key().into(), &storage)
+                            .get(&entity_key.clone().into_key(), &storage)
                             .await?
                         {
                             Some(State::Added(datum)) => {
@@ -796,21 +796,17 @@ impl ArtifactTreeExt for ArtifactTree {
                     // key is a no-op, so a same-batch assert+retract cancels
                     // to nothing and a retract of a fact that never existed
                     // changes nothing in the indexes.
+                    transient = transient.delete(&entity_key.into_key(), &storage).await?;
                     transient = transient
-                        .delete(&entity_key.into_key().into(), &storage)
+                        .delete(&attribute_key.into_key(), &storage)
                         .await?;
-                    transient = transient
-                        .delete(&attribute_key.into_key().into(), &storage)
-                        .await?;
-                    transient = transient
-                        .delete(&value_key.into_key().into(), &storage)
-                        .await?;
+                    transient = transient.delete(&value_key.into_key(), &storage).await?;
                 }
             }
         }
 
         for (key, entry) in history_entries {
-            transient = transient.insert(key.into(), entry, &storage).await?;
+            transient = transient.insert(key, entry, &storage).await?;
         }
 
         // Seal the whole batch with a single bottom-up persist into the
@@ -917,7 +913,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 store: store.clone(),
             });
             for (key, entry) in entries {
-                transient = transient.insert(key.into(), entry, &storage).await?;
+                transient = transient.insert(key, entry, &storage).await?;
             }
         }
         *self = transient.persist(delta)?;

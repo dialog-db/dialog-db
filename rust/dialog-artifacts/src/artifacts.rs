@@ -533,7 +533,7 @@ mod tests {
 
     use crate::helpers::generate_data;
     use crate::{
-        Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
+        Artifact, ArtifactSelector, ArtifactStoreMutExt, Artifacts, Attribute,
         DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
     };
 
