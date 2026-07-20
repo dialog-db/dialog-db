@@ -15,6 +15,7 @@
 //!     read_amplification -- --ignored --nocapture
 //! ```
 
+use crate::RevisionExt as _;
 use std::time::Instant;
 
 use anyhow::Result;
