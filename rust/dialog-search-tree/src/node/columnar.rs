@@ -24,15 +24,12 @@
 //! Every decode path is bounds-checked and returns an error on malformed
 //! input.
 
-use std::cmp::Ordering;
-
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::{
     Column, Component, DialogSearchTreeError, Schema,
     node::codec::{
-        KeyCursor, encode_keys, pack_varints, read_varint, unpack_varints, unpack_varints_all,
-        write_varint,
+        KeyCursor, encode_keys, pack_varints, read_varint, unpack_varints_all, write_varint,
     },
 };
 
@@ -48,16 +45,13 @@ fn malformed(message: &str) -> DialogSearchTreeError {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedColumnData)]
 pub enum ColumnData {
-    /// Front-coded arena: `(prefix, stream, restarts)` as in the flat codec,
-    /// but over just this component's bytes across all entries.
+    /// Front-coded arena: `(prefix, stream)` as in the flat codec, but over
+    /// just this component's bytes across all entries.
     Arena {
         /// Longest common prefix of this component across all entries.
         prefix: Vec<u8>,
         /// Front-coded per-entry stream of this component.
         stream: Vec<u8>,
-        /// Restart offsets into `stream`, LEB128 varint-packed. Small
-        /// segments keep these to one byte each rather than a fixed 4.
-        restarts: Vec<u8>,
     },
     /// Dictionary: a sorted table of distinct values (each length-prefixed)
     /// plus one varint index per entry into the table.
@@ -99,12 +93,8 @@ pub fn encode_columns(
 
         columns.push(match component.column {
             Column::Arena => {
-                let (prefix, stream, restarts) = encode_keys(&column_values);
-                ColumnData::Arena {
-                    prefix,
-                    stream,
-                    restarts: pack_varints(&restarts),
-                }
+                let (prefix, stream) = encode_keys(&column_values);
+                ColumnData::Arena { prefix, stream }
             }
             Column::Dictionary => encode_dictionary(&column_values),
         });
@@ -143,150 +133,6 @@ fn encode_dictionary(values: &[&[u8]]) -> ColumnData {
         table,
         table_ends: pack_varints(&table_ends),
         indices: pack_varints(&indices),
-    }
-}
-
-/// A fully decoded columnar leaf: every entry's components reconstructed
-/// into a row-major `Vec<Vec<u8>>`, ready for reconstruction and comparison.
-///
-/// Arena columns are cursor-decoded once; dictionary columns are index-
-/// resolved once. Reconstruction is then pure slicing. This trades one
-/// up-front decode pass for O(1) subsequent access, which suits the leaf's
-/// access pattern (a lookup or a scan touches most entries).
-pub struct ColumnarLeaf {
-    /// `rows[i][c]` is entry `i`'s component `c` bytes.
-    rows: Vec<Vec<Vec<u8>>>,
-}
-
-impl ColumnarLeaf {
-    /// Decodes all columns into rows. `columns[c]` is component `c`'s data;
-    /// `entry_count` is the leaf's entry count.
-    pub fn decode(
-        schema: &Schema,
-        columns: &[ColumnData],
-        entry_count: usize,
-    ) -> Result<Self, DialogSearchTreeError> {
-        let components = schema.components();
-        if columns.len() != components.len() {
-            return Err(malformed("Column count does not match the key schema"));
-        }
-
-        let mut rows: Vec<Vec<Vec<u8>>> = (0..entry_count).map(|_| Vec::new()).collect();
-
-        for (component, column) in components.iter().zip(columns) {
-            let decoded = decode_column(component, column, entry_count)?;
-            if decoded.len() != entry_count {
-                return Err(malformed("Column length does not match the entry count"));
-            }
-            for (row, value) in rows.iter_mut().zip(decoded) {
-                row.push(value);
-            }
-        }
-
-        Ok(Self { rows })
-    }
-
-    /// The number of entries in the leaf.
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    /// Whether the leaf has no entries.
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
-    /// The full key of entry `at`, reconstructed by concatenating its
-    /// components in schema order.
-    pub fn key(&self, at: usize) -> Result<Vec<u8>, DialogSearchTreeError> {
-        let row = self
-            .rows
-            .get(at)
-            .ok_or_else(|| malformed("Columnar entry out of range"))?;
-        Ok(row.concat())
-    }
-
-    /// Compares `probe` against entry `at`'s key, walking components without
-    /// concatenating either side. Equivalent to comparing the concatenated
-    /// keys because component boundaries partition the byte string.
-    pub fn compare(&self, at: usize, probe: &[u8]) -> Result<Ordering, DialogSearchTreeError> {
-        let row = self
-            .rows
-            .get(at)
-            .ok_or_else(|| malformed("Columnar entry out of range"))?;
-        let mut probe_at = 0usize;
-        for component in row {
-            let end = (probe_at + component.len()).min(probe.len());
-            let probe_slice = &probe[probe_at..end];
-            match component.as_slice().cmp(probe_slice) {
-                Ordering::Equal => probe_at = end,
-                other => return Ok(other),
-            }
-        }
-        // All components matched their probe slices; the longer key sorts
-        // after. If the probe still has bytes, it is longer.
-        Ok(if probe_at < probe.len() {
-            Ordering::Less
-        } else {
-            Ordering::Equal
-        })
-    }
-
-    /// Position of the entry whose key equals `probe`, or `None`.
-    /// Binary-searches over the (sorted) entries via component comparison.
-    pub fn find(&self, probe: &[u8]) -> Result<Option<usize>, DialogSearchTreeError> {
-        let (mut low, mut high) = (0usize, self.len());
-        while low < high {
-            let middle = (low + high) / 2;
-            match self.compare(middle, probe)? {
-                Ordering::Equal => return Ok(Some(middle)),
-                Ordering::Less => low = middle + 1,
-                Ordering::Greater => high = middle,
-            }
-        }
-        Ok(None)
-    }
-}
-
-/// Decodes one column into per-entry component byte vectors.
-fn decode_column(
-    component: &Component,
-    column: &ColumnData,
-    entry_count: usize,
-) -> Result<Vec<Vec<u8>>, DialogSearchTreeError> {
-    match (component.column, column) {
-        (Column::Arena, ColumnData::Arena { prefix, stream, .. }) => {
-            let mut cursor = KeyCursor::new(prefix, stream, 0);
-            let mut out = Vec::with_capacity(entry_count);
-            for _ in 0..entry_count {
-                cursor.advance()?;
-                out.push(cursor.key().to_vec());
-            }
-            Ok(out)
-        }
-        (
-            Column::Dictionary,
-            ColumnData::Dictionary {
-                table,
-                table_ends,
-                indices,
-            },
-        ) => {
-            let values = resolve_dictionary(table, table_ends)?;
-            let indices = unpack_varints(indices, entry_count)?;
-            indices
-                .iter()
-                .map(|&index| {
-                    values
-                        .get(index as usize)
-                        .map(|value| value.to_vec())
-                        .ok_or_else(|| malformed("Dictionary index out of range"))
-                })
-                .collect()
-        }
-        _ => Err(malformed(
-            "Column class does not match the schema component",
-        )),
     }
 }
 
@@ -342,11 +188,7 @@ pub enum ColumnSlices<'a> {
 /// Borrows the byte slices of an archived column for streaming decode.
 pub fn archived_column_slices(column: &ArchivedColumnData) -> ColumnSlices<'_> {
     match column {
-        ArchivedColumnData::Arena {
-            prefix,
-            stream,
-            restarts: _,
-        } => ColumnSlices::Arena {
+        ArchivedColumnData::Arena { prefix, stream } => ColumnSlices::Arena {
             prefix: prefix.as_ref(),
             stream: stream.as_ref(),
         },
@@ -442,10 +284,11 @@ impl<'a> ColumnReader<'a> {
 /// A streaming decoder over a columnar leaf that reconstructs each entry's full
 /// key into a single reused buffer, borrowing the archived columns.
 ///
-/// This is the scan hot path. Unlike [`ColumnarLeaf`] it never materializes the
-/// row-major `Vec<Vec<Vec<u8>>>` nor deserializes the columns to owned form: it
-/// borrows the archived arena/dictionary bytes and assembles one key at a time
-/// into `key_buf`, which is cleared and reused per entry. So a full scan of a
+/// This is the ONLY decoded-leaf form: every read path (scans, point
+/// lookups, first/last key, the per-buffer key memo) is built on it. It
+/// never materializes rows nor deserializes columns to owned form: it
+/// borrows the archived arena/dictionary bytes and assembles one key at a
+/// time into `key_buf`, cleared and reused per entry. So a full pass over a
 /// leaf allocates one buffer (plus the small per-dictionary-column table of
 /// borrowed slices), not `entries × components` vectors.
 pub struct StreamingLeaf<'a> {
@@ -503,11 +346,44 @@ mod tests {
 
     use anyhow::Result;
 
-    use super::{ColumnData, ColumnarLeaf, encode_columns, encode_dictionary};
+    use super::{ColumnData, ColumnSlices, StreamingLeaf, encode_columns, encode_dictionary};
     use crate::{Component, Schema};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// Borrows an owned test column as the slices the streaming decoder
+    /// consumes.
+    fn column_slices(column: &ColumnData) -> ColumnSlices<'_> {
+        match column {
+            ColumnData::Arena { prefix, stream } => ColumnSlices::Arena { prefix, stream },
+            ColumnData::Dictionary {
+                table,
+                table_ends,
+                indices,
+            } => ColumnSlices::Dictionary {
+                table,
+                table_ends,
+                indices,
+            },
+        }
+    }
+
+    /// Materializes every key of an encoded leaf through the streaming
+    /// decoder (the production read path).
+    fn keys_of(
+        schema: &Schema,
+        columns: &[ColumnData],
+        count: usize,
+    ) -> Result<Vec<Vec<u8>>, crate::DialogSearchTreeError> {
+        let slices: Vec<ColumnSlices<'_>> = columns.iter().map(column_slices).collect();
+        let mut leaf = StreamingLeaf::new(schema, &slices, count)?;
+        let mut out = Vec::with_capacity(count);
+        while let Some((_, key)) = leaf.next_key()? {
+            out.push(key.to_vec());
+        }
+        Ok(out)
+    }
 
     /// A dictionary column stores each distinct value once, in sorted order,
     /// regardless of how often or where it repeats, and indices resolve back
@@ -593,12 +469,8 @@ mod tests {
         let rows: Vec<Vec<&[u8]>> = keys.iter().map(|k| vec![&k[..2], &k[2..]]).collect();
 
         let columns = encode_columns(&schema, &rows)?;
-        let leaf = ColumnarLeaf::decode(&schema, &columns, keys.len())?;
-
-        assert_eq!(leaf.len(), keys.len());
-        for (index, key) in keys.iter().enumerate() {
-            assert_eq!(&leaf.key(index)?, key, "reconstructed key {index}");
-        }
+        let decoded = keys_of(&schema, &columns, keys.len())?;
+        assert_eq!(decoded, keys, "every key reconstructs identically");
 
         // The attribute dictionary stored "age"/"name" once each despite
         // three "age" and two "name" occurrences.
@@ -635,46 +507,11 @@ mod tests {
             .map(|k| vec![&k[0..1], &k[1..3], &k[3..4]])
             .collect();
         let columns = encode_columns(&schema, &rows)?;
-        let leaf = ColumnarLeaf::decode(&schema, &columns, keys.len())?;
-
-        for (index, key) in keys.iter().enumerate() {
-            assert_eq!(&leaf.key(index)?, key, "reconstruct {index}");
-            assert_eq!(leaf.find(key)?, Some(index), "find {key:?}");
-        }
-        Ok(())
-    }
-
-    /// `find` locates present keys and rejects absent ones, and `compare`
-    /// orders keys exactly as byte comparison of the concatenation does.
-    #[dialog_common::test]
-    async fn it_finds_and_orders_by_component_comparison() -> Result<()> {
-        const PARTS: &[Component] = &[Component::arena(2), Component::dictionary_var()];
-        let schema = Schema::new(PARTS);
-
-        let keys: Vec<Vec<u8>> = vec![
-            [b"E1".as_slice(), b"age"].concat(),
-            [b"E1".as_slice(), b"name"].concat(),
-            [b"E2".as_slice(), b"age"].concat(),
-        ];
-        let rows: Vec<Vec<&[u8]>> = keys.iter().map(|k| vec![&k[..2], &k[2..]]).collect();
-        let columns = encode_columns(&schema, &rows)?;
-        let leaf = ColumnarLeaf::decode(&schema, &columns, keys.len())?;
-
-        for (index, key) in keys.iter().enumerate() {
-            assert_eq!(leaf.find(key)?, Some(index), "find {index}");
-        }
-        assert_eq!(leaf.find(b"E1zzz")?, None, "absent key between entries");
-        assert_eq!(leaf.find(b"E9")?, None, "absent key past the end");
-        assert_eq!(leaf.find(b"A0")?, None, "absent key before the start");
-
-        // Component comparison matches concatenated byte comparison.
-        use std::cmp::Ordering;
-        assert_eq!(leaf.compare(0, &keys[0])?, Ordering::Equal);
-        assert_eq!(leaf.compare(0, b"E1zz")?, Ordering::Less, "entry < probe");
+        let decoded = keys_of(&schema, &columns, keys.len())?;
         assert_eq!(
-            leaf.compare(2, b"E1zz")?,
-            Ordering::Greater,
-            "entry > probe"
+            decoded,
+            keys.iter().map(|k| k.to_vec()).collect::<Vec<_>>(),
+            "every key reconstructs identically"
         );
         Ok(())
     }

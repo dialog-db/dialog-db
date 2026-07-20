@@ -5,9 +5,9 @@ mod archive;
 
 pub(crate) mod codec;
 
-/// Front-codes a sorted key list into `(prefix, stream, restarts)`. Exposed
-/// for benchmarking the whole-key encoding against the columnar columns.
-pub fn encode_keys_public<K: AsRef<[u8]>>(keys: &[K]) -> (Vec<u8>, Vec<u8>, Vec<u32>) {
+/// Front-codes a sorted key list into `(prefix, stream)`. Exposed for
+/// benchmarking the whole-key encoding against the columnar columns.
+pub fn encode_keys_public<K: AsRef<[u8]>>(keys: &[K]) -> (Vec<u8>, Vec<u8>) {
     codec::encode_keys(keys)
 }
 
