@@ -49,10 +49,9 @@
 use dialog_storage::Blake3Hash;
 
 use crate::history::{EDITION_LENGTH, ORIGIN_LENGTH, VERSION_LENGTH, Version};
-use crate::{
-    ATTRIBUTE_LENGTH, Attribute, ENTITY_LENGTH, ENTITY_RAW_HEAD, Entity, HASH_SIZE, KEY_LENGTH,
-    Key, KeyBytes, MAXIMUM_KEY, MINIMUM_KEY, TAG_LENGTH, ValueDataType, make_reference,
-};
+use crate::key::varkey::{KeyParts, ValuePayload, build_key};
+use crate::artifacts::ordkey::encode_bytes;
+use crate::{Attribute, Entity, Key, ValueDataType};
 
 /// The leading tag byte of history region keys
 pub const HISTORY_KEY_TAG: u8 = 3;
@@ -68,24 +67,9 @@ pub const HISTORY_KEY_TAG: u8 = 3;
 /// proportional to the coverage since base, not the write churn.
 pub const COVERAGE_KEY_TAG: u8 = 5;
 
-const ORIGIN_OFFSET: usize = TAG_LENGTH;
-const EDITION_OFFSET: usize = ORIGIN_OFFSET + ORIGIN_LENGTH;
-const ENTITY_OFFSET: usize = EDITION_OFFSET + EDITION_LENGTH;
-const ATTRIBUTE_OFFSET: usize = ENTITY_OFFSET + ENTITY_RAW_HEAD;
-const HASH_OFFSET: usize = ATTRIBUTE_OFFSET + HISTORY_ATTRIBUTE_HEAD;
-
-/// Number of leading attribute bytes stored raw (and therefore
-/// order-preserving) in a history key: whatever the fixed key width has
-/// left over. Attributes no longer than this appear in the key verbatim
-/// (they are zero-padded, so the match is exact); longer ones share their
-/// head and are disambiguated by the trailing whole-key hash.
-pub const HISTORY_ATTRIBUTE_HEAD: usize =
-    KEY_LENGTH - TAG_LENGTH - VERSION_LENGTH - ENTITY_RAW_HEAD - HASH_SIZE;
-
-/// The full logical history key, before truncation: every component raw.
-/// This is what the trailing hash covers.
-const PREIMAGE_LENGTH: usize =
-    TAG_LENGTH + VERSION_LENGTH + ENTITY_LENGTH + ATTRIBUTE_LENGTH + 1 + HASH_SIZE;
+/// Byte offset of the version prefix within a history/coverage key: it
+/// follows the single tag byte.
+const VERSION_OFFSET: usize = 1;
 
 /// The key at which the record of a claim on `(of, the)` with the given
 /// value type and reference, produced by the revision identified by
@@ -126,6 +110,43 @@ pub fn coverage_key(
     )
 }
 
+/// The version bytes as they appear in a history/coverage key:
+/// **origin-major, edition-minor**, which is the reverse of
+/// [`Version::key_bytes`].
+///
+/// This clustering is load-bearing: one writer's records occupy a
+/// contiguous span ordered by edition, so a graft merge adopts a peer's log
+/// as a range rather than gathering scattered entries. Ordering by edition
+/// first would interleave every writer.
+fn version_prefix(version: &Version) -> [u8; VERSION_LENGTH] {
+    let mut bytes = [0u8; VERSION_LENGTH];
+    bytes[..ORIGIN_LENGTH].copy_from_slice(version.origin.key_bytes());
+    bytes[ORIGIN_LENGTH..].copy_from_slice(&version.edition.key_bytes());
+    bytes
+}
+
+/// The parts of a history/coverage key. Every component is lossless: unlike
+/// the pre-M3 fixed-width history key (which truncated the entity and
+/// attribute and leaned on a trailing whole-key hash to disambiguate), a
+/// record reconstructs from its key alone.
+fn tagged_parts(
+    tag: u8,
+    version: &Version,
+    of: &Entity,
+    the: &Attribute,
+    value_type: ValueDataType,
+    value: ValuePayload,
+) -> KeyParts {
+    KeyParts {
+        tag,
+        entity: of.as_str().as_bytes().to_vec(),
+        attribute: the.as_str().as_bytes().to_vec(),
+        value_type,
+        value,
+        version: Some(version_prefix(version)),
+    }
+}
+
 fn tagged_key(
     tag: u8,
     version: &Version,
@@ -134,73 +155,60 @@ fn tagged_key(
     value_type: ValueDataType,
     value_reference: &Blake3Hash,
 ) -> Key {
-    let entity = of.key_bytes();
-    let attribute = the.key_bytes();
-    let version_bytes = version.key_bytes();
-
-    // Hash the untruncated logical key, so that whatever the raw head
-    // cannot distinguish (entity tails, long attribute tails, the value)
-    // still yields a unique stored key.
-    let mut preimage = [0u8; PREIMAGE_LENGTH];
-    preimage[0] = tag;
-    let mut at = TAG_LENGTH;
-    preimage[at..at + VERSION_LENGTH].copy_from_slice(&version_bytes);
-    at += VERSION_LENGTH;
-    preimage[at..at + ENTITY_LENGTH].copy_from_slice(entity);
-    at += ENTITY_LENGTH;
-    preimage[at..at + ATTRIBUTE_LENGTH].copy_from_slice(attribute);
-    at += ATTRIBUTE_LENGTH;
-    preimage[at] = value_type.into();
-    at += 1;
-    preimage[at..at + HASH_SIZE].copy_from_slice(value_reference);
-
-    let mut bytes = MINIMUM_KEY;
-    bytes[0] = tag;
-    bytes[ORIGIN_OFFSET..EDITION_OFFSET].copy_from_slice(version.origin.key_bytes());
-    bytes[EDITION_OFFSET..ENTITY_OFFSET].copy_from_slice(&version.edition.key_bytes());
-    bytes[ENTITY_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&entity[..ENTITY_RAW_HEAD]);
-    bytes[ATTRIBUTE_OFFSET..HASH_OFFSET].copy_from_slice(&attribute[..HISTORY_ATTRIBUTE_HEAD]);
-    bytes[HASH_OFFSET..KEY_LENGTH].copy_from_slice(&make_reference(preimage));
-    Key::from(bytes)
+    let parts = tagged_parts(
+        tag,
+        version,
+        of,
+        the,
+        value_type,
+        ValuePayload::Reference(value_reference.as_ref().to_vec()),
+    );
+    Key::from(build_key(&parts))
 }
 
 /// The inclusive bounds of the key range covering every history record of
 /// claims on `(of, the)` produced by the revision identified by `version`.
 ///
-/// The bounds span the raw entity/attribute heads, so the range is a tight
-/// superset: an attribute longer than [`HISTORY_ATTRIBUTE_HEAD`] or another
-/// entity sharing the same head falls inside it. Readers must re-check the
-/// stored record's full entity and attribute.
+/// Every component is lossless now, so the range is exact on
+/// `(version, entity, attribute)`: it brackets the value tail alone. Readers
+/// no longer need to re-check the entity and attribute of each hit.
 pub fn history_claim_range(version: &Version, of: &Entity, the: &Attribute) -> (Key, Key) {
-    let mut min = MINIMUM_KEY;
-    let mut max = MAXIMUM_KEY;
-    for bytes in [&mut min, &mut max] {
-        bytes[0] = HISTORY_KEY_TAG;
-        bytes[ORIGIN_OFFSET..EDITION_OFFSET].copy_from_slice(version.origin.key_bytes());
-        bytes[EDITION_OFFSET..ENTITY_OFFSET].copy_from_slice(&version.edition.key_bytes());
-        bytes[ENTITY_OFFSET..ATTRIBUTE_OFFSET].copy_from_slice(&of.key_bytes()[..ENTITY_RAW_HEAD]);
-        bytes[ATTRIBUTE_OFFSET..HASH_OFFSET]
-            .copy_from_slice(&the.key_bytes()[..HISTORY_ATTRIBUTE_HEAD]);
-    }
+    let mut min = Vec::new();
+    min.push(HISTORY_KEY_TAG);
+    min.extend_from_slice(&version_prefix(version));
+    encode_bytes(of.as_str().as_bytes(), &mut min);
+    encode_bytes(the.as_str().as_bytes(), &mut min);
+    // The value tail follows; bracket it between the smallest and largest
+    // possible tails so the range spans exactly this claim's records.
+    let mut max = min.clone();
+    min.push(u8::MIN);
+    max.push(u8::MAX);
     (Key::from(min), Key::from(max))
 }
 
 /// The inclusive bounds of the key range covering the entire history region
 pub fn history_region_range() -> (Key, Key) {
-    let mut min = MINIMUM_KEY;
-    let mut max = MAXIMUM_KEY;
-    min[0] = HISTORY_KEY_TAG;
-    max[0] = HISTORY_KEY_TAG;
-    (Key::from(min), Key::from(max))
+    (
+        Key::from(vec![HISTORY_KEY_TAG]),
+        Key::from(vec![HISTORY_KEY_TAG, u8::MAX]),
+    )
 }
 
 /// The [`Version`] component of a history region key
-pub fn history_key_version(key: &KeyBytes) -> Result<Version, crate::DialogArtifactsError> {
+pub fn history_key_version(key: &Key) -> Result<Version, crate::DialogArtifactsError> {
     use crate::history::{Edition, Origin};
+    let bytes: &[u8] = key.as_ref();
+    let at = VERSION_OFFSET;
+    if bytes.len() < at + VERSION_LENGTH {
+        return Err(crate::DialogArtifactsError::InvalidKey(
+            "history key is too short to carry a version".to_string(),
+        ));
+    }
+    // Origin-major, edition-minor: the reverse of `Version::key_bytes`.
     let mut origin = [0u8; ORIGIN_LENGTH];
-    origin.copy_from_slice(&key[ORIGIN_OFFSET..EDITION_OFFSET]);
+    origin.copy_from_slice(&bytes[at..at + ORIGIN_LENGTH]);
     let mut edition = [0u8; EDITION_LENGTH];
-    edition.copy_from_slice(&key[EDITION_OFFSET..ENTITY_OFFSET]);
+    edition.copy_from_slice(&bytes[at + ORIGIN_LENGTH..at + VERSION_LENGTH]);
     Ok(Version::new(
         Origin::from(origin),
         Edition::from_key_bytes(edition),
@@ -237,7 +245,7 @@ mod tests {
         let early_key = history_key(&early, &of, &the, value.data_type(), &value.to_reference());
         let late_key = history_key(&late, &of, &the, value.data_type(), &value.to_reference());
         assert_eq!(
-            history_key_version(&KeyBytes::from(early_key.clone()))?,
+            history_key_version(&Key::from(early_key.clone()))?,
             early
         );
         assert!(
