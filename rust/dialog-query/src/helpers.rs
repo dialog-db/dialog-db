@@ -768,7 +768,15 @@ where
 
             index.push((entity, status, assignee));
         }
-        transaction.commit().perform(&self.operator).await?;
+        // Import canonicalizes: the imported tree is the deterministic form of
+        // its fact set, so two imports of the same CSV produce the same root
+        // and a measurement is not reading a shape that depends on where the
+        // buffers happened to be when the import ended.
+        transaction
+            .commit()
+            .canonicalize()
+            .perform(&self.operator)
+            .await?;
         Ok(index)
     }
 
