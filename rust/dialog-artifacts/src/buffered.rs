@@ -289,7 +289,7 @@ mod tests {
 
     use anyhow::Result;
     use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage};
+    use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage, StorageBackend as _};
     use futures_util::stream;
 
     use super::apply_buffered;
@@ -521,6 +521,80 @@ mod tests {
             buffered.root(),
             "the buffered path must produce the byte-identical canonical root"
         );
+        Ok(())
+    }
+
+    /// A single batch that asserts a fact and retracts it again must cancel
+    /// through the buffer: the retract sees the same-batch assert on the
+    /// write target, so reads find nothing afterward, and with
+    /// canonicalization the root is identical to the canonical path's root
+    /// for the same batch. Covers both the flushed and the still-buffered
+    /// form; the deeper cross-level variant is not reachable through
+    /// `apply_buffered` (it opens the hitchhiker with default buffer sizes,
+    /// so a two-instruction batch never cascades) and is pinned at the
+    /// hitchhiker level instead.
+    #[dialog_common::test]
+    async fn it_cancels_a_same_batch_assert_and_retract_through_the_buffer() -> Result<()> {
+        let the = "test/field".parse().unwrap();
+        let of = "user:1".parse().unwrap();
+
+        for canonicalize in [true, false] {
+            let mut buffered_store = store();
+            let mut tree = ArtifactTree::empty();
+            let mut delta = Delta::zero();
+            let changed = apply_buffered(
+                &mut tree,
+                &mut buffered_store,
+                &mut delta,
+                None,
+                stream::iter(vec![
+                    assert_of("user:1", "resident"),
+                    retract_of("user:1", "resident"),
+                ]),
+                canonicalize,
+            )
+            .await?;
+            for (hash, buffer) in delta.flush() {
+                buffered_store
+                    .set(*hash.as_bytes(), buffer.as_ref().to_vec())
+                    .await?;
+            }
+
+            assert!(
+                changed,
+                "canonicalize {canonicalize}: the batch wrote and unwrote, which is a change"
+            );
+            assert!(
+                tree.select_data(buffered_store.clone(), &of, &the)
+                    .await?
+                    .is_empty(),
+                "canonicalize {canonicalize}: the retract must cancel the same-batch assert"
+            );
+
+            if canonicalize {
+                // The same batch through the canonical path on a fresh tree
+                // must land on the identical root.
+                let mut direct_store = store();
+                let mut direct = ArtifactTree::empty();
+                let mut direct_delta = Delta::zero();
+                direct
+                    .apply_versioned(
+                        &mut direct_store,
+                        &mut direct_delta,
+                        None,
+                        stream::iter(vec![
+                            assert_of("user:1", "resident"),
+                            retract_of("user:1", "resident"),
+                        ]),
+                    )
+                    .await?;
+                assert_eq!(
+                    tree.root(),
+                    direct.root(),
+                    "the cancelling pair must land on the canonical root"
+                );
+            }
+        }
         Ok(())
     }
 }

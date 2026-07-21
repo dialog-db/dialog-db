@@ -2323,10 +2323,14 @@ where
             // built, and regrouping discards the nodes that held them. Hand
             // them back so the caller re-attaches them to a node that covers
             // the run; dropping them here loses every write still buffered at
-            // a seam.
-            let mut novelty = left.novelty;
+            // a seam. Deepest first, as in `fuse_subtrees`: the seam ops come
+            // from one level further down and are older than the two joined
+            // nodes' own, so the stable sort here and at every re-attachment
+            // keeps the newest op for a key last. The two joined nodes cover
+            // disjoint ranges, so their relative order carries no precedence.
+            let mut novelty = seam_novelty;
+            novelty.extend(left.novelty);
             novelty.extend(right.novelty);
-            novelty.extend(seam_novelty);
             novelty.sort_by(|a, b| a.key.cmp(&b.key));
 
             Ok((
@@ -4495,7 +4499,8 @@ mod buffer_edit_interaction_tests {
     };
     use crate::{
         ArchivedNodeBody, Buffer, Change, ContentAddressedStorage, Delta, Entry, HitchhikerTree,
-        NoveltyEntry, PersistentNode, PersistentTree, Piece, TransientTree, into_owned, tree_spec,
+        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Piece, TransientTree, into_owned,
+        tree_spec,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -5725,6 +5730,95 @@ mod buffer_edit_interaction_tests {
             "the parked op must survive canonicalize"
         );
         assert_eq!(canonical.get(&a, &storage).await?, Some(a.to_vec()));
+        Ok(())
+    }
+
+    /// For a key buffered at two depths of a stitch source the SHALLOWEST op
+    /// is the newest: writes land in the root buffer and a flush only moves
+    /// ops downward, so deeper always means older. `concat_levels` lifts the
+    /// buffers off the nodes it dismantles at the seam, and the ops lifted by
+    /// its recursion come from one level further down than the two joined
+    /// nodes' own buffers. Re-attaching them after the joined nodes' own ops
+    /// lets the stable re-sort leave the deeper, older op to win a same-key
+    /// collision, resurrecting a superseded value in the stitched tree.
+    #[dialog_common::test]
+    async fn it_resolves_the_shallowest_op_across_a_stitch_seam() -> Result<()> {
+        let spec = tree_spec![
+            [                   ..p]
+            [        ..h,       ..p]
+            [..d, ..h, ..l, ..p]
+        ]
+        .build(test_storage())
+        .await
+        .expect("the fixture spec is valid");
+        let mut storage = spec.storage().clone();
+        let base = SpecTree::from_hash(spec.tree().root().clone());
+
+        // The probe lives under the RIGHTMOST mid-level index, the spine the
+        // stitch seam below dismantles. The far key lives under the other
+        // mid-level index and exists only to overflow the one-op root buffer,
+        // cascading the probe's first op down into the mid node covering it.
+        let probe = encode_key(b"k", 1, 1);
+        let far = encode_key(b"b", 1, 1);
+
+        let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(1);
+        buffered = buffered.insert(probe, vec![1], &storage).await?;
+        buffered = buffered.insert(far, vec![9], &storage).await?;
+        buffered = buffered.insert(probe, vec![2], &storage).await?;
+        let mut delta = Delta::zero();
+        let root = buffered.persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        // The fixture must genuinely hold the probe's ops at two levels: the
+        // newer op in the root buffer, the older one sealed into the rightmost
+        // mid-level index. A fixture with both ops at one depth pins nothing.
+        let root_node = load_spec_node(&storage, &root).await?;
+        assert!(
+            sealed_novelty(&root_node)?
+                .iter()
+                .any(|entry| entry.key == probe.to_vec() && entry.op == NoveltyOp::Assert(vec![2])),
+            "fixture: the newer op must sit in the root buffer"
+        );
+        let links = root_node.as_index()?.links()?;
+        let seam_child = links.last().expect("the fixture root has children");
+        let seam_node = load_spec_node(&storage, &seam_child.node).await?;
+        assert!(
+            sealed_novelty(&seam_node)?
+                .iter()
+                .any(|entry| entry.key == probe.to_vec() && entry.op == NoveltyOp::Assert(vec![1])),
+            "fixture: the older op must sit in the rightmost mid-level buffer"
+        );
+
+        // Stitch the whole buffered source next to a run of entries past its
+        // last key: the join runs down the source's rightmost spine, lifting
+        // both the root's buffer and the mid node's seam buffer.
+        let source: SpecTree = PersistentTree::from_hash(root);
+        let after = encode_key(b"t", 1, 1);
+        let stitched = TransientTree::stitch(
+            vec![
+                Piece::Range {
+                    source: &source,
+                    range: [0u8; 8]..=[0xffu8; 8],
+                },
+                Piece::Entries(vec![Entry {
+                    key: after,
+                    value: vec![7],
+                }]),
+            ],
+            &storage,
+        )
+        .await?;
+        let mut delta = Delta::zero();
+        let stitched = stitched.persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            stitched.get(&probe, &storage).await?,
+            Some(vec![2]),
+            "the stitch must resolve the shallower (newer) op at the seam"
+        );
+        assert_eq!(stitched.get(&far, &storage).await?, Some(vec![9]));
+        assert_eq!(stitched.get(&after, &storage).await?, Some(vec![7]));
         Ok(())
     }
 }

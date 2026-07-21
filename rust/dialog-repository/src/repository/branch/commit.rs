@@ -771,6 +771,38 @@ mod history_tests {
         Ok(())
     }
 
+    /// A commit whose only instructions retract facts that were never
+    /// asserted is a no-op end to end: retract-of-absent changes no index,
+    /// so the branch keeps its revision and mints no new edition.
+    #[dialog_common::test]
+    async fn it_keeps_the_revision_when_a_commit_only_retracts_absent_facts() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let first = branch
+            .commit(stream::iter(vec![Instruction::Assert(title(
+                "post:1", "Hej",
+            ))]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let unchanged = branch
+            .commit(stream::iter(vec![Instruction::Retract(title(
+                "post:9", "Never",
+            ))]))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            unchanged, first,
+            "a commit that only retracts absent facts mints no revision"
+        );
+        assert_eq!(branch.revision(), Some(first.clone()));
+
+        Ok(())
+    }
+
     /// A no-op commit from a stale handle must not silently succeed: the
     /// instructions were judged no-op against a snapshot another writer
     /// has since superseded, so "nothing to do" may be wrong at the
