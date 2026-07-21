@@ -807,7 +807,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_resolves_only_latest_name_target_via_name_concept() -> anyhow::Result<()> {
-            /// The `dialog.meta/named-entity` attribute — the entity a
+            /// The `app.meta/named-entity` attribute — the entity a
             /// name currently points at. Cardinality `one` (the derive
             /// default), so re-pointing a name supersedes the prior
             /// claim instead of accumulating.

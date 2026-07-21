@@ -10,15 +10,53 @@
 //! The surface is [`Blob`] (the noun) plus a [`BlobArchive`] target that a
 //! [`Branch`] converts into:
 //!
-//! ```ignore
+//! ```no_run
+//! # use dialog_capability::{Fork, Provider};
+//! # use dialog_effects::archive::{Get, Import, Put};
+//! # use dialog_effects::authority::{Attest, Identify};
+//! # use dialog_effects::blob::{
+//! #     BlobError, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
+//! # };
+//! # use dialog_effects::memory::{Publish, Resolve};
+//! # use dialog_repository::{Blob, Branch, CommitError, RemoteSite};
+//! # async fn example<Env>(
+//! #     branch: &Branch,
+//! #     env: &Env,
+//! #     entity: dialog_artifacts::Entity,
+//! #     range: ByteRange,
+//! #     chunks: futures_util::stream::Iter<std::vec::IntoIter<Result<Vec<u8>, BlobError>>>,
+//! # ) -> Result<(), CommitError>
+//! # where
+//! #     Env: Provider<Get>
+//! #         + Provider<Put>
+//! #         + Provider<Import>
+//! #         + Provider<Resolve>
+//! #         + Provider<Publish>
+//! #         + Provider<Identify>
+//! #         + Provider<Attest>
+//! #         + Provider<BlobRead>
+//! #         + Provider<BlobWrite>
+//! #         + Provider<BlobImport>
+//! #         + Provider<Fork<RemoteSite, Get>>
+//! #         + Provider<Fork<RemoteSite, Resolve>>
+//! #         + Provider<Fork<RemoteSite, BlobRead>>
+//! #         + dialog_common::ConditionalSync
+//! #         + 'static,
+//! # {
 //! // read (whole, or a slice); local-first with remote hydration + cache
-//! let bytes = Blob::from(entity).read(branch.into()).perform(env).await?;
-//! let head  = Blob::from(entity).slice(range).read(branch.into()).perform(env).await?;
-//! let size  = Blob::from(entity).size(branch.into()).perform(env).await?;   // index-only
+//! let bytes = Blob::from(entity.clone()).read(branch.into()).perform(env).await?;
+//! let head = Blob::from(entity.clone())
+//!     .slice(range)
+//!     .read(branch.into())
+//!     .perform(env)
+//!     .await?;
+//! let size = Blob::from(entity).size(branch.into()).perform(env).await?; // index-only
 //!
 //! // write: stream chunks in, get the blob's entity back (recorded in the
 //! // index so `push` replicates it)
 //! let entity = Blob::import(chunks).write(branch.into()).perform(env).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::RevisionExt as _;
@@ -371,11 +409,20 @@ where
         let head = branch.revision.checkpoint();
         let base_revision = branch.revision();
 
-        let remote = match branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => {
-                branch.subject().remote(name).load().perform(env).await.ok()
-            }
-            _ => None,
+        // Same remote-fallback selection as `commit`: the first remote among
+        // ALL tracked upstreams, not only a remote default — a branch whose
+        // default upstream is local but which tracks a remote must still be
+        // able to hydrate blocks it holds by reference.
+        let upstreams = branch.upstreams();
+        let remote = match upstreams.remote_name() {
+            Some(name) => branch
+                .subject()
+                .remote(name.to_string())
+                .load()
+                .perform(env)
+                .await
+                .ok(),
+            None => None,
         };
         let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
@@ -413,23 +460,12 @@ where
             None => Vec::new(),
         };
         let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
+        let lineage = crate::lineage_of(branch.of(), &profile, branch.name());
         let mut revision = match base_revision {
-            Some(base) => base.advance(
-                TreeReference::default(),
-                branch.of().clone(),
-                branch.name(),
-                issuer,
-                profile,
-            ),
-            None => Revision::new(
-                TreeReference::default(),
-                branch.of().clone(),
-                branch.name(),
-                issuer,
-                profile,
-            ),
+            Some(base) => base.advance(TreeReference::default(), lineage.as_str(), issuer),
+            None => Revision::new(TreeReference::default(), lineage.as_str(), issuer),
         };
-        let mut record = revision.record(parent.into_iter().collect(), skips);
+        let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
         // The record's key carries its value through the tree's own
         // inline-vs-spill threshold, so read it off the tree rather than

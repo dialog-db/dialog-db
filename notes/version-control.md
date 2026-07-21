@@ -92,12 +92,14 @@ Alice's `A:2` (edition 2) and Bob's `B:1` (edition 1) are ordered neither way by
 The single most load-bearing derived structure. A replica's **watermark** (in code: `Context`) summarizes everything its head has ever incorporated:
 
 ```text
-watermark = { origin -> highest edition seen from that origin }
+watermark = { origin -> (highest edition seen, revision count seen) }
 
-seen(version)  exactly when  version.edition <= watermark[version.origin]
+seen(version)  exactly when  version.edition <= watermark[version.origin].edition
 ```
 
-Why one number per writer suffices, exactly and not approximately: each origin writes sequentially, each revision building on its own previous one, so the revisions you have seen from any origin are always a prefix of that origin's history. Seen their 7 means seen their 0 through 6. The table has one entry per writer, never grows with edits, and answers "have I seen this change?" in one lookup.
+Why one entry per writer suffices, exactly and not approximately: each origin writes sequentially, each revision building on its own previous one, so the revisions you have seen from any origin are always a prefix of that origin's history. Seen their 7 means seen their 0 through 6. The table has one entry per writer, never grows with edits, and answers "have I seen this change?" in one lookup.
+
+Each entry carries a second number beside the edition: **how many of that origin's revisions the ancestry actually contains**. Editions are Lamport depths, not write counts — an origin's first commit atop a deep adopted history mints an edition near the whole depth — so the count is what makes delta-size estimates exact: prefixes of one origin's chain are nested, so the difference of two counts is precisely the number of revisions one side has that the other lacks. Verification bounds it (a count can never exceed `edition + 1`), so a hostile inflated count is refused with the head.
 
 Watermarks also order replicas by knowledge: if every entry of watermark P is at or below the corresponding entry of watermark Q, then Q has seen everything P has (in code: `Q.includes(P)`). The pull scenarios below are gated entirely on this comparison.
 
@@ -111,7 +113,7 @@ A test pins that all three agree (`it_publishes_the_watermark_with_the_head`, `i
 
 ## What a revision is made of
 
-**The head** is the small signed value published to the branch cell: repository DID, branch name, issuer (session key) and authority (profile) identities, the tree root, the parent tree roots, the edition, the watermark, and the issuer's signature over all of it. A replica verifies the signature **before anything else happens** with a head it did not mint: a forged or tampered head is rejected before a single block of its tree is read. Pull is the trust boundary (`it_refuses_to_pull_a_forged_head`).
+**The head** is the small signed value published to the branch cell: the branch identifier, the issuer (session key) DID, the tree root, the edition, the watermark, and the issuer's signature over all of it. The branch identifier is the content-derived branch entity — one opaque hash folding the profile, the repository, and the branch name — NOT the name itself: the name is whatever someone privately called their branch and no peer needs it, so it never travels (though a guessable name remains enumerable from the hash by anyone holding the public DIDs). Those two identity fields are the whole story: the origin derives from exactly `(branch identifier, issuer)`, so the head carries neither the repository DID nor the profile DID separately — the identifier already commits to both, and the in-tree record carries the attribution readably. An origin is never carried as a field, always recomputed, so a hostile issuer cannot mint into anyone else's origin. Parent edges live in the in-tree record, not on the head. A replica verifies the signature **before anything else happens** with a head it did not mint: a forged or tampered head is rejected before a single block of its tree is read. Pull is the trust boundary (`it_refuses_to_pull_a_forged_head`).
 
 **The record** is the revision's metadata written into the tree itself, one atomic fact in the reserved `dialog.` namespace: parent versions (the edges of the history graph), attribution, skip links, and its own signature. Two details:
 
@@ -136,9 +138,9 @@ History entries are keyed origin-first (writer, then edition), so one writer's r
 
 Every commit tags its facts with its version and appends one **claim record** per instruction. The record's key field is **supersedes**: the versions of the earlier claims this write replaced or withdrew.
 
-- **Assert** adds a fact; supersedes nothing.
+- **Assert** adds a fact; supersedes nothing. The fact orderings address a claim by `(entity, attribute, value)`, so two writers asserting the *identical* value share one index entry: the entry **collapses** their claim versions (one primary plus a sorted set) rather than overwriting, wherever same-value claims meet — an in-branch re-assert absorbs the standing versions, and a merge contest unions the two sides' sets deterministically. Everything downstream reasons over the whole set: a retraction covers every claim its author observed (the D3 promise holds on identical values, pinned by `it_covers_every_observed_claim_of_a_retracted_value`), and a covering record retires exactly the versions it names — the fact stays live while any collapsed claim remains uncovered, dying only when the last one is covered.
 - **Replace** sets the value at `(entity, attribute)`, deleting different-valued priors from the indexes and listing their versions in its record. An identical value already in place is a full no-op.
-- **Retract** deletes the fact's index entries and records the withdrawn claim's version. Covering writes (retractions, and replacements that superseded something) additionally mirror a compact entry into the **coverage region**: same key layout under its own tag, carrying the entity, attribute, covered versions, and polarity, but no value bytes. Its only purpose is enumerability: "every deletion or replacement since the sync base" becomes a scoped tree diff over this small region, without streaming the value-bearing assert records interleaved in the history log. It rides merges as ordinary append-only entries and is the repair source for the graft merge below. **No marker is left behind**: after a retract, the data regions look as if the fact never existed. What makes that safe across sync is the watermark, as the scenarios below show. (Same-batch assert+retract cancels to nothing; retracting a nonexistent fact is a no-op.)
+- **Retract** deletes the fact's index entries and records the withdrawn claim's version. Covering writes (retractions, and replacements that superseded something) additionally mirror a compact entry into the **coverage region**: same key layout under its own tag, carrying the entity, attribute, covered versions, and polarity, but no value bytes. Its only purpose is enumerability: "every deletion or replacement since the sync base" becomes a scoped tree diff over this small region, without streaming the value-bearing assert records interleaved in the history log. It rides merges as ordinary append-only entries and is the repair source for the graft merge below. **No marker is left behind**: after a retract, the data regions look as if the fact never existed. What makes that safe across sync is the watermark, as the scenarios below show. (Same-batch assert+retract cancels to nothing; retracting a nonexistent fact is a no-op — no index change, no record, no minted revision. Two instructions on the same `(entity, attribute, value)` in one batch land at one history key; their records fold — later polarity, union of superseded versions — so a retract-then-re-assert of one value nets to an assert citing the version it overrode, and the log and its coverage mirror stay consistent.)
 
 ## Pulling changes: every scenario
 
@@ -256,14 +258,14 @@ data, user/*        unchanged             unchanged          either: grafted, un
 
 Our side carries the bigger divergence (Alice's bulk counts as ours now), so our tree is the substrate; Bob's delta, scoped to the contested `post/*` spans, is read and screened in. Alice's two hundred commits and Bob's untouched regions cross the merge by subtree hash without a single interior read. The pre-graft design would have replayed Alice's entire bulk into Bob's tree here, which is the composition failure the graft exists to prevent.
 
-Cost: the intersection of the two change sets, plus coverage since base on both sides, plus seams. Pinned by `it_grafts_a_tracked_merge_without_walking_adopted_bulk`: a replica that adopted two hundred commits of foreign bulk and carries its own novelty pulls a three-commit tracked upstream in well under a hundred block reads. One honest limit: span locality follows key clustering. The log region (origin-first), the coverage region, and the attribute-ordered index cluster well; the entity-ordered and value-ordered indexes scatter content-hashed keys, so when *both* sides carry large novelty the contested work in those regions is irreducibly proportional to the smaller side, not to the true overlap.
+Cost: the intersection of the two change sets, plus coverage since base on both sides, plus seams. Pinned by `it_grafts_a_tracked_merge_without_walking_adopted_bulk` (a replica that adopted two hundred commits of foreign bulk and carries its own novelty pulls a twelve-commit tracked upstream in a bounded number of block reads, with the divergence gate asserted so the fixture provably routes through the graft) and, for the deletion legs, `it_propagates_deletions_across_a_graft_merge` (both sides carry graft-sized divergence, each retracted a base fact the other still holds, and the stitched-and-repaired tree keeps both dead). One honest limit: span locality follows key clustering. The log region (origin-first), the coverage region, and the attribute-ordered index cluster well; the entity-ordered and value-ordered indexes scatter content-hashed keys, so when *both* sides carry large novelty the contested work in those regions is irreducibly proportional to the smaller side, not to the true overlap.
 
 ### Scenario 5: replaying the smaller side
 
-Fires when the graft does not: the pull is first contact (no sync base to partition against), or one side's delta sits at or below the small-delta threshold. One whole side's delta is transferred, and the only question is direction: which side is smaller. That is answered with zero reads by comparing the two watermarks' **divergence masses**: for each origin, how far one watermark's edition runs beyond the other's, summed. Editions count writes, so the excess estimates delta size.
+Fires when the graft does not: the pull is first contact (no sync base to partition against), or one side's delta sits at or below the small-delta threshold. One whole side's delta is transferred, and the only question is direction: which side is smaller. That is answered with zero reads by comparing the two watermarks' **divergence masses**: for each origin, how many of its revisions one watermark's count runs beyond the other's, summed. Counts count revisions exactly (per-origin prefixes are nested), so the mass IS the delta size in revisions — an origin's single fresh commit atop a ten-thousand-deep adopted history weighs as one revision, not ten thousand, which editions alone would get wrong.
 
 ```text
-ours               theirs
+ours (count)       theirs (count)
 alice: 5           alice: 7
 bob:   3           bob:   5
 me:    6           me:    4
@@ -447,7 +449,7 @@ Levers if interactive single-fact commits need to be cheaper, none started: the 
 2. **A tree's revision records are a subset of its head's ancestry.** True at mint, preserved by every pull outcome. This is what makes the watermark derivable locally and lets root equality stand in for history equality.
 3. **Records before facts, one pass, one persist**, in both merge directions.
 4. **A screen consults only the receiver's state** (its tree and watermark) plus the incoming delta: ours in the screened direction, the substrate side's published one in the replay and graft directions. Never mix the two sides' screens.
-5. **Never act on an unverified head.** Signatures are checked before any gate fires; the watermark is only trustworthy because the signature covers it.
+5. **Never act on an unverified head.** Signatures are checked before any gate fires, on pull and on push alike; the watermark is only trustworthy because the signature covers it. Verification also refuses any edition (the head's own, or a watermark entry's) at or above the protocol ceiling (2^62): a validly signed hostile edition near `u64::MAX` would otherwise make the saturating successor mint one version twice and pin the origin's watermark so high that every future write from it is silently dropped.
 6. **The `dialog.` namespace is reserved**: revision metadata is written only by the internal record path.
 
 ## Not done yet
@@ -457,4 +459,4 @@ Levers if interactive single-fact commits need to be cheaper, none started: the 
 3. **Authority binding**: a time-anchoring story for delegation proofs in revision records (see the known gap above).
 4. **History horizon GC** behind a published bootstrap floor.
 5. **`State::Removed`** survives only for reading old trees; removing the variant is a serialization format change, deliberately deferred.
-6. **Re-asserts citing what they override**, making intentional resurrection first-class in the lineage; nothing depends on it.
+6. **Re-asserts citing what they override**, making intentional resurrection first-class in the lineage; nothing depends on it. (The same-batch case landed with the record fold: a retract-then-re-assert of one value in one batch records an assert citing the withdrawn version. The cross-batch case — a plain re-assert after an earlier deletion — still records a genesis assert.)

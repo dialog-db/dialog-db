@@ -495,7 +495,11 @@ where
                             // back to the deterministic last-write-wins
                             // hash race. Both paths are antisymmetric, so
                             // replicas integrating in opposite directions
-                            // pick the same winner and converge.
+                            // pick the same winner and converge — and the
+                            // loser is FUSED into the winner rather than
+                            // dropped, so value types that aggregate
+                            // (collapsed claim versions) survive the
+                            // contest on both sides identically.
                             let replaces = match entry.value.prevails_over(&existing) {
                                 Some(verdict) => verdict,
                                 None => {
@@ -504,8 +508,13 @@ where
                                     new_hash.as_bytes() > existing_hash.as_bytes()
                                 }
                             };
-                            if replaces {
-                                self = self.insert(entry.key, entry.value, storage).await?;
+                            let fused = if replaces {
+                                Value::fuse(entry.value, &existing)
+                            } else {
+                                Value::fuse(existing.clone(), &entry.value)
+                            };
+                            if fused != existing {
+                                self = self.insert(entry.key, fused, storage).await?;
                             }
                         }
                     }
@@ -558,18 +567,30 @@ where
         let accessor = Accessor::new(cache.clone(), storage.clone());
 
         // The stitched tree keeps its sources' format. A manifest lives in the
-        // nodes, so it is read from the first source root the stitch touches;
-        // pieces of one stitch share a format (they are ranges of trees being
-        // merged). A stitch of nothing but loose entries has no source to
-        // inherit from and takes the default format.
-        let mut manifest = None;
+        // nodes, so it is read from the source roots — and every source must
+        // AGREE: grafting subtrees written under one format into a tree
+        // stamped with another would mix headers and diverge silently from
+        // either side's canonical shape, so a mismatch fails loudly here,
+        // exactly as the edit path's `load` does. A stitch of nothing but
+        // loose entries has no source to inherit from and takes the default
+        // format.
+        let mut manifest: Option<Manifest> = None;
         for piece in &pieces {
             if let Piece::Range { source, .. } = piece {
                 let root = source.root().clone();
                 if &root != NULL_BLAKE3_HASH {
                     let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
-                    manifest = Some(node.manifest()?);
-                    break;
+                    let header = node.manifest()?;
+                    match &manifest {
+                        None => manifest = Some(header),
+                        Some(first) if *first == header => {}
+                        Some(first) => {
+                            return Err(DialogSearchTreeError::Node(format!(
+                                "Stitch manifest mismatch: one source was written under \
+                                 {first:?} and another under {header:?}"
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -610,9 +631,28 @@ where
         }
 
         // A single piece covering its whole source IS that source: hand its
-        // root back by hash so persisting writes nothing at all.
+        // root back by hash so persisting writes nothing at all. The result
+        // carries the source's manifest, not the default — a later edit of
+        // the stitched tree must run under the format its nodes were
+        // written with.
         if let [(_, _, Some(root))] = parts.as_slice() {
             return Ok(TransientTree::with_manifest(root.clone(), cache, manifest));
+        }
+
+        // A canonical tree opens its leftmost seam at the empty separator
+        // (negative infinity), and every index level derives its left edge
+        // from its leftmost segment. A start-trimmed carve leaves the
+        // surviving leftmost segment carrying the separator its parent link
+        // held in the SOURCE tree (derived from a left neighbor the trim
+        // dropped), and nothing downstream recomputes it — joins re-cut only
+        // right-hand seams — so the stale string would propagate into every
+        // leftmost link of the persisted result and break the byte-for-byte
+        // canonicality the stitch promises. Re-floor the first part's left
+        // edge; untouched whole-source parts are already canonical.
+        if let Some((node, _, whole)) = parts.first_mut()
+            && whole.is_none()
+        {
+            refloor_leftmost(node)?;
         }
 
         // Fold the parts left to right. Each join lifts the two facing edge
@@ -2026,6 +2066,40 @@ where
             } else {
                 Trim::Unchanged
             })
+        }
+    }
+}
+
+/// Resets the leftmost seam of a stitch's FIRST part to the empty separator,
+/// walking first children down to the leftmost segment (index levels derive
+/// their left edge from it, so nothing else needs touching). The carve lifts
+/// the whole start-bound spine, so on a start-trimmed part the walk stays on
+/// transient nodes all the way down; a persistent leftmost child can only
+/// mean the part kept its source's own left edge, whose stored separators
+/// are already the canonical empty string, so the walk stops there.
+fn refloor_leftmost<Key, Value>(
+    part: &mut TransientNode<Key, Value>,
+) -> Result<(), DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+{
+    let mut node = part;
+    loop {
+        match node {
+            TransientNode::Segment(segment) => {
+                segment.separator = Vec::new();
+                return Ok(());
+            }
+            TransientNode::Index(index) => {
+                let first = index.children.first_mut().ok_or_else(|| {
+                    DialogSearchTreeError::Node("Index was unexpectedly empty".into())
+                })?;
+                match first {
+                    Node::Transient(child) => node = child,
+                    Node::Persistent(_) => return Ok(()),
+                }
+            }
         }
     }
 }
@@ -4027,6 +4101,59 @@ mod tests {
         assert_eq!(
             root, expected,
             "{label}: stitching two disjoint trees must match the union build"
+        );
+        Ok(())
+    }
+
+    /// A stitch whose LEFTMOST piece start-trims its source must still be
+    /// canonical. The surviving leftmost segment carries the separator its
+    /// parent link held in the source (derived from a left neighbor the
+    /// trim dropped), and nothing downstream recomputes the left edge —
+    /// joins re-cut only right-hand seams — so without a re-floor the whole
+    /// leftmost spine of the persisted result differs byte-for-byte from a
+    /// from-scratch build over the same entries: replica divergence in the
+    /// convergent-merge use case the stitch exists for.
+    #[dialog_common::test]
+    async fn it_stitches_a_start_trimmed_leftmost_piece_canonically() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let source = stitch_source(&(0..500).collect::<Vec<u32>>(), &mut storage).await?;
+
+        // Single start-trimmed piece.
+        let (root, _) = stitched(
+            vec![Piece::Range {
+                source: &source,
+                range: bkey(300)..=bkey(u32::MAX),
+            }],
+            &storage,
+        )
+        .await?;
+        let expected = stitch_oracle(&(300..500).collect::<Vec<u32>>(), &storage).await?;
+        assert_eq!(
+            root, expected,
+            "a start-trimmed leftmost piece keeps the canonical left edge"
+        );
+
+        // The same left edge through the fold path (a second piece joins).
+        let tail = stitch_source(&(1000..1100).collect::<Vec<u32>>(), &mut storage).await?;
+        let (root, _) = stitched(
+            vec![
+                Piece::Range {
+                    source: &source,
+                    range: bkey(300)..=bkey(999),
+                },
+                Piece::Range {
+                    source: &tail,
+                    range: bkey(1000)..=bkey(u32::MAX),
+                },
+            ],
+            &storage,
+        )
+        .await?;
+        let union: Vec<u32> = (300..500).chain(1000..1100).collect();
+        let expected = stitch_oracle(&union, &storage).await?;
+        assert_eq!(
+            root, expected,
+            "the fold path keeps the canonical left edge too"
         );
         Ok(())
     }

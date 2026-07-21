@@ -133,7 +133,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             let operator = Identify
                 .perform(env)
                 .await
-                .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
+                .map_err(|e| DialogArtifactsError::InvalidSignature(format!("identify: {e}")))?;
 
             // Route through the same QueryLayer overlay path
             // Branch::query() uses, so schema-injected metadata

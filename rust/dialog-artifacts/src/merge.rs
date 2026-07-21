@@ -42,6 +42,7 @@
 //! state beyond the differential itself.
 
 use core::ops::RangeInclusive;
+use std::collections::BTreeSet;
 use std::iter::repeat_n;
 use std::str::FromStr;
 use std::str::from_utf8;
@@ -55,7 +56,7 @@ use dialog_storage::{DialogStorageError, StorageBackend};
 
 use crate::Value;
 use crate::artifacts::decode_value;
-use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord};
+use crate::history::{Context, REVISION_ATTRIBUTE, RevisionRecord, Version};
 use crate::key::varkey::{ValueRef, parse_key, parse_key_ref};
 use crate::tree::ArtifactTree;
 use crate::{
@@ -242,24 +243,39 @@ where
                             futures_util::StreamExt::next(&mut candidates).await
                         {
                             let candidate = candidate?;
-                            let covered = match &candidate.value {
-                                State::Added(datum) => datum
-                                    .version
-                                    .is_some_and(|version| superseded.contains(&version)),
-                                _ => false,
+                            let State::Added(datum) = &candidate.value else {
+                                continue;
                             };
-                            if covered {
-                                let entity_key = EntityKey(candidate.key);
-                                let attribute_key = AttributeKey::from_key(&entity_key);
-                                let value_key = ValueKey::from_key(&entity_key);
-                                for key in [
-                                    entity_key.into_key(),
-                                    attribute_key.into_key(),
-                                    value_key.into_key(),
-                                ] {
-                                    yield Change::Remove(Entry {
+                            if !datum
+                                .versions()
+                                .any(|version| superseded.contains(version))
+                            {
+                                continue;
+                            }
+                            // The entry may collapse several same-value
+                            // claims; the record retires exactly the ones
+                            // it names. Full coverage removes the entry
+                            // (guarded, so a claim the record never
+                            // observed is untouched); partial coverage
+                            // replaces it with the entry standing on its
+                            // surviving claims, at all three orderings.
+                            let surviving = datum.retire_covered(&superseded);
+                            let entity_key = EntityKey(candidate.key);
+                            let attribute_key = AttributeKey::from_key(&entity_key);
+                            let value_key = ValueKey::from_key(&entity_key);
+                            for key in [
+                                entity_key.into_key(),
+                                attribute_key.into_key(),
+                                value_key.into_key(),
+                            ] {
+                                yield Change::Remove(Entry {
+                                    key: key.clone(),
+                                    value: candidate.value.clone(),
+                                });
+                                if let Some(surviving) = &surviving {
+                                    yield Change::Add(Entry {
                                         key,
-                                        value: candidate.value.clone(),
+                                        value: State::Added(surviving.clone()),
                                     });
                                 }
                             }
@@ -292,21 +308,34 @@ where
                     // never propagate: deletion travels as history now.
                     State::Removed => continue,
                     State::Added(datum) => {
-                        // R1: a claim whose revision is already in the
-                        // local ancestry is never news — either it is
-                        // still live locally (nothing to do) or some
-                        // local record covered it (re-applying it would
-                        // resurrect a deletion). Claims without version
-                        // tags (unversioned writes) cannot be reasoned
-                        // about and pass through.
-                        let observed = datum
-                            .version
-                            .map(|version| context.observes(&version))
-                            .unwrap_or(false);
-                        if observed {
+                        // R1, per CLAIM: an entry stands for every claim
+                        // version it collapses (same-value claims share
+                        // one key), and each is screened independently.
+                        // An observed claim is never news — either it is
+                        // still live locally (the contest fuses it back
+                        // in) or some local record covered it
+                        // (re-applying it would resurrect a deletion) —
+                        // so observed versions are STRIPPED; the entry
+                        // passes on its unobserved claims alone, and is
+                        // dropped when none remain. Entries without
+                        // version tags (unversioned writes) cannot be
+                        // reasoned about and pass through.
+                        let observed: Vec<_> = datum
+                            .versions()
+                            .filter(|version| context.observes(version))
+                            .copied()
+                            .collect();
+                        if observed.is_empty() {
+                            yield Change::Add(entry);
                             continue;
                         }
-                        yield Change::Add(entry);
+                        let Some(surviving) = datum.retire_covered(&observed) else {
+                            continue;
+                        };
+                        yield Change::Add(Entry {
+                            key: entry.key,
+                            value: State::Added(surviving),
+                        });
                     }
                 },
                 // R2: guarded removes pass through; integrate applies
@@ -317,16 +346,20 @@ where
     }
 }
 
-/// Wrap a data-region differential, folding the version of every
+/// Wrap a data-region differential, collecting the version of every
 /// revision record riding it into `observed`.
 ///
 /// The revision records in an upstream delta are exactly the
 /// upstream-ancestry revisions the receiver may lack: a tree's records
 /// are a subset of its head's ancestry, and records at or below the
-/// sync base arrived with the pulls that established it. So `local
-/// context + observed` is the context of a head that adopts or merges
-/// this upstream — derived while the differential streams anyway, at
-/// zero extra reads, in place of the O(ancestry) `context_of` walk.
+/// sync base arrived with the pulls that established it. So the local
+/// context [`absorb`](Context::absorb)ing `observed` is the context of
+/// a head that adopts or merges this upstream — derived while the
+/// differential streams anyway, at zero extra reads, in place of the
+/// O(ancestry) `context_of` walk. The versions are collected as a SET
+/// (not folded into a context on the fly) because the count half of the
+/// watermark needs to know how many distinct new revisions arrived, and
+/// only the receiver's own watermark can screen which are new.
 ///
 /// Versions are derived from record *contents* (`RevisionRecord::version`,
 /// the same derivation the read-side check binds records with), not
@@ -335,7 +368,7 @@ where
 /// applies.
 pub fn observe_revisions<'a, C>(
     changes: C,
-    observed: Arc<Mutex<Context>>,
+    observed: Arc<Mutex<BTreeSet<Version>>>,
 ) -> impl Differential<Key, State<Datum>> + 'a
 where
     C: Differential<Key, State<Datum>> + 'a,
@@ -353,22 +386,31 @@ where
                 && parts.attribute.as_ref() == REVISION_ATTRIBUTE.as_bytes()
             {
                 // The inline payload is the ORDER-PRESERVING encoding, not the
-                // raw record bytes: decode it back to a value first. A spilled
-                // record's bytes live in the archive, which this pass does not
-                // read — the observer only needs the versions it can see.
-                let Some(bytes) = (match &parts.value {
+                // raw record bytes: decode it back to a value first. Every
+                // arm that cannot produce the record's version FAILS the
+                // merge rather than skipping: the context derived here is
+                // published under the merged head's signature, and a
+                // silently omitted version understates the watermark — a
+                // later pull would then treat facts this head has seen as
+                // news and resurrect deletions. A revision record is a few
+                // hundred bytes, far under the default inline threshold, so
+                // a spilled one means a non-default manifest this pass does
+                // not support yet (reading it back needs the archive).
+                let bytes = match &parts.value {
                     ValueRef::Inline(inline) => {
-                        decode_value(parts.value_type, inline).and_then(
-                            |(value, _)| match value {
-                                Value::Record(bytes) => Some(bytes),
-                                _ => None,
-                            },
-                        )
+                        match decode_value(parts.value_type, inline) {
+                            Some((Value::Record(bytes), _)) => bytes,
+                            _ => Err(DialogSearchTreeError::Node(
+                                "revision record payload does not decode to a record value"
+                                    .to_string(),
+                            ))?,
+                        }
                     }
-                    ValueRef::Spilled { .. } => None,
-                }) else {
-                    yield change;
-                    continue;
+                    ValueRef::Spilled { .. } => Err(DialogSearchTreeError::Node(
+                        "revision record spilled out of its key; the merged context cannot \
+                         be derived without reading it back"
+                            .to_string(),
+                    ))?,
                 };
                 let record = RevisionRecord::try_from_bytes(&bytes).map_err(|error| {
                     DialogSearchTreeError::Node(format!("revision record: {error}"))
@@ -376,7 +418,7 @@ where
                 observed
                     .lock()
                     .expect("the revision observer mutex is never poisoned")
-                    .record(record.version());
+                    .insert(record.version());
             }
             yield change;
         }
@@ -409,6 +451,14 @@ fn key_successor(key: &Key) -> Option<Key> {
     // `below(k)` for the key that drops the tail and increments the byte
     // before it; anything else gains a `0x00` (nothing sorts between).
     let bytes = key.as_ref();
+    if bytes.len() >= KEY_SPAN_FILLER && bytes.iter().all(|byte| *byte == u8::MAX) {
+        // `top_key()` (or above): nothing sorts higher. Returning a
+        // successor here would hand `partition_spans` a cursor above the
+        // top, closing a degenerate final piece whose start sorts above
+        // its end — and a divergence span reaching the top is the common
+        // case, since the coverage region is the highest region.
+        return None;
+    }
     let filler_at = bytes.len().checked_sub(KEY_SPAN_FILLER);
     if let Some(at) = filler_at
         && at > 0
@@ -552,22 +602,11 @@ fn below(key: &Key) -> Key {
     }
 }
 
-/// The immediate predecessor of a key. Only called for span starts that
-/// lie strictly ahead of the cursor, which is at least the minimum key,
-/// so the input is never the minimum.
+/// The immediate predecessor of a key, or `None` for the empty key (the
+/// bottom of the key space). [`below`] restricted to keys that have a
+/// predecessor.
 fn predecessor_of(key: &Key) -> Option<Key> {
-    // The greatest key strictly below `key`. A key ending in `0x00` loses that
-    // byte (that key is itself the successor of the shorter one); otherwise
-    // decrement the last byte and pad with `0xFF`, which is above every key
-    // sharing the decremented prefix. The empty key has no predecessor.
-    let bytes = key.as_ref();
-    let (&last, head) = bytes.split_last()?;
-    let mut previous = head.to_vec();
-    if last != u8::MIN {
-        previous.push(last - 1);
-        previous.extend(repeat_n(u8::MAX, KEY_SPAN_FILLER));
-    }
-    Some(Key::from(previous))
+    (!key.as_ref().is_empty()).then(|| below(key))
 }
 
 #[cfg(test)]
@@ -660,6 +699,26 @@ mod span_tests {
                 (key_successor(&key(6)).unwrap()..=top(), SpanSource::Theirs),
             ]
         );
+    }
+
+    /// A divergence span that reaches the top of the key space is the
+    /// common case, not an edge: the coverage region is the highest
+    /// region, so any covering write since base puts the rightmost node
+    /// in the diff frontier and the span closes at `top_key()`. The
+    /// partition must not emit a degenerate trailing piece whose start
+    /// sorts above its end.
+    #[test]
+    fn it_partitions_spans_reaching_the_top_of_the_key_space() {
+        let pieces = partition_spans(&[key(5)..=top()], &[]);
+        for (span, _) in &pieces {
+            assert!(
+                span.start() <= span.end(),
+                "no degenerate piece: {:?} > {:?}",
+                span.start(),
+                span.end()
+            );
+        }
+        assert_eq!(*pieces.last().unwrap().0.end(), top());
     }
 
     #[test]

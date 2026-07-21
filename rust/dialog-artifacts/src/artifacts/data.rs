@@ -48,6 +48,18 @@ pub struct Datum {
     /// Data committed directly through [`Artifacts`] carries no version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<Version>,
+    /// Additional claim versions collapsed into this entry. The fact
+    /// orderings address a claim by `(entity, attribute, value)`, so two
+    /// writers' claims of the *identical* value stand at ONE key:
+    /// [`Datum::version`] carries one of them and this field the rest,
+    /// sorted and deduplicated. Everything that reasons about the entry's
+    /// claims consults the whole set ([`Datum::versions`]): a retraction
+    /// covers all of them, a covering record retires only the versions it
+    /// names (the fact stays live while any collapsed claim remains
+    /// uncovered), and merge contests union the two sides' sets. Always
+    /// empty on history records and unversioned data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collapsed: Vec<Version>,
     /// For history records (entries under
     /// [`HISTORY_KEY_TAG`](crate::HISTORY_KEY_TAG)): the versions of the
     /// prior claims on the same `(entity, attribute)` that this record
@@ -69,9 +81,68 @@ impl Datum {
             cause: artifact.cause.clone(),
             blob: None,
             version: None,
+            collapsed: Vec::new(),
             supersedes: Vec::new(),
             retraction: false,
         }
+    }
+
+    /// Every claim version this entry stands for: the primary
+    /// [`version`](Datum::version) plus the [`collapsed`](Datum::collapsed)
+    /// set.
+    pub fn versions(&self) -> impl Iterator<Item = &Version> {
+        self.version.iter().chain(self.collapsed.iter())
+    }
+
+    /// Fold another claim's versions into this entry (the two claims stand
+    /// at the same key, i.e. assert the same fact), CANONICALIZING the
+    /// result: the union is sorted and deduplicated, the smallest version
+    /// becomes the primary and the rest the collapsed set. Canonical form
+    /// is load-bearing for convergence: two replicas can reach the same
+    /// claim-version set through different intermediate entries (one saw
+    /// the claims arrive one by one, the other received an already-fused
+    /// copy with observed versions stripped by the R1 screen), and their
+    /// entries must be byte-identical whenever their sets agree — an
+    /// input-dependent primary would leave same-set entries with
+    /// different bytes that no further exchange can reconcile (every
+    /// version being mutually observed, the screens strip everything and
+    /// the trees never converge). [`retire_covered`](Datum::retire_covered)
+    /// re-canonicalizes the same way.
+    pub fn absorb_versions<'a>(&mut self, versions: impl IntoIterator<Item = &'a Version>) {
+        let mut all: Vec<Version> = self.versions().copied().collect();
+        all.extend(versions.into_iter().copied());
+        all.sort();
+        all.dedup();
+        let mut all = all.into_iter();
+        self.version = all.next().or(self.version);
+        self.collapsed = all.collect();
+    }
+
+    /// Retire the claims `covered` names from this entry: `None` when every
+    /// claim is covered (the fact dies), or the entry standing on its
+    /// surviving claims in the same canonical form
+    /// [`absorb_versions`](Datum::absorb_versions) maintains (smallest
+    /// surviving version primary, rest collapsed, sorted) so both replicas
+    /// of a partial retirement produce identical bytes.
+    pub fn retire_covered(&self, covered: &[Version]) -> Option<Datum> {
+        let mut survivors: Vec<Version> = self
+            .versions()
+            .filter(|version| !covered.contains(version))
+            .copied()
+            .collect();
+        if self.version.is_none() {
+            // An unversioned entry cannot be covered by version.
+            return Some(self.clone());
+        }
+        survivors.sort();
+        survivors.dedup();
+        let mut survivors = survivors.into_iter();
+        let primary = survivors.next()?;
+        Some(Datum {
+            version: Some(primary),
+            collapsed: survivors.collect(),
+            ..self.clone()
+        })
     }
 }
 

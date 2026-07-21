@@ -19,7 +19,7 @@
 //!   opaque to the query layer either way.)
 //!
 //! These names are a dialog-repository convention (like
-//! `dialog.session/*` / `dialog.meta/*`).
+//! `dialog.session/*`).
 //!
 //! # Two layers, two caches
 //!

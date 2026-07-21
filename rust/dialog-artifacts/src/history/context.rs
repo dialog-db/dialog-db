@@ -30,7 +30,11 @@ pub async fn context_of<H: History>(
     visited.insert(*head);
 
     while let Some(version) = frontier.pop() {
-        context.record(version);
+        // `tally`, not `record`: the walk visits revisions in DAG order,
+        // not edition order, and every visited revision is distinct (the
+        // visited set guarantees it) — an advance-only fold would skip
+        // counting a revision reached below an already-raised watermark.
+        context.tally(version);
         let Some(record) = history.revision_record(&version).await? else {
             return Err(DialogArtifactsError::IncompleteHistory(format!(
                 "{version}"

@@ -1190,14 +1190,14 @@ where
         }
     }
 
-    /// Returns a stream of entry-level changes that transform the source
-    /// tree into the target tree.
-    ///
     /// The conservative key spans this difference confines all changes to,
-    /// as `(exclusive lower bound, inclusive upper bound)` pairs: one per
+    /// as `(inclusive lower bound, exclusive upper bound)` pairs: one per
     /// remaining frontier node on either side, in frontier order per side.
-    /// A `None` lower bound means the span starts at the bottom of the key
-    /// space.
+    /// The lower bound is the frontier node's own separator (the smallest
+    /// key it can hold, so INCLUSIVE — a changed key can equal it); the
+    /// upper bound is the next node's separator, which sorts strictly
+    /// above this node's maximum key (so EXCLUSIVE); a `None` upper bound
+    /// means the span runs open to the top of the key space.
     ///
     /// Conservative means superset: every changed key lies inside some
     /// span, but a span may also cover unchanged keys (shared nodes
@@ -1225,6 +1225,9 @@ where
         bounds
     }
 
+    /// Returns a stream of entry-level changes that transform the source
+    /// tree into the target tree.
+    ///
     /// Performs a two-cursor walk over the entries of both differing
     /// regions: keys only on the source side yield [`Change::Remove`], keys
     /// only on the target side yield [`Change::Add`], and keys present on

@@ -29,7 +29,17 @@ pub use dialog_capability::history::{
 mod cause;
 pub use cause::*;
 
+// A LEGACY revision type predating the split into the signed head
+// (`dialog_capability::Revision`) and the in-tree `RevisionRecord`. It
+// derives its origin WITHOUT the branch scope (`Origin::derive`) — a
+// derivation the live paths must never use, since two branches advanced
+// by one issuer would mint colliding versions — and signs a different
+// payload. It survives only as the fixture type of this module's unit
+// tests (`MemoryHistory` stores it); nothing outside the tests may
+// reach it.
+#[cfg(test)]
 mod revision;
+#[cfg(test)]
 pub use revision::*;
 
 mod claim;

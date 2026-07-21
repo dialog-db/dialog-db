@@ -13,11 +13,16 @@
 //!   numerics, escaped/terminated for byte strings). A value whose encoding
 //!   exceeds the inline threshold spills: its slot carries the encoding of
 //!   its first `spill_prefix` raw bytes — sorting the key INTO its type band
-//!   next to inline values — and the 32-byte whole-value hash is appended at
-//!   the absolute end of the key. The spill signal is exactly that
-//!   remainder: zero bytes after the final component means inline, 32 means
-//!   spilled. The trailing hash keeps distinct large values distinct
-//!   (cardinality-many) and addresses the archive block.
+//!   next to inline values — and a sentinel byte plus the 32-byte whole-value
+//!   hash are appended at the absolute end of the key. The spill signal is
+//!   exactly that remainder: zero bytes after the final component means
+//!   inline, [`SPILL_TAIL_LENGTH`] means spilled. The sentinel keeps the raw
+//!   hash from abutting the final component's `0x00` terminator — a hash
+//!   beginning with the `0xFF` escape byte would otherwise read back as an
+//!   escaped content zero and corrupt the parse (the "no field may begin
+//!   with `0xFF`" invariant [`MAX_FILLER_BYTE`] documents). The trailing
+//!   hash keeps distinct large values distinct (cardinality-many) and
+//!   addresses the archive block.
 //!
 //! Because every component is self-delimiting, the components concatenate into
 //! a key and a reader splits them back out by scanning, with no length table
@@ -35,6 +40,20 @@ use crate::{
 /// The length of a spilled value's content-addressed reference.
 pub const VALUE_REFERENCE_LENGTH: usize = 32;
 
+/// The byte standing between a spilled key's final component and its trailing
+/// whole-value hash. The final component of a terminated encoding ends with
+/// `0x00`, and `0x00 0xFF` is the ordkey escape sequence — a raw hash
+/// beginning with `0xFF` directly after the terminator would read back as an
+/// escaped content zero, walking the parser into the hash. The sentinel is a
+/// fixed non-`0xFF` byte, so the terminator always terminates. It carries no
+/// order: keys sharing every component compare on the hash right after it.
+pub const SPILL_SENTINEL: u8 = 0x01;
+
+/// The full trailing tail of a spilled key: the sentinel plus the hash. A
+/// remainder of exactly this length after the ordering's final component is
+/// the spill signal; zero bytes means inline; anything else is malformed.
+pub const SPILL_TAIL_LENGTH: usize = 1 + VALUE_REFERENCE_LENGTH;
+
 /// The payload a key carries for its value.
 ///
 /// An inline payload is the value's complete order-preserving encoding. A
@@ -43,14 +62,15 @@ pub const VALUE_REFERENCE_LENGTH: usize = 32;
 /// `spill_prefix` RAW bytes in the value slot — encoded exactly like an
 /// inline value, so spilled values sort INTO their type band next to inline
 /// ones — plus the 32-byte whole-value hash, which the key builder appends
-/// at the ABSOLUTE END of the key (after the ordering's last component).
+/// at the ABSOLUTE END of the key (after the ordering's last component,
+/// behind the [`SPILL_SENTINEL`]).
 ///
 /// The trailing hash is what keeps distinct large values distinct keys
 /// (cardinality-many: two values sharing their first `spill_prefix` bytes
 /// must not collapse), and it is the block address for loading the value
 /// from the archive. There is no spill flag anywhere: a key is spilled
-/// exactly when 32 bytes remain after its final component parses (the final
-/// component's own terminator is the signal).
+/// exactly when [`SPILL_TAIL_LENGTH`] bytes remain after its final
+/// component parses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValuePayload {
     /// The value's order-preserving bytes, inline in the key.
@@ -296,9 +316,10 @@ fn write_value_slot(parts: &KeyParts, out: &mut Vec<u8>) {
 /// Builds the key bytes for a given ordering tag from the components, encoding
 /// each in the ordering's byte order.
 ///
-/// A spilled value's 32-byte whole-value hash goes at the ABSOLUTE END of the
-/// key, after the ordering's last component: the key parses exactly like an
-/// inline key and the 32-byte remainder after the final component is the
+/// A spilled value's tail — the [`SPILL_SENTINEL`] plus the 32-byte
+/// whole-value hash — goes at the ABSOLUTE END of the key, after the
+/// ordering's last component: the key parses exactly like an inline key and
+/// the [`SPILL_TAIL_LENGTH`] remainder after the final component is the
 /// spill signal. Placing it last (rather than beside the value slot) keeps
 /// the ordering's interior components (attribute, entity in VAE) sub-sorting
 /// normally within a shared-prefix cluster; the hash only tie-breaks.
@@ -351,6 +372,7 @@ pub fn build_key(parts: &KeyParts) -> Vec<u8> {
         }
     }
     if let ValuePayload::Spilled { hash, .. } = &parts.value {
+        out.push(SPILL_SENTINEL);
         out.extend_from_slice(hash);
     }
     out
@@ -471,17 +493,17 @@ pub fn split_components(bytes: &[u8]) -> Option<Vec<&[u8]>> {
         _ => return None,
     }
 
-    // A spilled key carries the 32-byte whole-value hash after its final
-    // component (the spill signal is exactly this remainder). Fold it into
-    // the LAST component's slice: arena columns are length-delimited by the
-    // leaf codec (not by terminators), so the fold round-trips byte-exactly,
-    // and the component count stays fixed per schema whether or not the
-    // value spilled.
+    // A spilled key carries the sentinel plus the 32-byte whole-value hash
+    // after its final component (the spill signal is exactly this
+    // remainder). Fold the tail into the LAST component's slice: arena
+    // columns are length-delimited by the leaf codec (not by terminators),
+    // so the fold round-trips byte-exactly, and the component count stays
+    // fixed per schema whether or not the value spilled.
     match bytes.len() - at {
         0 => Some(out),
-        VALUE_REFERENCE_LENGTH => {
+        SPILL_TAIL_LENGTH if bytes[at] == SPILL_SENTINEL => {
             let last = out.pop()?;
-            let start = bytes.len() - VALUE_REFERENCE_LENGTH - last.len();
+            let start = bytes.len() - SPILL_TAIL_LENGTH - last.len();
             out.push(&bytes[start..]);
             Some(out)
         }
@@ -589,9 +611,10 @@ pub struct KeyRef<'a> {
 /// without per-field allocation. Returns `None` on malformed input.
 ///
 /// The spill signal is the REMAINDER after the ordering's final component:
-/// zero bytes left means an inline value, exactly 32 means the value spilled
-/// and the remainder is its whole-value hash (the slot then holds the
-/// value's encoded prefix). Any other remainder is malformed.
+/// zero bytes left means an inline value, [`SPILL_TAIL_LENGTH`] means the
+/// value spilled and the remainder is the [`SPILL_SENTINEL`] followed by its
+/// whole-value hash (the slot then holds the value's encoded prefix). Any
+/// other remainder is malformed.
 pub fn parse_key_ref(bytes: &[u8]) -> Option<KeyRef<'_>> {
     let (&tag, rest) = bytes.split_first()?;
 
@@ -640,9 +663,9 @@ pub fn parse_key_ref(bytes: &[u8]) -> Option<KeyRef<'_>> {
 
     let value = match rest.len() {
         0 => ValueRef::Inline(payload),
-        VALUE_REFERENCE_LENGTH => ValueRef::Spilled {
+        SPILL_TAIL_LENGTH if rest[0] == SPILL_SENTINEL => ValueRef::Spilled {
             prefix: payload,
-            hash: rest,
+            hash: &rest[1..],
         },
         _ => return None,
     };
@@ -897,6 +920,42 @@ mod tests {
             build_key(&real) <= build_key(&end),
             "attribute-scan end must dominate every same-attribute key"
         );
+        Ok(())
+    }
+
+    /// A spilled key must parse whatever bytes its trailing whole-value hash
+    /// happens to hold. A raw hash beginning with `0xFF` directly follows the
+    /// final component's `0x00` terminator, and `0x00 0xFF` is the ordkey
+    /// escape sequence — without a separator the parser reads the pair as an
+    /// escaped content zero and walks into the hash, so ~1/256 of spilled
+    /// values produced unparseable keys. Every coverage entry shares this
+    /// terminator-then-hash shape, which made graft pulls fail permanently.
+    #[dialog_common::test]
+    async fn it_parses_spilled_keys_whose_hash_begins_with_the_escape_byte() -> anyhow::Result<()> {
+        let mut prefix = Vec::new();
+        crate::encode_bytes(b"leading-bytes-of-a-large-value", &mut prefix);
+        for tag in [ENTITY_KEY_TAG, ATTRIBUTE_KEY_TAG, VALUE_KEY_TAG] {
+            let original = KeyParts {
+                tag,
+                entity: b"entity:doc".to_vec(),
+                attribute: b"doc/body".to_vec(),
+                value_type: ValueDataType::String,
+                value: ValuePayload::Spilled {
+                    prefix: prefix.clone(),
+                    hash: vec![0xFF; VALUE_REFERENCE_LENGTH],
+                },
+                version: None,
+            };
+            let bytes = build_key(&original);
+            let parsed = parse_key(&bytes)
+                .unwrap_or_else(|| panic!("tag {tag}: high-hash spilled key must parse"));
+            assert_eq!(parsed, original, "tag {tag} high-hash spilled round-trip");
+
+            let slices = split_components(&bytes)
+                .unwrap_or_else(|| panic!("tag {tag}: high-hash spilled key must split"));
+            let total: usize = slices.iter().map(|slice| slice.len()).sum();
+            assert_eq!(total, bytes.len(), "tag {tag}: slices cover the key");
+        }
         Ok(())
     }
 

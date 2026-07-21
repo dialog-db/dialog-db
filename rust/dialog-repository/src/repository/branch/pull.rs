@@ -1,4 +1,6 @@
 use crate::RevisionExt as _;
+use std::collections::BTreeSet;
+use std::mem;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::DialogArtifactsError;
@@ -26,7 +28,7 @@ use crate::{
 /// a merge routes to the direct replay or screen instead of the graft:
 /// tiny deltas fragment into per-key spans, and the stitch's seam work
 /// then exceeds simply walking the few entries.
-const SMALL_DIVERGENCE: u64 = 8;
+pub(crate) const SMALL_DIVERGENCE: u64 = 8;
 
 /// Command struct for pulling from upstream (auto-dispatches local/remote).
 pub struct Pull<'a> {
@@ -71,9 +73,26 @@ impl<'a> Pull<'a> {
     /// cell-advancing step while the (network-bound) fetch + rebase run
     /// lock-free, drive the two phases separately:
     ///
-    /// ```ignore
-    /// let prepared = branch.pull().prepare(&env).await?; // fetch + rebase, no cell writes
-    /// let revision = prepared.commit(&env).await?;       // advance the cells
+    /// ```no_run
+    /// # use dialog_repository::{Branch, PullError};
+    /// # async fn example<Env>(branch: &Branch, env: &Env) -> Result<(), PullError>
+    /// # where
+    /// #     Env: dialog_capability::Provider<dialog_effects::archive::Get>
+    /// #         + dialog_capability::Provider<dialog_effects::archive::Put>
+    /// #         + dialog_capability::Provider<dialog_effects::archive::Import>
+    /// #         + dialog_capability::Provider<dialog_effects::memory::Resolve>
+    /// #         + dialog_capability::Provider<dialog_effects::memory::Publish>
+    /// #         + dialog_capability::Provider<dialog_effects::authority::Identify>
+    /// #         + dialog_capability::Provider<dialog_effects::authority::Attest>
+    /// #         + dialog_capability::Provider<dialog_capability::Fork<dialog_repository::RemoteSite, dialog_effects::archive::Get>>
+    /// #         + dialog_capability::Provider<dialog_capability::Fork<dialog_repository::RemoteSite, dialog_effects::memory::Resolve>>
+    /// #         + dialog_common::ConditionalSync
+    /// #         + 'static,
+    /// # {
+    /// let prepared = branch.pull().prepare(env).await?; // fetch + rebase, no cell writes
+    /// let revision = prepared.commit(env).await?;       // advance the cells
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
     where
@@ -443,8 +462,11 @@ impl<'a> Pull<'a> {
                             continue;
                         }
                         // Scan the covered slot in the stitched tree and
-                        // collect the claims whose versions the record
-                        // names; delete them at all three orderings.
+                        // collect the entries whose claims the record
+                        // names. An entry may collapse several same-value
+                        // claims: full coverage deletes it at all three
+                        // orderings, partial coverage rewrites it standing
+                        // on its surviving claims.
                         let mut retire = Vec::new();
                         {
                             let candidates = stitched
@@ -455,14 +477,18 @@ impl<'a> Pull<'a> {
                             {
                                 let candidate = candidate?;
                                 if let dialog_artifacts::State::Added(datum) = &candidate.value
-                                    && let Some(version) = datum.version
-                                    && record.supersedes.contains(&version)
+                                    && datum
+                                        .versions()
+                                        .any(|version| record.supersedes.contains(version))
                                 {
-                                    retire.push(candidate.key);
+                                    retire.push((
+                                        candidate.key,
+                                        datum.retire_covered(&record.supersedes),
+                                    ));
                                 }
                             }
                         }
-                        for key in retire {
+                        for (key, surviving) in retire {
                             let entity_key = dialog_artifacts::EntityKey(key);
                             let attribute_key =
                                 dialog_artifacts::AttributeKey::from_key(&entity_key);
@@ -472,7 +498,18 @@ impl<'a> Pull<'a> {
                                 attribute_key.into_key(),
                                 value_key.into_key(),
                             ] {
-                                stitched = stitched.delete(&key, &tree_store).await?;
+                                stitched = match &surviving {
+                                    None => stitched.delete(&key, &tree_store).await?,
+                                    Some(datum) => {
+                                        stitched
+                                            .insert(
+                                                key,
+                                                dialog_artifacts::State::Added(datum.clone()),
+                                                &tree_store,
+                                            )
+                                            .await?
+                                    }
+                                };
                             }
                         }
                     }
@@ -505,15 +542,15 @@ impl<'a> Pull<'a> {
                 }
 
                 let authority = Identify.perform(env).await?;
+                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    branch.of().clone(),
-                    branch.name(),
+                    lineage.as_str(),
                     authority.did(),
-                    authority.profile().clone(),
                 );
                 let mut record = revision.record(
+                    authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
                 );
@@ -661,15 +698,15 @@ impl<'a> Pull<'a> {
                 // merged ancestry is both parents', and both watermarks
                 // are in hand.
                 let authority = Identify.perform(env).await?;
+                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    branch.of().clone(),
-                    branch.name(),
+                    lineage.as_str(),
                     authority.did(),
-                    authority.profile().clone(),
                 );
                 let mut record = revision.record(
+                    authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
                 );
@@ -738,14 +775,15 @@ impl<'a> Pull<'a> {
         let data_changes =
             base_tree.differentiate_within(&upstream_tree, &data_scope, &tree_store, &tree_store);
         let screened_history = merge::screen_history(history_changes, local_snapshot, screen_store);
-        // Fold the version of every revision record riding the delta
+        // Collect the version of every revision record riding the delta
         // into `observed` while the data differential streams anyway.
         // Those records are exactly the upstream-ancestry revisions we
         // may lack (records at or below the sync base arrived with the
-        // pulls that established it), so `local_context + observed` is
-        // the context of a head that adopts or merges this upstream —
-        // derived at zero extra reads, in place of the ancestry walk.
-        let observed = Arc::new(Mutex::new(Context::new()));
+        // pulls that established it), so the local context absorbing
+        // `observed` is the context of a head that adopts or merges this
+        // upstream — derived at zero extra reads, in place of the
+        // ancestry walk.
+        let observed = Arc::new(Mutex::new(BTreeSet::new()));
         let observed_data = merge::observe_revisions(data_changes, observed.clone());
         let screened_data = merge::screen_data(observed_data, local_context.clone());
         let screened = futures_util::StreamExt::chain(screened_history, screened_data);
@@ -758,18 +796,21 @@ impl<'a> Pull<'a> {
         let merged_tree = TreeReference::from(*merged.root().as_bytes());
 
         // The merged head's context, derived incrementally: the local
-        // context plus every revision that rode the delta (folded by
-        // `observe_revisions` while the differential streamed). The
-        // records in the delta are exactly the upstream-ancestry
+        // context absorbing every revision that rode the delta
+        // (collected by `observe_revisions` while the differential
+        // streamed; `absorb` screens them against the local watermark,
+        // so both the editions and the revision counts land exactly).
+        // The records in the delta are exactly the upstream-ancestry
         // revisions we may have lacked, so this equals the ancestry walk
         // without paying it.
         let merged_context = {
             let mut context = local_context;
-            context.merge(
-                &observed
+            let observed = mem::take(
+                &mut *observed
                     .lock()
                     .expect("the revision observer mutex is never poisoned"),
             );
+            context.absorb(observed);
             context
         };
 
@@ -800,13 +841,12 @@ impl<'a> Pull<'a> {
             // root is replaced once those records are in the tree.
             Some(local) => {
                 let authority = Identify.perform(env).await?;
+                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    branch.of().clone(),
-                    branch.name(),
+                    lineage.as_str(),
                     authority.did(),
-                    authority.profile().clone(),
                 );
                 // A merge records no skip table: a skip chain must never
                 // cross a revision with more than one parent, or leaping
@@ -815,6 +855,7 @@ impl<'a> Pull<'a> {
                 // record before it enters the tree, and the head once the
                 // merged root is final — same order as `Commit`.
                 let mut record = revision.record(
+                    authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
                 );
@@ -945,7 +986,19 @@ impl PreparedPull<'_> {
         // On success the checkpoint updates the shared cache, so the branch
         // handle sees the new head. The caller refreshes and re-pulls to
         // reconcile a mismatch.
-        head.publish(new_revision.clone(), env).await?;
+        //
+        // The "head stands" arms (the scenario-2 skip and the keep-ours
+        // merge outcomes) publish nothing: the merged revision IS the
+        // current head, and rewriting the cell with identical bytes would
+        // still bump its version — failing any commit racing through
+        // another checkpoint for no reason. (An auto-sync loop hits the
+        // skip arm once per upstream movement; in a mesh, once per peer.)
+        // The verdict stays valid even if a commit advances the head
+        // meanwhile: a newer local head's context only grows, so "nothing
+        // new from this upstream" cannot be invalidated by it.
+        if branch.revision().as_ref() != Some(&new_revision) {
+            head.publish(new_revision.clone(), env).await?;
+        }
 
         // Advance the pulled upstream's recorded sync base to the tree we
         // just merged in, so the next pull/push against it uses that as the
@@ -1358,6 +1411,7 @@ mod tests {
 
 #[cfg(test)]
 mod history_tests {
+    use super::SMALL_DIVERGENCE;
     use crate::RevisionExt as _;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1368,6 +1422,57 @@ mod history_tests {
     use dialog_artifacts::history::{Causality, History as _, causality, common_ancestor};
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::stream;
+
+    /// A scenario-2 pull ("upstream moved, but with things we already
+    /// know") keeps the head and advances only the sync base — and it must
+    /// not TOUCH the head cell doing so: republishing an identical head
+    /// still bumps the cell version, so a commit racing through another
+    /// handle's checkpoint would fail `VersionMismatch` even though the
+    /// head value never changed. An auto-sync loop hits this arm once per
+    /// upstream movement.
+    #[dialog_common::test]
+    async fn it_keeps_the_head_cell_untouched_on_a_nothing_new_pull() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        feature
+            .commit(stream::iter(vec![assert_one(
+                "user/name",
+                "user:1",
+                "Alice",
+            )]))
+            .perform(&operator)
+            .await?;
+
+        // Main adopts feature's head, so feature's next pull of main is
+        // the scenario-2 skip: main moved, but only with feature's own
+        // work.
+        main.pull().from(&feature).perform(&operator).await?;
+
+        // A second handle of feature, its head checkpoint taken BEFORE
+        // the pull below.
+        let racer = repo.branch("feature").open().perform(&operator).await?;
+
+        feature.pull().perform(&operator).await?;
+
+        // The pull kept the head and must not have bumped the head cell:
+        // the racer's commit still lands against its pre-pull checkpoint.
+        racer
+            .commit(stream::iter(vec![assert_one(
+                "user/email",
+                "user:1",
+                "alice@example.com",
+            )]))
+            .perform(&operator)
+            .await
+            .expect("a nothing-new pull must not invalidate a racing commit's checkpoint");
+
+        Ok(())
+    }
 
     fn assert_one(the: &str, of: &str, value: &str) -> Instruction {
         Instruction::Assert(Artifact {
@@ -1881,7 +1986,6 @@ mod history_tests {
         use crate::{Revision, TreeReference};
         use dialog_artifacts::DialogArtifactsError;
         use dialog_artifacts::history::Edition;
-        use std::collections::HashSet;
 
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
@@ -1891,12 +1995,9 @@ mod history_tests {
         // signed by that issuer's key.
         let evil = repo.branch("evil").open().perform(&operator).await?;
         let forged = Revision {
-            subject: evil.of().clone(),
-            issuer: operator.did(),
-            authority: profile.did(),
             branch: "evil".into(),
+            issuer: operator.did(),
             tree: TreeReference::from([9u8; 32]),
-            cause: HashSet::new(),
             edition: Edition::GENESIS,
             context: None,
             signature: Vec::new(),
@@ -2186,6 +2287,95 @@ mod history_tests {
             count_labels(mallory.clone()).await,
             0,
             "Jordan observed Mallory's claim, so his retraction covers it"
+        );
+
+        Ok(())
+    }
+
+    /// The reordered four-writer scenario: Alice merges Mallory's
+    /// IDENTICAL claim before retracting. The same-value contest
+    /// collapses both claim versions into one index entry, so Alice's
+    /// retraction covers Bob's AND Mallory's claims — and the deletion
+    /// then holds against every stale holder, in both pull directions.
+    /// Before the collapsed set, the contest kept only one version:
+    /// the orphaned claim was covered by no record, and Bob's replica
+    /// kept the label live while Alice's showed it dead — permanent
+    /// divergence with all further pulls quiescing.
+    #[dialog_common::test]
+    async fn it_retracts_collapsed_same_value_claims_everywhere() -> Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let count_labels = |branch: crate::Branch| {
+            let operator = &operator;
+            async move {
+                let rows: Vec<_> = branch
+                    .claims()
+                    .select(ArtifactSelector::new().the("task/label".parse().unwrap()))
+                    .perform(operator)
+                    .await
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                rows.len()
+            }
+        };
+        let urgent = || Artifact {
+            the: "task/label".parse().unwrap(),
+            of: "task:7".parse().unwrap(),
+            is: Value::String("urgent".to_string()),
+            cause: None,
+        };
+
+        // Bob labels the task; Alice and Mallory sync it.
+        let bob = repo.branch("bob").open().perform(&operator).await?;
+        bob.commit(stream::iter(vec![Instruction::Assert(urgent())]))
+            .perform(&operator)
+            .await?;
+        for name in ["alice", "mallory"] {
+            let b = repo.branch(name).open().perform(&operator).await?;
+            b.set_upstream(&bob).perform(&operator).await?;
+            b.pull().perform(&operator).await?;
+        }
+        let alice = repo.branch("alice").load().perform(&operator).await?;
+        let mallory = repo.branch("mallory").load().perform(&operator).await?;
+
+        // Mallory asserts the identical value under her own claim;
+        // Alice pulls it (the same-value contest collapses the two
+        // versions into one entry), THEN retracts having observed both.
+        mallory
+            .commit(stream::iter(vec![Instruction::Assert(urgent())]))
+            .perform(&operator)
+            .await?;
+        alice.pull().from(&mallory).perform(&operator).await?;
+        alice
+            .commit(stream::iter(vec![Instruction::Retract(urgent())]))
+            .perform(&operator)
+            .await?;
+        assert_eq!(count_labels(alice.clone()).await, 0, "dead at Alice");
+
+        // Bob still holds the fact live. Both pull directions must
+        // converge on the deletion: his stale copy is dropped by R1
+        // (both its versions are in Alice's ancestry), and her covering
+        // record retires his live copy by R3.
+        bob.pull().from(&alice).perform(&operator).await?;
+        assert_eq!(
+            count_labels(bob.clone()).await,
+            0,
+            "the retraction covers Bob's collapsed claim too — no resurrection"
+        );
+        alice.pull().from(&bob).perform(&operator).await?;
+        assert_eq!(count_labels(alice.clone()).await, 0, "and stays dead");
+
+        // Mallory converges the same way.
+        mallory.pull().from(&alice).perform(&operator).await?;
+        assert_eq!(
+            count_labels(mallory.clone()).await,
+            0,
+            "Mallory's own claim was observed and covered"
         );
 
         Ok(())
@@ -3205,34 +3395,6 @@ mod history_tests {
                 )]))
                 .perform(&env)
                 .await?;
-            if true {
-                let n = alice
-                    .claims()
-                    .select(ArtifactSelector::new().the("user/name".parse().unwrap()))
-                    .perform(&env)
-                    .await?
-                    .collect::<Vec<_>>()
-                    .await
-                    .len();
-                eprintln!(
-                    "DBGCOUNT {} {n} root={:?}",
-                    i + 1,
-                    alice
-                        .revision()
-                        .map(|r| r.tree.hash().as_ref()[..4].to_vec())
-                );
-            }
-        }
-        {
-            let n = alice
-                .claims()
-                .select(ArtifactSelector::new().the("user/name".parse().unwrap()))
-                .perform(&env)
-                .await?
-                .collect::<Vec<_>>()
-                .await
-                .len();
-            eprintln!("DBGCOUNT alice after 200 commits: {n}");
         }
         us.pull().from(&alice).perform(&env).await?;
         us.commit(stream::iter(vec![assert_one(
@@ -3243,9 +3405,14 @@ mod history_tests {
         .perform(&env)
         .await?;
 
-        // Bob moves by three commits; we pull him. The old replay walked
+        // Bob moves by a dozen commits; we pull him. The old replay walked
         // our whole divergence (the adopted bulk); the graft must not.
-        for i in 0..3 {
+        // TWELVE commits, not a couple: the graft gate requires BOTH
+        // sides' divergence masses above `SMALL_DIVERGENCE` (8), and a
+        // smaller fixture silently routes through scenario 5's screened
+        // direction — which also stays under the read bound, so the graft
+        // body would be exercised by no test at all.
+        for i in 0..12 {
             bob.commit(stream::iter(vec![assert_one(
                 "city/name",
                 &format!("city:{i}"),
@@ -3254,22 +3421,31 @@ mod history_tests {
             .perform(&env)
             .await?;
         }
-        {
-            let before = us
-                .claims()
-                .select(ArtifactSelector::new().the("user/name".parse().unwrap()))
-                .perform(&env)
-                .await?
-                .collect::<Vec<_>>()
-                .await
-                .len();
-            eprintln!("DBGCOUNT before final pull: {before}");
-        }
+
+        // Pin the routing, not just the cost: the divergence-mass gate
+        // must actually select the graft for this fixture.
+        let ours = us
+            .revision()
+            .expect("we have a head")
+            .context
+            .expect("our head publishes its watermark");
+        let theirs = bob
+            .revision()
+            .expect("bob has a head")
+            .context
+            .expect("bob's head publishes its watermark");
+        assert!(
+            ours.divergence(&theirs).min(theirs.divergence(&ours)) > SMALL_DIVERGENCE,
+            "fixture must route to the graft: ours-beyond {} theirs-beyond {}",
+            ours.divergence(&theirs),
+            theirs.divergence(&ours)
+        );
+
         env.reset();
         us.pull().from(&bob).perform(&env).await?.expect("merged");
         let reads = env.block_reads();
         assert!(
-            reads <= 80,
+            reads <= 120,
             "a graft merge must not walk the adopted bulk (got {reads} reads): {:?}",
             env.snapshot()
         );
@@ -3294,8 +3470,155 @@ mod history_tests {
             }
         };
         assert_eq!(count("user/name").await?, 200, "the adopted bulk survives");
-        assert_eq!(count("city/name").await?, 3, "bob's novelty lands");
+        assert_eq!(count("city/name").await?, 12, "bob's novelty lands");
         assert_eq!(count("post/title").await?, 2, "seed and our own fact stand");
+
+        Ok(())
+    }
+
+    /// Deletions hold across the GRAFT merge specifically (spec D5,
+    /// scenario 4): both sides carry graft-sized divergence, each side
+    /// retracted a fact the other still holds live from the shared base,
+    /// and the stitched-and-repaired tree keeps both facts dead. Every
+    /// other deletion test routes through the small-delta paths, so the
+    /// graft's stitch + contested integrate + coverage repair had no
+    /// deletion pin at all.
+    #[dialog_common::test]
+    async fn it_propagates_deletions_across_a_graft_merge() -> Result<()> {
+        use crate::RepositoryExt as _;
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = profile
+            .repository(unique_name("repo"))
+            .open()
+            .perform(&operator)
+            .await?;
+
+        // The shared base carries two victims, one for each side to kill.
+        let seed = repo.branch("seed").open().perform(&operator).await?;
+        seed.commit(stream::iter(vec![
+            assert_one("task/label", "task:bobs-victim", "urgent"),
+            assert_one("task/label", "task:ours-victim", "blocked"),
+        ]))
+        .perform(&operator)
+        .await?;
+
+        let bob = repo.branch("bob").open().perform(&operator).await?;
+        bob.set_upstream(&seed).perform(&operator).await?;
+        bob.pull().perform(&operator).await?;
+
+        let us = repo.branch("us").open().perform(&operator).await?;
+        us.set_upstream(&seed).perform(&operator).await?;
+        us.pull().perform(&operator).await?;
+        us.pull().from(&bob).perform(&operator).await?;
+
+        // Both sides now diverge past the graft threshold: a dozen churn
+        // commits each, plus one retraction each of a base fact the
+        // other side still holds live.
+        for i in 0..12 {
+            bob.commit(stream::iter(vec![assert_one(
+                "city/name",
+                &format!("city:{i}"),
+                "bobton",
+            )]))
+            .perform(&operator)
+            .await?;
+            us.commit(stream::iter(vec![assert_one(
+                "user/name",
+                &format!("user:{i}"),
+                "resident",
+            )]))
+            .perform(&operator)
+            .await?;
+        }
+        bob.commit(stream::iter(vec![Instruction::Retract(Artifact {
+            the: "task/label".parse()?,
+            of: "task:bobs-victim".parse()?,
+            is: Value::String("urgent".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+        us.commit(stream::iter(vec![Instruction::Retract(Artifact {
+            the: "task/label".parse()?,
+            of: "task:ours-victim".parse()?,
+            is: Value::String("blocked".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+        // The fixture must route to the graft, not a small-delta path.
+        let ours = us
+            .revision()
+            .expect("we have a head")
+            .context
+            .expect("our head publishes its watermark");
+        let theirs = bob
+            .revision()
+            .expect("bob has a head")
+            .context
+            .expect("bob's head publishes its watermark");
+        assert!(
+            ours.divergence(&theirs).min(theirs.divergence(&ours)) > SMALL_DIVERGENCE,
+            "fixture must route to the graft: ours-beyond {} theirs-beyond {}",
+            ours.divergence(&theirs),
+            theirs.divergence(&ours)
+        );
+
+        us.pull()
+            .from(&bob)
+            .perform(&operator)
+            .await?
+            .expect("merged");
+
+        let labels: Vec<_> = us
+            .claims()
+            .select(ArtifactSelector::new().the("task/label".parse()?))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            labels.is_empty(),
+            "both retractions hold across the graft: {labels:?}"
+        );
+
+        // Both sides' churn crossed the merge intact.
+        let count = |the: &str| {
+            let the: dialog_artifacts::Attribute = the.parse().unwrap();
+            let us = us.clone();
+            let operator = &operator;
+            async move {
+                anyhow::Ok(
+                    us.claims()
+                        .select(ArtifactSelector::new().the(the))
+                        .perform(operator)
+                        .await?
+                        .collect::<Vec<_>>()
+                        .await
+                        .into_iter()
+                        .collect::<Result<Vec<_>, _>>()?
+                        .len(),
+                )
+            }
+        };
+        assert_eq!(count("city/name").await?, 12, "bob's churn lands");
+        assert_eq!(count("user/name").await?, 12, "our churn survives");
+
+        // And the merge quiesces: pulling the same upstream again keeps
+        // the head (only bookkeeping may advance).
+        let settled = us.revision().expect("merged head");
+        us.pull().from(&bob).perform(&operator).await?;
+        assert_eq!(
+            us.revision().expect("head stands"),
+            settled,
+            "a repeated pull of the same upstream mints nothing new"
+        );
 
         Ok(())
     }

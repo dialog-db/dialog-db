@@ -34,7 +34,7 @@ use dialog_search_tree::{
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::iter::repeat_n;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
@@ -63,9 +63,24 @@ pub type ArtifactTree = PersistentTree<Key, State<Datum>>;
 // merge screen (see `crate::merge` and `notes/version-control.md`),
 // so no `Removed` tombstone ever reaches a data-region `integrate`
 // contest. The only remaining contest is `Added` vs `Added` — two
-// byte-variants of the *same* value — which the default deterministic
-// hash race resolves. No `prevails_over` override is needed.
-impl TreeValue for State<Datum> {}
+// byte-variants of the *same* value (the key carries entity, attribute
+// AND value) — which the default deterministic hash race resolves.
+// The contest FUSES rather than drops: both sides' claim versions
+// collapse into the winner (`Datum::absorb_versions`), so a later
+// retraction can cover every claim its author observed — a dropped
+// loser version could otherwise resurrect the fact through a peer that
+// still holds it (spec D3 on identical values).
+impl TreeValue for State<Datum> {
+    fn fuse(winner: Self, loser: &Self) -> Self {
+        match (winner, loser) {
+            (State::Added(mut winner), State::Added(loser)) => {
+                winner.absorb_versions(loser.versions());
+                State::Added(winner)
+            }
+            (winner, _) => winner,
+        }
+    }
+}
 
 /// Adapts a [`StorageBackend`] keyed by raw `[u8; 32]` hashes (the
 /// [`dialog_storage::Blake3Hash`] alias used throughout the artifact
@@ -1055,9 +1070,40 @@ where
 {
     // History records are buffered and only written if the batch changed
     // the indexes: a batch of pure no-ops must leave the tree untouched,
-    // history region included.
-    let mut history_entries: Vec<(Key, State<Datum>)> = Vec::new();
+    // history region included. Buffering is per history key, folding
+    // collisions: two instructions on the same (entity, attribute, value)
+    // in one batch land at ONE history key, and last-write-wins would
+    // silently drop the earlier record's lineage — a retract-then-re-assert
+    // of one value lost the retract's cause from the log (while its
+    // coverage mirror survived), so the screened merge path never retired
+    // a stale peer's copy while the graft path did. The fold keeps the
+    // later record's polarity and unions the superseded versions: a
+    // re-assert citing what it overrode.
+    let mut history_records: BTreeMap<Key, Record> = BTreeMap::new();
     let mut changed = false;
+    let buffer_record =
+        |records: &mut BTreeMap<Key, Record>, record: Record, version: &Version| {
+            let (key, _) = record.clone().into_entry(version, manifest);
+            match records.remove(&key) {
+                None => {
+                    records.insert(key, record);
+                }
+                Some(earlier) => {
+                    let mut versions = earlier.claim().cause.versions().to_vec();
+                    versions.extend_from_slice(record.claim().cause.versions());
+                    let claim = Claim {
+                        cause: HistoryCause::new(versions),
+                        ..record.claim().clone()
+                    };
+                    let folded = if record.is_assertion() {
+                        Record::Assert(claim)
+                    } else {
+                        Record::Retract(claim)
+                    };
+                    records.insert(key, folded);
+                }
+            }
+        };
 
     tokio::pin!(instructions);
     while let Some(instruction) = instructions.next().await {
@@ -1097,14 +1143,25 @@ where
                         is: artifact.is.clone(),
                         cause: HistoryCause::genesis(),
                     });
-                    if let Some(coverage) = record.coverage_entry(version) {
-                        history_entries.push(coverage);
-                    }
-                    history_entries.push(record.into_entry(version, manifest));
+                    buffer_record(&mut history_records, record, version);
                 }
 
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
+                // The fact orderings address a claim by (entity, attribute,
+                // value), so asserting a value that already stands re-asserts
+                // the SAME key: the standing claims collapse into the new
+                // datum rather than being overwritten. A later retraction
+                // covers the whole set — an insert-overwrite here silently
+                // orphaned the earlier claim, which could then resurrect the
+                // fact through a merge. Versioned writes only; the probe rides
+                // the same spine the insert below loads anyway.
+                if version.is_some()
+                    && let Some(State::Added(standing)) =
+                        transient.read(&entity_key, storage).await?
+                {
+                    datum.absorb_versions(standing.versions());
+                }
                 let added = State::Added(datum);
                 transient = transient
                     .write(entity_key.clone(), added.clone(), storage)
@@ -1167,10 +1224,15 @@ where
                             if current.is == artifact.is {
                                 found_same_value = true;
                             } else {
-                                // The superseded claim's version feeds the
+                                // The superseded claims' versions feed the
                                 // replacement record's cause, so a reader
                                 // can order the two without reading values.
-                                superseded_versions.extend(current_element.version);
+                                // ALL of the entry's claims: same-value
+                                // asserts collapse into one datum, and a
+                                // replacement its author issued having
+                                // observed the fact supersedes every claim
+                                // standing behind it.
+                                superseded_versions.extend(current_element.versions());
                                 superseded_keys.push(candidate.key);
                             }
                         }
@@ -1210,10 +1272,7 @@ where
                         is: artifact.is.clone(),
                         cause: HistoryCause::new(superseded_versions),
                     });
-                    if let Some(coverage) = record.coverage_entry(version) {
-                        history_entries.push(coverage);
-                    }
-                    history_entries.push(record.into_entry(version, manifest));
+                    buffer_record(&mut history_records, record, version);
                 }
 
                 if found_same_value {
@@ -1239,33 +1298,45 @@ where
                 transient = transient.write(value_key, added, storage).await?;
             }
             Instruction::Retract(artifact) => {
-                changed = true;
                 let (entity_key, attribute_key, value_key) =
                     artifact_index_keys(&artifact, manifest);
 
+                // The standing datum decides everything below: whether
+                // the retract changes anything at all, and which versions
+                // it withdraws. Retracting a fact that is not there is a
+                // no-op, spec'd as such: no index change, no record, no
+                // minted revision. (A same-batch assert of the same fact
+                // IS visible here — the write target carries it — so
+                // assert+retract still cancels through the erases below,
+                // and the record fold nets their lineage.)
+                let Some(State::Added(standing)) = transient.read(&entity_key, storage).await?
+                else {
+                    continue;
+                };
+                changed = true;
+
                 // A version-tagged retraction records its history: its
-                // cause is the version of the assertion it withdraws.
-                // An assertion made earlier in this same batch carries
-                // this batch's own version; a record must not claim
-                // itself as its cause, so that degenerates to a genesis
-                // retraction.
+                // cause is EVERY claim the standing entry collapses —
+                // same-value asserts from different writers share one
+                // key, and the retraction's author observed all of them
+                // (spec D3: a retraction covers exactly what its author
+                // had seen). An assertion made earlier in this same
+                // batch carries this batch's own version; a record must
+                // not claim itself as its cause, so that one is dropped
+                // (alone, it degenerates to a genesis retraction).
                 if let Some(version) = &version {
-                    let withdrawn = match transient.read(&entity_key, storage).await? {
-                        Some(State::Added(datum)) => {
-                            datum.version.filter(|withdrawn| withdrawn != version)
-                        }
-                        _ => None,
-                    };
+                    let withdrawn: Vec<Version> = standing
+                        .versions()
+                        .filter(|withdrawn| *withdrawn != version)
+                        .copied()
+                        .collect();
                     let record = Record::Retract(Claim {
                         the: artifact.the.clone(),
                         of: artifact.of.clone(),
                         is: artifact.is.clone(),
-                        cause: withdrawn.into_iter().collect(),
+                        cause: HistoryCause::new(withdrawn),
                     });
-                    if let Some(coverage) = record.coverage_entry(version) {
-                        history_entries.push(coverage);
-                    }
-                    history_entries.push(record.into_entry(version, manifest));
+                    buffer_record(&mut history_records, record, version);
                 }
 
                 // Observed-remove semantics: retraction deletes the
@@ -1285,8 +1356,20 @@ where
         }
     }
 
-    for (key, entry) in history_entries {
-        transient = transient.write(key, entry, storage).await?;
+    // Write the folded records and their coverage mirrors. Emitting
+    // coverage from the FOLDED record (rather than per instruction)
+    // keeps the mirror consistent with the log when a batch touched
+    // one (entity, attribute, value) twice: the coverage entry's key
+    // collides exactly when the record key does, and both then carry
+    // the same folded lineage.
+    if let Some(version) = &version {
+        for record in history_records.into_values() {
+            if let Some((key, entry)) = record.coverage_entry(version) {
+                transient = transient.write(key, entry, storage).await?;
+            }
+            let (key, entry) = record.into_entry(version, manifest);
+            transient = transient.write(key, entry, storage).await?;
+        }
     }
 
     Ok((transient, changed))

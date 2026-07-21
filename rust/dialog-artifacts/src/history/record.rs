@@ -58,6 +58,7 @@ impl Record {
             cause: None,
             blob: None,
             version: Some(*version),
+            collapsed: Vec::new(),
             supersedes: claim.cause.versions().to_vec(),
             retraction,
         };
@@ -83,24 +84,39 @@ impl Record {
             cause: None,
             blob: None,
             version: Some(*version),
+            collapsed: Vec::new(),
             supersedes: claim.cause.versions().to_vec(),
             retraction: !self.is_assertion(),
         };
         Some((key, State::Added(datum)))
     }
 
-    /// Reconstruct a record from its stored [`Datum`] form
-    /// Reconstruct a record from its stored key and [`Datum`].
+    /// Reconstruct a record from its stored key and [`Datum`], for a key
+    /// whose value is stored INLINE.
+    ///
+    /// A convenience over [`Record::try_from_key_datum_with_value`] with no
+    /// spilled bytes; a spilled key errors, because the raw value bytes live
+    /// in a separate archive block the caller must fetch.
+    pub fn try_from_key_datum(key: &Key, datum: Datum) -> Result<Record, DialogArtifactsError> {
+        Self::try_from_key_datum_with_value(key, datum, None)
+    }
+
+    /// Reconstruct a record from its stored key, its [`Datum`], and, for a
+    /// *spilled* key, the raw value bytes fetched from the archive block
+    /// store.
     ///
     /// The key is lossless (see `key::history`), so entity, attribute and
     /// value all come from it; the payload carries only the lineage the key
     /// does not encode (the superseded versions and the record's polarity).
     /// This mirrors how a fact reconstructs through
-    /// [`Artifact::from_key_datum_with_value`](crate::Artifact::from_key_datum_with_value).
-    ///
-    /// A spilled value is not resolved here: a record's value is compared by
-    /// reference, never by content, so the reference in the key is enough.
-    pub fn try_from_key_datum(key: &Key, datum: Datum) -> Result<Record, DialogArtifactsError> {
+    /// [`Artifact::from_key_datum_with_value`](crate::Artifact::from_key_datum_with_value):
+    /// pass `spilled = None` for inline keys and `Some(bytes)` (the block
+    /// fetched by the key's 32-byte reference) for spilled ones.
+    pub fn try_from_key_datum_with_value(
+        key: &Key,
+        datum: Datum,
+        spilled: Option<Vec<u8>>,
+    ) -> Result<Record, DialogArtifactsError> {
         let parts = varkey::parse_key(key.as_ref()).ok_or_else(|| {
             DialogArtifactsError::InvalidKey("history key did not parse".to_string())
         })?;
@@ -111,12 +127,13 @@ impl Record {
             DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
         })?)?;
         let is = match &parts.value {
-            // A spilled value's bytes live in the archive under this
-            // reference, exactly as for a fact; the caller resolves it.
             ValuePayload::Spilled { .. } => {
-                return Err(DialogArtifactsError::InvalidKey(
-                    "history record value spilled; resolve it through the archive".to_string(),
-                ));
+                let bytes = spilled.ok_or_else(|| {
+                    DialogArtifactsError::InvalidKey(
+                        "history record value spilled; resolve it through the archive".to_string(),
+                    )
+                })?;
+                crate::Value::try_from((parts.value_type, bytes))?
             }
             ValuePayload::Inline(payload) => {
                 decode_value(parts.value_type, payload)

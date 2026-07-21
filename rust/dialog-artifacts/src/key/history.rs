@@ -106,10 +106,14 @@ pub fn coverage_key(version: &Version, of: &Entity, the: &Attribute, value: &cra
     //
     // Under the in-band spill encoding the "hash only" form is a spilled
     // payload whose in-key prefix is EMPTY: the value slot holds the encoding
-    // of zero raw bytes (a lone terminator, so the slot is still
-    // self-delimiting and the key parses), and the 32-byte whole-value hash
-    // trails the key as the spill signal. No value bytes are carried, and a
-    // reader recovers the reference through `ValueRef::spill_hash`.
+    // of zero raw bytes (a lone terminator), and the whole-value hash trails
+    // the key as the spill signal. The type byte is FIXED at `Bytes`, not
+    // the covered value's own type: an empty prefix only self-delimits for
+    // terminated encodings, and a fixed-width type byte (int, float) would
+    // make the parser consume a full-width slot out of the 1-byte prefix,
+    // eating into the trailing hash. Nothing reads a coverage entry's value
+    // type — the key exists for enumerability and per-value uniqueness (the
+    // hash), and readers recover the reference through `ValueRef::spill_hash`.
     let mut prefix = Vec::new();
     encode_bytes(&[], &mut prefix);
     let parts = tagged_parts(
@@ -117,7 +121,7 @@ pub fn coverage_key(version: &Version, of: &Entity, the: &Attribute, value: &cra
         version,
         of,
         the,
-        value.data_type(),
+        ValueDataType::Bytes,
         ValuePayload::Spilled {
             prefix,
             hash: value.to_reference().as_ref().to_vec(),
@@ -202,12 +206,17 @@ pub fn history_claim_range(version: &Version, of: &Entity, the: &Attribute) -> (
     (Key::from(min), Key::from(max))
 }
 
-/// The inclusive bounds of the key range covering the entire history region
+/// The inclusive bounds of the key range covering the entire history region.
+///
+/// The upper bound needs a full filler run, not a single `0xFF`: a history
+/// key is the tag followed by a 32-byte origin, and an origin whose hash
+/// begins with `0xFF` produces keys that sort ABOVE the two-byte
+/// `[tag, 0xFF]` (longer key, equal prefix) — a short bound silently drops
+/// that writer's entire span from region scans.
 pub fn history_region_range() -> (Key, Key) {
-    (
-        Key::from(vec![HISTORY_KEY_TAG]),
-        Key::from(vec![HISTORY_KEY_TAG, u8::MAX]),
-    )
+    let mut max = vec![HISTORY_KEY_TAG];
+    max.extend(repeat_n(u8::MAX, VALUE_TAIL_BOUND));
+    (Key::from(vec![HISTORY_KEY_TAG]), Key::from(max))
 }
 
 /// The [`Version`] component of a history region key
@@ -242,6 +251,80 @@ mod tests {
     fn version(edition: u64, origin: u8) -> Version {
         use crate::history::{Edition, Origin};
         Version::new(Origin::from([origin; 32]), Edition::new(edition))
+    }
+
+    /// Every coverage key must parse, whatever the covered value's type.
+    /// The empty-prefix spilled form only self-delimits for terminated
+    /// (string-ish) encodings; carrying the covered value's own type byte
+    /// made the parser consume a fixed-width slot (16 bytes for ints, 8 for
+    /// floats) out of a 1-byte slot, eating into the trailing hash — every
+    /// coverage entry mirroring a covering write on an int- or float-valued
+    /// fact was unparseable, and the first graft pull to touch one failed.
+    #[test]
+    fn it_parses_coverage_keys_for_every_value_type() -> anyhow::Result<()> {
+        let of = Entity::from_str("test:sensor")?;
+        let the = Attribute::from_str("sensor/reading")?;
+        for value in [
+            crate::Value::UnsignedInt(5),
+            crate::Value::SignedInt(-5),
+            crate::Value::Float(1.5),
+            crate::Value::Boolean(true),
+            crate::Value::String("text".into()),
+            crate::Value::Bytes(vec![1, 2, 3]),
+            crate::Value::Entity(Entity::from_str("test:other")?),
+            crate::Value::Symbol(Attribute::from_str("some/symbol")?),
+            crate::Value::Record(vec![9, 9]),
+        ] {
+            let key = coverage_key(&version(2, 7), &of, &the, &value);
+            let parts = parse_key(key.as_ref()).unwrap_or_else(|| {
+                panic!("coverage key for {:?} did not parse", value.data_type())
+            });
+            assert_eq!(from_utf8(&parts.entity)?, of.as_str());
+            assert_eq!(from_utf8(&parts.attribute)?, the.as_str());
+            assert!(
+                parts.value.is_reference(),
+                "a coverage entry carries the covered value by reference"
+            );
+        }
+        Ok(())
+    }
+
+    /// Two covering writes by one revision on the same `(entity, attribute)`
+    /// slot (a same-batch retract of two values of a cardinality-many
+    /// attribute) must land at distinct coverage keys, or one entry
+    /// overwrites the other and graft repair misses a deletion.
+    #[test]
+    fn it_separates_coverage_keys_of_distinct_covered_values() -> anyhow::Result<()> {
+        let of = Entity::from_str("test:task")?;
+        let the = Attribute::from_str("task/label")?;
+        let at = version(3, 9);
+        let left = coverage_key(&at, &of, &the, &crate::Value::String("urgent".into()));
+        let right = coverage_key(&at, &of, &the, &crate::Value::String("blocked".into()));
+        assert_ne!(left, right);
+        Ok(())
+    }
+
+    /// The history region range must contain every writer's span, including
+    /// an origin whose hash begins with `0xFF`: a two-byte upper bound
+    /// `[tag, 0xFF]` sorts *below* that writer's longer keys, silently
+    /// dropping its entire log from region scans.
+    #[test]
+    fn it_contains_high_origins_in_the_history_region_range() -> anyhow::Result<()> {
+        use crate::history::{Edition, Origin};
+        let of = Entity::from_str("test:entity")?;
+        let the = Attribute::from_str("test/attribute")?;
+        let high = Version::new(Origin::from([0xFF; 32]), Edition::new(1));
+        let key = history_key(
+            &high,
+            &of,
+            &the,
+            &crate::Value::String("value".into()),
+            &Manifest::default(),
+        );
+        let (min, max) = history_region_range();
+        assert!(key >= min, "high-origin key sorts above the region minimum");
+        assert!(key <= max, "high-origin key sorts below the region maximum");
+        Ok(())
     }
 
     /// The key is lossless: entity and attribute round-trip in full, however
