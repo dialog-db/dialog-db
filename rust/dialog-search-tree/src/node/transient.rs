@@ -1068,13 +1068,18 @@ where
         }
     }
 
-    // The backstop: a maximal stretch of vetoed seams is uncuttable by any
-    // coin, so when its summed entry weight exceeds `max_segment` it is
-    // force-split at the rendezvous anchors `cap::forced_cut_positions`
-    // chooses. A group starting at a forced anchor carries the long-form
-    // forced separator (`cap::forced_separator`), which keeps the seam out
+    // The frame partition is the COIN's verdicts alone, snapshotted before
+    // any forced overlay: forced cuts (either backstop) never feed back
+    // into frame definition, so there is no cascade.
+    let coin_cut = cut_after.clone();
+
+    // The stretch backstop: a maximal stretch of vetoed seams is uncuttable
+    // by any coin, so when its summed entry weight exceeds `max_segment` it
+    // is force-split at the anchors `cap::forced_cut_positions` chooses. A
+    // group starting at a forced anchor carries the long-form forced
+    // separator (`cap::forced_seam_separator`), which keeps the seam out
     // of every index level (the seam coin's length guard) and marks the
-    // pieces as one stretch in stored form, so an edit can rejoin them.
+    // pieces as one run in stored form, so an edit can rejoin them.
     // Stretch extents never cross the window: a vetoed seam exists in
     // stored form only as a forced seam, and the edit path widens its
     // window across those before regrouping.
@@ -1097,6 +1102,34 @@ where
                 cut_after[start + cut - 1] = true;
                 forced_start[start + cut] = true;
             }
+        }
+    }
+
+    // The frame ceiling: a frame (the entries between coin-decided cuts)
+    // over `frame_ceiling_factor * max_segment` is force-split at accepted
+    // seams (`cap::frame_cut_positions`), bounding the weight coin's
+    // natural exponential tail. Same stored form and same window contract
+    // as the stretch backstop: forced seams are self-identifying and the
+    // edit path widens across them, so a frame is always regrouped whole.
+    if manifest.frame_ceiling() > 0 {
+        let mut start = 0usize;
+        for end in 0..count {
+            let closes_frame = coin_cut[end] || end + 1 == count;
+            if !closes_frame {
+                continue;
+            }
+            if end > start {
+                let keys: Vec<&Key> = entries[start..=end]
+                    .iter()
+                    .map(|entry| &entry.key)
+                    .collect();
+                let seams = &vetoed[start..end];
+                for cut in cap::frame_cut_positions(&keys, seams, manifest) {
+                    cut_after[start + cut - 1] = true;
+                    forced_start[start + cut] = true;
+                }
+            }
+            start = end + 1;
         }
     }
 
@@ -1161,7 +1194,7 @@ fn seal<Key, Value, D>(
     let separator = match previous_last.as_ref() {
         None => D::reseparate(first.as_ref(), floor),
         Some(previous) if forced => {
-            cap::forced_separator(previous.as_ref(), first.as_ref(), manifest)
+            cap::forced_seam_separator(previous.as_ref(), first.as_ref(), manifest)
         }
         Some(previous) => D::separator(previous.as_ref(), first.as_ref()),
     };

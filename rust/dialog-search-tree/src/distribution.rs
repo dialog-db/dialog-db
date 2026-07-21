@@ -424,24 +424,144 @@ pub mod cap {
         right[..cut].to_vec()
     }
 
+    /// How a forced cut chooses its anchor among a piece's candidate seams.
+    /// Read from `Manifest::anchor_selector`; both are pure functions of the
+    /// key set, so either converges — they trade stability characters.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum AnchorSelector {
+        /// Pure rendezvous: the candidate whose right key has the minimal
+        /// hash tail ([`anchor_order`] — bytes disjoint from the coin's
+        /// draw). Uniformly sticky: any churn relocates an anchor only by
+        /// beating or removing the local minimum.
+        Rendezvous,
+        /// Semantic first: the candidate whose shortest distinguishing
+        /// separator is shortest (the most semantically different adjacent
+        /// pair), hash-minimal within that class. By the sandwich property
+        /// (a key between two keys shares their common prefix) INSERTS can
+        /// never mint a strictly shorter class, so the class floor only
+        /// moves on deletes that merge seams; within large tie classes
+        /// (natural runs, where most seams diverge equally early) this
+        /// degrades toward pure rendezvous.
+        Hybrid,
+    }
+
+    impl AnchorSelector {
+        /// Decodes `Manifest::anchor_selector`; unknown values fall back to
+        /// rendezvous rather than failing, keeping old nodes readable.
+        pub fn from_manifest(manifest: &Manifest) -> Self {
+            match manifest.anchor_selector {
+                1 => AnchorSelector::Hybrid,
+                _ => AnchorSelector::Rendezvous,
+            }
+        }
+    }
+
+    /// A candidate anchor: the seam before `keys[at]`, its shortest
+    /// distinguishing separator length (the semantic-distance metric the
+    /// hybrid selector orders by first), and its rendezvous hash.
+    struct Anchor {
+        at: usize,
+        separator_len: usize,
+        hash: Blake3Hash,
+    }
+
+    /// The bytes an anchor election orders by: the TAIL of the key's blake3
+    /// hash, bytes 8..32 — disjoint from the leading 8 bytes every coin
+    /// draw reads ([`weight_paced_cut`](super::weight_paced_cut) and the
+    /// geometric rank both consume `hash[0..8]`).
+    ///
+    /// The disjointness is load-bearing: inside an over-target frame every
+    /// key's draw came up tails, so ordering elections by the full hash
+    /// (whose leading bytes ARE the draw) would systematically anchor at
+    /// the key that came closest to cutting, entangling coin outcomes with
+    /// anchor placement. Reading only the tail keeps the two decisions
+    /// independent while staying a pure function of the key. One rule for
+    /// both backstops: the vetoed-stretch anchors and the frame-ceiling
+    /// anchors order by this same slice.
+    pub fn anchor_order(hash: &Blake3Hash) -> &[u8] {
+        &hash.as_bytes()[8..]
+    }
+
+    /// Recursively splits `keys` at chosen anchors until every piece's
+    /// weight is at or under `threshold`: while a piece exceeds it, cut at
+    /// the selector's best candidate inside the piece. Returns cut
+    /// positions sorted ascending. Shared by the vetoed-stretch backstop
+    /// ([`forced_cut_positions`]) and the frame ceiling
+    /// ([`frame_cut_positions`]); a pure function of the candidate list and
+    /// weights, so the same inputs always split the same way, whatever
+    /// edits produced them. The threshold is symmetric — the same value
+    /// creates and dissolves cuts, no hysteresis — because any
+    /// trajectory-dependent rule would break the byte-identity independent
+    /// imports and canonicalize promise.
+    fn choose_cuts<K>(
+        keys: &[&K],
+        candidates: &[Anchor],
+        threshold: usize,
+        selector: AnchorSelector,
+    ) -> Vec<usize>
+    where
+        K: Key,
+    {
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        // Prefix weights: weight of keys[lo..hi] is prefix[hi] - prefix[lo].
+        let mut prefix = Vec::with_capacity(keys.len() + 1);
+        prefix.push(0usize);
+        for key in keys {
+            let last = *prefix.last().expect("prefix starts non-empty");
+            prefix.push(last + entry_weight(key.as_ref()));
+        }
+
+        let mut cuts = Vec::new();
+        let mut pieces = vec![(0usize, keys.len())];
+        while let Some((lo, hi)) = pieces.pop() {
+            if prefix[hi] - prefix[lo] <= threshold {
+                continue;
+            }
+            let best = candidates
+                .iter()
+                .filter(|anchor| anchor.at > lo && anchor.at < hi)
+                .min_by(|a, b| match selector {
+                    AnchorSelector::Rendezvous => anchor_order(&a.hash).cmp(anchor_order(&b.hash)),
+                    AnchorSelector::Hybrid => a
+                        .separator_len
+                        .cmp(&b.separator_len)
+                        .then_with(|| anchor_order(&a.hash).cmp(anchor_order(&b.hash))),
+                });
+            let Some(anchor) = best else {
+                continue;
+            };
+            cuts.push(anchor.at);
+            pieces.push((lo, anchor.at));
+            pieces.push((anchor.at, hi));
+        }
+        cuts.sort_unstable();
+        cuts
+    }
+
+    /// The shortest distinguishing separator length of the seam between
+    /// adjacent keys `left < right`: `min(lcp + 1, len(right))`, the
+    /// semantic-distance metric of the hybrid selector.
+    fn shortest_separator_len(left: &[u8], right: &[u8]) -> usize {
+        (lcp(left, right) + 1).min(right.len())
+    }
+
     /// Deterministic forced cut positions for a fully vetoed leaf stretch,
     /// as indices into `keys` (a cut at `i` starts a new segment at
     /// `keys[i]`), sorted ascending. Empty when the stretch's weight is
     /// within `max_segment`, the target is unset, or no seam qualifies.
     ///
-    /// Anchors are chosen rendezvous style, so boundaries are stable under
-    /// churn by PLACEMENT, not by memory: while a piece exceeds the target,
-    /// it is cut at the candidate key with the lowest blake3 hash inside
-    /// it, recursively. An insertion relocates an existing anchor only when
-    /// the new key's hash beats the piece's current minimum (otherwise the
-    /// old minima keep winning their pieces, and a piece pushed over the
-    /// target merely gains one new anchor); a deletion relocates one only
-    /// when the anchor key itself is removed, and the next-lowest hash
-    /// takes over. The threshold is symmetric — the same `max_segment`
-    /// creates and dissolves forced cuts, no hysteresis — because any
-    /// trajectory-dependent rule would break the byte-identity that
-    /// independent imports and canonicalize promise. The whole decision
-    /// stays a pure function of the stretch's key list.
+    /// Anchors are chosen by the manifest's [`AnchorSelector`] over the
+    /// candidate seams, recursively until every piece fits ([`choose_cuts`]):
+    /// boundaries are stable under churn by PLACEMENT, not memory. Under
+    /// rendezvous an insertion relocates an anchor only by beating the
+    /// piece's hash-tail minimum ([`anchor_order`], coin-disjoint bits) and
+    /// a deletion only by removing the anchor key; under the hybrid the
+    /// same holds within the shortest-separator class, and the class floor
+    /// itself can only drop on deletes (sandwich property). In a vetoed
+    /// stretch the hybrid also shrinks the STORED forced separators: they
+    /// carry `lcp + 1` bytes, and it anchors where that is smallest.
     ///
     /// A piece with no candidate seam stays whole even over the target (a
     /// run of short keys offers no separator the quietness rule accepts);
@@ -455,50 +575,132 @@ pub mod cap {
         if cap == 0 || keys.len() < 2 {
             return Vec::new();
         }
-
-        // Prefix weights: weight of keys[lo..hi] is prefix[hi] - prefix[lo].
-        let mut prefix = Vec::with_capacity(keys.len() + 1);
-        prefix.push(0usize);
-        for key in keys {
-            let last = *prefix.last().expect("prefix starts non-empty");
-            prefix.push(last + entry_weight(key.as_ref()));
-        }
-        if prefix[keys.len()] <= cap {
+        if keys
+            .iter()
+            .map(|key| entry_weight(key.as_ref()))
+            .sum::<usize>()
+            <= cap
+        {
             return Vec::new();
         }
 
-        // Candidate anchors with their rendezvous hash, computed once.
-        let mut candidates: Vec<(usize, Blake3Hash)> = Vec::new();
+        let mut candidates: Vec<Anchor> = Vec::new();
         for at in 1..keys.len() {
             let left = keys[at - 1].as_ref();
             let right = keys[at].as_ref();
             if is_forced_candidate(left, right, manifest) {
-                candidates.push((at, Blake3Hash::hash(right)));
+                candidates.push(Anchor {
+                    at,
+                    separator_len: shortest_separator_len(left, right),
+                    hash: Blake3Hash::hash(right),
+                });
             }
         }
-        if candidates.is_empty() {
+        choose_cuts(
+            keys,
+            &candidates,
+            cap,
+            AnchorSelector::from_manifest(manifest),
+        )
+    }
+
+    /// Whether the accepted seam between adjacent keys `left < right` can
+    /// carry a frame anchor: true when a valid lower-bound separator longer
+    /// than `max_separator` exists for it (see [`frame_separator`]), so the
+    /// forced seam stays self-identifying in stored form and rank 0 at
+    /// index levels, exactly like a stretch anchor.
+    pub fn is_frame_candidate(left: &[u8], right: &[u8], manifest: &Manifest) -> bool {
+        frame_separator(left, right, manifest).is_some()
+    }
+
+    /// The stored separator for a frame anchor at the accepted seam between
+    /// `left < right`: a valid lower-bound string (`> left`, `<= right`)
+    /// longer than `max_separator`, so the seam coin's length guard keeps
+    /// the seam leaf-level and the widening join predicate recognizes the
+    /// piece. When `right` outgrows the bound this is the same
+    /// right-prefix form the stretch anchors use ([`forced_separator`]);
+    /// otherwise `left` is padded with `0x00` just past the bound — still
+    /// strictly above `left` (a proper extension) and at or below `right`
+    /// whenever `right` does not sit inside the padding gap, the rare case
+    /// where no over-bound separator exists at all and the seam is not a
+    /// candidate. The padded form is not a prefix of the right key, which
+    /// the min-move floor rule normally relies on; forced seams never meet
+    /// that rule (the widening dissolves them before any regroup or
+    /// reseparate, exactly as for stretch anchors), which is why this is
+    /// safe.
+    pub fn frame_separator(left: &[u8], right: &[u8], manifest: &Manifest) -> Option<Vec<u8>> {
+        let bound = manifest.max_separator as usize;
+        if right.len() > bound {
+            return Some(forced_separator(left, right, manifest));
+        }
+        let mut separator = left.to_vec();
+        separator.resize(bound.max(left.len()) + 1, 0);
+        (separator.as_slice() <= right).then_some(separator)
+    }
+
+    /// The stored separator for ANY forced seam — stretch or frame anchor —
+    /// between adjacent keys `left < right`. Total over both anchor kinds:
+    /// a stretch anchor's right key is over the bound by the veto's own
+    /// condition, so it always takes the right-prefix form, and a frame
+    /// anchor was admitted by [`is_frame_candidate`].
+    pub fn forced_seam_separator(left: &[u8], right: &[u8], manifest: &Manifest) -> Vec<u8> {
+        frame_separator(left, right, manifest)
+            .expect("forced seam chosen at a seam with no over-bound separator")
+    }
+
+    /// Deterministic forced cut positions bounding a FRAME — the entries
+    /// between two coin-decided cuts — at the hard ceiling
+    /// (`Manifest::frame_ceiling`), as indices into `keys` sorted
+    /// ascending. `vetoed[i]` describes the seam between `keys[i]` and
+    /// `keys[i + 1]`: anchors land only on ACCEPTED seams (a vetoed seam
+    /// may never cut, whatever the weight), and only where a
+    /// self-identifying separator exists ([`is_frame_candidate`]).
+    ///
+    /// This bounds the weight coin's natural exponential tail: the coin
+    /// leaves a frame over the ceiling with probability `e^(-ceiling /
+    /// max_segment)`, and the ceiling converts that tail into forced
+    /// splits. Frames are delimited by coin cuts ONLY — forced cuts (this
+    /// function's own output, or the stretch backstop's) never feed back
+    /// into frame definition, so there is no cascade: the frame partition
+    /// is a pure function of the key set, and so are the anchors.
+    pub fn frame_cut_positions<K>(keys: &[&K], vetoed: &[bool], manifest: &Manifest) -> Vec<usize>
+    where
+        K: Key,
+    {
+        let ceiling = manifest.frame_ceiling();
+        if ceiling == 0 || keys.len() < 2 {
+            return Vec::new();
+        }
+        if keys
+            .iter()
+            .map(|key| entry_weight(key.as_ref()))
+            .sum::<usize>()
+            <= ceiling
+        {
             return Vec::new();
         }
 
-        let mut cuts = Vec::new();
-        let mut pieces = vec![(0usize, keys.len())];
-        while let Some((lo, hi)) = pieces.pop() {
-            if prefix[hi] - prefix[lo] <= cap {
+        let mut candidates: Vec<Anchor> = Vec::new();
+        for at in 1..keys.len() {
+            if vetoed[at - 1] {
                 continue;
             }
-            let best = candidates
-                .iter()
-                .filter(|(at, _)| *at > lo && *at < hi)
-                .min_by(|(_, a_hash), (_, b_hash)| a_hash.as_bytes().cmp(b_hash.as_bytes()));
-            let Some(&(at, _)) = best else {
-                continue;
-            };
-            cuts.push(at);
-            pieces.push((lo, at));
-            pieces.push((at, hi));
+            let left = keys[at - 1].as_ref();
+            let right = keys[at].as_ref();
+            if is_frame_candidate(left, right, manifest) {
+                candidates.push(Anchor {
+                    at,
+                    separator_len: shortest_separator_len(left, right),
+                    hash: Blake3Hash::hash(right),
+                });
+            }
         }
-        cuts.sort_unstable();
-        cuts
+        choose_cuts(
+            keys,
+            &candidates,
+            ceiling,
+            AnchorSelector::from_manifest(manifest),
+        )
     }
 }
 
@@ -768,6 +970,44 @@ mod tests {
                     "a zero target must ignore the bank"
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// Anchor elections read hash bits DISJOINT from the coin's draw: the
+    /// ordering ([`cap::anchor_order`]) is unchanged when only the leading
+    /// 8 bytes — the bytes every coin draw consumes — differ, and it does
+    /// respond to any tail byte. Without this, in an over-target frame
+    /// (where every draw came up tails) a full-hash-minimal election would
+    /// systematically anchor at the key that came closest to cutting,
+    /// entangling coin outcomes with anchor placement.
+    #[dialog_common::test]
+    async fn it_elects_anchors_on_coin_disjoint_bits() -> Result<()> {
+        let mut rng = test_rng();
+        for _ in 0..200 {
+            let mut bytes = [0u8; 32];
+            rng.fill(&mut bytes);
+            let hash = Blake3Hash::from(bytes);
+
+            // Flipping every coin bit leaves the election order untouched.
+            let mut lead_flipped = bytes;
+            for byte in lead_flipped.iter_mut().take(8) {
+                *byte = !*byte;
+            }
+            assert_eq!(
+                cap::anchor_order(&hash),
+                cap::anchor_order(&Blake3Hash::from(lead_flipped)),
+                "anchor order must ignore the coin's hash bytes"
+            );
+
+            // Flipping any tail byte changes the ordering key.
+            let mut tail_flipped = bytes;
+            tail_flipped[8 + (bytes[0] as usize % 24)] ^= 0x01;
+            assert_ne!(
+                cap::anchor_order(&hash),
+                cap::anchor_order(&Blake3Hash::from(tail_flipped)),
+                "anchor order must read the hash tail"
+            );
         }
         Ok(())
     }

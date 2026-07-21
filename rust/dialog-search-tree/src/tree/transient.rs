@@ -894,19 +894,19 @@ where
         let height = path.len() as Rank;
 
         // The backstop widening: forced seams split an over-target vetoed
-        // stretch into pieces whose anchors are a function of the WHOLE
-        // stretch, so a membership-changing edit into any piece must
-        // re-shape the complete stretch. Value-only updates and no-op
-        // deletes cannot move an anchor (anchors are key-derived) and skip
-        // it. Unlike the retired hard cap this widening reaches only
-        // genuinely vetoed clusters — the scan joins nothing unless a
+        // stretch — or an over-ceiling frame — into pieces whose anchors
+        // are a function of the WHOLE run, so a membership-changing edit
+        // into any piece must re-shape the complete run. Value-only updates
+        // and no-op deletes cannot move an anchor (anchors are key-derived)
+        // and skip it. Unlike the retired hard cap this widening reaches
+        // only force-split runs — the scan joins nothing unless a
         // neighboring separator exceeds `max_separator`, which the weight
         // coin's natural cuts never store — so the common edit path pays two
         // separator length reads and nothing else.
-        let widened = if manifest.max_segment == 0 {
+        let changes_membership = if manifest.max_segment == 0 {
             false
         } else {
-            let changes_membership = match (&self, follow(&mut root, &path)?) {
+            match (&self, follow(&mut root, &path)?) {
                 (Edit::Upsert(entry), TransientNode::Segment(segment)) => segment
                     .entries
                     .binary_search_by(|e| e.key.cmp(&entry.key))
@@ -915,14 +915,38 @@ where
                     segment.entries.binary_search_by(|e| e.key.cmp(key)).is_ok()
                 }
                 _ => true,
-            };
-            if changes_membership {
-                merge_vetoed_stretch::<Key, Value, Backend>(
-                    &mut root, &mut path, accessor, &manifest,
-                )
+            }
+        };
+        let widened = if changes_membership {
+            merge_forced_run::<Key, Value, Backend>(&mut root, &mut path, accessor, &manifest)
                 .await?
-            } else {
-                false
+        } else {
+            false
+        };
+
+        // The frame ceiling's fast-path gate: a membership-changing edit
+        // that leaves its segment over the ceiling must reach the regroup,
+        // which force-splits the frame — the in-place fast path would let
+        // the segment grow past the hard bound. The weight sum is paid only
+        // when a ceiling is armed and membership changes; an upsert of an
+        // existing key never gets here (weights are key-derived).
+        let over_ceiling = if !changes_membership || manifest.frame_ceiling() == 0 {
+            false
+        } else {
+            match follow(&mut root, &path)? {
+                TransientNode::Segment(segment) => {
+                    let weight: usize = segment
+                        .entries
+                        .iter()
+                        .map(|entry| cap::entry_weight(entry.key.as_ref()))
+                        .sum();
+                    let weight = match &self {
+                        Edit::Upsert(entry) => weight + cap::entry_weight(entry.key.as_ref()),
+                        Edit::Delete(_) => weight,
+                    };
+                    weight > manifest.frame_ceiling()
+                }
+                _ => false,
             }
         };
 
@@ -1108,6 +1132,7 @@ where
             && !dissolves_left_cut
             && !raises_left_cut
             && !widened
+            && !over_ceiling
         {
             let TransientNode::Segment(segment) = follow(&mut root, &path)? else {
                 return Err(DialogSearchTreeError::Node(
@@ -1151,7 +1176,7 @@ where
         // neighbor the scan reads one separator length and joins nothing.
         let neighbor_path = match neighbor_path {
             Some(mut neighbor_path) if manifest.max_segment > 0 => {
-                merge_vetoed_stretch::<Key, Value, Backend>(
+                merge_forced_run::<Key, Value, Backend>(
                     &mut root,
                     &mut neighbor_path,
                     accessor,
@@ -1411,32 +1436,34 @@ where
     bank
 }
 
-/// Widens an edit's window to the whole force-split vetoed stretch around
-/// the leaf at `path`: merges the stretch's pieces into a single segment
-/// carrying the stretch's own left separator, updates `path`'s leaf
-/// position, and returns whether any merge happened.
+/// Widens an edit's window to the whole force-split run around the leaf at
+/// `path` — a vetoed stretch's pieces, an over-ceiling frame's pieces, or
+/// both — merging them into a single segment carrying the run's own left
+/// separator, updating `path`'s leaf position, and returning whether any
+/// merge happened.
 ///
-/// Backstop anchors (`cap::forced_cut_positions`) are pure functions of a
-/// whole stretch's keys, so an edit that changes any piece's membership
-/// must re-shape the complete stretch, or differently ordered edits would
-/// anchor against different subsets and diverge. A stretch's pieces are
-/// found from stored structure alone: a separator longer than
-/// `max_separator` is the self-identifying mark of a forced seam and joins
-/// a piece to its left sibling — under the veto no accepted seam ever
-/// stores such a separator, so the mark is exact for canonically built
-/// trees. Forced seams never punch index cuts (the seam coin's length
-/// guard ranks them 0), so a stretch's pieces are always contiguous
-/// children of one parent index node and the scan never crosses a node
-/// boundary. A stitch can still leave an over-long natural separator at a
-/// piece seam; that only widens the window, and a wider regroup reproduces
-/// the same canonical shape.
+/// Forced anchors (`cap::forced_cut_positions`, `cap::frame_cut_positions`)
+/// are pure functions of a whole run's keys, so an edit that changes any
+/// piece's membership must re-shape the complete run, or differently
+/// ordered edits would anchor against different subsets and diverge. A
+/// run's pieces are found from stored structure alone: a separator longer
+/// than `max_separator` is the self-identifying mark of a forced seam (both
+/// anchor kinds store one; see `cap::forced_seam_separator`) and joins a
+/// piece to its left sibling — no natural cut ever stores such a
+/// separator, so the mark is exact for canonically built trees. Forced
+/// seams never punch index cuts (the seam coin's length guard ranks them
+/// 0), so a run's pieces are always contiguous children of one parent
+/// index node and the scan never crosses a node boundary. A stitch can
+/// still leave an over-long natural separator at a piece seam; that only
+/// widens the window, and a wider regroup reproduces the same canonical
+/// shape.
 ///
 /// This is the arm-1 window machinery rescoped to where it is cheap: the
 /// hard cap ran it for every over-target run (the common case in the SE
-/// workload — a 7x regression); the backstop reaches only fully vetoed
-/// clusters, which the weight coin cannot pace and which are rare and
-/// cluster-bounded by construction.
-async fn merge_vetoed_stretch<Key, Value, Backend>(
+/// workload — a 7x regression); this widening reaches only force-split
+/// runs, which are rare (vetoed clusters, or the coin's `e^(-ceiling/S)`
+/// tail) and bounded by their own extent.
+async fn merge_forced_run<Key, Value, Backend>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
     accessor: &Accessor<Backend>,
@@ -4547,15 +4574,18 @@ mod tests {
         }
 
         // The weight coin must actually govern the shape: the same keys
-        // under `max_segment: 0` (the geometric coin) shape differently.
+        // under `max_segment: 0` (the geometric coin) group differently.
+        // Compared as BOUNDARY SETS, not roots — the manifest is stamped
+        // into every node, so root hashes differ whenever the manifest
+        // does, coin switched or not.
         let uncapped = Manifest {
             max_segment: 0,
             ..manifest
         };
         let plain = build_incremental(&sorted, uncapped, &mut storage).await?;
         assert_ne!(
-            a.root(),
-            plain.root(),
+            leaf_boundaries(a.root(), &storage).await?,
+            leaf_boundaries(plain.root(), &storage).await?,
             "the weight-paced build must differ from the geometric one, or the coin never switched"
         );
 
@@ -4720,15 +4750,17 @@ mod tests {
 
         // The veto must be what shaped the tree: with the bound widened past
         // every in-cluster separator, the coin's cuts inside the clusters
-        // are accepted and the shape differs.
+        // are accepted and the grouping differs. Compared as BOUNDARY SETS,
+        // not roots — the manifest is stamped into every node, so root
+        // hashes differ whenever the manifest does, veto fired or not.
         let unvetoed = Manifest {
             max_separator: 512,
             ..manifest
         };
         let wide = build_incremental(&sorted, unvetoed, &mut storage).await?;
         assert_ne!(
-            a.root(),
-            wide.root(),
+            leaf_boundaries(a.root(), &storage).await?,
+            leaf_boundaries(wide.root(), &storage).await?,
             "the vetoed build must differ from the wide-bound one, or the veto never fired"
         );
 
@@ -4961,6 +4993,494 @@ mod tests {
         assert!(
             flapping_edits * 4 <= total,
             "anchors flapped on {flapping_edits} of {total} edits"
+        );
+
+        Ok(())
+    }
+
+    /// The capped manifest with a frame ceiling armed at `factor` times the
+    /// 512-byte target, and the anchor selector chosen explicitly.
+    fn ceiling_manifest(factor: u32, selector: u32) -> Manifest {
+        Manifest {
+            frame_ceiling_factor: factor,
+            anchor_selector: selector,
+            ..capped_manifest()
+        }
+    }
+
+    /// The first `want` keys of the form `{prefix}{n:04}` whose bank-zero
+    /// weight coin comes up tails under `manifest` — a deterministic
+    /// all-tails run: every seam accepted (short keys diverge in their
+    /// digits), no coin cut anywhere, the natural exponential tail's shape
+    /// seeded by key choice.
+    fn tails_keys(prefix: &str, want: usize, manifest: &Manifest) -> Vec<VarKey> {
+        let mut keys = Vec::new();
+        let mut n = 0u32;
+        while keys.len() < want {
+            let key = VarKey(format!("{prefix}{n:04}").into_bytes());
+            if <Geometric as Distribution>::rank(&key.0, manifest) <= 1 {
+                keys.push(key);
+            }
+            n += 1;
+        }
+        keys
+    }
+
+    /// The summed entry weight of each leaf, in tree order, derived by
+    /// partitioning the sorted key set at the persisted leaf boundaries.
+    async fn leaf_weights(
+        sorted: &[VarKey],
+        root: &Blake3Hash,
+        storage: &ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    ) -> Result<Vec<usize>> {
+        let boundaries: HashSet<Vec<u8>> =
+            leaf_boundaries(root, storage).await?.into_iter().collect();
+        let mut weights = Vec::new();
+        let mut current = 0usize;
+        for key in sorted {
+            current += distribution::cap::entry_weight(&key.0);
+            if boundaries.contains(&key.0) {
+                weights.push(current);
+                current = 0;
+            }
+        }
+        if current > 0 {
+            weights.push(current);
+        }
+        Ok(weights)
+    }
+
+    /// Step-5 convergence gate: the frame ceiling's forced cuts are a pure
+    /// function of the key set (frames are delimited by coin cuts only, and
+    /// anchors are chosen by the selector over candidate accepted seams),
+    /// so an all-tails run over the ceiling must build byte-identical trees
+    /// across insertion orders, and incremental deletes must land on the
+    /// survivors' fresh build.
+    #[dialog_common::test]
+    async fn it_converges_on_over_ceiling_frames_across_insertion_orders() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(2, 0);
+
+        let sorted = tails_keys("n", 60, &manifest);
+        let reversed: Vec<VarKey> = sorted.iter().rev().cloned().collect();
+        let hashed = {
+            let mut keys = sorted.clone();
+            keys.sort_by_key(|key| *Blake3Hash::hash(&key.0).as_bytes());
+            keys
+        };
+
+        let a = build_incremental(&sorted, manifest, &mut storage).await?;
+        let b = build_incremental(&reversed, manifest, &mut storage).await?;
+        let c = build_incremental(&hashed, manifest, &mut storage).await?;
+        assert_eq!(a.root(), b.root(), "orders must converge over the ceiling");
+        assert_eq!(a.root(), c.root(), "orders must converge over the ceiling");
+
+        // The ceiling must be what shaped it: factor 0 groups differently.
+        // Compared as BOUNDARY SETS, not roots — the manifest is stamped
+        // into every node, so root hashes differ whenever the manifest
+        // does, ceiling fired or not.
+        let unbounded = build_incremental(&sorted, ceiling_manifest(0, 0), &mut storage).await?;
+        assert_ne!(
+            leaf_boundaries(a.root(), &storage).await?,
+            leaf_boundaries(unbounded.root(), &storage).await?,
+            "the ceiling never fired on an over-ceiling all-tails run"
+        );
+
+        // Delete oracle: every 5th key, one edit at a time.
+        let doomed: Vec<VarKey> = sorted.iter().step_by(5).cloned().collect();
+        let survivors: Vec<VarKey> = sorted
+            .iter()
+            .filter(|key| !doomed.contains(key))
+            .cloned()
+            .collect();
+        let pruned = delete_incremental(a, &doomed, &mut storage).await?;
+        let rebuilt = build_incremental(&survivors, manifest, &mut storage).await?;
+        assert_eq!(
+            pruned.root(),
+            rebuilt.root(),
+            "incremental deletes must converge on the rebuild under the ceiling"
+        );
+
+        Ok(())
+    }
+
+    /// The hard bound itself: on an all-tails run (the coin never cuts) the
+    /// ceiling still holds — no persisted leaf weighs more than the ceiling
+    /// plus one entry, at either candidate factor.
+    #[dialog_common::test]
+    async fn it_bounds_frames_at_the_ceiling() -> Result<()> {
+        for factor in [2u32, 3] {
+            for selector in [0u32, 1] {
+                let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+                let manifest = ceiling_manifest(factor, selector);
+                let sorted = tails_keys("n", 90, &manifest);
+                let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+
+                let ceiling = manifest.frame_ceiling();
+                let slack = sorted
+                    .iter()
+                    .map(|key| distribution::cap::entry_weight(&key.0))
+                    .max()
+                    .expect("keys exist");
+                for weight in leaf_weights(&sorted, tree.root(), &storage).await? {
+                    assert!(
+                        weight <= ceiling + slack,
+                        "leaf weighs {weight}, over the {ceiling} ceiling \
+                         (factor {factor}, selector {selector})"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Step-5 edit locality: frames are delimited by coin cuts, so an edit
+    /// inside one frame re-anchors only that frame; boundaries in other
+    /// frames — including the coin cut between them — stay byte-identical.
+    #[dialog_common::test]
+    async fn it_keeps_ceiling_effects_inside_the_touched_frames() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(2, 0);
+
+        // Two over-ceiling all-tails frames separated by one heads key (a
+        // coin cut), found deterministically.
+        let frame_a = tails_keys("a", 40, &manifest);
+        let heads = {
+            let mut n = 0u32;
+            loop {
+                let key = VarKey(format!("m{n:04}").into_bytes());
+                if <Geometric as Distribution>::rank(&key.0, &manifest) > 1 {
+                    break key;
+                }
+                n += 1;
+            }
+        };
+        let frame_b = tails_keys("z", 40, &manifest);
+        let mut sorted: Vec<VarKey> = frame_a.clone();
+        sorted.push(heads.clone());
+        sorted.extend(frame_b.clone());
+        sorted.sort();
+
+        let mut tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let mut before: HashSet<Vec<u8>> = leaf_boundaries(tree.root(), &storage)
+            .await?
+            .into_iter()
+            .collect();
+        assert!(
+            before.contains(&heads.0),
+            "the heads key must cut between the frames"
+        );
+
+        // One insert into frame B and one delete from it: every boundary
+        // change stays inside frame B's key range.
+        let insert = tails_keys("z", 41, &manifest)
+            .pop()
+            .expect("a 41st tails key exists");
+        let edits: Vec<(bool, VarKey)> = vec![(true, insert), (false, frame_b[7].clone())];
+        let mut delta = Delta::zero();
+        for (is_insert, key) in edits {
+            let transient = tree.edit_with_manifest(&storage).await?;
+            let transient = if is_insert {
+                transient
+                    .insert(key.clone(), key.0.clone(), &storage)
+                    .await?
+            } else {
+                transient.delete(&key, &storage).await?
+            };
+            tree = transient.persist(&mut delta)?;
+            for (hash, buffer) in delta.flush() {
+                storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            }
+            delta = Delta::zero();
+
+            let after: HashSet<Vec<u8>> = leaf_boundaries(tree.root(), &storage)
+                .await?
+                .into_iter()
+                .collect();
+            for moved in before.symmetric_difference(&after) {
+                assert!(
+                    moved.starts_with(b"z"),
+                    "an edit inside frame B moved the boundary {:?}",
+                    String::from_utf8_lossy(moved)
+                );
+            }
+            before = after;
+        }
+
+        Ok(())
+    }
+
+    /// Constraint 5: in a composite frame — accepted-seam runs around a
+    /// vetoed cluster — the ceiling anchors only at accepted seams; the
+    /// vetoed cluster's interior is never cut by the frame machinery,
+    /// whatever the weight distribution.
+    #[dialog_common::test]
+    async fn it_anchors_frames_only_at_accepted_seams() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(2, 0);
+
+        // A small vetoed cluster (under the 512 stretch target, so the
+        // stretch backstop stays out of the picture) whose terminal seam
+        // coin is tails, found deterministically over cluster tags.
+        let cluster = {
+            let mut tag = b'a';
+            loop {
+                let make = |n: u32| {
+                    let mut bytes = vec![b'm', tag];
+                    bytes.extend(vec![b'q'; 28]);
+                    bytes.extend(format!("{n:04}").into_bytes());
+                    VarKey(bytes)
+                };
+                let keys: Vec<VarKey> = (0..5u32).map(make).collect();
+                let bank: usize = keys[..4]
+                    .iter()
+                    .map(|key| distribution::cap::entry_weight(&key.0))
+                    .sum();
+                let last = &keys[4];
+                if !<Geometric as Distribution>::leaf_cut(&last.0, bank, &manifest) {
+                    break keys;
+                }
+                tag += 1;
+            }
+        };
+
+        let mut sorted: Vec<VarKey> = tails_keys("e", 10, &manifest);
+        sorted.extend(cluster.clone());
+        sorted.extend(tails_keys("x", 10, &manifest));
+        sorted.sort();
+
+        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let pieces = leaf_piece_heads(tree.root(), &storage).await?;
+        let bound = manifest.max_separator as usize;
+        let anchors: Vec<&Vec<u8>> = pieces
+            .iter()
+            .filter(|(separator, _)| *separator > bound)
+            .map(|(_, head)| head)
+            .collect();
+        assert!(
+            !anchors.is_empty(),
+            "the composite frame exceeds the ceiling and must be force-split"
+        );
+        let cluster_interior: HashSet<&[u8]> =
+            cluster[1..].iter().map(|key| key.0.as_slice()).collect();
+        for anchor in anchors {
+            assert!(
+                !cluster_interior.contains(anchor.as_slice()),
+                "a frame anchor landed inside the vetoed cluster: {:?}",
+                String::from_utf8_lossy(anchor)
+            );
+        }
+
+        Ok(())
+    }
+
+    /// The step-5 churn and evenness measurement, one run per (ceiling
+    /// factor, anchor selector) config over the same all-tails fixture:
+    /// builds the tree, reports piece evenness (leaf weight min/mean/max),
+    /// then applies the shared edit protocol (interior inserts, then
+    /// deletes) counting boundary moves per edit — excluding the edited
+    /// key itself — split into insert-driven and delete-driven. The
+    /// numbers land in the experiment note; the assertion only pins that
+    /// churn stays bounded (no edit moves more than a handful of
+    /// boundaries).
+    #[dialog_common::test]
+    async fn it_reports_boundary_churn_across_configs() -> Result<()> {
+        let probe = capped_manifest();
+        let all = tails_keys("f", 200, &probe);
+        let seed: Vec<VarKey> = all.iter().step_by(2).cloned().collect();
+        let inserts: Vec<VarKey> = all.iter().skip(1).step_by(8).cloned().collect();
+        let deletes: Vec<VarKey> = seed.iter().skip(3).step_by(9).cloned().collect();
+
+        for (factor, selector) in [(0u32, 0u32), (2, 0), (2, 1), (3, 0), (3, 1)] {
+            let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let manifest = ceiling_manifest(factor, selector);
+            let mut tree = build_incremental(&seed, manifest, &mut storage).await?;
+
+            let weights = leaf_weights(&seed, tree.root(), &storage).await?;
+            let total: usize = weights.iter().sum();
+            eprintln!(
+                "CHURN-EVENNESS factor={factor} selector={selector}: leaves={} weight min={} mean={} max={}",
+                weights.len(),
+                weights.iter().min().expect("leaves exist"),
+                total / weights.len(),
+                weights.iter().max().expect("leaves exist"),
+            );
+
+            let mut before: HashSet<Vec<u8>> = leaf_boundaries(tree.root(), &storage)
+                .await?
+                .into_iter()
+                .collect();
+            let mut delta = Delta::zero();
+            let mut insert_moves = 0usize;
+            let mut delete_moves = 0usize;
+            let edits: Vec<(bool, VarKey)> = inserts
+                .iter()
+                .map(|key| (true, key.clone()))
+                .chain(deletes.iter().map(|key| (false, key.clone())))
+                .collect();
+            for (is_insert, key) in edits {
+                let transient = tree.edit_with_manifest(&storage).await?;
+                let transient = if is_insert {
+                    transient
+                        .insert(key.clone(), key.0.clone(), &storage)
+                        .await?
+                } else {
+                    transient.delete(&key, &storage).await?
+                };
+                tree = transient.persist(&mut delta)?;
+                for (hash, buffer) in delta.flush() {
+                    storage.store(buffer.as_ref().to_vec(), &hash).await?;
+                }
+                delta = Delta::zero();
+
+                let after: HashSet<Vec<u8>> = leaf_boundaries(tree.root(), &storage)
+                    .await?
+                    .into_iter()
+                    .collect();
+                let moved = before
+                    .symmetric_difference(&after)
+                    .filter(|boundary| boundary.as_slice() != key.0.as_slice())
+                    .count();
+                assert!(
+                    moved <= 4,
+                    "an edit moved {moved} boundaries (factor {factor}, selector {selector})"
+                );
+                if is_insert {
+                    insert_moves += moved;
+                } else {
+                    delete_moves += moved;
+                }
+                before = after;
+            }
+            eprintln!(
+                "CHURN factor={factor} selector={selector}: insert_moves={insert_moves}/{} delete_moves={delete_moves}/{}",
+                inserts.len(),
+                deletes.len(),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// A vetoed cluster with two sub-cluster boundaries whose shortest
+    /// separators (25 bytes) are strictly shorter than every in-sub seam's
+    /// (32+): the hybrid selector's semantic anchors. Three sub-clusters
+    /// of 15 near-duplicate keys sharing a 24-byte cluster prefix.
+    fn semantic_cluster() -> Vec<VarKey> {
+        let mut keys = Vec::new();
+        for sub in [b'A', b'B', b'C'] {
+            for n in 0..15u32 {
+                let mut bytes = vec![b'W'];
+                bytes.extend(vec![b'q'; 23]);
+                bytes.push(sub);
+                bytes.extend(vec![b'r'; 6]);
+                bytes.extend(format!("{n:03}").into_bytes());
+                keys.push(VarKey(bytes));
+            }
+        }
+        keys
+    }
+
+    /// Sandwich property, insert half: for sorted `p < q < k`, `q` shares
+    /// `p` and `k`'s common prefix, so an insert can never mint a strictly
+    /// shorter separator — under the hybrid selector the semantic anchors
+    /// (the sub-cluster boundaries) stay put through inserts elsewhere in
+    /// the stretch.
+    #[dialog_common::test]
+    async fn it_keeps_semantic_anchors_still_under_inserts() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(0, 1);
+
+        let sorted = semantic_cluster();
+        let mut tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        // A semantic anchor's stored separator carries exactly lcp + 1 = 25
+        // bytes (the sub-boundary divergence, one past the 24-byte cluster
+        // prefix); in-sub anchors carry 32 or more.
+        let bound = manifest.max_separator as usize;
+        let semantic = |pieces: &[(usize, Vec<u8>)]| -> Vec<Vec<u8>> {
+            pieces
+                .iter()
+                .filter(|(separator, _)| *separator == bound + 1)
+                .map(|(_, head)| head.clone())
+                .collect()
+        };
+        let anchors = semantic(&leaf_piece_heads(tree.root(), &storage).await?);
+        let sub_b_first = &sorted[15];
+        let sub_c_first = &sorted[30];
+        assert!(
+            anchors.contains(&sub_b_first.0) && anchors.contains(&sub_c_first.0),
+            "the hybrid selector must anchor at the sub-cluster boundaries"
+        );
+
+        // Insert new members inside sub-cluster B (deep seams only): the
+        // semantic anchors must not move.
+        let mut delta = Delta::zero();
+        for n in [500u32, 501, 502] {
+            let mut bytes = vec![b'W'];
+            bytes.extend(vec![b'q'; 23]);
+            bytes.push(b'B');
+            bytes.extend(vec![b'r'; 6]);
+            bytes.extend(format!("{n:03}").into_bytes());
+            let key = VarKey(bytes);
+            tree = tree
+                .edit_with_manifest(&storage)
+                .await?
+                .insert(key.clone(), key.0.clone(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (hash, buffer) in delta.flush() {
+                storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            }
+            delta = Delta::zero();
+        }
+        let after = semantic(&leaf_piece_heads(tree.root(), &storage).await?);
+        assert!(
+            after.contains(&sub_b_first.0) && after.contains(&sub_c_first.0),
+            "inserts inside a sub-cluster moved a semantic anchor"
+        );
+
+        Ok(())
+    }
+
+    /// Sandwich property, delete half: deleting the semantic anchor key
+    /// merges its seam with the next, and the merged seam keeps the shallow
+    /// divergence — the anchor legitimately re-anchors at the merged seam's
+    /// right key (the sub-cluster's next member), not anywhere else.
+    #[dialog_common::test]
+    async fn it_reanchors_when_the_semantic_anchor_is_deleted() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(0, 1);
+
+        let sorted = semantic_cluster();
+        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let sub_b_first = sorted[15].clone();
+        let sub_b_second = sorted[16].clone();
+
+        let mut delta = Delta::zero();
+        let tree = tree
+            .edit_with_manifest(&storage)
+            .await?
+            .delete(&sub_b_first, &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (hash, buffer) in delta.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        let bound = manifest.max_separator as usize;
+        let anchors: Vec<Vec<u8>> = leaf_piece_heads(tree.root(), &storage)
+            .await?
+            .into_iter()
+            .filter(|(separator, _)| *separator > bound)
+            .map(|(_, head)| head)
+            .collect();
+        assert!(
+            !anchors.contains(&sub_b_first.0),
+            "the deleted anchor key must be gone"
+        );
+        assert!(
+            anchors.contains(&sub_b_second.0),
+            "the merged seam must re-anchor at the sub-cluster's next member"
         );
 
         Ok(())
