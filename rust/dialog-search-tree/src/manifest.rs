@@ -29,13 +29,14 @@
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// The current format version. Bump when any format constant's meaning or a
-/// node encoding changes.
+/// node encoding changes AFTER data in the prior format has shipped; format
+/// evolution before the first ship stays at version 1, since there is no
+/// stored data anywhere for a bump to protect.
 ///
-/// Version 2: an index node's novelty is grouped per child link and each
-/// link's buffer is encoded with the segment codec (schema-split columns,
-/// per-buffer dictionaries, front-coded arenas, op polarity as a column)
-/// instead of one node-wide rkyv `Vec<NoveltyEntry>`.
-pub const FORMAT_VERSION: u8 = 2;
+/// Version 1 includes: per-child-link novelty grouping with each link's
+/// buffer encoded via the segment codec (schema-split columns, per-buffer
+/// dictionaries, front-coded arenas, op polarity as a column).
+pub const FORMAT_VERSION: u8 = 1;
 
 /// The branching parameter as `n`, where the geometric split factor (expected
 /// fanout) is `2^n`. One byte spans the whole practical range; `n = 8` gives a
