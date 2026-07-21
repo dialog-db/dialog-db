@@ -149,20 +149,21 @@ where
     /// `cache`. Used by the hitchhiker tree to replay leaf-bound ops directly on
     /// its live spine, with no serialization round-trip.
     ///
-    /// The manifest defaults: the caller hands over a live transient node, not
-    /// a hash, so there is no persisted root to read a manifest back from here.
-    /// The hitchhiker path that calls this defaults its own manifest too (see
-    /// [`HitchhikerTree::persist`](crate::HitchhikerTree::persist)), so the two
-    /// agree; carrying a non-default manifest through the buffered path means
-    /// threading it from where the buffered tree is opened.
+    /// The caller hands over a live transient node, not a hash, so there is no
+    /// persisted root to read a format header back from here: `manifest` must
+    /// be the one the spine's nodes carry, which the hitchhiker captures when
+    /// it first loads the tree's root (see
+    /// [`HitchhikerTree::persist`](crate::HitchhikerTree::persist)). A tree
+    /// born empty has no stored header and passes the default.
     pub(crate) fn from_loaded(
         node: TransientNode<Key, Value>,
         cache: Cache<Blake3Hash, Buffer>,
+        manifest: Manifest,
     ) -> Self {
         Self {
             root: TransientRoot::Loaded(node),
             cache,
-            manifest: Manifest::default(),
+            manifest,
             distribution: PhantomData,
         }
     }
@@ -1415,22 +1416,29 @@ where
             // that subtree.
             let carried = std::mem::take(&mut node.as_index_mut()?.novelty);
             let children = &mut node.as_index_mut()?.children;
-            let run = if left_fuse == Some(0) {
+            let (run, mut lifted) = if left_fuse == Some(0) {
                 // The replacement's left-edge seam rank dropped: its head
                 // must merge into the left sibling. The edited child is
                 // consumed by its replacement either way.
                 children.remove(at);
                 fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)?
             } else {
-                splice_and_regroup::<Key, Value, D>(
-                    children,
-                    at..at + 1,
-                    replacement,
-                    height,
-                    manifest,
-                )?
+                (
+                    splice_and_regroup::<Key, Value, D>(
+                        children,
+                        at..at + 1,
+                        replacement,
+                        height,
+                        manifest,
+                    )?,
+                    Vec::new(),
+                )
             };
-            carry_novelty::<Key, Value>(run, carried)
+            // Ops lifted off fused child-level nodes are deeper (older) than
+            // this node's own buffer, so they precede it; `carry_novelty`'s
+            // stable re-sort then keeps the newest op for a key last.
+            lifted.extend(carried);
+            carry_novelty::<Key, Value>(run, lifted)
         }
     }
 }
@@ -1510,13 +1518,17 @@ where
 /// new rank still punches some levels, the regroup simply recreates those
 /// cuts, so an over-wide window is safe. An empty run degenerates to a plain
 /// re-cut.
+///
+/// Returns the spliced run together with the buffered ops the fusion lifted
+/// off the dismantled nodes (see [`fuse_subtrees`]); the caller must
+/// re-attach them to a node covering the run.
 fn fuse_left_run<Key, Value, D>(
     children: &mut Vec<Node<Key, Value>>,
     insert_at: usize,
     mut run: Vec<Node<Key, Value>>,
     height: Rank,
     manifest: &Manifest,
-) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+) -> Result<JoinedRun<Key, Value>, DialogSearchTreeError>
 where
     Key: self::Key,
     Value: self::Value,
@@ -1531,27 +1543,33 @@ where
         ));
     }
     if run.is_empty() {
-        return splice_and_regroup::<Key, Value, D>(
-            children,
-            insert_at..insert_at,
-            run,
-            height,
-            manifest,
-        );
+        return Ok((
+            splice_and_regroup::<Key, Value, D>(
+                children,
+                insert_at..insert_at,
+                run,
+                height,
+                manifest,
+            )?,
+            Vec::new(),
+        ));
     }
 
     let left_sibling = take_transient(children, insert_at - 1)?;
     let first = run.remove(0).into_transient()?;
-    let mut fused =
+    let (mut fused, lifted) =
         fuse_subtrees::<Key, Value, D>(left_sibling, first, None, height - 1, manifest)?;
     fused.extend(run);
-    splice_and_regroup::<Key, Value, D>(
-        children,
-        (insert_at - 1)..(insert_at - 1),
-        fused,
-        height,
-        manifest,
-    )
+    Ok((
+        splice_and_regroup::<Key, Value, D>(
+            children,
+            (insert_at - 1)..(insert_at - 1),
+            fused,
+            height,
+            manifest,
+        )?,
+        lifted,
+    ))
 }
 
 /// Re-shapes the shared prefix of a boundary delete down to the lowest common
@@ -1597,19 +1615,28 @@ where
         // We have reached the LCA: fuse the main child subtree (at `at`) with the
         // neighbour child subtree (at `at + 1`).
         // Regrouping below replaces this node, so its buffer is carried onto
-        // the run that takes its place (see `carry_novelty`).
+        // the run that takes its place (see `carry_novelty`), together with
+        // the buffers the fusion lifts off the two dismantled children.
         let carried = std::mem::take(&mut node.as_index_mut()?.novelty);
         let children = &mut node.as_index_mut()?.children;
         let main = take_transient(children, at)?;
         // After removing the main child the neighbour shifted left into `at`.
         let neighbor = take_transient(children, at)?;
-        let fused = fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1, manifest)?;
+        let (fused, mut lifted) =
+            fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1, manifest)?;
         let run = if left_fuse == Some(0) {
-            fuse_left_run::<Key, Value, D>(children, at, fused, height, manifest)?
+            let (run, more) =
+                fuse_left_run::<Key, Value, D>(children, at, fused, height, manifest)?;
+            lifted.extend(more);
+            run
         } else {
             splice_and_regroup::<Key, Value, D>(children, at..at, fused, height, manifest)?
         };
-        return carry_novelty::<Key, Value>(run, carried);
+        // The lifted ops came from child level or below, so they are older
+        // than this node's own buffer and precede it; `carry_novelty`'s
+        // stable re-sort keeps the newest op for a key last.
+        lifted.extend(carried);
+        return carry_novelty::<Key, Value>(run, lifted);
     }
 
     // Above the LCA: recurse through the shared prefix, then splice and re-cut.
@@ -1626,13 +1653,25 @@ where
     )?;
     let carried = std::mem::take(&mut node.as_index_mut()?.novelty);
     let children = &mut node.as_index_mut()?.children;
-    let run = if left_fuse == Some(0) {
+    let (run, mut lifted) = if left_fuse == Some(0) {
         children.remove(at);
         fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)?
     } else {
-        splice_and_regroup::<Key, Value, D>(children, at..at + 1, replacement, height, manifest)?
+        (
+            splice_and_regroup::<Key, Value, D>(
+                children,
+                at..at + 1,
+                replacement,
+                height,
+                manifest,
+            )?,
+            Vec::new(),
+        )
     };
-    carry_novelty::<Key, Value>(run, carried)
+    // Lifted ops are deeper (older) than this node's own buffer; see the
+    // ordering note in `reshape_path`.
+    lifted.extend(carried);
+    carry_novelty::<Key, Value>(run, lifted)
 }
 
 /// Fuses the main subtree (whose rightmost leaf lost its boundary) with the
@@ -1649,13 +1688,21 @@ where
 /// run, and the neighbour spine's right siblings into one run re-cut at that
 /// level. Mirrors the level-by-level fold in the shaper's
 /// `let_right_neighbor_adopt_orphans`.
+///
+/// Returns the fused run together with the buffered ops lifted off the index
+/// nodes the fusion dismantled, the same contract as [`concat_levels`]: those
+/// ops are pending writes with no home until the caller re-attaches them to a
+/// node covering the run, and dropping them loses data. The lifted list is
+/// ordered deepest first (a seam level's ops precede the two fused nodes'
+/// own), so the append-then-stable-sort re-attachment in [`carry_novelty`]
+/// keeps the newest op for a key last.
 fn fuse_subtrees<Key, Value, D>(
     main: TransientNode<Key, Value>,
     neighbor: TransientNode<Key, Value>,
     key: Option<&Key>,
     height: Rank,
     manifest: &Manifest,
-) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+) -> Result<JoinedRun<Key, Value>, DialogSearchTreeError>
 where
     Key: self::Key,
     Value: self::Value,
@@ -1671,7 +1718,8 @@ where
             // entries and re-cut into segments. The main segment's separator
             // is the floor for the fused run: the run's left seam is the main
             // segment's left seam (the neighbour's own seam dissolves and is
-            // re-derived fresh if regrouping recreates it).
+            // re-derived fresh if regrouping recreates it). Leaves buffer
+            // nothing, so there is nothing to lift here.
             let floor = std::mem::take(&mut main.separator);
             if let Some(key) = key
                 && main.entries.last().map(|e| &e.key == key).unwrap_or(false)
@@ -1680,7 +1728,10 @@ where
             }
             let mut entries = main.entries;
             entries.extend(neighbor.entries);
-            Ok(regroup_entries::<Key, Value, D>(entries, floor, manifest))
+            Ok((
+                regroup_entries::<Key, Value, D>(entries, floor, manifest),
+                Vec::new(),
+            ))
         }
         (TransientNode::Index(mut main), TransientNode::Index(mut neighbor)) => {
             // The main spine descends through the last child; the neighbour
@@ -1694,7 +1745,7 @@ where
             let neighbor_first = remove_first(&mut neighbor.children)?;
             let neighbor_first = neighbor_first.into_transient()?;
 
-            let fused = fuse_subtrees::<Key, Value, D>(
+            let (fused, seam_novelty) = fuse_subtrees::<Key, Value, D>(
                 main_last,
                 neighbor_first,
                 key,
@@ -1705,7 +1756,21 @@ where
             let mut combined = main.children;
             combined.extend(fused);
             combined.extend(neighbor.children);
-            regroup_children::<Key, Value, D>(combined, height, manifest)
+
+            // Both destructured nodes' buffers are pending against the run
+            // being built, and the regroup discards the nodes that held them.
+            // Lift them out for the caller, deepest first: the seam ops come
+            // from one level further down and are older than this level's own.
+            // The two fused nodes cover disjoint ranges, so their relative
+            // order carries no precedence.
+            let mut novelty = seam_novelty;
+            novelty.extend(main.novelty);
+            novelty.extend(neighbor.novelty);
+
+            Ok((
+                regroup_children::<Key, Value, D>(combined, height, manifest)?,
+                novelty,
+            ))
         }
         _ => Err(DialogSearchTreeError::Node(
             "Fused subtrees had mismatched heights".into(),
@@ -1821,10 +1886,25 @@ where
         }
         match &index.children[0] {
             Node::Transient(TransientNode::Index(_)) => {
+                let novelty = std::mem::take(&mut index.novelty);
                 let child = index.children.pop().expect("single child present");
-                let Node::Transient(child) = child else {
+                let Node::Transient(mut child) = child else {
                     unreachable!("matched transient index above");
                 };
+                // The stripped wrapper's buffer is pending against exactly
+                // the subtree the surviving child roots (they cover the same
+                // range), so it moves onto the child. The wrapper sat one
+                // level shallower, so its ops are the newer: append them
+                // after the child's own and stable-sort so the newest op for
+                // a key stays last, the position last-op-wins resolution
+                // reads.
+                if !novelty.is_empty() {
+                    let child_index = child.as_index_mut()?;
+                    child_index.novelty.extend(novelty);
+                    child_index
+                        .novelty
+                        .sort_by(|left, right| left.key.cmp(&right.key));
+                }
                 root = child;
             }
             _ => break,
@@ -4410,9 +4490,12 @@ mod buffer_edit_interaction_tests {
     use dialog_common::Blake3Hash;
     use dialog_storage::MemoryStorageBackend;
 
+    use crate::helpers::{
+        DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
+    };
     use crate::{
-        Buffer, Change, ContentAddressedStorage, Delta, Entry, HitchhikerTree, PersistentTree,
-        Piece, TransientTree,
+        ArchivedNodeBody, Buffer, Change, ContentAddressedStorage, Delta, Entry, HitchhikerTree,
+        NoveltyEntry, PersistentNode, PersistentTree, Piece, TransientTree, into_owned, tree_spec,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -5435,6 +5518,213 @@ mod buffer_edit_interaction_tests {
             Some(vec![222]),
             "a canonical edit must override the buffered op it shadows"
         );
+        Ok(())
+    }
+
+    type SpecTree = PersistentTree<SpecKey, Vec<u8>, DistributionSimulator>;
+
+    async fn flush_spec(
+        delta: &mut Delta<Blake3Hash, Buffer>,
+        storage: &mut SpecStorage,
+    ) -> Result<()> {
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn load_spec_node(
+        storage: &SpecStorage,
+        hash: &Blake3Hash,
+    ) -> Result<PersistentNode<SpecKey, Vec<u8>>> {
+        let bytes = storage
+            .retrieve(hash)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
+        Ok(PersistentNode::new(Buffer::from(bytes)))
+    }
+
+    /// The buffered ops sealed into a stored node, owned.
+    fn sealed_novelty(
+        node: &PersistentNode<SpecKey, Vec<u8>>,
+    ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
+        Ok(match node.body()? {
+            ArchivedNodeBody::Index(index) => index
+                .novelty
+                .iter()
+                .map(into_owned::<NoveltyEntry<Vec<u8>>>)
+                .collect::<Result<Vec<_>, _>>()?,
+            ArchivedNodeBody::Segment(_) => Vec::new(),
+        })
+    }
+
+    /// Buffered ops parked on the two index subtrees flanking a leaf boundary
+    /// must survive the boundary delete that fuses those subtrees at their
+    /// LCA: `fuse_subtrees` dismantles both index spines, and the buffers they
+    /// carry are pending writes, not shape. (The existing fuse tests fuse
+    /// SEGMENTS, which hold no buffers, so they cannot see this.)
+    #[dialog_common::test]
+    async fn it_keeps_buffered_ops_through_an_lca_fusion() -> Result<()> {
+        let spec = tree_spec![
+            [                   ..p]
+            [        ..h,       ..p]
+            [..d, ..h, ..l, ..p]
+        ]
+        .build(test_storage())
+        .await
+        .expect("the fixture spec is valid");
+        let mut storage = spec.storage().clone();
+        let base = SpecTree::from_hash(spec.tree().root().clone());
+
+        let left_parked = encode_key(b"bb", 1, 1);
+        let right_parked = encode_key(b"mm", 1, 1);
+        let boundary = encode_key(b"h", 2, 1);
+
+        // Park one op on each mid-level index flanking the `h` boundary: the
+        // first write buffers at the root, the second overflows the one-op
+        // buffer and cascades each op into the mid-level node covering it.
+        let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(1);
+        buffered = buffered.insert(left_parked, vec![1], &storage).await?;
+        buffered = buffered.insert(right_parked, vec![2], &storage).await?;
+        let mut delta = Delta::zero();
+        let root = buffered.persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        // The fixture must actually park both ops BELOW the root.
+        let root_node = load_spec_node(&storage, &root).await?;
+        assert!(
+            sealed_novelty(&root_node)?.is_empty(),
+            "fixture: the root buffer must be empty after the cascade"
+        );
+        let mut parked_count = 0;
+        for link in root_node.as_index()?.links()? {
+            let child = load_spec_node(&storage, &link.node).await?;
+            parked_count += sealed_novelty(&child)?.len();
+        }
+        assert_eq!(
+            parked_count, 2,
+            "fixture: both ops must sit in mid-level index buffers"
+        );
+
+        let parked: SpecTree = PersistentTree::from_hash(root);
+        assert_eq!(
+            parked.get(&left_parked, &storage).await?,
+            Some(vec![1]),
+            "control: the parked op reads back before the fusion"
+        );
+
+        // Deleting the boundary key fuses the two mid-level subtrees at the
+        // root, their LCA.
+        let mut delta = Delta::zero();
+        let fused = parked
+            .edit()
+            .delete(&boundary, &storage)
+            .await?
+            .persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            fused.get(&left_parked, &storage).await?,
+            Some(vec![1]),
+            "the left fused subtree's buffered op must survive the fusion"
+        );
+        assert_eq!(
+            fused.get(&right_parked, &storage).await?,
+            Some(vec![2]),
+            "the right fused subtree's buffered op must survive the fusion"
+        );
+        assert_eq!(fused.get(&boundary, &storage).await?, None);
+
+        // And survive the full flush.
+        let mut delta = Delta::zero();
+        let canonical = HitchhikerTree::open(&fused)
+            .canonicalize(&storage, &mut delta)
+            .await?;
+        flush_spec(&mut delta, &mut storage).await?;
+        assert_eq!(
+            canonical.get(&left_parked, &storage).await?,
+            Some(vec![1]),
+            "the left parked op must survive canonicalize"
+        );
+        assert_eq!(
+            canonical.get(&right_parked, &storage).await?,
+            Some(vec![2]),
+            "the right parked op must survive canonicalize"
+        );
+        assert_eq!(canonical.get(&boundary, &storage).await?, None);
+        Ok(())
+    }
+
+    /// A delete that strips a single-child root wrapper must carry the
+    /// wrapper's buffer onto the surviving root instead of dropping it.
+    /// Shaped like
+    /// `it_strips_a_persistent_single_child_root_after_rightmost_delete`,
+    /// but with an op parked in the root buffer before the delete.
+    #[dialog_common::test]
+    async fn it_keeps_the_root_buffer_when_a_delete_strips_the_root() -> Result<()> {
+        let mut storage = test_storage();
+        let a = encode_key(b"a", 2, 1); // leaf boundary, quiet seam
+        let b = encode_key(b"b", 1, 3); // interior, seam punches level 1
+
+        let mut delta = Delta::zero();
+        let mut tree = SpecTree::empty();
+        for key in [a, b] {
+            tree = tree
+                .edit()
+                .insert(key, key.to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            flush_spec(&mut delta, &mut storage).await?;
+        }
+
+        // Park an op in the ROOT buffer (the default buffer is big enough
+        // that nothing cascades).
+        let parked = encode_key(b"aa", 1, 1);
+        let buffered = HitchhikerTree::open(&tree)
+            .insert(parked, vec![7], &storage)
+            .await?;
+        let mut delta = Delta::zero();
+        let root = buffered.persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        let root_node = load_spec_node(&storage, &root).await?;
+        assert_eq!(
+            sealed_novelty(&root_node)?.len(),
+            1,
+            "fixture: the op must sit in the root buffer"
+        );
+
+        // Deleting `b` empties the rightmost subtree, leaving a single-child
+        // index-over-index root that `seal_root` strips.
+        let reopened: SpecTree = PersistentTree::from_hash(root);
+        let mut delta = Delta::zero();
+        let stripped = reopened
+            .edit()
+            .delete(&b, &storage)
+            .await?
+            .persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            stripped.get(&parked, &storage).await?,
+            Some(vec![7]),
+            "the stripped wrapper's buffered op must move onto the surviving root"
+        );
+        assert_eq!(stripped.get(&a, &storage).await?, Some(a.to_vec()));
+
+        let mut delta = Delta::zero();
+        let canonical = HitchhikerTree::open(&stripped)
+            .canonicalize(&storage, &mut delta)
+            .await?;
+        flush_spec(&mut delta, &mut storage).await?;
+        assert_eq!(
+            canonical.get(&parked, &storage).await?,
+            Some(vec![7]),
+            "the parked op must survive canonicalize"
+        );
+        assert_eq!(canonical.get(&a, &storage).await?, Some(a.to_vec()));
         Ok(())
     }
 }

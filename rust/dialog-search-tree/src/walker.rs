@@ -48,8 +48,10 @@ fn past_end<Key: Ord, R: RangeBounds<Key>>(range: &R, key: &Key) -> bool {
 /// every key belongs to it, matching the flush rule that the last child takes
 /// whatever remains.
 ///
-/// Within a key the last op wins, matching how a point read resolves a key and
-/// how a flush replays them.
+/// Precedence: WITHIN one node's buffer the last entry for a key is the newest
+/// and wins; ACROSS the path the first (root-most) layer holding the key wins,
+/// because writes land in the root buffer and a flush only moves ops downward,
+/// so deeper always means older.
 #[allow(clippy::type_complexity)]
 fn pending_for_leaf<Key, Value>(
     path: &[(PersistentNode<Key, Value>, Option<usize>)],
@@ -111,6 +113,9 @@ where
             continue;
         }
 
+        // Winners recorded before this layer came from shallower nodes and are
+        // newer; only entries from THIS layer's buffer may replace each other.
+        let layer_start = winners.len();
         for entry in index.novelty.iter() {
             let key: &[u8] = &entry.key;
             // Below the span: skip without decoding.
@@ -123,10 +128,13 @@ where
                 break;
             }
 
-            let op: NoveltyOp<Value> = into_owned(&entry.op)?;
-            match winners.iter_mut().find(|(candidate, _)| candidate == key) {
-                Some((_, winner)) => *winner = op,
-                None => winners.push((key.to_vec(), op)),
+            match winners.iter().position(|(candidate, _)| candidate == key) {
+                // Same layer: a later entry in one buffer is the newer op.
+                Some(at) if at >= layer_start => winners[at].1 = into_owned(&entry.op)?,
+                // A shallower layer already holds the newer op for this key;
+                // this deeper (older) one loses without being decoded.
+                Some(_) => {}
+                None => winners.push((key.to_vec(), into_owned(&entry.op)?)),
             }
         }
     }
@@ -140,7 +148,9 @@ where
 ///
 /// A write lands in a node's buffer and only reaches a leaf when that buffer
 /// overflows, so a read that consults the leaf alone misses every recent write
-/// to that key. Within a key the last op wins, matching how a flush replays them.
+/// to that key. Within one node's buffer the last op wins (matching how a
+/// flush replays it); across the path the FIRST layer holding the key wins,
+/// because ops flow root to leaf and deeper therefore means older.
 pub fn pending_for_key<Key, Value>(
     path: &[TreeLayer<Key, Value>],
     key: &[u8],
@@ -153,7 +163,6 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
 {
-    let mut winner = None;
     for layer in path {
         let ArchivedNodeBody::Index(index) = layer.host.body()? else {
             continue;
@@ -175,10 +184,13 @@ where
             found = Some(entry);
         }
         if let Some(entry) = found {
-            winner = Some(into_owned::<NoveltyOp<Value>>(&entry.op)?);
+            // The path is root first, so this is the shallowest layer holding
+            // the key: its op is the newest, and any deeper hit is an older
+            // copy a flush pushed down before this one was buffered.
+            return Ok(Some(into_owned::<NoveltyOp<Value>>(&entry.op)?));
         }
     }
-    Ok(winner)
+    Ok(None)
 }
 
 /// A traversal mechanism for walking through a tree structure.

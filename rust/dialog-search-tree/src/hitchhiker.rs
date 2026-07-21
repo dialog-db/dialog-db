@@ -40,9 +40,10 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution,
-    Entry, Geometric, Key, Manifest, Node, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree,
-    TransientNode, TransientRootParts, TransientSegment, TransientTree, Value, resolve_pending,
+    Accessor, ArchivedNodeBody, Buffer, Cache, ContentAddressedStorage, Delta,
+    DialogSearchTreeError, Distribution, Entry, Geometric, Key, Manifest, Node, NoveltyEntry,
+    NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientRootParts, TransientSegment,
+    TransientTree, Value, resolve_pending,
 };
 
 /// The default per-node novelty capacity.
@@ -77,6 +78,15 @@ type NodeFuture<'a, Key, Value> = std::pin::Pin<
         dyn ConditionalSendFuture<Output = Result<TransientNode<Key, Value>, DialogSearchTreeError>>
             + 'a,
     >,
+>;
+
+/// A boxed unit future, the shape the recursive novelty drain returns.
+type UnitFuture<'a> =
+    std::pin::Pin<Box<dyn ConditionalSendFuture<Output = Result<(), DialogSearchTreeError>> + 'a>>;
+
+/// A boxed boolean future, the shape the recursive novelty probe returns.
+type BoolFuture<'a> = std::pin::Pin<
+    Box<dyn ConditionalSendFuture<Output = Result<bool, DialogSearchTreeError>> + 'a>,
 >;
 
 /// How far an overflowing buffer cascades, selecting the tree's write behavior.
@@ -160,6 +170,14 @@ where
     op_buf_size: usize,
     policy: FlushPolicy,
     trigger: FlushTrigger,
+    /// The tree's format header, captured from the root node the first time a
+    /// write or canonicalize loads it (opening is synchronous and cannot read
+    /// it). `None` until then, and forever for a tree born empty, whose first
+    /// canonical write stamps the default format. Threaded into every replay
+    /// and persist so the buffered path re-shapes and re-stamps under the
+    /// tree's own format, mirroring the guard `TransientTree::load` enforces
+    /// on the canonical edit path.
+    manifest: Option<Manifest>,
     distribution: PhantomData<D>,
 }
 
@@ -190,6 +208,7 @@ where
             op_buf_size: DEFAULT_OP_BUF_SIZE,
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
+            manifest: None,
             distribution: PhantomData,
         }
     }
@@ -202,6 +221,7 @@ where
             op_buf_size: DEFAULT_OP_BUF_SIZE,
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
+            manifest: None,
             distribution: PhantomData,
         }
     }
@@ -291,6 +311,11 @@ where
             HitchhikerRoot::Unloaded(ref hash) if hash == NULL_BLAKE3_HASH => None,
             HitchhikerRoot::Unloaded(ref hash) => {
                 let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
+                // Capture the tree's format header at the first root load,
+                // where storage is in hand: the synchronous `open` cannot read
+                // it, and every replay and persist below must run under the
+                // tree's own format rather than the default.
+                self.manifest = Some(node.manifest()?);
                 // The root's left edge is the tree's global leftmost seam,
                 // whose separator is the empty string (negative infinity).
                 Some(TransientNode::open(&node, Vec::new())?)
@@ -329,7 +354,11 @@ where
         // upper nodes ride along untouched; only the leaves the ops reach are
         // reshaped, exactly as a sequential edit would reshape them.
         let edit = match node {
-            Some(node) => TransientTree::<Key, Value, D>::from_loaded(node, self.cache.clone()),
+            Some(node) => TransientTree::<Key, Value, D>::from_loaded(
+                node,
+                self.cache.clone(),
+                self.manifest.unwrap_or_default(),
+            ),
             None => {
                 TransientTree::<Key, Value, D>::new(NULL_BLAKE3_HASH.clone(), self.cache.clone())
             }
@@ -362,17 +391,51 @@ where
         // the buffers as we go, then replay them as canonical edits onto the
         // de-buffered base in memory. A canonical edit reshapes exactly as a
         // sequential insert/delete, so the result is the canonical tree.
+        //
+        // The drain is post-order (children before their parent's own buffer),
+        // so for any key the deepest op comes first. Ops flow root to leaf and
+        // deeper therefore means older, so after the stable sort by key the
+        // SHALLOWEST (newest) op for a key sits last, and last-write-wins
+        // replay lets exactly that op stand.
+        let accessor = Accessor::new(self.cache.clone(), storage.clone());
         let edit = match self.root {
             HitchhikerRoot::Unloaded(hash) => {
-                TransientTree::<Key, Value, D>::new(hash, self.cache.clone())
+                // A cold reopen of a persisted buffered tree arrives here with
+                // its buffers sealed in the stored bytes, so the root must be
+                // inspected rather than passed through verbatim. A tree with
+                // no novelty anywhere is already canonical (an empty buffer is
+                // byte-identical to a canonical node's) and keeps its hash
+                // with no rewrite.
+                if &hash == NULL_BLAKE3_HASH
+                    || !subtree_has_novelty::<Key, Value, Backend>(&hash, &accessor).await?
+                {
+                    TransientTree::<Key, Value, D>::new(hash, self.cache.clone())
+                } else {
+                    let root: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
+                    // The replay must re-shape and re-stamp under the tree's
+                    // own format, read from the root it is inlined into.
+                    let manifest = root.manifest()?;
+                    let mut node = TransientNode::open(&root, Vec::new())?;
+                    let mut ops = Vec::new();
+                    drain_novelty(&mut node, &mut ops, &accessor).await?;
+                    ops.sort_by(|a, b| a.key.cmp(&b.key));
+                    let edit = TransientTree::<Key, Value, D>::from_loaded(
+                        node,
+                        self.cache.clone(),
+                        manifest,
+                    );
+                    replay_ops(edit, ops, storage).await?
+                }
             }
             HitchhikerRoot::Loaded(mut node) => {
                 let mut ops = Vec::new();
-                drain_novelty(&mut node, &mut ops);
-                // A higher node's buffer interleaves with lower ones, so order
-                // the full set by key before replay (stable, last op last).
+                drain_novelty(&mut node, &mut ops, &accessor).await?;
                 ops.sort_by(|a, b| a.key.cmp(&b.key));
-                let edit = TransientTree::<Key, Value, D>::from_loaded(node, self.cache.clone());
+                let edit = TransientTree::<Key, Value, D>::from_loaded(
+                    node,
+                    self.cache.clone(),
+                    self.manifest.unwrap_or_default(),
+                );
                 replay_ops(edit, ops, storage).await?
             }
         };
@@ -597,13 +660,15 @@ where
     ) -> Result<Blake3Hash, DialogSearchTreeError> {
         match self.root {
             HitchhikerRoot::Unloaded(hash) => Ok(hash),
-            // Every node carries the tree's format header. Like the canonical
-            // edit path, the buffered path stamps the default manifest; adopting
-            // a loaded root's own manifest needs an async read the synchronous
-            // seal cannot make, and today every tree uses the default.
-            HitchhikerRoot::Loaded(node) => {
-                Ok(node.persist(delta, &Manifest::default())?.hash().clone())
-            }
+            // Every node carries the tree's format header. A loaded root means
+            // a write loaded it, and that load captured the tree's own
+            // manifest; a tree born empty in this process has no stored header
+            // yet and takes the default, which is exactly what its first
+            // canonical write would stamp.
+            HitchhikerRoot::Loaded(node) => Ok(node
+                .persist(delta, &self.manifest.unwrap_or_default())?
+                .hash()
+                .clone()),
         }
     }
 }
@@ -1038,28 +1103,91 @@ where
     Ok(edit)
 }
 
-/// Drains every `novelty` buffer in the subtree rooted at `node` into `ops`,
-/// in ascending key order, leaving all buffers empty.
+/// Whether any node in the stored subtree rooted at `hash` carries buffered
+/// ops (sealed `novelty`).
 ///
-/// A pre-order walk that prepends each index node's (sorted) buffer before its
-/// children would not yield global key order, so instead the buffers are
-/// gathered and the caller sorts. Within one node the buffer is already sorted;
-/// across nodes a higher buffer's ops may interleave with a lower one's, so the
-/// caller (canonicalize) stable-sorts the full set by key before replay.
-fn drain_novelty<Key, Value>(
-    node: &mut TransientNode<Key, Value>,
-    ops: &mut Vec<NoveltyEntry<Value>>,
-) where
-    Value: Clone,
+/// Novelty lives only in index nodes, so the probe walks the subtree's index
+/// spine and never touches a leaf. It is what lets the drain lift exactly the
+/// subtrees that need rewriting, leaving every clean subtree's hash untouched.
+fn subtree_has_novelty<'a, Key, Value, Backend>(
+    hash: &'a Blake3Hash,
+    accessor: &'a Accessor<Backend>,
+) -> BoolFuture<'a>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
 {
-    if let TransientNode::Index(index) = node {
-        ops.append(&mut index.novelty);
-        for child in &mut index.children {
-            if let Node::Transient(child) = child {
-                drain_novelty(child, ops);
+    Box::pin(async move {
+        let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
+        let links = match node.body()? {
+            ArchivedNodeBody::Segment(_) => return Ok(false),
+            ArchivedNodeBody::Index(index) => {
+                if !index.novelty.is_empty() {
+                    return Ok(true);
+                }
+                index.links()?
+            }
+        };
+        for link in links {
+            if subtree_has_novelty::<Key, Value, Backend>(&link.node, accessor).await? {
+                return Ok(true);
             }
         }
-    }
+        Ok(false)
+    })
+}
+
+/// Drains every `novelty` buffer in the subtree rooted at `node` into `ops`,
+/// leaving all buffers empty. Persistent index children whose subtree still
+/// carries sealed novelty are lifted so their buffers drain too; subtrees with
+/// no novelty anywhere below them are never lifted, so untouched regions keep
+/// their hashes through structural sharing.
+///
+/// The walk is POST-order: a node's children are drained before its own
+/// buffer is appended. Ops flow root to leaf, so along any path deeper means
+/// older; post-order therefore appends the oldest ops first and the root's
+/// newest last, and the caller's stable sort by key preserves that, leaving
+/// the shallowest (newest) op for every key in the last position for
+/// last-write-wins replay. Within one node the buffer is already sorted with
+/// the newest op for a key last, so appending it whole keeps that order too.
+fn drain_novelty<'a, Key, Value, Backend>(
+    node: &'a mut TransientNode<Key, Value>,
+    ops: &'a mut Vec<NoveltyEntry<Value>>,
+    accessor: &'a Accessor<Backend>,
+) -> UnitFuture<'a>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'b> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+{
+    Box::pin(async move {
+        if let TransientNode::Index(index) = node {
+            for child in &mut index.children {
+                if let Node::Persistent(link) = child {
+                    if !subtree_has_novelty::<Key, Value, Backend>(&link.node, accessor).await? {
+                        continue;
+                    }
+                    lift_child(child, accessor).await?;
+                }
+                if let Node::Transient(child) = child {
+                    drain_novelty(child, ops, accessor).await?;
+                }
+            }
+            ops.append(&mut index.novelty);
+        }
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -1067,11 +1195,18 @@ mod tests {
     #![allow(unexpected_cfgs)]
 
     use anyhow::Result;
-    use dialog_common::Blake3Hash;
+    use dialog_common::{Blake3Hash, NULL_BLAKE3_HASH};
     use dialog_storage::MemoryStorageBackend;
 
     use super::{FlushPolicy, FlushTrigger, HitchhikerTree};
-    use crate::{Buffer, ContentAddressedStorage, Delta, PersistentTree};
+    use crate::helpers::{
+        DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
+    };
+    use crate::{
+        ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta, Manifest,
+        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientTree, into_owned,
+        tree_spec,
+    };
 
     /// The three flush policies, so an oracle can assert behavior is identical
     /// across all of them (the canonical form is policy-independent).
@@ -2074,6 +2209,591 @@ mod tests {
                 "seed {seed}: flush triggers must reach the same canonical tree"
             );
         }
+        Ok(())
+    }
+
+    type SpecTree = PersistentTree<SpecKey, Vec<u8>, DistributionSimulator>;
+    type SpecHitchhiker = HitchhikerTree<SpecKey, Vec<u8>, DistributionSimulator>;
+
+    /// The probe key: an interior key of the spec fixture's base, which the
+    /// precedence pins buffer at TWO depths of the spine.
+    fn probe() -> SpecKey {
+        encode_key(b"f", 1, 1)
+    }
+
+    /// A key covered by the OTHER top-level subtree; writing it overflows the
+    /// one-op root buffer and cascades the probe's first op into the mid-level
+    /// index that covers the probe.
+    fn far_key() -> SpecKey {
+        encode_key(b"mm", 1, 1)
+    }
+
+    async fn spec_flush(
+        delta: &mut Delta<Blake3Hash, Buffer>,
+        storage: &mut SpecStorage,
+    ) -> Result<()> {
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn load_spec_node(
+        storage: &SpecStorage,
+        hash: &Blake3Hash,
+    ) -> Result<PersistentNode<SpecKey, Vec<u8>>> {
+        let bytes = storage
+            .retrieve(hash)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
+        Ok(PersistentNode::new(Buffer::from(bytes)))
+    }
+
+    /// The buffered ops sealed into a stored node, owned.
+    fn sealed_novelty(
+        node: &PersistentNode<SpecKey, Vec<u8>>,
+    ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
+        Ok(match node.body()? {
+            ArchivedNodeBody::Index(index) => index
+                .novelty
+                .iter()
+                .map(into_owned::<NoveltyEntry<Vec<u8>>>)
+                .collect::<Result<Vec<_>, _>>()?,
+            ArchivedNodeBody::Segment(_) => Vec::new(),
+        })
+    }
+
+    /// Applies the three writes that leave the probe key pending at two
+    /// depths: (probe, [1]) parked in a mid-level index buffer by the cascade,
+    /// then `root_op` for the same key freshly buffered at the root.
+    async fn apply_probe_writes(
+        base: &SpecTree,
+        root_op: &NoveltyOp<Vec<u8>>,
+        storage: &SpecStorage,
+    ) -> Result<SpecHitchhiker> {
+        let mut tree = SpecHitchhiker::open(base).with_op_buf_size(1);
+        tree = tree.insert(probe(), vec![1], storage).await?;
+        tree = tree.insert(far_key(), vec![9], storage).await?;
+        Ok(match root_op {
+            NoveltyOp::Assert(value) => tree.insert(probe(), value.clone(), storage).await?,
+            NoveltyOp::Retract => tree.delete(probe(), storage).await?,
+        })
+    }
+
+    /// Verifies the two-level fixture actually pins what it claims: the older
+    /// op for the probe sits in a NON-ROOT index buffer while the newer
+    /// `root_op` sits at the root. A fixture that leaves the key at one depth
+    /// would pin nothing.
+    async fn assert_probe_spans_two_levels(
+        root: &Blake3Hash,
+        storage: &SpecStorage,
+        root_op: &NoveltyOp<Vec<u8>>,
+    ) -> Result<()> {
+        let root_node = load_spec_node(storage, root).await?;
+        assert!(
+            sealed_novelty(&root_node)?
+                .iter()
+                .any(|entry| entry.key == probe().to_vec() && &entry.op == root_op),
+            "fixture: the newer op must sit in the root buffer"
+        );
+        let mut parked = false;
+        for link in root_node.as_index()?.links()? {
+            let child = load_spec_node(storage, &link.node).await?;
+            if sealed_novelty(&child)?.iter().any(|entry| {
+                entry.key == probe().to_vec() && entry.op == NoveltyOp::Assert(vec![1])
+            }) {
+                parked = true;
+            }
+        }
+        assert!(
+            parked,
+            "fixture: the older op must sit in a mid-level index buffer"
+        );
+        Ok(())
+    }
+
+    /// Builds a three-level base (root, two mid-level indexes, four leaves)
+    /// and buffers the probe key at two depths of the spine: `[1]` in the
+    /// mid-level index covering it, `root_op` (newer) at the root. A twin of
+    /// the returned tree is persisted first purely to verify the placement.
+    async fn buffered_at_two_levels(
+        root_op: NoveltyOp<Vec<u8>>,
+    ) -> Result<(SpecHitchhiker, SpecTree, SpecStorage)> {
+        let spec = tree_spec![
+            [                   ..p]
+            [        ..h,       ..p]
+            [..d, ..h, ..l, ..p]
+        ]
+        .build(test_storage())
+        .await
+        .expect("the fixture spec is valid");
+        let mut storage = spec.storage().clone();
+        let base = SpecTree::from_hash(spec.tree().root().clone());
+
+        // The writes are deterministic, so a persisted twin proves where the
+        // returned (still live) tree holds its ops.
+        let twin = apply_probe_writes(&base, &root_op, &storage).await?;
+        let mut delta = Delta::zero();
+        let twin_root = twin.persist(&mut delta)?;
+        spec_flush(&mut delta, &mut storage).await?;
+        assert_probe_spans_two_levels(&twin_root, &storage, &root_op).await?;
+
+        let tree = apply_probe_writes(&base, &root_op, &storage).await?;
+        Ok((tree, base, storage))
+    }
+
+    /// For a key buffered at two depths the SHALLOWEST op is the newest:
+    /// writes land in the root buffer and a flush only moves ops downward, so
+    /// deeper always means older. The live read resolves this correctly (the
+    /// control); canonicalize must agree with it instead of letting the
+    /// deeper, older op replay last.
+    #[dialog_common::test]
+    async fn it_resolves_the_shallowest_op_across_levels() -> Result<()> {
+        let (tree, base, mut storage) = buffered_at_two_levels(NoveltyOp::Assert(vec![2])).await?;
+
+        assert_eq!(
+            tree.get(&probe(), &storage).await?,
+            Some(vec![2]),
+            "control: the live buffered read resolves the root-most op"
+        );
+
+        let mut delta = Delta::zero();
+        let canonical = tree.canonicalize(&storage, &mut delta).await?;
+        spec_flush(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            canonical.get(&probe(), &storage).await?,
+            Some(vec![2]),
+            "canonicalize must let the shallowest (newest) op win"
+        );
+
+        let mut delta = Delta::zero();
+        let expected = base
+            .edit()
+            .insert(far_key(), vec![9], &storage)
+            .await?
+            .insert(probe(), vec![2], &storage)
+            .await?
+            .persist(&mut delta)?;
+        spec_flush(&mut delta, &mut storage).await?;
+        assert_eq!(
+            canonical.root(),
+            expected.root(),
+            "canonicalize must converge on the canonical build of the surviving facts"
+        );
+        Ok(())
+    }
+
+    /// The retract flavor of the cross-level precedence pin: a root-buffered
+    /// retract must hide the older assert parked one level down.
+    #[dialog_common::test]
+    async fn it_resolves_a_shallow_retract_over_a_deep_assert() -> Result<()> {
+        let (tree, base, mut storage) = buffered_at_two_levels(NoveltyOp::Retract).await?;
+
+        assert_eq!(
+            tree.get(&probe(), &storage).await?,
+            None,
+            "control: the live buffered read resolves the root-most retract"
+        );
+
+        let mut delta = Delta::zero();
+        let canonical = tree.canonicalize(&storage, &mut delta).await?;
+        spec_flush(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            canonical.get(&probe(), &storage).await?,
+            None,
+            "canonicalize must let the shallowest retract hide the deeper assert"
+        );
+
+        let mut delta = Delta::zero();
+        let expected = base
+            .edit()
+            .insert(far_key(), vec![9], &storage)
+            .await?
+            .delete(&probe(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        spec_flush(&mut delta, &mut storage).await?;
+        assert_eq!(
+            canonical.root(),
+            expected.root(),
+            "canonicalize must converge on the canonical build without the probe"
+        );
+        Ok(())
+    }
+
+    /// After a buffered persist and a cold reopen, the stored tree's readers
+    /// (point read and range scan) must also resolve the shallowest op.
+    #[dialog_common::test]
+    async fn it_reads_the_shallowest_op_after_a_buffered_persist() -> Result<()> {
+        let (tree, _base, mut storage) = buffered_at_two_levels(NoveltyOp::Assert(vec![2])).await?;
+
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        spec_flush(&mut delta, &mut storage).await?;
+        assert_probe_spans_two_levels(&root, &storage, &NoveltyOp::Assert(vec![2])).await?;
+
+        let reopened = SpecTree::from_hash(root);
+        assert_eq!(
+            reopened.get(&probe(), &storage).await?,
+            Some(vec![2]),
+            "the point read must resolve the root-most op"
+        );
+
+        let mut scanned: Vec<(SpecKey, Vec<u8>)> = Vec::new();
+        {
+            let stream = reopened.stream_range(.., &storage);
+            futures_util::pin_mut!(stream);
+            while let Some(entry) = futures_util::StreamExt::next(&mut stream)
+                .await
+                .transpose()?
+            {
+                scanned.push((entry.key, entry.value));
+            }
+        }
+        let probed = scanned
+            .iter()
+            .find(|(key, _)| key == &probe())
+            .map(|(_, value)| value.clone());
+        assert_eq!(
+            probed,
+            Some(vec![2]),
+            "the range scan must resolve the root-most op"
+        );
+        Ok(())
+    }
+
+    /// The retract flavor of the reopened-reader pin: a sealed root-level
+    /// retract must hide the older assert sealed one level down.
+    #[dialog_common::test]
+    async fn it_hides_a_shallow_retract_after_a_buffered_persist() -> Result<()> {
+        let (tree, _base, mut storage) = buffered_at_two_levels(NoveltyOp::Retract).await?;
+
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        spec_flush(&mut delta, &mut storage).await?;
+        assert_probe_spans_two_levels(&root, &storage, &NoveltyOp::Retract).await?;
+
+        let reopened = SpecTree::from_hash(root);
+        assert_eq!(
+            reopened.get(&probe(), &storage).await?,
+            None,
+            "the point read must let the root-most retract hide the deeper assert"
+        );
+
+        let mut scanned: Vec<SpecKey> = Vec::new();
+        {
+            let stream = reopened.stream_range(.., &storage);
+            futures_util::pin_mut!(stream);
+            while let Some(entry) = futures_util::StreamExt::next(&mut stream)
+                .await
+                .transpose()?
+            {
+                scanned.push(entry.key);
+            }
+        }
+        assert!(
+            !scanned.contains(&probe()),
+            "the range scan must let the root-most retract hide the deeper assert"
+        );
+        Ok(())
+    }
+
+    /// The differential must surface the shallowest op's value for a key
+    /// pending at two depths, not the deeper, older one.
+    #[dialog_common::test]
+    async fn it_differentiates_the_shallowest_op_across_levels() -> Result<()> {
+        let (tree, base, mut storage) = buffered_at_two_levels(NoveltyOp::Assert(vec![2])).await?;
+
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        spec_flush(&mut delta, &mut storage).await?;
+        let reopened = SpecTree::from_hash(root);
+
+        let mut adds: Vec<(SpecKey, Vec<u8>)> = Vec::new();
+        {
+            let differential = base.differentiate(&reopened, &storage, &storage);
+            futures_util::pin_mut!(differential);
+            while let Some(change) = futures_util::StreamExt::next(&mut differential).await {
+                if let Change::Add(entry) = change? {
+                    adds.push((entry.key, entry.value));
+                }
+            }
+        }
+
+        let probe_adds: Vec<Vec<u8>> = adds
+            .iter()
+            .filter(|(key, _)| key == &probe())
+            .map(|(_, value)| value.clone())
+            .collect();
+        assert_eq!(
+            probe_adds,
+            vec![vec![2]],
+            "the difference must carry the newest (shallowest) op's value"
+        );
+        Ok(())
+    }
+
+    /// The retract flavor of the differential pin: with a root-level retract
+    /// over a deeper assert, the difference must report a removal for the
+    /// probe and no addition.
+    #[dialog_common::test]
+    async fn it_differentiates_a_shallow_retract_over_a_deep_assert() -> Result<()> {
+        let (tree, base, mut storage) = buffered_at_two_levels(NoveltyOp::Retract).await?;
+
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        spec_flush(&mut delta, &mut storage).await?;
+        let reopened = SpecTree::from_hash(root);
+
+        let mut probe_adds: Vec<Vec<u8>> = Vec::new();
+        let mut probe_removed = false;
+        {
+            let differential = base.differentiate(&reopened, &storage, &storage);
+            futures_util::pin_mut!(differential);
+            while let Some(change) = futures_util::StreamExt::next(&mut differential).await {
+                match change? {
+                    Change::Add(entry) if entry.key == probe() => {
+                        probe_adds.push(entry.value);
+                    }
+                    Change::Remove(entry) if entry.key == probe() => {
+                        probe_removed = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(
+            probe_adds.is_empty(),
+            "the root-most retract must hide the deeper assert from the difference, \
+             but it reported adds: {probe_adds:?}"
+        );
+        assert!(
+            probe_removed,
+            "the difference must report the probe's removal"
+        );
+        Ok(())
+    }
+
+    /// A persisted-but-never-canonicalized tree, reopened cold, must still
+    /// canonicalize: its buffers travel in the stored bytes, so canonicalize
+    /// has to load the root rather than pass the unloaded hash through
+    /// verbatim.
+    #[dialog_common::test]
+    async fn it_canonicalizes_a_reopened_buffered_tree() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let keys: Vec<u32> = (0..300).collect();
+        let expected = sequential(&keys, &mut storage).await?;
+
+        // A giant buffer keeps every op (after the first) in the root buffer,
+        // so the persisted tree is unambiguously non-canonical.
+        let mut tree = TestHitchhiker::empty().with_op_buf_size(100_000);
+        for &k in &keys {
+            tree = tree
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        let reopened = TestTree::from_hash(root);
+        let mut delta = Delta::zero();
+        let canonical = HitchhikerTree::open(&reopened)
+            .canonicalize(&storage, &mut delta)
+            .await?;
+        flush(&mut delta, &mut storage).await?;
+        assert_eq!(
+            canonical.root(),
+            expected.root(),
+            "a reopened buffered tree must canonicalize to the sequential root"
+        );
+
+        // Idempotence: canonicalizing the canonical result changes nothing.
+        let mut delta = Delta::zero();
+        let again = HitchhikerTree::open(&canonical)
+            .canonicalize(&storage, &mut delta)
+            .await?;
+        assert_eq!(
+            again.root(),
+            canonical.root(),
+            "canonicalize must be idempotent"
+        );
+        Ok(())
+    }
+
+    /// Sealed novelty BELOW a loaded root must be drained too: a later write
+    /// loads the root, but the mid-level buffers persisted earlier still sit
+    /// in `Node::Persistent` children, which the drain must lift.
+    #[dialog_common::test]
+    async fn it_canonicalizes_sealed_novelty_below_a_loaded_root() -> Result<()> {
+        let spec = tree_spec![
+            [                   ..p]
+            [        ..h,       ..p]
+            [..d, ..h, ..l, ..p]
+        ]
+        .build(test_storage())
+        .await
+        .expect("the fixture spec is valid");
+        let mut storage = spec.storage().clone();
+        let base = SpecTree::from_hash(spec.tree().root().clone());
+
+        // Park one new key in each mid-level buffer via the one-op cascade,
+        // then persist without canonicalizing.
+        let left = encode_key(b"bb", 1, 1);
+        let right = encode_key(b"mm", 1, 1);
+        let mut tree = SpecHitchhiker::open(&base).with_op_buf_size(1);
+        tree = tree.insert(left, vec![1], &storage).await?;
+        tree = tree.insert(right, vec![9], &storage).await?;
+        let mut delta = Delta::zero();
+        let root = tree.persist(&mut delta)?;
+        spec_flush(&mut delta, &mut storage).await?;
+
+        // A later write loads the root; its children stay persistent links
+        // carrying the sealed buffers.
+        let late = encode_key(b"cc", 1, 1);
+        let reopened = SpecTree::from_hash(root);
+        let tree = SpecHitchhiker::open(&reopened)
+            .insert(late, vec![7], &storage)
+            .await?;
+        let mut delta = Delta::zero();
+        let canonical = tree.canonicalize(&storage, &mut delta).await?;
+        spec_flush(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            canonical.get(&left, &storage).await?,
+            Some(vec![1]),
+            "a sealed mid-level op must survive canonicalize"
+        );
+        assert_eq!(
+            canonical.get(&right, &storage).await?,
+            Some(vec![9]),
+            "a sealed mid-level op must survive canonicalize"
+        );
+        assert_eq!(
+            canonical.get(&late, &storage).await?,
+            Some(vec![7]),
+            "the live root op must survive canonicalize"
+        );
+
+        let mut delta = Delta::zero();
+        let expected = base
+            .edit()
+            .insert(left, vec![1], &storage)
+            .await?
+            .insert(right, vec![9], &storage)
+            .await?
+            .insert(late, vec![7], &storage)
+            .await?
+            .persist(&mut delta)?;
+        spec_flush(&mut delta, &mut storage).await?;
+        assert_eq!(
+            canonical.root(),
+            expected.root(),
+            "canonicalize must equal the canonical build of all surviving facts"
+        );
+        Ok(())
+    }
+
+    /// A buffered persist over a tree written under a NON-default format must
+    /// stamp that tree's manifest into the nodes it writes, not the default.
+    #[dialog_common::test]
+    async fn it_stamps_the_trees_manifest_on_buffered_persist() -> Result<()> {
+        let custom = Manifest {
+            fanout_n: 2,
+            ..Manifest::default()
+        };
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
+            NULL_BLAKE3_HASH.clone(),
+            Cache::new(),
+            custom,
+        );
+        for k in 0..50u32 {
+            edit = edit
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let base = edit.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        let tree = HitchhikerTree::open(&base)
+            .insert(999u32.to_be_bytes(), vec![2], &storage)
+            .await?;
+        let mut delta = Delta::zero();
+        tree.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            let node = PersistentNode::<[u8; 4], Vec<u8>>::new(buffer);
+            assert_eq!(
+                node.manifest()?,
+                custom,
+                "a buffered persist must stamp the tree's manifest, not the default"
+            );
+        }
+        Ok(())
+    }
+
+    /// Canonicalizing buffered writes over a non-default-format tree must
+    /// replay and stamp under that tree's manifest: the result must equal a
+    /// canonical build of the union under the same format.
+    #[dialog_common::test]
+    async fn it_canonicalizes_under_the_trees_manifest() -> Result<()> {
+        let custom = Manifest {
+            fanout_n: 2,
+            ..Manifest::default()
+        };
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
+            NULL_BLAKE3_HASH.clone(),
+            Cache::new(),
+            custom,
+        );
+        for k in 0..40u32 {
+            edit = edit
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let base = edit.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        let mut tree = HitchhikerTree::open(&base).with_op_buf_size(4);
+        for k in 40..80u32 {
+            tree = tree
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let canonical = tree.canonicalize(&storage, &mut delta).await?;
+        flush(&mut delta, &mut storage).await?;
+
+        let mut oracle = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
+            NULL_BLAKE3_HASH.clone(),
+            Cache::new(),
+            custom,
+        );
+        for k in 0..80u32 {
+            oracle = oracle
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let expected = oracle.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            canonical.root(),
+            expected.root(),
+            "canonicalize must replay and stamp under the tree's own manifest"
+        );
         Ok(())
     }
 }

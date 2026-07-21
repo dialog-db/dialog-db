@@ -1081,29 +1081,28 @@ where
     // re-assert citing what it overrode.
     let mut history_records: BTreeMap<Key, Record> = BTreeMap::new();
     let mut changed = false;
-    let buffer_record =
-        |records: &mut BTreeMap<Key, Record>, record: Record, version: &Version| {
-            let (key, _) = record.clone().into_entry(version, manifest);
-            match records.remove(&key) {
-                None => {
-                    records.insert(key, record);
-                }
-                Some(earlier) => {
-                    let mut versions = earlier.claim().cause.versions().to_vec();
-                    versions.extend_from_slice(record.claim().cause.versions());
-                    let claim = Claim {
-                        cause: HistoryCause::new(versions),
-                        ..record.claim().clone()
-                    };
-                    let folded = if record.is_assertion() {
-                        Record::Assert(claim)
-                    } else {
-                        Record::Retract(claim)
-                    };
-                    records.insert(key, folded);
-                }
+    let buffer_record = |records: &mut BTreeMap<Key, Record>, record: Record, version: &Version| {
+        let (key, _) = record.clone().into_entry(version, manifest);
+        match records.remove(&key) {
+            None => {
+                records.insert(key, record);
             }
-        };
+            Some(earlier) => {
+                let mut versions = earlier.claim().cause.versions().to_vec();
+                versions.extend_from_slice(record.claim().cause.versions());
+                let claim = Claim {
+                    cause: HistoryCause::new(versions),
+                    ..record.claim().clone()
+                };
+                let folded = if record.is_assertion() {
+                    Record::Assert(claim)
+                } else {
+                    Record::Retract(claim)
+                };
+                records.insert(key, folded);
+            }
+        }
+    };
 
     tokio::pin!(instructions);
     while let Some(instruction) = instructions.next().await {

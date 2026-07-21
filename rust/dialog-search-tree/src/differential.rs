@@ -73,7 +73,7 @@ enum SparseTreeNode<Key, Value> {
         /// The separator at the node's left edge (its lower bound; empty for
         /// a root or the global leftmost subtree).
         lower_bound: Vec<u8>,
-        /// Ops routed here from ancestors' buffers, nearest-root first (see
+        /// Ops routed here from ancestors' buffers, oldest first (see
         /// [`SparseTreeNode::Pending`]).
         pending: Vec<NoveltyEntry<Value>>,
     },
@@ -92,7 +92,11 @@ enum SparseTreeNode<Key, Value> {
     Pending {
         /// The reference this node was reached by.
         link: Link,
-        /// Ops pending against this subtree, nearest-root first.
+        /// Ops pending against this subtree, oldest first: an op from a deeper
+        /// node precedes one routed down from a shallower node, and within one
+        /// node's buffer a later entry is the newer op, so the LAST op for a
+        /// key is always the newest. Last-wins resolution (the same rule a
+        /// single buffer uses) therefore picks the shallowest, newest op.
         pending: Vec<NoveltyEntry<Value>>,
     },
     /// A subtree whose difference was fully resolved from buffers alone.
@@ -306,10 +310,17 @@ where
 
         match node.body()? {
             ArchivedNodeBody::Index(index) => {
-                let mut pending = inherited;
+                // Keep the accumulated ops oldest first: this node's own
+                // buffer sits one level DEEPER than whatever an ancestor
+                // routed down to it, and a flush only moves ops toward the
+                // leaves, so the node's own ops are the older ones and must
+                // precede the inherited ones for last-wins resolution to pick
+                // the shallowest, newest op.
+                let mut pending = Vec::with_capacity(index.novelty.len() + inherited.len());
                 for entry in index.novelty.iter() {
                     pending.push(into_owned::<NoveltyEntry<Value>>(entry)?);
                 }
+                pending.extend(inherited);
 
                 let links = index.links()?;
                 let mut children = Vec::with_capacity(links.len());
@@ -671,12 +682,15 @@ where
     /// which is the desired outcome for equal content under divergent flush
     /// history.
     ///
-    /// A key's ops live at exactly one depth: a flush *moves* a node's buffer
-    /// into its children rather than copying it, so no key is ever pending at
-    /// two levels of a real tree. Precedence between depths therefore never has
-    /// to be decided; the ops collected along a path are simply deduplicated by
-    /// key, which also absorbs the copies expansion made when it routed an
-    /// ancestor's ops down to the children they cover.
+    /// A key CAN be pending at two depths of one tree: a flush moves the
+    /// root's buffer into its children, and the next write to the same key
+    /// re-buffers it at the root while the flushed copy still sits mid-level.
+    /// Precedence between depths therefore matters, and it is depth order:
+    /// ops flow root to leaf, so the shallower op is the newer. The ops
+    /// collected along a path are kept oldest first (a node's own buffer
+    /// before anything inherited from its ancestors) and reduced per key by
+    /// last-op-wins in [`winning_ops`], so the shallowest op stands, exactly
+    /// as a point read resolves and a full flush replays.
     fn stream(&self) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + '_ {
         try_stream! {
             for sparse_node in &self.nodes {
@@ -715,19 +729,24 @@ where
 
                 // In-order walk; children pushed in reverse so the stack pops
                 // them in key order. Each frame carries the ops inherited from
-                // the ancestors on its path (nearest-root first) and its own
-                // lower bound, which scopes those ops to the frame's span. The
-                // seed is whatever expansion already routed to this node.
+                // the ancestors on its path (oldest first) and its own lower
+                // bound, which scopes those ops to the frame's span. The seed
+                // is whatever expansion already routed to this node.
                 let mut stack = vec![(node, routed, None, None)];
                 while let Some((node, inherited, lower, upper)) = stack.pop() {
                     match node.body()? {
                         ArchivedNodeBody::Index(index) => {
-                            // Ops routed here by expansion, plus this node's
-                            // own, in buffer order.
-                            let mut pending = inherited;
+                            // This node's own buffer precedes the inherited
+                            // ops: it is one level deeper than any ancestor
+                            // that routed ops down here, and deeper means
+                            // older, so oldest-first order (which last-wins
+                            // resolution relies on) puts it first.
+                            let mut pending =
+                                Vec::with_capacity(index.novelty.len() + inherited.len());
                             for entry in index.novelty.iter() {
                                 pending.push(into_owned(entry)?);
                             }
+                            pending.extend(inherited);
 
                             let mut children = Vec::with_capacity(index.len());
                             for at in 0..index.len() {
@@ -859,11 +878,13 @@ fn pending_ops<Key, Value>(node: &SparseTreeNode<Key, Value>) -> &[NoveltyEntry<
 /// on the rightmost spine (a flush routes an op sorting past every key to the
 /// last child).
 ///
-/// Ops accumulate in buffer order, and a buffer keeps the newest op for a key
-/// last (writes append, then a *stable* sort by key preserves arrival order
-/// within the key), so the **last** op for a key is the most recent and wins.
-/// This matches how a point read resolves a key and how a flush replays ops, so
-/// all three agree.
+/// Ops accumulate oldest first: a node's own buffer is appended before the
+/// ops inherited from its ancestors (deeper means older, since a flush only
+/// moves ops toward the leaves), and within one buffer the newest op for a
+/// key is last (writes append, then a *stable* sort by key preserves arrival
+/// order within the key). The **last** op for a key is therefore the most
+/// recent across every depth and wins. This matches how a point read resolves
+/// a key and how a flush replays ops, so all three agree.
 ///
 /// Ops outside the span belong to sibling leaves: a buffer high in the tree
 /// covers its whole subtree, and each op is resolved at the one leaf whose range
