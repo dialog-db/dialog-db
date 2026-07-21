@@ -56,6 +56,10 @@ pub struct NodeStat {
     pub novelty_ops: usize,
     /// Bytes this node carries beyond its canonical (novelty-free) encoding.
     pub novelty_bytes: usize,
+    /// Links whose separator exceeds the manifest's `max_separator` (always
+    /// 0 for a segment): the self-identifying mark of forced backstop seams,
+    /// so this counts the force-split pieces this index joins.
+    pub forced_links: usize,
 }
 
 /// Walks the tree rooted at `root` breadth-first and measures every node.
@@ -84,8 +88,13 @@ where
             let size = bytes.len();
             let node = PersistentNode::<Key, State<Datum>>::new(Buffer::from(bytes));
             let stat = if let Ok(index) = node.as_index() {
+                let bound = node.manifest()?.max_separator as usize;
+                let mut forced_links = 0usize;
                 for at in 0..index.len() {
                     next.push(*index.hash_at(at)?.as_bytes());
+                    if index.separator(at)?.len() > bound {
+                        forced_links += 1;
+                    }
                 }
                 let novelty_ops = index.novelty_len();
                 let novelty_bytes = if novelty_ops == 0 {
@@ -107,6 +116,7 @@ where
                     slots: index.len(),
                     novelty_ops,
                     novelty_bytes,
+                    forced_links,
                 }
             } else {
                 let segment = node.as_segment()?;
@@ -117,6 +127,7 @@ where
                     slots: segment.len(),
                     novelty_ops: 0,
                     novelty_bytes: 0,
+                    forced_links: 0,
                 }
             };
             stats.push((depth, stat));
@@ -173,6 +184,7 @@ fn summarize(label: &str, group: &str, stats: &[&NodeStat]) {
     let slots: usize = stats.iter().map(|stat| stat.slots).sum();
     let novelty_ops: usize = stats.iter().map(|stat| stat.novelty_ops).sum();
     let novelty_bytes: usize = stats.iter().map(|stat| stat.novelty_bytes).sum();
+    let forced_links: usize = stats.iter().map(|stat| stat.forced_links).sum();
 
     let mut node_hist = [0usize; BUCKETS.len()];
     let mut byte_hist = [0usize; BUCKETS.len()];
@@ -196,7 +208,8 @@ fn summarize(label: &str, group: &str, stats: &[&NodeStat]) {
     eprintln!(
         "TREEDIST {label} {group}: count={count} total_bytes={total} \
          mean={} p10={} p50={} p90={} p99={} min={} max={} \
-         slots_mean={:.1} novelty_ops={novelty_ops} novelty_bytes={novelty_bytes}",
+         slots_mean={:.1} novelty_ops={novelty_ops} novelty_bytes={novelty_bytes} \
+         forced_links={forced_links}",
         total / count,
         percentile(&sizes, 10.0),
         percentile(&sizes, 50.0),

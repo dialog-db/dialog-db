@@ -1,6 +1,6 @@
 use dialog_common::Blake3Hash;
 
-use crate::Manifest;
+use crate::{BOTTOM_RANK, Manifest};
 
 /// The rank of a node in the prolly tree.
 pub type Rank = u64;
@@ -30,14 +30,18 @@ pub type Rank = u64;
 pub trait Distribution {
     /// The leaf coin: computes the rank of an entry key from its bytes and the
     /// tree's [`Manifest`]. An entry whose rank exceeds
-    /// [`BOTTOM_RANK`](crate::BOTTOM_RANK) ends its leaf segment.
+    /// [`BOTTOM_RANK`](crate::BOTTOM_RANK) proposes to end its leaf segment;
+    /// the proposal stands unless the seam to the entry's successor is
+    /// vetoed ([`vetoes`](Self::vetoes)).
     ///
-    /// A key longer than `manifest.max_separator` is forced to rank 0 so it
-    /// can never become a boundary; this bounds every separator by
-    /// construction (plan 5.7a), since a separator is the shortest prefix of
-    /// the right segment's first key exceeding the (now bounded) boundary key.
-    /// The branching parameter (`manifest.branch_factor`) sets the split
-    /// probability, i.e. the expected fanout.
+    /// The coin sees only the key bytes: every key is ranked, whatever its
+    /// length. The separator bound (`manifest.max_separator`) is enforced per
+    /// seam by the veto, which rejects exactly the seams whose shortest
+    /// separator would exceed it, instead of demoting every long key to rank
+    /// 0 (the retired length guard, which glued all long keys into one
+    /// unbounded run even where they diverged early). The branching parameter
+    /// (`manifest.branch_factor`) sets the split probability, i.e. the
+    /// expected fanout.
     fn rank(key: &[u8], manifest: &Manifest) -> Rank;
 
     /// The seam coin: computes the rank of a seam from its separator bytes.
@@ -49,14 +53,99 @@ pub trait Distribution {
     /// The default applies the key coin to the separator bytes, which is the
     /// right choice for any hash-based distribution (the two coins stay
     /// independent because their inputs never collide: a separator sorts
-    /// strictly between two keys). Separators are bounded by construction at
-    /// `max_separator + 1` bytes (a prefix of the right key one byte past
-    /// the divergence from a boundary key of at most `max_separator` bytes),
-    /// so the length guard can fire only on that one-byte edge, forcing that
-    /// seam quiet — deterministic on both build and rebuild, so canonical
-    /// form is unaffected.
+    /// strictly between two keys), behind a length guard that ranks any
+    /// separator longer than `max_separator` at 0.
+    ///
+    /// The guard is the stored-form face of the veto
+    /// ([`vetoes`](Self::vetoes)): an accepted seam's separator is within the
+    /// bound by construction (a vetoed seam never forms), so for natural
+    /// seams the guard is inert and the coin decides. A separator over the
+    /// bound therefore marks a seam that was never accepted by the veto —
+    /// today a forced seam from the segment cap ([`cap`]), whose separator
+    /// exceeds `max_separator` by construction precisely so this guard keeps
+    /// it quiet: forced seams are leaf-level only and must never punch an
+    /// index cut. Guard and veto MUST agree (both compare the same separator
+    /// against the same bound), or a cut accepted at the leaf could go
+    /// missing at index levels.
     fn seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
+        if separator.len() as u32 > manifest.max_separator {
+            return 0;
+        }
         Self::rank(separator, manifest)
+    }
+
+    /// The veto: whether the seam between `left` and `right` — adjacent keys
+    /// in the FULL key order, `left` the immediate predecessor — is rejected
+    /// as a boundary. One decision per seam: the seam between two keys is
+    /// the same seam at every level, so a veto suppresses the leaf cut and
+    /// every index cut above it at once, and the two keys always share a
+    /// segment.
+    ///
+    /// The default rejects a seam exactly when its shortest distinguishing
+    /// separator ([`separator`](Self::separator)) would exceed
+    /// `manifest.max_separator`: accepting it would store an over-long
+    /// separator. Since vetoed seams never exist in stored form, every
+    /// stored natural separator stays within the bound by construction —
+    /// the property the retired length-guard demotion bought by ranking
+    /// every over-long KEY at 0, which glued long keys into one unbounded
+    /// run even where they diverged early. The veto rejects only the seams
+    /// that are genuinely indistinguishable within the bound (near-duplicate
+    /// neighbors), so a run of long keys with early divergences still splits
+    /// naturally.
+    ///
+    /// Edit stability, the property incremental maintenance leans on: a
+    /// seam's separator — and with it this decision — is a function of its
+    /// two adjacent keys alone, and under the lower-bound convention it is
+    /// invariant under every edit that keeps both partner keys (keys routed
+    /// left of a separator share exactly its divergence with the right key;
+    /// see `raise_to_floor` for the right-hand side). Only an edit that
+    /// removes a partner key can change a stored seam's status, and those
+    /// edits (boundary deletes, orphan appends, min-moves) widen their
+    /// re-shape window across the seam before regrouping.
+    ///
+    /// An override must stay consistent with [`separator`](Self::separator)
+    /// and [`seam_rank`](Self::seam_rank): `vetoes(left, right)` must hold
+    /// exactly when `separator(left, right)` is longer than `max_separator`,
+    /// or the cut decision and the stored form disagree and canonical shape
+    /// breaks. It must also be downward closed between neighbors: for
+    /// `p < q < s`, `vetoes(p, s)` implies `vetoes(p, q)` and
+    /// `vetoes(q, s)`. The default has this by construction (a key between
+    /// two keys shares at least their common prefix, and cannot be that
+    /// prefix itself, so it cannot diverge from either any earlier); the
+    /// edit fast path leans on it to skip seam re-checks on insert.
+    fn vetoes(left: &[u8], right: &[u8], manifest: &Manifest) -> bool {
+        seam_vetoed(left, right, manifest)
+    }
+
+    /// The authoritative leaf-level cut decision for the ACCEPTED seam after
+    /// `key`, given the weight `banked` since the previous accepted seam.
+    ///
+    /// `banked` is the bank rule's accumulator: walking seams left to right,
+    /// every vetoed seam adds its left key's entry weight to the bank (no
+    /// cut is possible there), and every accepted seam spends the bank into
+    /// this decision and resets it — RESET AT EVERY ACCEPTED SEAM, cut or
+    /// no cut. That makes the bank "weight since the last accepted seam", a
+    /// structural property of the key sequence, never "weight since the
+    /// last cut": no coin anywhere reads a cut outcome, which is what keeps
+    /// the decision a pure function of the key set (a cut-outcome bank
+    /// would cascade every downstream decision off one flip and break
+    /// convergence). An uncuttable vetoed stretch therefore funds the first
+    /// accepted seam at its end with its whole weight, so byte pacing holds
+    /// across near-duplicate clusters instead of flipping one key-sized
+    /// coin per cluster.
+    ///
+    /// Away from vetoed stretches every accepted seam sees `banked == 0`
+    /// and this is exactly the per-key weight coin. With `max_segment == 0`
+    /// the bank is ignored entirely and the decision is the entry-counted
+    /// geometric coin (`rank`), byte for byte the shipped baseline. Index
+    /// levels never consult this: seam ranks stay separator-geometric
+    /// ([`seam_rank`](Self::seam_rank)).
+    fn leaf_cut(key: &[u8], banked: usize, manifest: &Manifest) -> bool {
+        if manifest.max_segment == 0 {
+            Self::rank(key, manifest) > BOTTOM_RANK
+        } else {
+            weight_paced_cut(key, banked + cap::entry_weight(key), manifest)
+        }
     }
 
     /// Derives the separator for a fresh seam from the two keys adjacent to
@@ -93,13 +182,98 @@ pub struct Geometric;
 
 impl Distribution for Geometric {
     fn rank(key: &[u8], manifest: &Manifest) -> Rank {
-        // Oversized keys never become boundaries (plan 5.7a), keeping every
-        // separator bounded by construction.
-        if key.len() as u32 > manifest.max_separator {
+        // Every key is ranked by a coin over its own bytes alone. The
+        // separator bound is enforced per seam by the veto
+        // (`Distribution::vetoes`) and the seam coin's length guard, not by
+        // demoting long keys: a demoted key could never end a segment even
+        // where it diverged from its neighbor in the first byte, which is
+        // what let near-duplicate-free runs of long keys grow into unbounded
+        // leaves.
+        //
+        // Which coin depends on the manifest: `max_segment == 0` keeps the
+        // entry-counted geometric coin (the shipped baseline, byte for
+        // byte); a non-zero `max_segment` switches to the byte-pacing
+        // weight coin, whose cut probability is the entry's weight share of
+        // the target so segments average `max_segment` weighted bytes
+        // whatever the key-size mix (see [`weight_paced_rank`]).
+        if manifest.max_segment == 0 {
+            geometric::compute_geometric_rank(&Blake3Hash::hash(key), manifest.branch_factor())
+        } else {
+            weight_paced_rank(key, manifest)
+        }
+    }
+
+    /// The seam coin stays geometric under BOTH leaf coins: index levels
+    /// subsample leaf boundaries uniformly at `1/m` per level (each accepted
+    /// seam's separator punches level `n` when its own geometric rank
+    /// exceeds `BOTTOM_RANK + n`), which is the right ladder even when the
+    /// leaf coin paces by bytes — index entries are separator-sized, so
+    /// entry-counted fanout is exactly what bounds an index node's size.
+    /// Routing the seam coin through `Self::rank` would cap it at the
+    /// weight coin's two outcomes and flatten the tree above level 1.
+    ///
+    /// The length guard is the stored-form face of the veto, exactly as in
+    /// the trait default: accepted seams are within the bound by
+    /// construction, so it fires only for forced separators (the cap
+    /// backstop), keeping them leaf-level only.
+    fn seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
+        if separator.len() as u32 > manifest.max_separator {
             return 0;
         }
-        geometric::compute_geometric_rank(&Blake3Hash::hash(key), manifest.branch_factor())
+        geometric::compute_geometric_rank(&Blake3Hash::hash(separator), manifest.branch_factor())
     }
+}
+
+/// The byte-pacing leaf coin in its bank-zero form: cut after `key` with
+/// probability `entry_weight(key) / max_segment`, decided from
+/// `blake3(key)` alone. This is what [`Geometric::rank`] answers under a
+/// non-zero `max_segment` — the conservative per-key floor the edit path's
+/// structural checks read (a bank can only raise the cut probability, so
+/// `rank > BOTTOM_RANK` here implies the authoritative decision cuts too).
+/// The grouped decision, which adds the bank an uncuttable vetoed stretch
+/// accumulated, is [`Distribution::leaf_cut`].
+///
+/// Per renewal reasoning, independent per-key cuts with probability
+/// proportional to weight make the expected weighted run length between
+/// cuts `max_segment`, with an exponential tail (`P(run > W) ≈ e^(-W /
+/// max_segment)`) — a soft cap: segments AVERAGE the target instead of
+/// never exceeding it, which is what removes the whole-run re-shape
+/// machinery a hard cap needed. An entry at or above the target weight
+/// always cuts (probability clamps to one), subject to the veto like any
+/// other proposed boundary.
+///
+/// The coin reads the SEAM'S LEFT key (the entry that closes its segment,
+/// the existing cut-after convention): a separator is a prefix of the seam's
+/// RIGHT key and sorts strictly above the left key, so the leaf coin and the
+/// seam coin can never read the same bytes even when a separator equals a
+/// whole key — the two stay independent by construction. Returns
+/// `BOTTOM_RANK + 1` (cut) or `BOTTOM_RANK` (no cut); index promotion is the
+/// seam coin's job alone.
+pub fn weight_paced_rank(key: &[u8], manifest: &Manifest) -> Rank {
+    if weight_paced_cut(key, cap::entry_weight(key), manifest) {
+        BOTTOM_RANK + 1
+    } else {
+        BOTTOM_RANK
+    }
+}
+
+/// The weight coin's core draw: cut at the accepted seam after `key` with
+/// probability `weight / max_segment`, decided from `blake3(key)` alone.
+/// `weight` is the total funding the seam charges — the key's own entry
+/// weight plus whatever bank an uncuttable vetoed stretch behind it
+/// accumulated ([`Distribution::leaf_cut`]).
+///
+/// The comparison runs in 128-bit arithmetic so neither product can
+/// overflow or lose precision, and the probability saturates cleanly: any
+/// `weight >= max_segment` makes the inequality hold for every draw (a
+/// stretch several times the target cuts with certainty, which is exactly
+/// the pacing intent).
+pub fn weight_paced_cut(key: &[u8], weight: usize, manifest: &Manifest) -> bool {
+    let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *Blake3Hash::hash(key).as_bytes();
+    let draw = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
+    let weight = weight as u128;
+    let target = manifest.max_segment as u128;
+    (draw as u128) * target < (weight << 64)
 }
 
 /// The shortest prefix of `right` that sorts strictly above `left`, given
@@ -120,6 +294,21 @@ pub fn shortest_separator(left: &[u8], right: &[u8]) -> Vec<u8> {
         .take_while(|(a, b)| a == b)
         .count();
     right[..=lcp.min(right.len() - 1)].to_vec()
+}
+
+/// Whether the shortest distinguishing separator of the seam between
+/// adjacent keys `left < right` exceeds `manifest.max_separator`: the
+/// default veto rule (see [`Distribution::vetoes`]).
+///
+/// The shortest separator is `min(lcp + 1, len(right))` bytes long
+/// ([`shortest_separator`]), so it exceeds the bound exactly when `right`
+/// outgrows the bound and the two keys agree on its first `max_separator`
+/// bytes; checked here without allocating the separator. (`lcp >= bound`
+/// with `len(right) == bound` cannot occur: `right` would be a prefix of
+/// `left` and sort at or below it.)
+pub fn seam_vetoed(left: &[u8], right: &[u8], manifest: &Manifest) -> bool {
+    let bound = manifest.max_separator as usize;
+    right.len() > bound && left.len() >= bound && left[..bound] == right[..bound]
 }
 
 /// The shortest prefix of `min` that sorts at or above `floor`: the canonical
@@ -151,6 +340,165 @@ pub fn raise_to_floor(min: &[u8], floor: &[u8]) -> Vec<u8> {
         // rather than misroute.
         debug_assert!(false, "reseparate invariant violated: min < floor");
         min.to_vec()
+    }
+}
+
+/// Pure helpers for weighing entries and force-splitting over-target
+/// vetoed stretches: the last-resort backstop behind the weight coin.
+///
+/// The veto ([`Distribution::vetoes`](crate::Distribution::vetoes)) rejects
+/// every seam whose shortest separator exceeds `max_separator`, so
+/// near-duplicate neighbors — keys agreeing beyond the bound, e.g. copies
+/// of one long value under VAE order — can never split among themselves.
+/// Where such keys cluster, the stretch between accepted seams grows
+/// without bound and every edit rewrites the whole block, and no coin can
+/// help: every proposal inside the stretch is vetoed. The backstop steps in
+/// exactly there, and ONLY there: when a fully vetoed stretch's summed
+/// [`entry_weight`] exceeds `max_segment`, it is split at the deterministic
+/// anchors [`forced_cut_positions`] chooses. (The arm-1 hard cap invoked
+/// the same splitting for EVERY over-target run, which dragged whole-run
+/// merge machinery onto the common edit path — a 7x regression; the weight
+/// coin paces everything the veto allows, so the backstop stays off the
+/// common path by construction.)
+///
+/// [`entry_weight`] also feeds the weight-paced leaf coin
+/// ([`weight_paced_rank`](super::weight_paced_rank)), so the backstop and
+/// the coin meter the same byte scale.
+///
+/// Every function here is a pure function of the run's key list (never of
+/// edit history or remembered state), which is what lets differently ordered
+/// edits converge on the same forced cuts. Forced seams are leaf-level only:
+/// their separators exceed `max_separator` by construction (see
+/// [`forced_separator`]), so the seam coin's length guard ranks them 0 and
+/// they can never punch an index-level cut.
+pub mod cap {
+    use dialog_common::Blake3Hash;
+
+    use crate::{Key, Manifest};
+
+    /// Weight charged per entry beyond its key bytes: a stand-in for the
+    /// value slot and per-entry encoding overhead. The cap needs a
+    /// deterministic per-entry weight at cut time, when the encoded node
+    /// size (front coding, per-node dictionaries) is not yet known; for
+    /// artifact trees the key carries the value, so key length dominates
+    /// real cost and front coding brings real blocks in under the proxy.
+    pub const ENTRY_WEIGHT_OVERHEAD: usize = 32;
+
+    /// The weight an entry contributes toward `Manifest::max_segment`.
+    pub fn entry_weight(key: &[u8]) -> usize {
+        key.len() + ENTRY_WEIGHT_OVERHEAD
+    }
+
+    /// Longest common prefix length of two byte strings.
+    fn lcp(a: &[u8], b: &[u8]) -> usize {
+        a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
+    }
+
+    /// Whether the seam between adjacent keys `left < right` may carry a
+    /// forced cut: true exactly when [`forced_separator`] would exceed
+    /// `max_separator`, keeping the seam quiet at index levels through the
+    /// existing length guard and self-identifying in stored form (a
+    /// separator longer than `max_separator` joins a segment to its left
+    /// sibling's run when an edit widens its window).
+    pub fn is_forced_candidate(left: &[u8], right: &[u8], manifest: &Manifest) -> bool {
+        let bound = manifest.max_separator as usize;
+        right.len() > bound || lcp(left, right) + 1 > bound
+    }
+
+    /// The separator of a forced seam between adjacent keys `left < right`:
+    /// the shortest prefix of `right` that sorts strictly above `left` AND
+    /// exceeds `max_separator`, so the seam coin's length guard keeps the
+    /// seam out of every index level. Only defined for seams where
+    /// [`is_forced_candidate`] holds.
+    ///
+    /// `left < right` guarantees `right` is not a prefix of `left`, so the
+    /// divergence byte exists in `right` and the cut never exceeds
+    /// `right.len()`.
+    pub fn forced_separator(left: &[u8], right: &[u8], manifest: &Manifest) -> Vec<u8> {
+        debug_assert!(
+            is_forced_candidate(left, right, manifest),
+            "forced separator requested for a seam that is not a candidate"
+        );
+        let bound = manifest.max_separator as usize;
+        let cut = (lcp(left, right) + 1).max((bound + 1).min(right.len()));
+        right[..cut].to_vec()
+    }
+
+    /// Deterministic forced cut positions for a fully vetoed leaf stretch,
+    /// as indices into `keys` (a cut at `i` starts a new segment at
+    /// `keys[i]`), sorted ascending. Empty when the stretch's weight is
+    /// within `max_segment`, the target is unset, or no seam qualifies.
+    ///
+    /// Anchors are chosen rendezvous style, so boundaries are stable under
+    /// churn by PLACEMENT, not by memory: while a piece exceeds the target,
+    /// it is cut at the candidate key with the lowest blake3 hash inside
+    /// it, recursively. An insertion relocates an existing anchor only when
+    /// the new key's hash beats the piece's current minimum (otherwise the
+    /// old minima keep winning their pieces, and a piece pushed over the
+    /// target merely gains one new anchor); a deletion relocates one only
+    /// when the anchor key itself is removed, and the next-lowest hash
+    /// takes over. The threshold is symmetric — the same `max_segment`
+    /// creates and dissolves forced cuts, no hysteresis — because any
+    /// trajectory-dependent rule would break the byte-identity that
+    /// independent imports and canonicalize promise. The whole decision
+    /// stays a pure function of the stretch's key list.
+    ///
+    /// A piece with no candidate seam stays whole even over the target (a
+    /// run of short keys offers no separator the quietness rule accepts);
+    /// in the fully vetoed stretches the backstop is scoped to, every seam
+    /// qualifies, so this is a formality there.
+    pub fn forced_cut_positions<K>(keys: &[&K], manifest: &Manifest) -> Vec<usize>
+    where
+        K: Key,
+    {
+        let cap = manifest.max_segment as usize;
+        if cap == 0 || keys.len() < 2 {
+            return Vec::new();
+        }
+
+        // Prefix weights: weight of keys[lo..hi] is prefix[hi] - prefix[lo].
+        let mut prefix = Vec::with_capacity(keys.len() + 1);
+        prefix.push(0usize);
+        for key in keys {
+            let last = *prefix.last().expect("prefix starts non-empty");
+            prefix.push(last + entry_weight(key.as_ref()));
+        }
+        if prefix[keys.len()] <= cap {
+            return Vec::new();
+        }
+
+        // Candidate anchors with their rendezvous hash, computed once.
+        let mut candidates: Vec<(usize, Blake3Hash)> = Vec::new();
+        for at in 1..keys.len() {
+            let left = keys[at - 1].as_ref();
+            let right = keys[at].as_ref();
+            if is_forced_candidate(left, right, manifest) {
+                candidates.push((at, Blake3Hash::hash(right)));
+            }
+        }
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        let mut cuts = Vec::new();
+        let mut pieces = vec![(0usize, keys.len())];
+        while let Some((lo, hi)) = pieces.pop() {
+            if prefix[hi] - prefix[lo] <= cap {
+                continue;
+            }
+            let best = candidates
+                .iter()
+                .filter(|(at, _)| *at > lo && *at < hi)
+                .min_by(|(_, a_hash), (_, b_hash)| a_hash.as_bytes().cmp(b_hash.as_bytes()));
+            let Some(&(at, _)) = best else {
+                continue;
+            };
+            cuts.push(at);
+            pieces.push((lo, at));
+            pieces.push((at, hi));
+        }
+        cuts.sort_unstable();
+        cuts
     }
 }
 
@@ -223,6 +571,8 @@ mod tests {
     use rand::{Rng, SeedableRng, rngs::StdRng};
 
     use super::geometric::compute_geometric_rank;
+    use super::{cap, weight_paced_rank};
+    use crate::{BOTTOM_RANK, Manifest};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -339,6 +689,86 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    /// The weight-paced coin's runs are byte-denominated exponential: with
+    /// cut probability `entry_weight / max_segment` per key, run weights
+    /// between cuts average `max_segment` and the tail decays as
+    /// `e^(-W / max_segment)`, whatever the key-length mix. The geometric
+    /// coin cannot do this: it paces by entry count, so runs of long keys
+    /// average `m` times the mean entry size however large that is.
+    #[dialog_common::test]
+    async fn it_paces_runs_at_the_weight_target() -> Result<()> {
+        let target = 8192u32;
+        let manifest = Manifest {
+            max_segment: target,
+            ..Manifest::default()
+        };
+        let mut rng = test_rng();
+
+        let mut runs: Vec<usize> = Vec::new();
+        let mut run = 0usize;
+        for _ in 0..60_000u32 {
+            let len = rng.gen_range(20..=600usize);
+            let mut key = vec![0u8; len];
+            rng.fill(&mut key[..]);
+            run += cap::entry_weight(&key);
+            if weight_paced_rank(&key, &manifest) > BOTTOM_RANK {
+                runs.push(run);
+                run = 0;
+            }
+        }
+        assert!(runs.len() > 1_000, "enough runs to be statistical");
+
+        let mean = runs.iter().sum::<usize>() as f64 / runs.len() as f64;
+        let expected = target as f64;
+        assert!(
+            (mean - expected).abs() / expected < 0.1,
+            "mean run weight {mean:.0} should be within 10% of the {target} target"
+        );
+
+        // Exponential tail: P(run > 2 * target) ≈ e^-2 ≈ 0.135.
+        let beyond = runs
+            .iter()
+            .filter(|weight| **weight > 2 * target as usize)
+            .count() as f64
+            / runs.len() as f64;
+        let e2 = (-2.0f64).exp();
+        assert!(
+            (beyond - e2).abs() / e2 < 0.35,
+            "P(run > 2 * target) = {beyond:.4} should be near e^-2 = {e2:.4}"
+        );
+
+        Ok(())
+    }
+
+    /// With `max_segment == 0` the leaf cut is the entry-counted geometric
+    /// coin and the bank is ignored entirely — whatever weight a vetoed
+    /// stretch would have accumulated, the decision is byte-identical to
+    /// the shipped baseline. This is the identity half of the bank rule:
+    /// the banked coin exists only under a non-zero target.
+    #[dialog_common::test]
+    async fn it_ignores_the_bank_when_the_target_is_unset() -> Result<()> {
+        let manifest = Manifest {
+            max_segment: 0,
+            ..Manifest::default()
+        };
+        let mut rng = test_rng();
+        for _ in 0..500 {
+            let len = rng.gen_range(4..=700usize);
+            let mut key = vec![0u8; len];
+            rng.fill(&mut key[..]);
+            let baseline =
+                <super::Geometric as super::Distribution>::rank(&key, &manifest) > BOTTOM_RANK;
+            for bank in [0usize, 1, 512, 65_536, 10 << 20] {
+                assert_eq!(
+                    <super::Geometric as super::Distribution>::leaf_cut(&key, bank, &manifest),
+                    baseline,
+                    "a zero target must ignore the bank"
+                );
+            }
+        }
         Ok(())
     }
 

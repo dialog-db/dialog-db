@@ -14,7 +14,7 @@ use std::ops::Bound;
 use crate::{
     ArchivedIndex, ArchivedNodeBody, Buffer, Delta, DialogSearchTreeError, Distribution, Entry,
     Key, Link, Manifest, Node, NoveltyBuffer, NoveltyEntry, NoveltyOp, PersistentNode,
-    PersistentNodeBody, Rank, Value, into_owned, resolve_pending,
+    PersistentNodeBody, Rank, Value, distribution::cap, into_owned, resolve_pending,
 };
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
@@ -991,8 +991,27 @@ where
 }
 
 /// Regroups an ordered list of entries into leaf segments by the canonical cut
-/// rule at level 0 (threshold [`BOTTOM_RANK`]): a segment ends at the first
-/// entry whose leaf-coin rank exceeds the threshold.
+/// rule at level 0 (threshold [`BOTTOM_RANK`]): a segment ends at an entry
+/// whose leaf-coin rank exceeds the threshold AND whose seam to the successor
+/// entry survives the veto ([`Distribution::vetoes`]) — a vetoed seam keeps
+/// the two keys in one segment at every level. Which leaf coin flips is the
+/// manifest's choice (`max_segment`: zero keeps the entry-counted geometric
+/// coin, non-zero paces cuts by entry weight; see
+/// [`weight_paced_rank`](crate::distribution::weight_paced_rank)) — either
+/// way the coin decision is per key. A non-zero `max_segment` additionally
+/// arms the backstop: a fully vetoed stretch whose weight exceeds the
+/// target — the one shape no coin is allowed to cut — is force-split at
+/// rendezvous anchors ([`cap::forced_cut_positions`]), so the caller must
+/// hand this whole stretches (the edit path widens its window across the
+/// self-identifying forced seams; see `merge_vetoed_stretch` in the
+/// transient tree).
+///
+/// The window's last entry proposes no cut: its seam partner (the tree-wide
+/// successor key) lies beyond the window, and that seam's status cannot have
+/// drifted — a seam's separator is invariant under every edit that keeps
+/// both partner keys (the edit-stability note on [`Distribution::vetoes`]),
+/// and the edits that remove a partner (boundary deletes, orphan appends)
+/// widen their window across the seam before regrouping.
 ///
 /// `floor` is the separator at the left edge of the run (the edited
 /// segment's previous separator). The first produced segment re-derives its
@@ -1017,41 +1036,137 @@ where
     // first group, whose separator comes from the floor instead.
     let mut previous_last: Option<Key> = None;
 
-    let seal = |pending: &mut Vec<Entry<Key, Value>>,
-                previous_last: &mut Option<Key>,
-                groups: &mut Vec<Node<Key, Value>>| {
-        let entries = std::mem::take(pending);
-        let first = entries
-            .first()
-            .expect("groups are sealed only when non-empty")
-            .key
-            .clone();
-        let last = entries
-            .last()
-            .expect("groups are sealed only when non-empty")
-            .key
-            .clone();
-        let separator = match previous_last.as_ref() {
-            None => D::reseparate(first.as_ref(), &floor),
-            Some(previous) => D::separator(previous.as_ref(), first.as_ref()),
-        };
-        *previous_last = Some(last);
-        groups.push(TransientNode::Segment(TransientSegment { entries, separator }).into());
-    };
+    // Pair-aware cuts, decided before the entries move: the coin proposes a
+    // boundary after an entry, and the veto rejects the proposal when the
+    // seam to the successor cannot be told apart within the separator
+    // bound. Both partner keys are needed, so the decisions are computed
+    // over the borrowed list first. The veto verdicts are kept: they
+    // delimit the stretches the backstop below scans.
+    //
+    // The weight bank rides the same walk: a vetoed seam banks its left
+    // key's weight (no cut is possible there), and every ACCEPTED seam
+    // spends the bank into its cut decision and resets it — reset on every
+    // accepted seam, cut or no cut, so the bank is "weight since the last
+    // accepted seam" (a structural property of the key sequence) and never
+    // "weight since the last cut" (which would cascade decisions off coin
+    // outcomes and break convergence). See `Distribution::leaf_cut`.
+    let count = entries.len();
+    let mut vetoed = vec![false; count.saturating_sub(1)];
+    let mut cut_after = vec![false; count];
+    let mut bank = 0usize;
+    for at in 0..count.saturating_sub(1) {
+        let key = entries[at].key.as_ref();
+        vetoed[at] = D::vetoes(key, entries[at + 1].key.as_ref(), manifest);
+        if vetoed[at] {
+            // The coin is skipped entirely for vetoed seams: the veto
+            // overrides whatever it would say, and the weight moves into
+            // the bank instead.
+            bank += cap::entry_weight(key);
+        } else {
+            cut_after[at] = D::leaf_cut(key, bank, manifest);
+            bank = 0;
+        }
+    }
 
-    for entry in entries {
-        let rank = D::rank(entry.key.as_ref(), manifest);
+    // The backstop: a maximal stretch of vetoed seams is uncuttable by any
+    // coin, so when its summed entry weight exceeds `max_segment` it is
+    // force-split at the rendezvous anchors `cap::forced_cut_positions`
+    // chooses. A group starting at a forced anchor carries the long-form
+    // forced separator (`cap::forced_separator`), which keeps the seam out
+    // of every index level (the seam coin's length guard) and marks the
+    // pieces as one stretch in stored form, so an edit can rejoin them.
+    // Stretch extents never cross the window: a vetoed seam exists in
+    // stored form only as a forced seam, and the edit path widens its
+    // window across those before regrouping.
+    let mut forced_start = vec![false; count];
+    if manifest.max_segment > 0 {
+        let mut at = 0usize;
+        while at < vetoed.len() {
+            if !vetoed[at] {
+                at += 1;
+                continue;
+            }
+            let start = at;
+            while at < vetoed.len() && vetoed[at] {
+                at += 1;
+            }
+            // The stretch covers keys `start..=at` (the last vetoed seam
+            // joins keys `at - 1` and `at`).
+            let keys: Vec<&Key> = entries[start..=at].iter().map(|entry| &entry.key).collect();
+            for cut in cap::forced_cut_positions(&keys, manifest) {
+                cut_after[start + cut - 1] = true;
+                forced_start[start + cut] = true;
+            }
+        }
+    }
+
+    let mut group_start = 0usize;
+    for (at, entry) in entries.into_iter().enumerate() {
         pending.push(entry);
-        if rank > BOTTOM_RANK {
-            seal(&mut pending, &mut previous_last, &mut groups);
+        if cut_after[at] {
+            seal::<Key, Value, D>(
+                &mut pending,
+                &mut previous_last,
+                &mut groups,
+                &floor,
+                forced_start[group_start],
+                manifest,
+            );
+            group_start = at + 1;
         }
     }
 
     if !pending.is_empty() {
-        seal(&mut pending, &mut previous_last, &mut groups);
+        seal::<Key, Value, D>(
+            &mut pending,
+            &mut previous_last,
+            &mut groups,
+            &floor,
+            forced_start[group_start],
+            manifest,
+        );
     }
 
     groups
+}
+
+/// Seals one group of entries into a segment, deriving its left-edge
+/// separator: from the floor for the very first group of a regroup, the
+/// long forced form when the group starts at a backstop anchor, and the
+/// canonical shortest-distinguishing prefix against the previous group's
+/// last key everywhere else.
+fn seal<Key, Value, D>(
+    pending: &mut Vec<Entry<Key, Value>>,
+    previous_last: &mut Option<Key>,
+    groups: &mut Vec<Node<Key, Value>>,
+    floor: &[u8],
+    forced: bool,
+    manifest: &Manifest,
+) where
+    Key: self::Key,
+    Value: self::Value,
+    D: Distribution,
+{
+    let entries = std::mem::take(pending);
+    let first = entries
+        .first()
+        .expect("groups are sealed only when non-empty")
+        .key
+        .clone();
+    let last = entries
+        .last()
+        .expect("groups are sealed only when non-empty")
+        .key
+        .clone();
+    let separator = match previous_last.as_ref() {
+        None => D::reseparate(first.as_ref(), floor),
+        Some(previous) if forced => {
+            cap::forced_separator(previous.as_ref(), first.as_ref(), manifest)
+        }
+        Some(previous) => D::separator(previous.as_ref(), first.as_ref()),
+    };
+    *previous_last = Some(last);
+    groups.push(TransientNode::Segment(TransientSegment { entries, separator }).into());
 }
 
 #[cfg(test)]

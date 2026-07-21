@@ -61,6 +61,15 @@ pub const DEFAULT_INLINE_N: u32 = 4096;
 /// bytes (beyond it, the scan loads the block and post-filters).
 pub const DEFAULT_SPILL_PREFIX: u16 = 64;
 
+/// Default segment weight cap: 0 disables the cap, the shipped baseline. When
+/// non-zero, a leaf run whose summed entry weight (see
+/// [`entry_weight`](crate::distribution::cap::entry_weight)) exceeds this is
+/// force-split at deterministic positions (see
+/// [`forced_cut_positions`](crate::distribution::cap::forced_cut_positions)),
+/// bounding the unbounded leaves that runs of vetoed seams (near-duplicate
+/// keys) otherwise form.
+pub const DEFAULT_MAX_SEGMENT: u32 = 0;
+
 /// The self-describing format constants of a tree, inlined into every node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedManifest)]
@@ -77,17 +86,47 @@ pub struct Manifest {
     /// How many leading raw value bytes a spilled value's key carries as its
     /// order-preserving prefix.
     pub spill_prefix: u16,
+    /// Leaf-run weight cap; 0 disables it. A run between accepted seams whose
+    /// summed entry weight exceeds this is force-split at deterministic,
+    /// leaf-level-only positions.
+    pub max_segment: u32,
 }
 
 impl Default for Manifest {
     fn default() -> Self {
+        // Experiment plumbing for the boundary-policy arms (see
+        // notes/boundary-policy-experiment.md): the manifest a fresh tree is
+        // created under can be overridden through the environment, so the
+        // whole artifact stack runs a capture under an arm's format without
+        // threading configuration through every layer. Unset variables leave
+        // the shipped defaults untouched; existing trees always keep the
+        // manifest their root node carries.
         Self {
             version: FORMAT_VERSION,
             fanout_n: DEFAULT_FANOUT_N,
             max_separator: DEFAULT_MAX_SEPARATOR,
-            inline_n: DEFAULT_INLINE_N,
+            inline_n: env_override("DIALOG_TREE_INLINE_N", DEFAULT_INLINE_N),
             spill_prefix: DEFAULT_SPILL_PREFIX,
+            max_segment: env_override("DIALOG_TREE_MAX_SEGMENT", DEFAULT_MAX_SEGMENT),
         }
+    }
+}
+
+/// Reads a `u32` manifest override from the environment, falling back to the
+/// built-in default when the variable is unset or unparsable. On targets
+/// without an environment (wasm) the fallback always wins.
+fn env_override(name: &str, fallback: u32) -> u32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(fallback)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = name;
+        fallback
     }
 }
 
@@ -174,6 +213,7 @@ mod tests {
             max_separator: 512,
             inline_n: 4096,
             spill_prefix: 64,
+            max_segment: 131072,
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&manifest)?;
         let decoded: Manifest = rkyv::from_bytes::<Manifest, rkyv::rancor::Error>(&bytes)?;
