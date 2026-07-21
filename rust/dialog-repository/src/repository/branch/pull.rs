@@ -2861,6 +2861,22 @@ mod history_tests {
             })]))
             .perform(&operator)
             .await?;
+        // Extra moderator-side revisions push OUR divergence above the
+        // author's, so the cascade provably takes the SCREENED direction
+        // this test pins (the replay gate requires ours <= theirs). With
+        // masses tied, the tie-break routes to the replay direction and
+        // the deletion would hold through a different mechanism (R3 from
+        // our replayed record) — green, but pinning nothing.
+        for i in 0..2 {
+            moderator
+                .commit(stream::iter(vec![assert_one(
+                    "mod/note",
+                    &format!("note:{i}"),
+                    "moderation",
+                )]))
+                .perform(&operator)
+                .await?;
+        }
 
         author
             .commit(stream::iter(vec![assert_one(
@@ -2880,6 +2896,32 @@ mod history_tests {
         let replica = repo.branch("replica").open().perform(&operator).await?;
         replica.set_upstream(&moderator).perform(&operator).await?;
         replica.pull().perform(&operator).await?;
+
+        // Routing witness: neither side includes the other (adoption and
+        // skip both refuse), and our divergence mass exceeds the
+        // author's, so the screened direction fires — their delta onto
+        // our tree, R1 rejecting the stale copy.
+        let ours = replica
+            .revision()
+            .expect("replica adopted a head")
+            .context
+            .expect("the head publishes its watermark");
+        let theirs = author
+            .revision()
+            .expect("author has a head")
+            .context
+            .expect("the head publishes its watermark");
+        assert!(
+            !ours.includes(&theirs) && !theirs.includes(&ours),
+            "fixture: both sides carry novelty"
+        );
+        assert!(
+            ours.divergence(&theirs) > theirs.divergence(&ours),
+            "fixture must route to the screened direction: ours-beyond {} theirs-beyond {}",
+            ours.divergence(&theirs),
+            theirs.divergence(&ours)
+        );
+
         replica.pull().from(&author).perform(&operator).await?;
 
         let titles: Vec<_> = replica
@@ -3043,6 +3085,50 @@ mod history_tests {
         })]))
         .perform(&operator)
         .await?;
+
+        // Extra upstream churn pushes THEIR divergence above ours, so
+        // the cascade provably takes the REPLAY direction this test pins
+        // (our delta onto their tree; only our covering record can
+        // retire their live copy). Without it the masses favored the
+        // screened direction, where R1 keeps the fact dead through a
+        // different mechanism — green, but pinning nothing.
+        for i in 0..2 {
+            m.commit(stream::iter(vec![assert_one(
+                "mod/note",
+                &format!("note:{i}"),
+                "churn",
+            )]))
+            .perform(&operator)
+            .await?;
+        }
+
+        // Routing witness: neither side includes the other, both sit
+        // under the graft threshold, and our divergence mass is the
+        // smaller, so the replay direction fires.
+        let ours = f
+            .revision()
+            .expect("f has a head")
+            .context
+            .expect("the head publishes its watermark");
+        let theirs = m
+            .revision()
+            .expect("m has a head")
+            .context
+            .expect("the head publishes its watermark");
+        assert!(
+            !ours.includes(&theirs) && !theirs.includes(&ours),
+            "fixture: both sides carry novelty"
+        );
+        assert!(
+            ours.divergence(&theirs).min(theirs.divergence(&ours)) <= SMALL_DIVERGENCE,
+            "fixture stays under the graft threshold"
+        );
+        assert!(
+            ours.divergence(&theirs) <= theirs.divergence(&ours),
+            "fixture must route to the replay direction: ours-beyond {} theirs-beyond {}",
+            ours.divergence(&theirs),
+            theirs.divergence(&ours)
+        );
 
         f.pull().perform(&operator).await?.expect("merged");
 

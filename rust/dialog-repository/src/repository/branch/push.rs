@@ -495,6 +495,79 @@ mod tests {
         Ok(())
     }
 
+    /// A push whose tracking-cell snapshot went stale — another handle of
+    /// the same branch reconfigured upstreams after this handle opened —
+    /// must still succeed and fold its advance into the current cell
+    /// state rather than failing after the target already advanced (which
+    /// left the recorded base behind, so every retried push read as
+    /// non-fast-forward until a pull) or clobbering the other handle's
+    /// entry. The push-side analogue of
+    /// `it_folds_tracking_updates_racing_from_another_handle`.
+    #[dialog_common::test]
+    async fn it_folds_tracking_updates_when_pushing_from_a_stale_handle() -> Result<()> {
+        use crate::Upstream;
+        use crate::helpers::test_operator_with_profile;
+        use crate::helpers::test_repo;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let backup = repo.branch("backup").open().perform(&operator).await?;
+
+        // Handle A of "feature" opens (snapshotting the upstream cell),
+        // then handle B reconfigures tracking, advancing the cell version
+        // past A's snapshot.
+        let feature_a = repo.branch("feature").open().perform(&operator).await?;
+        feature_a.set_upstream(&main).perform(&operator).await?;
+        feature_a
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:1".parse()?,
+                is: Value::String("Alice".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let feature_b = repo.branch("feature").open().perform(&operator).await?;
+        feature_b.set_upstream(&backup).perform(&operator).await?;
+        feature_b.push().to(&backup).perform(&operator).await?;
+
+        // A's push to main runs against its stale tracking snapshot: it
+        // must land, and the cell must end up carrying BOTH entries —
+        // A's advanced base for main and B's entry for backup.
+        let pushed = feature_a.push().to(&main).perform(&operator).await?;
+        assert!(pushed.is_some(), "the stale-handle push lands");
+
+        let fresh = repo.branch("feature").open().perform(&operator).await?;
+        let upstreams = fresh.upstreams();
+        let revision = feature_a.revision().expect("feature has a head");
+        assert!(
+            upstreams.iter().any(|entry| matches!(
+                entry,
+                Upstream::Local { branch, tree } if branch == "main" && *tree == revision.tree
+            )),
+            "A's tracking advance for main lands despite the stale snapshot"
+        );
+        assert!(
+            upstreams
+                .iter()
+                .any(|entry| matches!(entry, Upstream::Local { branch, .. } if branch == "backup")),
+            "B's entry for backup survives A's fold"
+        );
+
+        // And the retried bare push is a clean no-op, not NonFastForward.
+        let again = feature_a.push().to(&main).perform(&operator).await?;
+        assert_eq!(
+            again.map(|r| r.tree),
+            Some(revision.tree),
+            "a re-push after the fold is a no-op"
+        );
+
+        Ok(())
+    }
+
     /// A branch can push to an upstream other than its default: the target
     /// advances, starts being tracked with its own sync base, and the
     /// default stays put.
