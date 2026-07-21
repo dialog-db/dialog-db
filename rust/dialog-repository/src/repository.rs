@@ -42,7 +42,7 @@ pub use remote::*;
 // without linking `dialog-query` or the storage/transport stack.
 // Re-exported here at their historical
 // `dialog_repository::{Revision, TreeReference}` paths.
-pub use dialog_capability::{EMPTY_TREE_HASH, Revision, TreeReference};
+pub use dialog_artifacts::{EMPTY_TREE_HASH, Revision, TreeReference};
 
 /// A repository scoped to a specific subject.
 ///
@@ -1038,7 +1038,6 @@ mod tests {
     mod query_session {
 
         use super::query_engine::{Employee, employee};
-        use crate::RevisionExt as _;
         use crate::helpers::{test_operator_with_profile, test_repo};
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
@@ -1492,7 +1491,7 @@ mod tests {
             assert_eq!(rows.len(), 1, "the revision projects exactly once");
             assert_eq!(rows[0].issuer.0, operator.did().this());
             assert_eq!(rows[0].authority.0, profile.did().this());
-            assert_eq!(rows[0].branch.0, head.branch_entity());
+            assert_eq!(rows[0].branch.0, head.branch);
             assert_eq!(rows[0].edition.0, head.edition.value());
 
             Ok(())

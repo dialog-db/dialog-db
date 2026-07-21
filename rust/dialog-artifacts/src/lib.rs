@@ -54,6 +54,8 @@ mod artifacts;
 pub use artifacts::*;
 
 pub mod history;
+mod revision;
+pub use revision::*;
 
 mod reference;
 pub use reference::*;

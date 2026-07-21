@@ -1,4 +1,3 @@
-use crate::RevisionExt as _;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
@@ -231,8 +230,8 @@ where
         };
 
         let mut revision = match base_revision {
-            Some(base) => base.advance(TreeReference::default(), branch_entity.as_str(), issuer),
-            None => Revision::new(TreeReference::default(), branch_entity.as_str(), issuer),
+            Some(base) => base.advance(TreeReference::default(), branch_entity.clone(), issuer),
+            None => Revision::new(TreeReference::default(), branch_entity.clone(), issuer),
         };
         debug_assert_eq!(revision.version(), version);
         // Sign the record before it enters the tree: the issuer's signature
@@ -466,7 +465,6 @@ mod tests {
 
 #[cfg(test)]
 mod history_tests {
-    use crate::RevisionExt as _;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -548,7 +546,7 @@ mod history_tests {
             .await?
             .expect("the revision record is retrievable");
         assert!(history.revision_record(&first.version()).await?.is_some());
-        assert_eq!(record.branch, second.branch_entity());
+        assert_eq!(record.branch, second.branch.clone());
         assert_eq!(record.parents, vec![first.version()]);
         assert_eq!(record.issuer, second.issuer.to_string());
         assert_eq!(record.authority, profile.did().to_string());

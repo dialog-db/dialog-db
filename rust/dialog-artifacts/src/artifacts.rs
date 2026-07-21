@@ -163,7 +163,7 @@ where
                         ))
                     })?;
 
-                    storage.read::<Revision>(&hash).await?
+                    storage.read::<IndexRoot>(&hash).await?
                 }
             } else {
                 None
@@ -270,7 +270,7 @@ where
         Ok(if root == NULL_BLAKE3_HASH {
             NULL_REVISION_HASH
         } else {
-            Revision::new(root.as_bytes()).as_reference().await?
+            IndexRoot::new(root.as_bytes()).as_reference().await?
         })
     }
 
@@ -322,7 +322,7 @@ where
                 // Otherwise we hydrate revision info from the store.
                 let revision = self
                     .storage
-                    .read::<Revision>(&required_hash)
+                    .read::<IndexRoot>(&required_hash)
                     .await?
                     .ok_or_else(|| {
                         DialogArtifactsError::InvalidRevision(format!(
@@ -437,7 +437,7 @@ where
             let next_revision = if root == NULL_BLAKE3_HASH {
                 None
             } else {
-                Some(Revision::new(root.as_bytes()))
+                Some(IndexRoot::new(root.as_bytes()))
             };
 
             let revision_hash = if let Some(revision) = &next_revision {

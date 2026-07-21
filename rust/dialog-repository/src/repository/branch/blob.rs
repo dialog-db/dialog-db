@@ -59,7 +59,6 @@
 //! # }
 //! ```
 
-use crate::RevisionExt as _;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, TreeReference, Upstream,
@@ -462,8 +461,8 @@ where
         let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
         let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
         let mut revision = match base_revision {
-            Some(base) => base.advance(TreeReference::default(), branch_entity.as_str(), issuer),
-            None => Revision::new(TreeReference::default(), branch_entity.as_str(), issuer),
+            Some(base) => base.advance(TreeReference::default(), branch_entity.clone(), issuer),
+            None => Revision::new(TreeReference::default(), branch_entity.clone(), issuer),
         };
         let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;

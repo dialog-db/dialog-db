@@ -12,7 +12,6 @@
 //! `branch.query()` is evaluated against — see
 //! [`QueryLayer::metadata`](super::session::QueryLayer::metadata).
 
-use crate::RevisionExt as _;
 use base58::ToBase58;
 use dialog_artifacts::{Statement, Update};
 use dialog_capability::Capability;
