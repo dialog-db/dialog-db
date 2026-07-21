@@ -95,10 +95,22 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+      # TMPDIR must live on the large /nix volume, not the root
+      # filesystem. nothing-but-nix leaves the root filesystem only
+      # root-safe-haven (16GB) of free space, and the web test suites
+      # leak a headless Chrome profile (scoped_dir*, ~10MB+ each) into
+      # TMPDIR for every one of the ~1600 per-test browser launches:
+      # wasm-bindgen-test-runner SIGKILLs chromedriver without ending
+      # the WebDriver session, so chromedriver never removes the
+      # profile. With TMPDIR on the root filesystem the leak exhausts
+      # it after ~1400 tests and the run dies with ENOSPC or SIGKILLed
+      # renderers; the /nix volume has ~90GB of headroom.
       - name: 'Run test configuration'
         run: |
+          sudo mkdir -p /nix/tmp
+          sudo chmod 1777 /nix/tmp
           nix develop \
             --accept-flake-config \
-            --set-env-var TMPDIR $RUNNER_TEMP \
+            --set-env-var TMPDIR /nix/tmp \
             --command ${{ matrix.configuration }}
 
