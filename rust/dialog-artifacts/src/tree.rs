@@ -52,6 +52,8 @@ use crate::{
     value_predicates_admit,
 };
 
+pub mod distribution;
+
 /// The concrete search-tree type the artifact indexes use.
 ///
 /// Keys are the raw variable-length bytes of [`Key`]; values are [`State`]

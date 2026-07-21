@@ -1734,9 +1734,88 @@ mod test {
     use super::*;
 
     #[cfg(not(target_arch = "wasm32"))]
+    use dialog_artifacts::tree::distribution;
+    #[cfg(not(target_arch = "wasm32"))]
     use std::fs::read_dir;
     #[cfg(not(target_arch = "wasm32"))]
     use std::path::Path;
+
+    /// Capture the node-size distribution of the tree a transaction-log
+    /// replay leaves behind: history region plus live per-link novelty
+    /// buffers, the shape a real commit sequence produces (deliberately not
+    /// canonicalized). Skipped unless `DIALOG_TXN_LOG` points at a file
+    /// produced by `scripts/se-transform.py`; `DIALOG_TXN_LIMIT` caps the
+    /// replay (default 2048, 0 replays all). `DIALOG_TXN_MEM` switches to the
+    /// in-memory backend — a deep replay writes cumulative block bytes far
+    /// beyond the final tree (every commit rewrites its touched path), so the
+    /// disk backend can exhaust storage long before the log ends.
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn it_reports_replay_distribution() -> Result<()> {
+        let Ok(path) = env::var("DIALOG_TXN_LOG") else {
+            eprintln!("DIALOG_TXN_LOG not set; skipping replay distribution");
+            return Ok(());
+        };
+        let limit: usize = env::var("DIALOG_TXN_LIMIT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2048);
+
+        if env::var("DIALOG_TXN_MEM").is_ok() {
+            capture_replay_distribution(BenchEnv::volatile().await?, &path, limit).await
+        } else {
+            capture_replay_distribution(BenchEnv::temp().await?, &path, limit).await
+        }
+    }
+
+    /// Replays the log on `env`, then walks the resulting tree and prints its
+    /// node-size distribution. Shared by both backend arms of
+    /// [`it_reports_replay_distribution`].
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn capture_replay_distribution<Env>(
+        env: BenchEnv<Env>,
+        path: &str,
+        limit: usize,
+    ) -> Result<()>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<SpaceLoad>
+            + Provider<SpaceCreate>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let start = Instant::now();
+        env.import_transaction_log(path, limit).await?;
+        eprintln!("TREEDIST replayed limit={limit} in {:?}", start.elapsed());
+
+        let branch = env
+            .repo
+            .branch(&env.branch)
+            .load()
+            .perform(env.operator())
+            .await?;
+        let Some(revision) = branch.revision() else {
+            eprintln!("replay left no revision; nothing to capture");
+            return Ok(());
+        };
+        let root = *revision.tree.hash();
+        // Any constrained selector works here; the catalog it names is the
+        // branch's archive index, which is where the tree nodes live.
+        let the: Attribute = "se.post/title".parse()?;
+        let select = branch.claims().select(ArtifactSelector::new().the(the));
+        let store = NetworkedIndex::new(env.operator(), select.catalog(), None);
+        let stats = distribution::capture(&root, &store).await?;
+        distribution::report(&format!("se-replay-{limit}"), &stats);
+        Ok(())
+    }
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);

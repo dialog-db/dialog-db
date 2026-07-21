@@ -534,6 +534,8 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::helpers::generate_data;
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::tree::distribution;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStoreMutExt, Artifacts, Attribute,
         DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
@@ -819,6 +821,17 @@ mod tests {
                 .await?;
         }
         let commit_elapsed = commit_start.elapsed();
+
+        // Node-size capture: walk the persisted tree and report the byte-size
+        // distribution split by kind and height (one line per node when
+        // DIALOG_DIST_NODES is set). This is the flat, canonical dataset for
+        // the size-variance work; the replay harness in dialog-query covers
+        // the history-bearing shape.
+        {
+            let root = *facts.index.read().await.root().as_bytes();
+            let stats = distribution::capture(&root, &measured).await?;
+            distribution::report("tonk-import", &stats);
+        }
 
         let (write_bytes, writes) = {
             let storage = measured.lock().await;
