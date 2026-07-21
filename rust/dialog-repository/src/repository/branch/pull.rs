@@ -542,11 +542,12 @@ impl<'a> Pull<'a> {
                 }
 
                 let authority = Identify.perform(env).await?;
-                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
+                let branch_entity =
+                    crate::branch_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    lineage.as_str(),
+                    branch_entity.as_str(),
                     authority.did(),
                 );
                 let mut record = revision.record(
@@ -694,11 +695,12 @@ impl<'a> Pull<'a> {
                 // merged ancestry is both parents', and both watermarks
                 // are in hand.
                 let authority = Identify.perform(env).await?;
-                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
+                let branch_entity =
+                    crate::branch_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    lineage.as_str(),
+                    branch_entity.as_str(),
                     authority.did(),
                 );
                 let mut record = revision.record(
@@ -833,11 +835,12 @@ impl<'a> Pull<'a> {
             // root is replaced once those records are in the tree.
             Some(local) => {
                 let authority = Identify.perform(env).await?;
-                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
+                let branch_entity =
+                    crate::branch_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    lineage.as_str(),
+                    branch_entity.as_str(),
                     authority.did(),
                 );
                 // A merge records no skip table: a skip chain must never

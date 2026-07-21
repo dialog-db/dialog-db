@@ -439,7 +439,7 @@ async fn it_forks_and_merges_across_repositories() -> Result<()> {
     assert!(merged.parents.contains(&a4.version()));
     assert!(merged.parents.contains(&b4.version()));
     assert_eq!(merged.parents.len(), 2);
-    assert_eq!(merged.lineage, alice_repo);
+    assert_eq!(merged.branch, alice_repo);
 
     // Independent lineages share no history
     let stranger_repo = Entity::new()?;
@@ -1335,7 +1335,7 @@ async fn it_verifies_signed_revision_records() -> Result<()> {
     let parent = Version::new(Origin::from([3u8; 32]), Edition::new(4));
     let mut record = RevisionRecord {
         format: super::REVISION_RECORD_FORMAT,
-        lineage,
+        branch: lineage,
         issuer: did_key.clone(),
         authority: did_key.clone(),
         parents: vec![parent],
@@ -1408,7 +1408,7 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
     };
     let mut signed = RevisionRecord {
         format: super::REVISION_RECORD_FORMAT,
-        lineage: Entity::new()?,
+        branch: Entity::new()?,
         issuer: did_key,
         authority: "did:web:example.com".to_string(),
         parents: Vec::new(),
@@ -1416,7 +1416,7 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
         signature: Vec::new(),
     };
     let forged = RevisionRecord {
-        lineage: Entity::new()?,
+        branch: Entity::new()?,
         ..signed.clone()
     };
     signed.signature = key.sign(&signed.payload()?).to_bytes().to_vec();

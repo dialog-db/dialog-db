@@ -460,10 +460,10 @@ where
             None => Vec::new(),
         };
         let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
-        let lineage = crate::lineage_of(branch.of(), &profile, branch.name());
+        let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
         let mut revision = match base_revision {
-            Some(base) => base.advance(TreeReference::default(), lineage.as_str(), issuer),
-            None => Revision::new(TreeReference::default(), lineage.as_str(), issuer),
+            Some(base) => base.advance(TreeReference::default(), branch_entity.as_str(), issuer),
+            None => Revision::new(TreeReference::default(), branch_entity.as_str(), issuer),
         };
         let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;

@@ -38,8 +38,10 @@ use super::{Edition, Origin, REVISION_ATTRIBUTE, Version, verify_issuer_signatur
 pub struct RevisionRecord {
     /// Encoding version of this record, for forward evolution
     pub format: u8,
-    /// The branch lineage entity this revision was minted on
-    pub lineage: Entity,
+    /// The branch entity this revision was minted on (the opaque
+    /// content-derived identifier folding replica and name — the same
+    /// one the head carries)
+    pub branch: Entity,
     /// DID of the operator (session key) that minted the revision — the
     /// key whose signature binds this record
     pub issuer: String,
@@ -98,11 +100,11 @@ impl RevisionRecord {
         Ok(payload)
     }
 
-    /// The [`Origin`] of this record's revision, derived from the lineage
-    /// and issuer the record itself names — the same derivation the minting
-    /// replica used
+    /// The [`Origin`] of this record's revision, derived from the branch
+    /// entity and issuer the record itself names — the same derivation the
+    /// minting replica used
     pub fn origin(&self) -> Origin {
-        Origin::derive_from_identifiers([self.lineage.as_str(), self.issuer.as_str()])
+        Origin::derive_from_identifiers([self.branch.as_str(), self.issuer.as_str()])
     }
 
     /// The [`Edition`] of this record's revision, derived from its parents:

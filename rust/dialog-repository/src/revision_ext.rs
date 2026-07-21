@@ -4,9 +4,9 @@
 //! [`Revision`] itself is the identity and clock: its fields are built from
 //! the [`history`](dialog_capability::history) types, so it lives in
 //! `dialog-capability` (which `dialog-artifacts` depends on). Deriving a
-//! revision's lineage needs this crate's [`schema`], and its in-tree record
-//! needs `dialog_artifacts::history::RevisionRecord` — both above that
-//! layer. They are supplied here as an extension trait.
+//! revision's branch entity needs this crate's [`schema`], and its in-tree
+//! record needs `dialog_artifacts::history::RevisionRecord` — both above
+//! that layer. They are supplied here as an extension trait.
 
 use dialog_artifacts::Entity;
 use dialog_artifacts::history::{REVISION_RECORD_FORMAT, RevisionRecord};
@@ -15,28 +15,24 @@ use dialog_capability::{Did, Revision};
 
 use crate::schema;
 
-/// The branch lineage entity for `branch` on `subject` as advanced by
-/// `profile`: the schema [`Branch`](crate::schema::Branch) entity,
-/// content-derived from the `(profile, subject)` origin and the branch
-/// name. This is the opaque identifier published heads carry in place of
-/// the branch name — every replica of the branch derives the same one.
-pub fn lineage_of(subject: &Did, profile: &Did, branch: &str) -> Entity {
-    schema::Branch::new(
-        schema::Origin::new(profile.clone(), subject.clone()),
-        branch,
-    )
-    .this
+/// The branch entity for the branch named `name` on the replica
+/// `(subject, profile)`: the schema [`Branch`](crate::schema::Branch)
+/// entity, content-derived from the [`Replica`](crate::schema::Replica)
+/// and the name. This is the opaque identifier published heads carry in
+/// place of the name — every copy of the branch derives the same one.
+pub fn branch_of(subject: &Did, profile: &Did, name: &str) -> Entity {
+    schema::Branch::new(schema::Replica::new(profile.clone(), subject.clone()), name).this
 }
 
 /// Revision behaviour that depends on the repository schema and the in-tree
 /// revision record. The identity half — [`Revision::origin`] and
 /// [`Revision::version`] — moved onto `Revision` itself once heads began
-/// carrying their lineage identifier; what remains here needs `Entity` or
+/// carrying their branch identifier; what remains here needs `Entity` or
 /// the record type, which live above `dialog-capability`.
 pub trait RevisionExt {
-    /// The branch lineage entity this revision was minted on, parsed from
-    /// the identifier the head carries (see [`lineage_of`]).
-    fn lineage(&self) -> Entity;
+    /// The branch entity this revision was minted on, parsed from the
+    /// identifier the head carries (see [`branch_of`]).
+    fn branch_entity(&self) -> Entity;
 
     /// The content-derived entity identifying this revision — the entity
     /// onto which commit metadata can be associated, like on any other
@@ -56,11 +52,11 @@ pub trait RevisionExt {
     -> RevisionRecord;
 }
 
-/// The version-control [`Origin`] for the given lineage (branch) entity
-/// advanced by `issuer`. Both identifiers are length-prefixed in the
-/// derivation, keeping it injective.
-pub fn origin_of(lineage: &Entity, issuer: &Did) -> Origin {
-    Origin::derive_from_identifiers([lineage.as_str(), issuer.as_str()])
+/// The version-control [`Origin`] for the given branch entity advanced by
+/// `issuer`. Both identifiers are length-prefixed in the derivation,
+/// keeping it injective.
+pub fn origin_of(branch: &Entity, issuer: &Did) -> Origin {
+    Origin::derive_from_identifiers([branch.as_str(), issuer.as_str()])
 }
 
 /// The entity for the revision identified by `version`. Any replica that
@@ -73,7 +69,7 @@ pub fn entity_of(version: &Version) -> Entity {
 }
 
 impl RevisionExt for Revision {
-    fn lineage(&self) -> Entity {
+    fn branch_entity(&self) -> Entity {
         self.branch
             .parse()
             .expect("a head's branch identifier is a schema branch entity URI")
@@ -91,7 +87,7 @@ impl RevisionExt for Revision {
     ) -> RevisionRecord {
         RevisionRecord {
             format: REVISION_RECORD_FORMAT,
-            lineage: self.lineage(),
+            branch: self.branch_entity(),
             issuer: self.issuer.to_string(),
             authority: authority.to_string(),
             parents,

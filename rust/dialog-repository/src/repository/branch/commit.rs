@@ -120,8 +120,8 @@ where
             .as_ref()
             .map(|base| base.edition.successor())
             .unwrap_or(Edition::GENESIS);
-        let lineage = crate::lineage_of(branch.of(), &profile, branch.name());
-        let origin = crate::origin_of(&lineage, &issuer);
+        let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
+        let origin = crate::origin_of(&branch_entity, &issuer);
         let version = Version::new(origin, edition);
 
         // Walk forward from the current revision's tree root, or from
@@ -231,8 +231,8 @@ where
         };
 
         let mut revision = match base_revision {
-            Some(base) => base.advance(TreeReference::default(), lineage.as_str(), issuer),
-            None => Revision::new(TreeReference::default(), lineage.as_str(), issuer),
+            Some(base) => base.advance(TreeReference::default(), branch_entity.as_str(), issuer),
+            None => Revision::new(TreeReference::default(), branch_entity.as_str(), issuer),
         };
         debug_assert_eq!(revision.version(), version);
         // Sign the record before it enters the tree: the issuer's signature
@@ -548,7 +548,7 @@ mod history_tests {
             .await?
             .expect("the revision record is retrievable");
         assert!(history.revision_record(&first.version()).await?.is_some());
-        assert_eq!(record.lineage, second.lineage());
+        assert_eq!(record.branch, second.branch_entity());
         assert_eq!(record.parents, vec![first.version()]);
         assert_eq!(record.issuer, second.issuer.to_string());
         assert_eq!(record.authority, profile.did().to_string());

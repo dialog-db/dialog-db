@@ -29,7 +29,7 @@ impl MemoryHistory {
     pub fn record_revision(&mut self, revision: &Revision) -> Result<(), DialogArtifactsError> {
         let record = RevisionRecord {
             format: REVISION_RECORD_FORMAT,
-            lineage: revision.subject().clone(),
+            branch: revision.subject().clone(),
             issuer: revision.issuer().to_string(),
             authority: revision.authority().to_string(),
             parents: revision.cause().versions().to_vec(),

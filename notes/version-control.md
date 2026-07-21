@@ -81,7 +81,13 @@ gitGraph TB:
 
 Alice's `A:2` (edition 2) and Bob's `B:1` (edition 1) are ordered neither way by inspection alone, but Bob's merge has seen both, so it lands above both at edition 3.
 
-**The origin** answers "who is counting?": a hash folding together the user profile, the repository, the branch name, and the session key of the writing device. The same person on two branches, or on two devices, gets two origins. Each origin is therefore a **single sequential actor**: it produces revisions one at a time, never in parallel with itself.
+**The origin** answers "who is counting?". It is built from a three-step ladder of derived identities, each folding the previous:
+
+- A **replica** is a repository as seen by one profile: `hash(repository, profile)`.
+- A **branch** is a named line of work on a replica: `hash(replica, branch-name)`. This opaque identifier — never the name — is what published heads carry.
+- An **origin** is a branch as advanced by one session key: `hash(branch, operator)`.
+
+The same person on two branches, or on two devices, gets two origins. Each origin is therefore a **single sequential actor**: it produces revisions one at a time, never in parallel with itself.
 
 **The version** is the pair `(origin, edition)`, the globally unique name of a revision.
 

@@ -73,7 +73,7 @@ fn verified(of: &RecordBytes) -> Option<RevisionRecord> {
 }
 
 /// Projects the scalar fields of a revision record: attribution
-/// (issuer, authority), the branch lineage, the causal depth, and the
+/// (issuer, authority), the branch, the causal depth, and the
 /// revision entity derived from the record itself.
 #[derive(Debug, Clone, Formula)]
 pub struct Revision {
@@ -84,9 +84,10 @@ pub struct Revision {
     /// Join it against the scanned fact's entity to reject replays.
     #[output]
     pub this: Entity,
-    /// The branch lineage entity the revision was minted on.
+    /// The branch entity the revision was minted on (the opaque
+    /// replica-and-name identifier).
     #[output]
-    pub lineage: Entity,
+    pub branch: Entity,
     /// DID (as entity) of the operator that minted the revision.
     #[output]
     pub issuer: Entity,
@@ -112,7 +113,7 @@ impl Revision {
         vec![Revision {
             of: input.of.clone(),
             this: version.entity(),
-            lineage: record.lineage,
+            branch: record.branch,
             issuer,
             authority,
             edition: version.edition.value(),
@@ -178,7 +179,7 @@ mod tests {
         let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let mut record = RevisionRecord {
             format: REVISION_RECORD_FORMAT,
-            lineage: "test:lineage".parse().expect("valid entity"),
+            branch: "test:branch".parse().expect("valid entity"),
             issuer: did_key_of(&key),
             authority: did_key_of(&key),
             parents,
@@ -201,7 +202,7 @@ mod tests {
         let rows = Revision::compute(RevisionInput { of: of.clone() });
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].this, record.version().entity());
-        assert_eq!(rows[0].lineage, record.lineage);
+        assert_eq!(rows[0].branch, record.branch);
         assert_eq!(rows[0].issuer.to_string(), record.issuer);
         assert_eq!(rows[0].edition, 5);
 
@@ -259,7 +260,7 @@ mod tests {
 
         // Tamper with a signed field after signing.
         let mut forged = record.clone();
-        forged.lineage = "test:elsewhere".parse().expect("valid entity");
+        forged.branch = "test:elsewhere".parse().expect("valid entity");
         let of = RecordBytes(forged.to_bytes().expect("record encodes"));
         assert!(Revision::compute(RevisionInput { of: of.clone() }).is_empty());
         assert!(RevisionParent::compute(RevisionParentInput { of }).is_empty());
