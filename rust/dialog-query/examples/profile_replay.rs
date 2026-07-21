@@ -24,11 +24,22 @@
 //!
 //! Args: `<log.csv> [limit]` (limit defaults to 2048; 0 replays all).
 
+// The replay drives the on-disk BenchEnv and a tokio runtime, neither of
+// which exists on wasm; the example is native-only, with a stub main so the
+// wasm example build (which compiles every example) still links.
+#![cfg_attr(target_arch = "wasm32", allow(unused))]
+
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "../src/helpers.rs"]
 #[allow(dead_code, unused_imports)]
 mod helpers;
+#[cfg(not(target_arch = "wasm32"))]
 use helpers::BenchEnv;
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let mut args = std::env::args().skip(1);
     let path = args
