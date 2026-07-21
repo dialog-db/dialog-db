@@ -194,6 +194,91 @@ mod tests {
         pub name: people::Name,
     }
 
+    /// `Transaction::integrate` replays an externally built [`Changes`]
+    /// batch as if its instructions had been issued on the transaction
+    /// directly: asserts surface, retracts tombstone, and the branch
+    /// itself stays untouched until commit. This is the only pin on the
+    /// integrate replay mapping (Assert/Replace -> associate, Retract ->
+    /// dissociate); it died with the old transaction_query module and is
+    /// ported back.
+    #[dialog_common::test]
+    async fn it_integrates_external_changes_into_branch_transaction() -> anyhow::Result<()> {
+        use dialog_artifacts::Changes;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+
+        // Seed the branch with Alice; Bob will be added via integrate.
+        branch
+            .transaction()
+            .assert(Person {
+                this: alice.clone(),
+                name: people::Name("Alice".into()),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // Build an external Changes that adds Bob and retracts Alice's
+        // name. This batch could have come from any source — a separate
+        // builder, a reactor accumulator, etc.
+        let mut external = Changes::new();
+        external.assert(Person {
+            this: bob.clone(),
+            name: people::Name("Bob".into()),
+        });
+        external.retract(the!("test/name").of(alice.clone()).is("Alice".to_string()));
+
+        // Integrate into a transaction and observe through tx.query().
+        let tx = branch.transaction().integrate(external);
+
+        let mut names: Vec<String> = tx
+            .query()
+            .select(Query::<Person> {
+                this: Term::var("this"),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|p| p.name.0)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["Bob".to_string()],
+            "integrated changes must surface Bob (assert) and tombstone \
+             Alice (retract); got {names:?}"
+        );
+
+        // The branch itself remains untouched until commit.
+        let mut committed: Vec<String> = branch
+            .query()
+            .select(Query::<Person> {
+                this: Term::var("this"),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|p| p.name.0)
+            .collect();
+        committed.sort();
+        assert_eq!(
+            committed,
+            vec!["Alice".to_string()],
+            "integrate must not mutate the branch before commit"
+        );
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_surfaces_pending_asserts_through_transaction_query() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
