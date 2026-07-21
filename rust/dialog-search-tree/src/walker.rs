@@ -38,17 +38,16 @@ fn past_end<Key: Ord, R: RangeBounds<Key>>(range: &R, key: &Key) -> bool {
 /// winning op per key and sorted by key.
 ///
 /// `path` is the walk's ancestor stack, root first, each entry paired with the
-/// index of the child it descended into. That gives both the ops (each index
-/// node's `novelty`) and the leaf's span: the child link's upper bound, and its
-/// predecessor's as the exclusive lower bound. Ops outside the span belong to
-/// sibling leaves and are skipped, so each op is resolved at exactly the one
-/// leaf whose range covers it, the same leaf a flush would route it to.
+/// index of the child it descended into. Novelty is stored per child link, so
+/// each level contributes exactly the descended link's buffer; what a
+/// shallower level contributed is narrowed to the descended link's share at
+/// each deeper level by the same partition rule a flush uses (child `at`
+/// takes `[sep(at), sep(at + 1))`, child 0 also takes everything below its
+/// own separator, the last child runs open-ended). Successive narrowing
+/// leaves, at the leaf, exactly the ops a flush would deliver to it — no
+/// cross-level span inheritance exists to get wrong.
 ///
-/// The rightmost leaf of the rightmost path is open-ended: an op sorting past
-/// every key belongs to it, matching the flush rule that the last child takes
-/// whatever remains.
-///
-/// Precedence: WITHIN one node's buffer the last entry for a key is the newest
+/// Precedence: WITHIN one link's buffer the last entry for a key is the newest
 /// and wins; ACROSS the path the first (root-most) layer holding the key wins,
 /// because writes land in the root buffer and a flush only moves ops downward,
 /// so deeper always means older.
@@ -64,78 +63,58 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
 {
-    // Pass one: establish the leaf's span from the separator table alone,
-    // touching no buffered entry. The span is what makes the second pass
-    // cheap, so it has to be known before any op is looked at.
-    //
-    // Separators are lower bounds: child `at` spans `[sep(at), sep(at + 1))`,
-    // and the last child of the rightmost path runs open-ended, matching the
-    // flush rule that the last child takes whatever remains.
-    let mut lower: Option<Vec<u8>> = None;
-    let mut upper: Option<Vec<u8>> = None;
-
-    for (node, descended) in path {
-        let ArchivedNodeBody::Index(index) = node.body()? else {
-            continue;
-        };
-        let Some(at) = descended else { continue };
-
-        if *at < index.len() {
-            let separator = index.separator(*at)?;
-            if !separator.is_empty() {
-                lower = Some(separator);
-            }
-            upper = if *at + 1 < index.len() {
-                Some(index.separator(*at + 1)?)
-            } else {
-                // Rightmost child at this level: it inherits whatever bound
-                // an ancestor imposed, so leave `upper` as the ancestors set it.
-                upper
-            };
-        }
-    }
-
-    // Pass two: collect only the ops that fall in this leaf's span.
-    //
-    // A buffer holds ops for its whole subtree, so most of them belong to
-    // sibling leaves. Deciding that from the archived key skips the
-    // deserialization for every op that is not ours, which is the bulk of them.
-    //
-    // Buffers are sorted by key, so the in-range ops form a contiguous run and
-    // the scan can stop at the first key past the span rather than walking the
-    // tail.
     let mut winners: Vec<(Vec<u8>, NoveltyOp<Value>)> = Vec::new();
     for (node, descended) in path {
         let ArchivedNodeBody::Index(index) = node.body()? else {
             continue;
         };
-        if descended.is_none() {
-            continue;
+        let Some(at) = *descended else { continue };
+
+        // Narrow what shallower levels handed down to the descended link's
+        // share. Ops already collected sit within this node's range, so the
+        // partition against this node's own separators is all it takes.
+        if !winners.is_empty() {
+            let lower = if at == 0 {
+                None
+            } else {
+                Some(index.separator(at)?)
+            };
+            let upper = if at + 1 < index.len() {
+                Some(index.separator(at + 1)?)
+            } else {
+                None
+            };
+            winners.retain(|(key, _)| {
+                lower
+                    .as_ref()
+                    .is_none_or(|lower| key.as_slice() >= lower.as_slice())
+                    && upper
+                        .as_ref()
+                        .is_none_or(|upper| key.as_slice() < upper.as_slice())
+            });
         }
 
-        // Winners recorded before this layer came from shallower nodes and are
-        // newer; only entries from THIS layer's buffer may replace each other.
-        let layer_start = winners.len();
-        for entry in index.novelty.iter() {
-            let key: &[u8] = &entry.key;
-            // Below the span: skip without decoding.
-            if lower.as_ref().is_some_and(|lower| key < lower.as_slice()) {
+        // This level's buffer is deeper (older) than everything accumulated,
+        // so only keys no shallower layer claimed enter. Within the buffer
+        // equal keys are contiguous and the last op of a run is the newest;
+        // values are decoded only for the ops that win.
+        let Some(buffer) = index.buffer_for(at) else {
+            continue;
+        };
+        let mut keys = buffer.keys::<Key>()?;
+        let mut runs: Vec<(Vec<u8>, usize)> = Vec::new();
+        while let Some((entry_at, key)) = keys.next_key()? {
+            match runs.last_mut() {
+                Some((last_key, last_at)) if last_key.as_slice() == key => *last_at = entry_at,
+                _ => runs.push((key.to_vec(), entry_at)),
+            }
+        }
+        for (key, entry_at) in runs {
+            if winners.iter().any(|(candidate, _)| *candidate == key) {
                 continue;
             }
-            // At or past the exclusive upper bound: the rest of this sorted
-            // buffer is too, so stop.
-            if upper.as_ref().is_some_and(|upper| key >= upper.as_slice()) {
-                break;
-            }
-
-            match winners.iter().position(|(candidate, _)| candidate == key) {
-                // Same layer: a later entry in one buffer is the newer op.
-                Some(at) if at >= layer_start => winners[at].1 = into_owned(&entry.op)?,
-                // A shallower layer already holds the newer op for this key;
-                // this deeper (older) one loses without being decoded.
-                Some(_) => {}
-                None => winners.push((key.to_vec(), into_owned(&entry.op)?)),
-            }
+            let op = buffer.op_at(entry_at)?;
+            winners.push((key, op));
         }
     }
 
@@ -148,9 +127,12 @@ where
 ///
 /// A write lands in a node's buffer and only reaches a leaf when that buffer
 /// overflows, so a read that consults the leaf alone misses every recent write
-/// to that key. Within one node's buffer the last op wins (matching how a
-/// flush replays it); across the path the FIRST layer holding the key wins,
-/// because ops flow root to leaf and deeper therefore means older.
+/// to that key. Novelty rides the child links, and an op routes to exactly the
+/// link the search descends (routing and enqueue share one rule), so only the
+/// descended link's buffer is consulted at each layer. Within one buffer the
+/// last op for a key wins (matching how a flush replays it); across the path
+/// the FIRST layer holding the key wins, because ops flow root to leaf and
+/// deeper therefore means older.
 pub fn pending_for_key<Key, Value>(
     path: &[TreeLayer<Key, Value>],
     key: &[u8],
@@ -167,27 +149,26 @@ where
         let ArchivedNodeBody::Index(index) = layer.host.body()? else {
             continue;
         };
-        // Buffers are sorted by key, so the run of entries for this key is
-        // found by binary search rather than by scanning the whole buffer. A
-        // node's buffer holds ops for its entire subtree, so scanning it per
-        // read is the difference between constant and linear work in the buffer
-        // size on every point read.
-        let at = index
-            .novelty
-            .partition_point(|entry| entry.key.as_slice() < key);
-        // Within a key the last op wins, and equal keys are contiguous.
-        let mut found = None;
-        for entry in index.novelty[at..].iter() {
-            if entry.key.as_slice() != key {
-                break;
+        let Some(buffer) = index.buffer_for(layer.index) else {
+            continue;
+        };
+        // Keys stream in sorted order, so the walk stops at the first key
+        // past the probe; within a key the last op wins, and equal keys are
+        // contiguous. Only a winning op's value is decoded.
+        let mut keys = buffer.keys::<Key>()?;
+        let mut found: Option<usize> = None;
+        while let Some((at, candidate)) = keys.next_key()? {
+            match candidate.cmp(key) {
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => found = Some(at),
+                std::cmp::Ordering::Greater => break,
             }
-            found = Some(entry);
         }
-        if let Some(entry) = found {
+        if let Some(at) = found {
             // The path is root first, so this is the shallowest layer holding
             // the key: its op is the newest, and any deeper hit is an older
             // copy a flush pushed down before this one was buffered.
-            return Ok(Some(into_owned::<NoveltyOp<Value>>(&entry.op)?));
+            return Ok(Some(buffer.op_at(at)?));
         }
     }
     Ok(None)

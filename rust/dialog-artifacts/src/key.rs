@@ -349,6 +349,13 @@ impl TreeKey for Key {
         self.0.first().copied().unwrap_or(u8::MIN)
     }
 
+    /// The layout is the leading tag byte, readable from the stored bytes
+    /// without reconstructing the key; the novelty encoder classifies whole
+    /// buffers this way before deciding whether a typed parse is needed.
+    fn layout_of(bytes: &[u8]) -> Result<u8, DialogSearchTreeError> {
+        Ok(bytes.first().copied().unwrap_or(u8::MIN))
+    }
+
     fn schema(layout: u8) -> Schema {
         match layout {
             ENTITY_KEY_TAG => Schema::new(EAV_SCHEMA),

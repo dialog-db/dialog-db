@@ -4499,8 +4499,7 @@ mod buffer_edit_interaction_tests {
     };
     use crate::{
         ArchivedNodeBody, Buffer, Change, ContentAddressedStorage, Delta, Entry, HitchhikerTree,
-        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Piece, TransientTree, into_owned,
-        tree_spec,
+        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Piece, TransientTree, tree_spec,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -5556,11 +5555,7 @@ mod buffer_edit_interaction_tests {
         node: &PersistentNode<SpecKey, Vec<u8>>,
     ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
         Ok(match node.body()? {
-            ArchivedNodeBody::Index(index) => index
-                .novelty
-                .iter()
-                .map(into_owned::<NoveltyEntry<Vec<u8>>>)
-                .collect::<Result<Vec<_>, _>>()?,
+            ArchivedNodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
             ArchivedNodeBody::Segment(_) => Vec::new(),
         })
     }

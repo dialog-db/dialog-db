@@ -310,46 +310,42 @@ where
 
         match node.body()? {
             ArchivedNodeBody::Index(index) => {
-                // Keep the accumulated ops oldest first: this node's own
-                // buffer sits one level DEEPER than whatever an ancestor
-                // routed down to it, and a flush only moves ops toward the
-                // leaves, so the node's own ops are the older ones and must
-                // precede the inherited ones for last-wins resolution to pick
-                // the shallowest, newest op.
-                let mut pending = Vec::with_capacity(index.novelty.len() + inherited.len());
-                for entry in index.novelty.iter() {
-                    pending.push(into_owned::<NoveltyEntry<Value>>(entry)?);
-                }
-                pending.extend(inherited);
-
                 let links = index.links()?;
                 let mut children = Vec::with_capacity(links.len());
                 for (at, link) in links.into_iter().enumerate() {
-                    // Ops routed to this child, by the same lower-bound rule
-                    // routing uses: the covering child is the last one whose
-                    // separator is at or below the key, so this child takes
-                    // `[sep(at), sep(at + 1))`. The leftmost child also takes
-                    // everything below its own separator (routing clamps a key
-                    // below every separator to it), and the rightmost child is
-                    // open-ended: a buffered insert can sort past every existing
-                    // key, and a flush routes such an op to the last child.
-                    // Without those two open ends the op would match no child
-                    // and be dropped.
+                    // Novelty is stored per child link, so this child's own
+                    // ops ARE its link's buffer. Ops an ancestor routed down
+                    // are narrowed to this child by the same lower-bound rule
+                    // routing uses: this child takes `[sep(at), sep(at + 1))`,
+                    // the leftmost child also takes everything below its own
+                    // separator (routing clamps a key below every separator to
+                    // it), and the rightmost child is open-ended: a buffered
+                    // insert can sort past every existing key, and a flush
+                    // routes such an op to the last child. Without those two
+                    // open ends the op would match no child and be dropped.
+                    //
+                    // Order stays oldest first: the link's own buffer sits one
+                    // level DEEPER than whatever an ancestor routed down, and
+                    // a flush only moves ops toward the leaves, so the link's
+                    // ops precede the inherited ones and last-wins resolution
+                    // picks the shallowest, newest op.
+                    let mut routed = index.link_novelty::<Key>(at)?;
                     let lower = index.separator(at)?;
                     let upper = if at + 1 < index.len() {
                         Some(index.separator(at + 1)?)
                     } else {
                         None
                     };
-                    let routed: Vec<_> = pending
-                        .iter()
-                        .filter(|entry| {
-                            let key = entry.key.as_slice();
-                            (at == 0 || key >= lower.as_slice())
-                                && upper.as_ref().is_none_or(|upper| key < upper.as_slice())
-                        })
-                        .cloned()
-                        .collect();
+                    routed.extend(
+                        inherited
+                            .iter()
+                            .filter(|entry| {
+                                let key = entry.key.as_slice();
+                                (at == 0 || key >= lower.as_slice())
+                                    && upper.as_ref().is_none_or(|upper| key < upper.as_slice())
+                            })
+                            .cloned(),
+                    );
                     let child = if routed.is_empty() {
                         SparseTreeNode::Ref(link)
                     } else {
@@ -456,16 +452,8 @@ where
             }
         }
 
-        let ours_ops = ours_index
-            .novelty
-            .iter()
-            .map(into_owned::<NoveltyEntry<Value>>)
-            .collect::<Result<Vec<_>, _>>()?;
-        let theirs_ops = theirs_index
-            .novelty
-            .iter()
-            .map(into_owned::<NoveltyEntry<Value>>)
-            .collect::<Result<Vec<_>, _>>()?;
+        let ours_ops = ours_index.all_novelty::<Key>()?;
+        let theirs_ops = theirs_index.all_novelty::<Key>()?;
 
         // Emitting a change for a buffered op needs to know whether the key
         // already exists below: absent means `Add`, present means `Remove(old)`
@@ -609,12 +597,16 @@ where
                 .any(|entry| in_scope(entry.key.as_slice()));
             let buffered_in_scope = !pending_in_scope
                 && match &node {
-                    SparseTreeNode::Loaded { node: loaded, .. } => {
-                        matches!(loaded.body(), Ok(ArchivedNodeBody::Index(index)) if index
-                        .novelty
-                        .iter()
-                        .any(|entry| in_scope(&entry.key)))
-                    }
+                    SparseTreeNode::Loaded { node: loaded, .. } => match loaded.body() {
+                        // A buffer that fails to decode cannot prove itself
+                        // out of scope; keep the node (over-retaining is safe,
+                        // over-dropping loses changes) and let the read path
+                        // surface the error.
+                        Ok(ArchivedNodeBody::Index(index)) => {
+                            index.any_novelty_key::<Key>(in_scope).unwrap_or(true)
+                        }
+                        _ => false,
+                    },
                     _ => false,
                 };
             if intersects || pending_in_scope || buffered_in_scope {
@@ -728,53 +720,55 @@ where
                 };
 
                 // In-order walk; children pushed in reverse so the stack pops
-                // them in key order. Each frame carries the ops inherited from
-                // the ancestors on its path (oldest first) and its own lower
-                // bound, which scopes those ops to the frame's span. The seed
-                // is whatever expansion already routed to this node.
-                let mut stack = vec![(node, routed, None, None)];
-                while let Some((node, inherited, lower, upper)) = stack.pop() {
+                // them in key order. Each frame carries the ops covering it,
+                // oldest first, already narrowed to the frame's own range: at
+                // every index the descent hands each child its own link's
+                // buffer plus the inherited ops the child's share covers, so a
+                // leaf receives exactly the ops a flush would deliver to it.
+                // The seed is whatever expansion already routed to this node.
+                let mut stack = vec![(node, routed)];
+                while let Some((node, inherited)) = stack.pop() {
                     match node.body()? {
                         ArchivedNodeBody::Index(index) => {
-                            // This node's own buffer precedes the inherited
-                            // ops: it is one level deeper than any ancestor
-                            // that routed ops down here, and deeper means
-                            // older, so oldest-first order (which last-wins
-                            // resolution relies on) puts it first.
-                            let mut pending =
-                                Vec::with_capacity(index.novelty.len() + inherited.len());
-                            for entry in index.novelty.iter() {
-                                pending.push(into_owned(entry)?);
-                            }
-                            pending.extend(inherited);
-
                             let mut children = Vec::with_capacity(index.len());
                             for at in 0..index.len() {
                                 let hash = index.hash_at(at)?;
                                 let child = Self::load(self.storage, hash).await?;
-                                // Separators are lower bounds, so child `at`
-                                // spans `[sep(at), sep(at + 1))`. The leftmost
-                                // child inherits the frame's own lower bound
-                                // (routing clamps a key below every separator to
-                                // it) and the rightmost inherits the frame's
-                                // upper bound, which is open at the top of the
-                                // rightmost spine: an op sorting past every
-                                // stored key belongs there, the same way a flush
-                                // routes such an op to the last child.
-                                let child_lower = if at == 0 {
-                                    lower.clone()
-                                } else {
-                                    Some(index.separator(at)?)
-                                };
-                                let child_upper = if at + 1 < index.len() {
+                                // The child's own link buffer precedes the
+                                // inherited ops: it is one level deeper than
+                                // any ancestor that routed ops down here, and
+                                // deeper means older, so oldest-first order
+                                // (which last-wins resolution relies on) puts
+                                // it first. Inherited ops are narrowed by the
+                                // flush partition rule: child `at` takes
+                                // `[sep(at), sep(at + 1))`, the leftmost child
+                                // also takes everything below its separator
+                                // (the routing clamp), and the rightmost child
+                                // is open-ended, the same way a flush routes
+                                // an op sorting past every stored key.
+                                let mut pending = index.link_novelty::<Key>(at)?;
+                                let lower = index.separator(at)?;
+                                let upper = if at + 1 < index.len() {
                                     Some(index.separator(at + 1)?)
                                 } else {
-                                    upper.clone()
+                                    None
                                 };
-                                children.push((child, child_lower, child_upper));
+                                pending.extend(
+                                    inherited
+                                        .iter()
+                                        .filter(|entry| {
+                                            let key = entry.key.as_slice();
+                                            (at == 0 || key >= lower.as_slice())
+                                                && upper
+                                                    .as_ref()
+                                                    .is_none_or(|upper| key < upper.as_slice())
+                                        })
+                                        .cloned(),
+                                );
+                                children.push((child, pending));
                             }
-                            while let Some((child, lower, upper)) = children.pop() {
-                                stack.push((child, pending.clone(), lower, upper));
+                            while let Some((child, pending)) = children.pop() {
+                                stack.push((child, pending));
                             }
                         }
                         ArchivedNodeBody::Segment(segment) => {
@@ -782,19 +776,10 @@ where
                             // wins, and with no covering op the stored entry
                             // stands. Ops for keys the segment does not hold
                             // are inserts, and are emitted in key order among
-                            // the stored entries.
-                            //
-                            // Scoped to this leaf's span, because a buffer high
-                            // in the tree holds ops for the whole subtree: an op
-                            // belongs to the one leaf whose range covers it, and
-                            // routing follows the same child separators a flush
-                            // would, so a buffered op lands where its flushed
-                            // counterpart would have.
-                            let covering = winning_ops(
-                                &inherited,
-                                lower.as_deref(),
-                                upper.as_deref(),
-                            );
+                            // the stored entries. The descent already scoped
+                            // the ops to this leaf, so no span filtering
+                            // remains to do here.
+                            let covering = winning_ops(&inherited);
                             let mut buffered = covering.into_iter().peekable();
 
                             let mut keys = segment.keys::<Key>()?;
@@ -870,39 +855,27 @@ fn pending_ops<Key, Value>(node: &SparseTreeNode<Key, Value>) -> &[NoveltyEntry<
 }
 
 /// Reduces the ops collected along a root-to-leaf path to the winning op per
-/// key, restricted to the leaf's span `[lower, upper)` and sorted by key.
+/// key, sorted by key.
 ///
-/// Separators are lower bounds, so a leaf's span is closed below and open
-/// above, and both ends may be absent: `None` for `lower` on the leftmost spine
-/// (routing clamps a key below every separator into it) and `None` for `upper`
-/// on the rightmost spine (a flush routes an op sorting past every key to the
-/// last child).
+/// The descent narrows the ops to each frame's own range as it routes them
+/// down (per-link buffers plus the flush partition rule), so by the leaf the
+/// collected list is exactly the leaf's covering set and no span filtering
+/// remains.
 ///
-/// Ops accumulate oldest first: a node's own buffer is appended before the
+/// Ops accumulate oldest first: a link's own buffer is appended before the
 /// ops inherited from its ancestors (deeper means older, since a flush only
 /// moves ops toward the leaves), and within one buffer the newest op for a
 /// key is last (writes append, then a *stable* sort by key preserves arrival
 /// order within the key). The **last** op for a key is therefore the most
 /// recent across every depth and wins. This matches how a point read resolves
 /// a key and how a flush replays ops, so all three agree.
-///
-/// Ops outside the span belong to sibling leaves: a buffer high in the tree
-/// covers its whole subtree, and each op is resolved at the one leaf whose range
-/// contains it.
-fn winning_ops<Value>(
-    collected: &[NoveltyEntry<Value>],
-    lower: Option<&[u8]>,
-    upper: Option<&[u8]>,
-) -> Vec<(Vec<u8>, NoveltyOp<Value>)>
+fn winning_ops<Value>(collected: &[NoveltyEntry<Value>]) -> Vec<(Vec<u8>, NoveltyOp<Value>)>
 where
     Value: Clone,
 {
     let mut winners: Vec<(Vec<u8>, NoveltyOp<Value>)> = Vec::new();
     for entry in collected {
         let key = entry.key.as_slice();
-        if lower.is_some_and(|lower| key < lower) || upper.is_some_and(|upper| key >= upper) {
-            continue;
-        }
         // Last op wins, so a later op for a key replaces the one recorded so
         // far. This also absorbs the copies expansion made when it routed an
         // ancestor's ops down: the same op arriving twice resolves to itself.
@@ -3643,7 +3616,7 @@ mod tests {
                 let node: PersistentNode<[u8; 4], Vec<u8>> =
                     PersistentNode::new(crate::Buffer::from(bytes));
                 if let Ok(crate::ArchivedNodeBody::Index(index)) = node.body() {
-                    let own = index.novelty.len();
+                    let own = index.novelty_len();
                     let mut below = 0;
                     for at in 0..index.len() {
                         let h = index.hash_at(at)?.clone();
@@ -3651,7 +3624,7 @@ mod tests {
                         let child: PersistentNode<[u8; 4], Vec<u8>> =
                             PersistentNode::new(crate::Buffer::from(b));
                         if let Ok(crate::ArchivedNodeBody::Index(ci)) = child.body() {
-                            below += ci.novelty.len();
+                            below += ci.novelty_len();
                         }
                         next.push(h);
                     }
@@ -3773,7 +3746,7 @@ mod tests {
                     } else {
                         Some(index.separator(0)?)
                     };
-                    for entry in index.novelty.iter() {
+                    for entry in index.all_novelty::<[u8; 4]>()? {
                         checked += 1;
                         let k: &[u8] = &entry.key;
                         if let Some(low) = node_lower.as_ref()

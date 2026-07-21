@@ -62,6 +62,19 @@ pub trait Key:
         0
     }
 
+    /// The layout id of a key given only its stored bytes, without
+    /// reconstructing the typed key. Must agree with
+    /// `Self::try_from_bytes(bytes)?.layout()`.
+    ///
+    /// The default reconstructs the key and asks it. A key type whose layout
+    /// is derived from a leading tag byte should override this to read the
+    /// tag straight from the bytes: the novelty encoder classifies a whole
+    /// buffer by layout first and skips the typed parse entirely when the
+    /// buffer straddles layouts (the opaque fallback needs no components).
+    fn layout_of(bytes: &[u8]) -> Result<u8, DialogSearchTreeError> {
+        Ok(Self::try_from_bytes(bytes)?.layout())
+    }
+
     /// The component layout for a given layout id, describing how each
     /// component is stored in a columnar leaf. Defaults to a single whole-key
     /// arena component (no finer structure) for the only id `0`, so key types

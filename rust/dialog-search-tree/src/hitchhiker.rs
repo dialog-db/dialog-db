@@ -1204,8 +1204,7 @@ mod tests {
     };
     use crate::{
         ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta, Manifest,
-        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientTree, into_owned,
-        tree_spec,
+        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientTree, tree_spec,
     };
 
     /// The three flush policies, so an oracle can assert behavior is identical
@@ -2256,11 +2255,7 @@ mod tests {
         node: &PersistentNode<SpecKey, Vec<u8>>,
     ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
         Ok(match node.body()? {
-            ArchivedNodeBody::Index(index) => index
-                .novelty
-                .iter()
-                .map(into_owned::<NoveltyEntry<Vec<u8>>>)
-                .collect::<Result<Vec<_>, _>>()?,
+            ArchivedNodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
             ArchivedNodeBody::Segment(_) => Vec::new(),
         })
     }

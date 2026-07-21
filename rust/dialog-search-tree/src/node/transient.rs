@@ -49,6 +49,14 @@ pub struct TransientIndex<Key, Value> {
     /// A canonical edit (insert/delete) never introduces novelty, so on that
     /// path this is always empty and flows through reshape untouched. It becomes
     /// non-empty only on the hitchhiker write/flush path.
+    ///
+    /// Held flat here (the child list mutates freely during reshape); the
+    /// STORED form groups it per child link and encodes each link's buffer
+    /// with the segment codec (see
+    /// [`NoveltyBuffer`](crate::NoveltyBuffer)). Because every op routes to
+    /// exactly one link and links partition the key space in order, the flat
+    /// sorted list and the per-link grouping are two views of the same data:
+    /// persist groups, open concatenates, and the round trip is exact.
     pub novelty: Vec<NoveltyEntry<Value>>,
 }
 
@@ -184,13 +192,12 @@ where
             .map(Node::Persistent)
             .collect::<Vec<Node<Key, Value>>>();
         // Carry the node's novelty across to the transient form so a flush or
-        // canonicalize can act on it. The deserialized ops are owned copies of
-        // the archived novelty.
-        let novelty = index
-            .novelty
-            .iter()
-            .map(into_owned::<NoveltyEntry<Value>>)
-            .collect::<Result<Vec<NoveltyEntry<Value>>, DialogSearchTreeError>>()?;
+        // canonicalize can act on it. The stored form is grouped per child
+        // link and columnar; decoding concatenates the buffers in child order,
+        // which reproduces the flat sorted list the transient spine holds
+        // (links partition the key space in order, so child order IS key
+        // order), and persisting re-groups it identically.
+        let novelty = index.all_novelty::<Key>()?;
         Ok(TransientIndex { children, novelty })
     }
 }
@@ -257,10 +264,10 @@ where
     /// For a segment, the entries are encoded directly. For an index, each
     /// child is resolved to a [`Link`] first (a [`Node::Transient`] child
     /// recurses and serializes; a [`Node::Persistent`] child already is a
-    /// link), and the node's novelty is carried through unchanged, so the
-    /// index's body holds its links and its novelty. This makes no shape
-    /// decisions: the children, novelty, and entries are encoded exactly as the
-    /// edits left them.
+    /// link), and the node's novelty is grouped per child link (each op rides
+    /// the one link that routes it) and encoded with the segment codec. This
+    /// makes no shape decisions: the children, novelty, and entries are
+    /// encoded exactly as the edits left them.
     pub fn persist(
         self,
         delta: &mut Delta<Blake3Hash, Buffer>,
@@ -275,7 +282,7 @@ where
                     .into_iter()
                     .map(|child| child.into_link(delta, manifest))
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
-                PersistentNodeBody::index_from_links(links, novelty, *manifest)?
+                PersistentNodeBody::index_from_links::<Key>(links, novelty, *manifest)?
             }
         };
 

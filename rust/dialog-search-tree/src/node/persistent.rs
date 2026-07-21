@@ -10,7 +10,7 @@ use rkyv::{
 
 use crate::{
     Buffer, DialogSearchTreeError, Entry, Key, Link, Manifest, Value,
-    node::codec::common_prefix,
+    node::codec::{common_prefix, encode_keys},
     node::columnar::{ColumnData, encode_columns},
 };
 use std::marker::PhantomData;
@@ -231,13 +231,191 @@ pub enum NoveltyOp<Value> {
 /// The key is the raw byte string, matching the front-coded separator table:
 /// under the value-in-key format a key IS its bytes, so a buffered op needs no
 /// key type of its own.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+///
+/// This is the DECODED (transient) form of a buffered op. The stored form is
+/// [`NoveltyBuffer`], which encodes a whole per-link buffer with the segment
+/// codec rather than one rkyv record per op.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedNoveltyEntry)]
 pub struct NoveltyEntry<Value> {
     /// The key this op applies to.
     pub key: Vec<u8>,
     /// The buffered op.
     pub op: NoveltyOp<Value>,
+}
+
+/// One child link's buffered ops in stored form, encoded with the SAME
+/// columnar codec leaf segments use.
+///
+/// The keys are split into their schema components and stored one column per
+/// component (front-coded arenas for large mostly-distinct components,
+/// per-buffer dictionaries for small repeated ones), exactly as
+/// [`PersistentSegment`] stores leaf keys. Buffered ops repeat entities and
+/// attributes heavily, so the same dictionary and front-coding compression
+/// that shrank leaves shrinks the buffer bytes, and hash cost is proportional
+/// to bytes. Op polarity (assert/retract) is one more small column; values
+/// ride in a table aligned with the assert entries.
+///
+/// A buffer is range-scoped to its link, so away from the top of the tree it
+/// is tag-homogeneous and the full columnar schema applies; a buffer that
+/// genuinely straddles a layout boundary falls back to the opaque whole-key
+/// schema under [`MIXED_LAYOUT`], the same rule segments use.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedNoveltyBuffer)]
+pub struct NoveltyBuffer<Value> {
+    /// Index of the child link this buffer is pending against. Buffers are
+    /// stored sparsely (links without pending ops store nothing), in strictly
+    /// ascending child order.
+    pub child: u32,
+    /// Number of buffered ops.
+    pub count: u32,
+    /// The layout id shared by every key in this buffer, or [`MIXED_LAYOUT`]
+    /// when the buffer straddles a layout boundary.
+    pub layout: u8,
+    /// One encoded column per key-schema component, in schema order.
+    pub columns: Vec<ColumnData>,
+    /// Op polarity per entry, in entry order: 1 is an assert, 0 a retract.
+    pub polarity: Vec<u8>,
+    /// Values of the assert entries, in entry order (a retract carries none).
+    pub values: Vec<Value>,
+}
+
+impl<Value> NoveltyBuffer<Value>
+where
+    Value: self::Value,
+{
+    /// Encodes one link's buffered ops (sorted by key, newest op for a key
+    /// last) into the columnar stored form. Encoding is a pure function of
+    /// the op list, so equal buffers serialize to identical bytes.
+    pub fn from_entries<Key: self::Key>(
+        child: u32,
+        entries: Vec<NoveltyEntry<Value>>,
+    ) -> Result<Self, DialogSearchTreeError> {
+        let count = entries.len() as u32;
+        if entries.is_empty() {
+            return Err(DialogSearchTreeError::Node(
+                "Attempted to encode an empty novelty buffer".into(),
+            ));
+        }
+
+        // Classify the buffer by layout from the raw bytes alone
+        // ([`Key::layout_of`]): a buffer that straddles layouts (common near
+        // the root, whose range spans every key region) takes the opaque
+        // whole-key fallback, which needs no component split — so the typed
+        // parse is skipped entirely there and paid only where the schema
+        // split actually applies.
+        let first_layout = Key::layout_of(&entries[0].key)?;
+        let mut uniform = true;
+        for entry in &entries[1..] {
+            if Key::layout_of(&entry.key)? != first_layout {
+                uniform = false;
+                break;
+            }
+        }
+
+        let (layout, columns) = if uniform {
+            let schema = Key::schema(first_layout);
+            // Buffered keys are raw bytes; the schema split needs the typed
+            // key. Every buffered key was produced by `Key::as_ref`, so this
+            // parse is a round trip and a failure marks corrupt state, not
+            // bad input.
+            let keys = entries
+                .iter()
+                .map(|entry| Key::try_from_bytes(&entry.key))
+                .collect::<Result<Vec<Key>, DialogSearchTreeError>>()?;
+            let mut rows: Vec<Vec<&[u8]>> = Vec::with_capacity(keys.len());
+            for key in &keys {
+                let mut row = Vec::with_capacity(schema.len());
+                key.components(&mut row);
+                // The same `Key` contract check the segment encoder makes: a
+                // surplus slice would be silently dropped by the column
+                // encoder, which is data loss in a content-addressed node.
+                if row.len() != schema.len() {
+                    return Err(DialogSearchTreeError::Node(format!(
+                        "Key split into {} components for a schema of {}",
+                        row.len(),
+                        schema.len()
+                    )));
+                }
+                if row.iter().map(|slice| slice.len()).sum::<usize>() != key.as_ref().len() {
+                    return Err(DialogSearchTreeError::Node(
+                        "Key components do not cover the key's bytes".into(),
+                    ));
+                }
+                rows.push(row);
+            }
+            (first_layout, encode_columns(&schema, &rows)?)
+        } else {
+            // The opaque schema is a single whole-key arena column; encode it
+            // directly from the key slices rather than through the per-row
+            // component table (which would allocate a one-slice row per op).
+            let keys: Vec<&[u8]> = entries.iter().map(|entry| entry.key.as_slice()).collect();
+            let (prefix, stream) = encode_keys(&keys);
+            (MIXED_LAYOUT, vec![ColumnData::Arena { prefix, stream }])
+        };
+
+        let mut polarity = Vec::with_capacity(entries.len());
+        let mut values = Vec::new();
+        for entry in entries {
+            match entry.op {
+                NoveltyOp::Assert(value) => {
+                    polarity.push(1);
+                    values.push(value);
+                }
+                NoveltyOp::Retract => polarity.push(0),
+            }
+        }
+
+        Ok(Self {
+            child,
+            count,
+            layout,
+            columns,
+            polarity,
+            values,
+        })
+    }
+}
+
+/// Groups a node-wide buffer (sorted by key) into per-link buffers by the
+/// SAME rule routing and a flush use: child `at` takes the ops in
+/// `[sep(at), sep(at + 1))`, the last child takes whatever remains, and a key
+/// below every separator clamps into child 0. Each op lands in exactly one
+/// link's buffer, so the reader that descends a link takes exactly that
+/// link's ops with no span derivation.
+fn group_novelty<Key, Value>(
+    links: &[Link],
+    novelty: Vec<NoveltyEntry<Value>>,
+) -> Result<Vec<NoveltyBuffer<Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+{
+    if novelty.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut buffers = Vec::new();
+    let mut rest = novelty.into_iter().peekable();
+    for at in 0..links.len() {
+        let took: Vec<NoveltyEntry<Value>> = if at + 1 == links.len() {
+            rest.by_ref().collect()
+        } else {
+            let bound: &[u8] = &links[at + 1].separator;
+            let mut took = Vec::new();
+            while let Some(entry) = rest.peek() {
+                if entry.key.as_slice() < bound {
+                    took.push(rest.next().expect("peeked"));
+                } else {
+                    break;
+                }
+            }
+            took
+        };
+        if !took.is_empty() {
+            buffers.push(NoveltyBuffer::from_entries::<Key>(at as u32, took)?);
+        }
+    }
+    Ok(buffers)
 }
 
 /// An index node holding its children as a front-coded separator table.
@@ -264,17 +442,21 @@ pub struct PersistentIndex<Value> {
     pub ends: Vec<u32>,
     /// Child node content hashes, in child order.
     pub hashes: Vec<Blake3Hash>,
-    /// Ops pending against the subtree this node roots, sorted by key (the
-    /// node's novelty).
+    /// Ops pending against this node's subtrees, grouped per child link and
+    /// encoded with the segment codec (the node's novelty). Sparse: only
+    /// links with pending ops store a buffer, in ascending child order, each
+    /// buffer sorted by key with the newest op for a key last.
     ///
-    /// An empty `novelty` makes this node byte-identical to a canonical
-    /// (fully flushed) index, so
+    /// Logically each child is `{separator, hash, novelty}`; physically the
+    /// separator table stays columnar and the buffers ride here with a
+    /// per-child index. An empty `novelty` makes this node byte-identical to
+    /// a canonical (fully flushed) index, so
     /// [`canonicalize`](crate::HitchhikerTree::canonicalize) reproduces the
-    /// canonical tree exactly. The buffer is deliberately excluded from the
+    /// canonical tree exactly. The buffers are deliberately excluded from the
     /// separator table: separators are routing keys and rank inputs, so
     /// letting a pending op move one would reshape the tree as a side effect
     /// of buffering.
-    pub novelty: Vec<NoveltyEntry<Value>>,
+    pub novelty: Vec<NoveltyBuffer<Value>>,
 }
 
 impl<Value> PersistentIndex<Value> {
@@ -473,21 +655,27 @@ where
     /// Builds an index node body from child links, stamping the tree's format
     /// header.
     ///
-    /// `novelty` is the buffer of ops pending against this subtree; it is
-    /// empty for a canonical (fully flushed) index, which makes such a node
-    /// byte-identical to one built before the novelty buffer existed.
-    pub fn index_from_links(
+    /// `novelty` is the buffer of ops pending against this subtree, sorted by
+    /// key; it is grouped per child link here (by the same rule routing and a
+    /// flush use) and each link's buffer is encoded with the segment codec.
+    /// An empty `novelty` yields a canonical (fully flushed) index — THE
+    /// canonical byte form, byte-identical to a node built with no buffers.
+    pub fn index_from_links<Key>(
         links: Vec<Link>,
         novelty: Vec<NoveltyEntry<Value>>,
         header: Manifest,
-    ) -> Result<Self, DialogSearchTreeError> {
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Key: self::Key,
+    {
         if links.is_empty() {
             return Err(DialogSearchTreeError::Node(
                 "Attempted to create an index from zero links".into(),
             ));
         }
+        let buffers = group_novelty::<Key, Value>(&links, novelty)?;
         let mut index = PersistentIndex::from_links(links, header);
-        index.novelty = novelty;
+        index.novelty = buffers;
         Ok(PersistentNodeBody::Index(index))
     }
 
@@ -511,14 +699,16 @@ where
     }
 }
 
-/// The winning buffered op for `key` in a node's `novelty`, or `None` when the
-/// key is not buffered here.
+/// The winning buffered op for `key` in a decoded (transient) buffer, or
+/// `None` when the key is not buffered here.
 ///
-/// **The single definition of how a buffered op resolves**, shared by every
-/// reader (point reads on stored and lifted trees, range scans, the
-/// differential) so they cannot drift apart. A buffer is sorted by key and
-/// stable within a key, so the run of equal-key entries is contiguous and its
-/// last element is the most recent op, matching how a flush replays them.
+/// **The single definition of how a buffered op resolves on owned buffers**,
+/// shared by the transient readers (point reads on lifted trees, the
+/// differential's settled nodes) so they cannot drift apart; the archived
+/// per-link readers resolve by the same last-op-wins rule through
+/// [`ArchivedNoveltyBuffer`]'s decode. A buffer is sorted by key and stable
+/// within a key, so the run of equal-key entries is contiguous and its last
+/// element is the most recent op, matching how a flush replays them.
 pub fn resolve_pending<'a, Value>(
     novelty: &'a [NoveltyEntry<Value>],
     key: &[u8],
