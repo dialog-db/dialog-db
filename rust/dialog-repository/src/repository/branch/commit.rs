@@ -3,7 +3,6 @@ use crate::{
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
 use dialog_artifacts::history::{Context, Edition, TreeHistory, Version, context_of, extend_skips};
-use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{DialogArtifactsError, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -136,14 +135,20 @@ where
         // cardinality-one supersession, retraction — and, because the
         // writes are version-tagged, each instruction's history record,
         // whose cause lists the versions of the exact claims the write
-        // superseded — all live in the shared
-        // `ArtifactTreeExt::apply_versioned` so the key layout stays
-        // uniform. Data and history land in the same tree: one root covers
-        // both. The batch's new nodes accumulate in `delta`.
+        // superseded — all live in the shared instruction semantics so the
+        // key layout stays uniform. Data and history land in the same tree:
+        // one root covers both.
+        //
+        // Nothing is persisted yet: the batch stays open so the revision
+        // record minted below (which needs the batch's outcome and signs over
+        // its content, so it cannot ride the instruction stream) is appended
+        // to the SAME open edit, and one seal below covers data and record
+        // together. A no-op batch is simply dropped, leaving the delta
+        // untouched and the tree root unchanged.
         let mut delta = Delta::zero();
-        let changed = tree
-            .apply_versioned(&mut store, &mut delta, Some(version), changes)
-            .await?;
+        let batch =
+            dialog_artifacts::EditBatch::apply(&tree, &mut store, Some(version), changes).await?;
+        let changed = batch.changed();
 
         // A batch that left the indexes untouched (e.g. a transaction
         // re-asserting metadata that is already in place) is a no-op:
@@ -241,8 +246,15 @@ where
         let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
         debug_assert_eq!(record.version(), version);
-        tree.record(&mut store, &mut delta, record.entries()?)
-            .await?;
+        // The entries are appended to the batch's still open edit: they ride
+        // the same transient batch as the data, so the record costs an
+        // in-batch insert instead of a second spine-to-leaf edit and persist.
+        let entries = record.entries()?;
+        let batch = batch.record(&store, entries).await?;
+
+        // ONE seal covers the data writes and the record entries, into the
+        // batch delta.
+        tree = batch.seal(&mut delta)?;
 
         // Persist the tree's pending nodes before referencing the root in
         // a revision; a revision must only point at durable blocks. The

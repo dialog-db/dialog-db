@@ -27,7 +27,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, PersistentTree, Value as TreeValue,
+    Buffer, ContentAddressedStorage, Delta, PersistentTree, TransientTree, Value as TreeValue,
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
@@ -541,162 +541,51 @@ fn numeric_width(value_type: ValueDataType) -> usize {
     }
 }
 
-/// Shared mutation + scan operations on an [`ArtifactTree`].
+/// An open transient edit batch over an [`ArtifactTree`], not yet persisted.
 ///
-/// An extension trait rather than inherent methods because
-/// `ArtifactTree` aliases a foreign `dialog_search_tree::PersistentTree` — the
-/// orphan rule forbids `impl ArtifactTree { .. }`. Uses
-/// `#[async_trait]` (matching [`ArtifactStore`](crate::ArtifactStore))
-/// so the async `apply` desugars to a boxed future rather than a
-/// bound-less native `async fn`.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait ArtifactTreeExt {
-    /// Drain a stream of [`Instruction`]s into the tree, applying the
-    /// same key writes that a branch commit or `Artifacts::commit`
-    /// would.
-    ///
-    /// Each instruction touches all three EAV/AEV/VAE indexes;
-    /// `Replace` additionally scans the `(entity, attribute)` range to
-    /// supersede any different-valued priors (and skips inserting when
-    /// a same-valued prior is already in place — that's the
-    /// cardinality-one no-op).
-    ///
-    /// The batch's new nodes are written into `delta`, the caller-owned
-    /// accumulator. Callers own everything else: building the change stream,
-    /// choosing a base tree root, persisting a `Revision`, and flushing
-    /// `delta`.
-    async fn apply<S, I>(
-        &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
-        instructions: I,
-    ) -> Result<(), DialogArtifactsError>
-    where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
-        I: Stream<Item = Instruction> + ConditionalSend;
-
-    /// Like [`ArtifactTreeExt::apply`], but tags every [`Datum`] written by
-    /// the batch with the [`Version`](crate::history::Version) of the
-    /// revision that produced it, and records each instruction's history
-    /// claim into the tree's history region. This is the write path used
-    /// by version-controlled branch commits; [`ArtifactTreeExt::apply`]
-    /// leaves the version unset.
-    ///
-    /// Returns whether the batch changed the indexes at all. A batch made
-    /// entirely of cardinality-one no-ops (re-asserting values already in
-    /// place) leaves the tree untouched and records no history — there is
-    /// nothing a revision could attribute, and callers should not mint one.
-    async fn apply_versioned<S, I>(
-        &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
-        version: Option<Version>,
-        instructions: I,
-    ) -> Result<bool, DialogArtifactsError>
-    where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
-        I: Stream<Item = Instruction> + ConditionalSend;
-
-    /// The currently asserted [`Datum`]s recorded for the given entity and
-    /// attribute, scanned from the EAV index. Multiple data are possible for
-    /// attributes with more than one asserted value.
-    async fn select_data<S>(
-        &self,
-        store: S,
-        of: &crate::Entity,
-        the: &crate::Attribute,
-    ) -> Result<Vec<Datum>, DialogArtifactsError>
-    where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
-
-    /// Look up data at `(the, of)` through the attribute-ordered index,
-    /// the ordering revision records are stored in.
-    async fn select_record<S>(
-        &self,
-        store: S,
-        of: &crate::Entity,
-        the: &crate::Attribute,
-    ) -> Result<Vec<Artifact>, DialogArtifactsError>
-    where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
-
-    /// Write pre-built entries (e.g. revision lineage records — see
-    /// [`Record::into_entry`](crate::history::Record::into_entry)) into the
-    /// tree as one edit batch, accumulating new nodes in `delta`
-    async fn record<S>(
-        &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
-        entries: Vec<(Key, State<Datum>)>,
-    ) -> Result<(), DialogArtifactsError>
-    where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
-
-    /// Scan the tree for [`Artifact`]s matching the given constrained
-    /// selector.
-    ///
-    /// Picks the EAV/AEV/VAE index based on which field of the
-    /// selector is constrained (entity / value / attribute, in that
-    /// priority order), then streams the matching key range. Items in
-    /// the range that don't fully satisfy the selector and items in
-    /// the `Removed` state are filtered out.
-    ///
-    /// Consumes `self` (the tree is moved into the returned stream to
-    /// pin its root); `store` is the storage backing it, and `cache` serves
-    /// spilled value blocks across scans so a repeated read of the same large
-    /// value skips the store fetch.
-    fn scan<'s, S>(
-        self,
-        store: S,
-        cache: SpillCache,
-        selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
-    where
-        Self: Sized,
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's;
+/// The commit path's three-step surface:
+///
+/// 1. [`EditBatch::apply`] drains the instruction stream into one open
+///    transient edit and reports whether it changed the indexes, persisting
+///    NOTHING;
+/// 2. the caller decides: dropping the batch is a complete no-op (the delta is
+///    untouched and the base tree root unchanged), which is how an unchanged
+///    commit declines to mint a revision;
+/// 3. otherwise the caller appends its revision-record entries with
+///    [`record`](Self::record) and seals everything, data and records
+///    together, with the ONE persist in [`seal`](Self::seal).
+///
+/// This exists so the revision record rides the same edit as the batch's
+/// data. Records need the batch's outcome (a no-op commit mints nothing, and
+/// the record signs over its content), so they cannot be part of the
+/// instruction stream; but routing them through a second edit after the batch
+/// persisted cost a second full spine-to-leaf persist per commit, whose leaf
+/// re-encode cost grows as the database's leaves fill. Appending them to the
+/// still open transient makes them ordinary in-batch inserts covered by the
+/// same persist.
+pub struct EditBatch {
+    transient: TransientTree<Key, State<Datum>>,
+    changed: bool,
 }
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl ArtifactTreeExt for ArtifactTree {
-    async fn apply<S, I>(
-        &mut self,
+impl EditBatch {
+    /// Applies `instructions` to a transient edit opened over `tree`, without
+    /// persisting anything.
+    ///
+    /// Runs the shared instruction semantics of a branch commit or
+    /// `Artifacts::commit` (EAV/AEV/VAE writes, cardinality-one supersession,
+    /// retraction, and, for version-tagged batches, each instruction's
+    /// history record), so the key layout stays uniform. Data and history
+    /// land in the same tree: one root covers both.
+    ///
+    /// `tree` itself is untouched; the batch lives in memory until
+    /// [`seal`](Self::seal).
+    pub async fn apply<S, I>(
+        tree: &ArtifactTree,
         store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
-        instructions: I,
-    ) -> Result<(), DialogArtifactsError>
-    where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
-        I: Stream<Item = Instruction> + ConditionalSend,
-    {
-        self.apply_versioned(store, delta, None, instructions)
-            .await
-            .map(|_| ())
-    }
-
-    async fn apply_versioned<S, I>(
-        &mut self,
-        store: &mut S,
-        delta: &mut Delta<NodeHash, Buffer>,
         version: Option<Version>,
         instructions: I,
-    ) -> Result<bool, DialogArtifactsError>
+    ) -> Result<Self, DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
@@ -708,7 +597,7 @@ impl ArtifactTreeExt for ArtifactTree {
         // Open one transient edit batch over this tree's spine and apply every
         // instruction's writes to it in flight, so the whole instruction stream
         // costs a single persist instead of one full tree rebuild per key.
-        let mut transient = self.edit();
+        let mut transient = tree.edit();
 
         // History records are buffered and only written if the batch changed
         // the indexes: a batch of pure no-ops must leave the tree untouched,
@@ -752,9 +641,9 @@ impl ArtifactTreeExt for ArtifactTree {
             // The `dialog.` namespace is reserved for version-control
             // machinery (revision records — see
             // `history::RevisionRecord`), which writes through
-            // [`ArtifactTreeExt::record`] rather than instructions. At the
-            // library level lineage therefore cannot be corrupted through
-            // the ordinary write path.
+            // [`ArtifactTreeExt::record`] or [`EditBatch::record`] rather
+            // than instructions. At the library level lineage therefore
+            // cannot be corrupted through the ordinary write path.
             {
                 let (Instruction::Assert(artifact)
                 | Instruction::Replace(artifact)
@@ -1008,9 +897,223 @@ impl ArtifactTreeExt for ArtifactTree {
             }
         }
 
-        // Seal the whole batch with a single bottom-up persist into the
-        // caller's delta.
-        *self = transient.persist(delta)?;
+        Ok(Self { transient, changed })
+    }
+
+    /// Whether the applied instructions changed the indexes at all.
+    ///
+    /// A batch made entirely of no-ops (re-asserting values already in place,
+    /// retracting absent facts) leaves the tree untouched and records no
+    /// history; callers should mint no revision for it and drop the batch
+    /// unsealed.
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    /// Appends pre-built record entries (revision lineage records, which enter
+    /// through this surface and never through instructions) to the open
+    /// transient edit.
+    ///
+    /// The entries become ordinary in-batch inserts: the single persist in
+    /// [`seal`](Self::seal) covers them together with the batch's data, so
+    /// the record costs an in-batch insert instead of a second spine-to-leaf
+    /// edit and persist.
+    pub async fn record<S>(
+        mut self,
+        store: &S,
+        entries: Vec<(Key, State<Datum>)>,
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        for (key, entry) in entries {
+            self.transient = self.transient.insert(key, entry, &storage).await?;
+        }
+        Ok(self)
+    }
+
+    /// Seals the whole batch, data and record entries alike, into `delta`
+    /// with a single bottom-up persist, returning the resulting tree.
+    pub fn seal(
+        self,
+        delta: &mut Delta<NodeHash, Buffer>,
+    ) -> Result<ArtifactTree, DialogArtifactsError> {
+        Ok(self.transient.persist(delta)?)
+    }
+}
+
+/// Shared mutation + scan operations on an [`ArtifactTree`].
+///
+/// An extension trait rather than inherent methods because
+/// `ArtifactTree` aliases a foreign `dialog_search_tree::PersistentTree` — the
+/// orphan rule forbids `impl ArtifactTree { .. }`. Uses
+/// `#[async_trait]` (matching [`ArtifactStore`](crate::ArtifactStore))
+/// so the async `apply` desugars to a boxed future rather than a
+/// bound-less native `async fn`.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+pub trait ArtifactTreeExt {
+    /// Drain a stream of [`Instruction`]s into the tree, applying the
+    /// same key writes that a branch commit or `Artifacts::commit`
+    /// would.
+    ///
+    /// Each instruction touches all three EAV/AEV/VAE indexes;
+    /// `Replace` additionally scans the `(entity, attribute)` range to
+    /// supersede any different-valued priors (and skips inserting when
+    /// a same-valued prior is already in place — that's the
+    /// cardinality-one no-op).
+    ///
+    /// The batch's new nodes are written into `delta`, the caller-owned
+    /// accumulator. Callers own everything else: building the change stream,
+    /// choosing a base tree root, persisting a `Revision`, and flushing
+    /// `delta`.
+    async fn apply<S, I>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        instructions: I,
+    ) -> Result<(), DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+        I: Stream<Item = Instruction> + ConditionalSend;
+
+    /// Like [`ArtifactTreeExt::apply`], but tags every [`Datum`] written by
+    /// the batch with the [`Version`](crate::history::Version) of the
+    /// revision that produced it, and records each instruction's history
+    /// claim into the tree's history region. This is the write path used
+    /// by version-controlled branch commits; [`ArtifactTreeExt::apply`]
+    /// leaves the version unset.
+    ///
+    /// Returns whether the batch changed the indexes at all. A batch made
+    /// entirely of cardinality-one no-ops (re-asserting values already in
+    /// place) leaves the tree untouched and records no history — there is
+    /// nothing a revision could attribute, and callers should not mint one.
+    async fn apply_versioned<S, I>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        version: Option<Version>,
+        instructions: I,
+    ) -> Result<bool, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+        I: Stream<Item = Instruction> + ConditionalSend;
+
+    /// The currently asserted [`Datum`]s recorded for the given entity and
+    /// attribute, scanned from the EAV index. Multiple data are possible for
+    /// attributes with more than one asserted value.
+    async fn select_data<S>(
+        &self,
+        store: S,
+        of: &crate::Entity,
+        the: &crate::Attribute,
+    ) -> Result<Vec<Datum>, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync;
+
+    /// Look up data at `(the, of)` through the attribute-ordered index,
+    /// the ordering revision records are stored in.
+    async fn select_record<S>(
+        &self,
+        store: S,
+        of: &crate::Entity,
+        the: &crate::Attribute,
+    ) -> Result<Vec<Artifact>, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync;
+
+    /// Write pre-built entries (e.g. revision lineage records — see
+    /// [`Record::into_entry`](crate::history::Record::into_entry)) into the
+    /// tree as one edit batch, accumulating new nodes in `delta`
+    async fn record<S>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        entries: Vec<(Key, State<Datum>)>,
+    ) -> Result<(), DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync;
+
+    /// Scan the tree for [`Artifact`]s matching the given constrained
+    /// selector.
+    ///
+    /// Picks the EAV/AEV/VAE index based on which field of the
+    /// selector is constrained (entity / value / attribute, in that
+    /// priority order), then streams the matching key range. Items in
+    /// the range that don't fully satisfy the selector and items in
+    /// the `Removed` state are filtered out.
+    ///
+    /// Consumes `self` (the tree is moved into the returned stream to
+    /// pin its root); `store` is the storage backing it, and `cache` serves
+    /// spilled value blocks across scans so a repeated read of the same large
+    /// value skips the store fetch.
+    fn scan<'s, S>(
+        self,
+        store: S,
+        cache: SpillCache,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
+    where
+        Self: Sized,
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync
+            + 's;
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl ArtifactTreeExt for ArtifactTree {
+    async fn apply<S, I>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        instructions: I,
+    ) -> Result<(), DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+        I: Stream<Item = Instruction> + ConditionalSend,
+    {
+        self.apply_versioned(store, delta, None, instructions)
+            .await
+            .map(|_| ())
+    }
+
+    async fn apply_versioned<S, I>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        version: Option<Version>,
+        instructions: I,
+    ) -> Result<bool, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+        I: Stream<Item = Instruction> + ConditionalSend,
+    {
+        // The one-shot composition of [`EditBatch::apply`] and
+        // [`EditBatch::seal`], for callers with no record entries to
+        // interleave (the commit path has, and uses the three-step
+        // [`EditBatch`] surface directly).
+        let batch = EditBatch::apply(self, store, version, instructions).await?;
+        let changed = batch.changed();
+        *self = batch.seal(delta)?;
         Ok(changed)
     }
 
@@ -1374,6 +1477,167 @@ mod spill_cache_tests {
         let cache = spill_cache();
         assert_eq!(fetch_spilled_cached(&store, &cache, &key).await?, None);
         assert_eq!(fetch_spilled(&store, &key).await?, None);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use anyhow::Result;
+    use dialog_search_tree::Delta;
+    use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage, StorageBackend as _};
+    use futures_util::stream;
+
+    use super::{ArtifactTree, ArtifactTreeExt as _, EditBatch};
+    use crate::history::{Edition, Origin, Version};
+    use crate::{
+        Artifact, AttributeKey, Datum, EntityKey, FromKey as _, Instruction, Key, State, Value,
+    };
+
+    fn store() -> Storage<CborEncoder, MemoryStorageBackend<[u8; 32], Vec<u8>>> {
+        Storage {
+            encoder: CborEncoder,
+            backend: MemoryStorageBackend::default(),
+        }
+    }
+
+    fn assert_of(entity: &str, value: &str) -> Instruction {
+        Instruction::Assert(Artifact {
+            the: "test/field".parse().unwrap(),
+            of: entity.parse().unwrap(),
+            is: Value::String(value.to_string()),
+            cause: None,
+        })
+    }
+
+    fn replace_of(entity: &str, value: &str) -> Instruction {
+        Instruction::Replace(Artifact {
+            the: "test/field".parse().unwrap(),
+            of: entity.parse().unwrap(),
+            is: Value::String(value.to_string()),
+            cause: None,
+        })
+    }
+
+    fn version() -> Version {
+        Version::new(Origin::from([7u8; 32]), Edition::new(1))
+    }
+
+    fn data() -> Vec<Instruction> {
+        vec![assert_of("user:1", "resident"), assert_of("user:2", "b")]
+    }
+
+    fn entries() -> Vec<(Key, State<Datum>)> {
+        let artifact = Artifact {
+            the: "test/record".parse().unwrap(),
+            of: "rev:1".parse().unwrap(),
+            is: Value::String("record".to_string()),
+            cause: None,
+        };
+        let entity_key = EntityKey::from(&artifact);
+        let attribute_key = AttributeKey::from_key(&entity_key);
+        let added = State::Added(Datum::for_artifact(&artifact));
+        vec![
+            (entity_key.into_key(), added.clone()),
+            (attribute_key.into_key(), added),
+        ]
+    }
+
+    /// Record entries appended through [`EditBatch::record`] are ordinary
+    /// in-batch inserts covered by the batch's single persist.
+    ///
+    /// Three pins: sealing the batch lands on the identical root the two-step
+    /// path (`apply_versioned` + `record`) produces for the same data and
+    /// entries, so the record's placement is not path-dependent; `apply`
+    /// itself leaves the base tree untouched, which is what makes dropping an
+    /// unsealed no-op batch free; and the sealed root serves the record and
+    /// the data through the ordinary read paths.
+    #[dialog_common::test]
+    async fn it_seals_record_entries_with_the_batch_onto_the_canonical_root() -> Result<()> {
+        // The reference: data through the one-shot edit path, then the record
+        // through the `record` surface (a second edit and persist).
+        let mut direct_store = store();
+        let mut direct = ArtifactTree::empty();
+        let mut direct_delta = Delta::zero();
+        direct
+            .apply_versioned(
+                &mut direct_store,
+                &mut direct_delta,
+                Some(version()),
+                stream::iter(data()),
+            )
+            .await?;
+        direct
+            .record(&mut direct_store, &mut direct_delta, entries())
+            .await?;
+
+        // The batch surface: the same fact set must land on the
+        // byte-identical root with ONE persist.
+        let mut batch_store = store();
+        let base = ArtifactTree::empty();
+        let mut delta = Delta::zero();
+        let batch = EditBatch::apply(
+            &base,
+            &mut batch_store,
+            Some(version()),
+            stream::iter(data()),
+        )
+        .await?;
+        assert!(batch.changed(), "the data writes change the indexes");
+        let batch = batch.record(&batch_store, entries()).await?;
+        let sealed = batch.seal(&mut delta)?;
+        assert_eq!(
+            sealed.root(),
+            direct.root(),
+            "the batch-carried record must land on the canonical root"
+        );
+        assert_eq!(
+            base.root(),
+            ArtifactTree::empty().root(),
+            "applying a batch must not touch the base tree"
+        );
+
+        // The sealed root serves the record and the data through the
+        // ordinary read paths once the delta is flushed.
+        for (hash, buffer) in delta.flush() {
+            batch_store
+                .set(*hash.as_bytes(), buffer.as_ref().to_vec())
+                .await?;
+        }
+        let records = sealed
+            .select_record(
+                batch_store.clone(),
+                &"rev:1".parse()?,
+                &"test/record".parse()?,
+            )
+            .await?;
+        assert_eq!(records.len(), 1, "the record reads back from the tree");
+        assert_eq!(records[0].is, Value::String("record".to_string()));
+        assert!(
+            !sealed
+                .select_data(
+                    batch_store.clone(),
+                    &"user:1".parse()?,
+                    &"test/field".parse()?
+                )
+                .await?
+                .is_empty(),
+            "the batch's data survives alongside the record"
+        );
+
+        // A pure no-op batch (re-replacing a value already in place) reports
+        // unchanged; the caller drops it whole and nothing is minted.
+        let noop = EditBatch::apply(
+            &sealed,
+            &mut batch_store,
+            Some(Version::new(Origin::from([7u8; 32]), Edition::new(2))),
+            stream::iter(vec![replace_of("user:1", "resident")]),
+        )
+        .await?;
+        assert!(!noop.changed(), "a same-value replace is a no-op batch");
         Ok(())
     }
 }

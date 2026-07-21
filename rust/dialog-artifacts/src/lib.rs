@@ -89,6 +89,7 @@ pub use key::*;
 /// Shared tree-ops on the artifact prolly tree.
 pub mod merge;
 pub mod tree;
+pub use tree::EditBatch;
 
 mod uri;
 pub use uri::*;
