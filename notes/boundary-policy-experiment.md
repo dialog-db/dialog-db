@@ -257,6 +257,50 @@ Tonk: byte-identical to steps 2-3 (7 segments, mean 84.9K, `forced_links=0`) —
 
 Mem 2048: 3.54/3.71 s (step 3: 3.38; step 2: 3.39-3.46; baseline 4.22-4.31). Mem 8192: 31.9 s (steps 2-3: 30.1-30.9; baseline 47.0). The append and delete detections cost nothing measurable. Disk `store_bytes`: 2048: 407.5 MB / 5091 files (step 3: 407.7 / 4819); 4096: 1196.3 MB (step 3: 1160.4, step 2: 1188.4 — the three sit within ±1.5% of each other; all ~-22% vs baseline's 1528.3). The bank splits composite runs into more, smaller leaves, trading a few percent more block files for the tighter rewrite unit; net disk bytes are a wash at this depth against the pre-bank arms and far below baseline.
 
+## Step 5: the frame ceiling with pluggable anchors (2026-07-21)
+
+The natural exponential tail gets a hard bound. The rendezvous backstop's frame generalizes from "runs between accepted seams" to FRAMES — the entries between coin-decided cuts, snapshotted before any forced overlay, so forced cuts never feed back into frame definition and there is no cascade. When a frame's summed entry weight exceeds `frame_ceiling_factor * max_segment` (a new manifest knob, `Manifest::frame_ceiling()`, 0 = off, env `DIALOG_TREE_CEILING_FACTOR`; deliberately not a hardcoded constant), it is force-split at accepted seams until every piece fits, recursively, derived at cut time like every other anchor. Frame anchors need the same three properties stretch anchors have — rank 0 above, self-identification for the widening, piece contiguity under one parent — and all three come from the same stored mark: a lower-bound separator longer than `max_separator`. For a long right key that is the step-3 right-prefix form; for short keys it is the left key zero-padded one byte past the bound (`cap::frame_separator`) — a valid separator that is NOT a prefix of the right key, safe for exactly the reason step-3 separators are: the widening dissolves forced seams before any regroup or reseparate can meet them. The rare seam with no over-bound separator at all (right key inside the padding gap) is simply not a candidate.
+
+Anchor selection is pluggable (`Manifest::anchor_selector`, env `DIALOG_TREE_ANCHOR_SELECTOR`), one rule for both backstops, and — per the refined spec — elections read the hash TAIL (`cap::anchor_order`, bytes 8..32), disjoint from the leading 8 bytes every coin draw consumes: in an over-target frame every draw came up tails, so full-hash-minimal election would systematically anchor at the key that came closest to cutting. Pinned by `it_elects_anchors_on_coin_disjoint_bits` (flipping all coin bytes never changes an election; flipping any tail byte does). The selectors:
+
+- A, rendezvous (0): hash-tail-minimal candidate in the piece.
+- B, hybrid (1): shortest-separator-length class first (the most semantically different adjacent pair — the user's original instinct, formalized), hash-tail-minimal within the class. The sandwich property makes B insert-proof: for `p < q < k`, `q` shares `p`,`k`'s common prefix, so inserts never mint a strictly shorter class; only deletes that merge seams can. Pinned by `it_keeps_semantic_anchors_still_under_inserts` (inserts inside a sub-cluster leave the 25-byte-separator anchors in place; red under selector A) and `it_reanchors_when_the_semantic_anchor_is_deleted` (deleting the anchor key re-anchors at the merged seam's right key).
+
+Edit path: `merge_vetoed_stretch` generalizes to `merge_forced_run` (identical mechanics — the long-separator join predicate already covers both anchor kinds), and a new fast-path gate re-shapes any membership-changing edit whose segment exceeds the ceiling (the in-place path would otherwise grow a frame past the hard bound). Other tests: convergence + delete oracle over an over-ceiling all-tails run (`it_converges_on_over_ceiling_frames_across_insertion_orders`, shape-compared control), the hard bound itself at both factors and both selectors (`it_bounds_frames_at_the_ceiling`, red with the overlay disabled), edit locality across frames (`it_keeps_ceiling_effects_inside_the_touched_frames`), anchors only at accepted seams in composite frames (`it_anchors_frames_only_at_accepted_seams`), and `max_segment = 0` identity unchanged (suite). The three older "mechanism actually fired" controls were also strengthened from root-hash comparisons (vacuous: the manifest is stamped into every node, so any knob change flips the root) to boundary-set comparisons.
+
+### SE replay, mem LIMIT 8192, S=64K (leaf segments; step-4 no-ceiling row for reference)
+
+| metric | no ceiling | 2x A | 2x B | 3x A | 3x B |
+|---|---|---|---|---|---|
+| leaves | 705 | 898 | 900 | 761 | 768 |
+| mean | 69.8K | 54.9K | 54.7K | 64.7K | 64.1K |
+| count-wtd p90 / p99 | 149.8K / 338.2K | 110.4K / 139.1K | 108.0K / 143.7K | 138.8K / 200.6K | 137.3K / 201.1K |
+| bytes-wtd p50 / p90 | 110.6K / 303.5K | 83.1K / 127.5K | 84.4K / 127.2K | 100.9K / 179.8K | 101.5K / 182.1K |
+| max | 565.9K | 272.6K | 257.5K | 325.9K | 423.8K |
+| leaves > 2S by count | — | 3.2% | 3.3% | 13.0% | 12.6% |
+| forced links / sep bytes | 0 / 0 | 165 / 110.9K | 154 / 103.1K | 48 / 35.1K | 52 / 31.7K |
+| replay time | 31.9 s | 42.2 s | 40.4 s | 36.0 s | 37.0 s |
+
+The 566 KB accepted-only leaf splits everywhere — at 2x into pieces ending at 251-273 KB max, at 3x 318-424 KB. Byte caveat: the ceiling bounds the WEIGHT proxy (key + 32); encoded leaves carry value payloads and per-entry overhead beyond it, so the byte tail lands near 2x the weight-implied figure. Small-leaf mass is unchanged (<0.1x64K: 6.6-6.8% of leaves, ~0.45% of bytes, all configs). Tonk: at 2x exactly one anchor appears (the 176.8K leaf splits to 152.9K max under A, 158.7K under B, one 513-byte forced separator); at 3x nothing fires — tonk is under the ceiling, as it should be.
+
+Perf and disk: mem 2048 in 5.2-6.0 s at 2x, 4.2-4.4 s at 3x (no-ceiling 3.5-3.7 s); disk 2048 402-407 MB, 4096 1119-1151 MB (no-ceiling 407.5 / 1196.3 — the ceiling actually SAVES 4-6% disk at depth by shrinking the rewrite unit of the monsters). The replay CPU cost is real and tracks the number of split frames (e^-2 = 13.5% of frames at 2x vs e^-3 = 5% at 3x): every membership edit into a split frame merges and regroups the whole frame. That is the arm-1 cost formula scoped to the tail the factor chooses, and it is the knob's price axis.
+
+### Anchor churn and evenness (synthetic all-tails frame, shared edit protocol; boundary moves excluding the edited key)
+
+| config | insert-driven moves / 25 | delete-driven moves / 11 | piece weights min/mean/max |
+|---|---|---|---|
+| no ceiling | 0 | 0 | one 3700-weight leaf |
+| 2x A | 7 | 2 | 111 / 616 / 999 |
+| 2x B | 2 | 3 | 222 / 616 / 888 |
+| 3x A | 4 | 1 | 370 / 925 / 1480 |
+| 3x B | 1 | 2 | 222 / 740 / 1332 |
+
+The asymmetry the comparison was for: B is 3-4x more insert-stable (the sandwich property working — inserts cannot mint a shorter class, so the semantic anchors never move under insert churn), at one extra delete-driven move (a deleted anchor key forces re-anchoring under either selector). B also packs pieces more evenly at 2x (min 222 vs 111) and stores slightly fewer forced-separator bytes on SE (103.1K vs 110.9K at 2x — mostly fewer links; in natural runs the separator-length classes tie broadly and B degrades toward A, exactly as predicted; the per-separator savings shows in vetoed-run territory, where B's 25-byte sub-boundary separators beat A's 33-byte in-sub picks in the sandwich fixture).
+
+### Recommendation
+
+Selector: B (hybrid). It wins insert-stability decisively, matches A everywhere else, costs nothing measurable, and anchors where a human would cut (the biggest semantic break). Ceiling: factor 3 as the default-candidate — it converts the unbounded tail into a ~1/3-of-before max for a 13-16% replay-CPU cost and 48 forced links, where factor 2 pays 27-70% CPU for a further 25% off the max; the knob stays a knob (`DIALOG_TREE_CEILING_FACTOR`), and workloads that prize a tight fetch ceiling over write CPU can run 2x. If the CPU cost of 2x ever matters enough, the follow-up lever is incremental segment-weight bookkeeping on the edit path (the per-edit weight sum plus whole-frame regroups dominate), not a different mechanism.
+
 ### Decision table (running)
 
 | arm | SE max leaf @8192 | SE 100K+ bytes | mem replay 8192 | disk bytes @4096 | verdict |
@@ -267,3 +311,4 @@ Mem 2048: 3.54/3.71 s (step 3: 3.38; step 2: 3.39-3.46; baseline 4.22-4.31). Mem
 | step 2 (veto + weight coin S=64K) | 566 KB | 62% | 30 s (0.65x) | 1188.4 MB | byte pacing works; residue = clustered stretches |
 | step 3 (+ rendezvous backstop) | 566 KB | 62% | 30.9 s (0.66x) | 1160.4 MB | mechanism proven on synthetic clusters, flap 5/25; fires ZERO times on SE — the residue is COMPOSITE stretches (see finding) |
 | step 4 (+ weight bank) | 566 KB (accepted-only tail, e^-8.6) | 56% | 31.9 s (0.68x) | 1196.3 MB | approved fix landed; composite stretches split (p90 153K, P(>2S)=13.9% vs e^-2=13.5% — true byte-renewal); remaining tail is the soft cap's own extreme value, not a gap |
+| step 5 (+ frame ceiling 3x, hybrid anchors) | 424 KB (weight-bounded; p99 201K) | — | 37.0 s (0.79x) | 1119.4 MB | hard bound on the natural tail; selector B insert-stable 1/25; 2x available for tighter tails at 27-70% CPU |
