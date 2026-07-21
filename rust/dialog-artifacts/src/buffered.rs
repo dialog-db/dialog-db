@@ -34,8 +34,8 @@ use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
 use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, DialogSearchTreeError, Entry, HitchhikerTree,
-    TransientTree,
+    Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Entry, HitchhikerTree,
+    Manifest, TransientTree,
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
@@ -218,30 +218,181 @@ impl ArtifactWriter for BufferedArtifactTree {
     }
 }
 
+/// An open buffered write batch over an [`ArtifactTree`], not yet persisted.
+///
+/// The commit path's three-step surface:
+///
+/// 1. [`BufferedBatch::apply`] drains the instruction stream into the buffered
+///    tree and reports whether it changed the indexes, persisting NOTHING;
+/// 2. the caller decides: dropping the batch is a complete no-op (the delta is
+///    untouched and the base tree root unchanged), which is how an unchanged
+///    commit declines to mint a revision;
+/// 3. otherwise the caller appends its revision-record entries with
+///    [`record`](Self::record) and seals everything, data and records
+///    together, with the ONE persist (or canonicalize) in
+///    [`seal`](Self::seal).
+///
+/// This exists so the revision record rides the same buffered write as the
+/// batch's data. Records need the batch's outcome (a no-op commit mints
+/// nothing, and the record signs over its content), so they cannot be part of
+/// the instruction stream; but routing them through the canonical edit path
+/// after the batch persisted cost a second spine-to-leaf rewrite per commit,
+/// whose leaf re-encode grew with the database. Appending them to the still
+/// open buffered tree makes them ordinary buffered ops covered by the same
+/// seal.
+pub struct BufferedBatch {
+    tree: BufferedArtifactTree,
+    cache: Cache<NodeHash, Buffer>,
+    manifest: Manifest,
+    changed: bool,
+}
+
+impl BufferedBatch {
+    /// Applies `instructions` to a buffered tree opened over `tree`, without
+    /// persisting anything.
+    ///
+    /// The buffered counterpart of
+    /// [`ArtifactTreeExt::apply_versioned`](crate::ArtifactTreeExt::apply_versioned),
+    /// running the very same instruction semantics (they share
+    /// [`write_instructions`](crate::tree::write_instructions)). The
+    /// difference is where the writes land: instead of reshaping the tree per
+    /// batch, they accumulate in bounded per-node buffers, and the reshape
+    /// happens only when a buffer overflows and cascades.
+    ///
+    /// `tree` itself is untouched; the batch lives in memory until
+    /// [`seal`](Self::seal).
+    #[tracing::instrument(skip_all, name = "apply_batch")]
+    pub async fn apply<S, I>(
+        tree: &ArtifactTree,
+        store: &mut S,
+        version: Option<Version>,
+        instructions: I,
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+        I: Stream<Item = Instruction> + ConditionalSend,
+    {
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        // Keys are built under the target tree's own format, read from the
+        // manifest its root node carries. Writes preserve that format, so the
+        // manifest captured here also governs the record entries appended
+        // later and the root `seal` produces.
+        let manifest = tree.manifest(&storage).await?;
+        let (buffered, changed) = write_instructions(
+            HitchhikerTree::open(tree),
+            store,
+            &storage,
+            version,
+            &manifest,
+            instructions,
+        )
+        .await?;
+        Ok(Self {
+            tree: buffered,
+            cache: tree.node_cache(),
+            manifest,
+            changed,
+        })
+    }
+
+    /// Whether the applied instructions changed the indexes at all.
+    ///
+    /// A batch made entirely of no-ops (re-asserting values already in place,
+    /// retracting absent facts) leaves the tree untouched and records no
+    /// history; callers should mint no revision for it and drop the batch
+    /// unsealed.
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+
+    /// The target tree's format [`Manifest`], captured at
+    /// [`apply`](Self::apply) time.
+    ///
+    /// Record entries must be built under it (see
+    /// [`RevisionRecord::entries`](crate::history::RevisionRecord::entries)):
+    /// the record's value rides its key through the tree's own inline-vs-spill
+    /// threshold, not the default.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Appends pre-built record entries (revision lineage records, which enter
+    /// through this surface and never through instructions) to the open
+    /// buffered tree.
+    ///
+    /// The entries become ordinary buffered ops: the single persist in
+    /// [`seal`](Self::seal) covers them together with the batch's data, and
+    /// readers see them through the same novelty-aware get and scan as any
+    /// other buffered write.
+    #[tracing::instrument(skip_all, name = "buffer_records")]
+    pub async fn record<S>(
+        mut self,
+        store: &S,
+        entries: Vec<(Key, State<Datum>)>,
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        for (key, value) in entries {
+            self.tree = self.tree.write(key, value, &storage).await?;
+        }
+        Ok(self)
+    }
+
+    /// Seals the whole batch, data and record entries alike, into `delta` with
+    /// a single persist, returning the resulting tree.
+    ///
+    /// With `canonicalize` the buffers are flushed to the leaves first, so the
+    /// result is the deterministic canonical form of its fact set. Without it
+    /// the buffers are left in place and the result is the buffered form.
+    ///
+    /// **Both forms are publishable.** A node's hash covers its buffers as
+    /// well as its links, so a buffered root identifies its content exactly:
+    /// it reads (buffers merge over stored entries), diffs (the differential
+    /// is novelty-aware), and pushes (its blocks carry the ops) like any other
+    /// root. What the buffered form gives up is *canonicality*, meaning two
+    /// replicas with the same facts hash differently if they flushed at
+    /// different points. That costs convergence detection, not correctness: a
+    /// fast-forward check compares roots, so such replicas fail to recognize
+    /// each other as equal and do merge work that finds nothing.
+    #[tracing::instrument(skip_all, name = "seal_batch")]
+    pub async fn seal<S>(
+        self,
+        store: &S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        canonicalize: bool,
+    ) -> Result<ArtifactTree, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        Ok(if canonicalize {
+            self.tree.canonicalize(&storage, delta).await?
+        } else {
+            // Serialize the spine with its buffers intact and seal the
+            // resulting root: the hash covers the buffered ops, so this is a
+            // complete identity for the tree's content.
+            let root = self.tree.persist(delta)?;
+            ArtifactTree::from_hash_with_cache(root, self.cache)
+        })
+    }
+}
+
 /// Applies `instructions` to `tree` through the write buffer, returning whether
 /// the batch changed the indexes.
 ///
-/// The buffered counterpart of
-/// [`ArtifactTreeExt::apply_versioned`](crate::ArtifactTreeExt::apply_versioned),
-/// running the very same instruction semantics (they share
-/// [`write_instructions`](crate::tree::write_instructions)). The difference is
-/// where the writes land: instead of reshaping the tree per batch, they
-/// accumulate in bounded per-node buffers, and the reshape happens only when a
-/// buffer overflows and cascades.
-///
-/// With `canonicalize` the buffers are flushed to the leaves before returning,
-/// so `tree` ends as the deterministic canonical form of its fact set. Without
-/// it the buffers are left in place and `tree` is the buffered form.
-///
-/// **Both forms are publishable.** A node's hash covers its buffers as well as
-/// its links, so a buffered root identifies its content exactly: it reads
-/// (buffers merge over stored entries), diffs (the differential is
-/// novelty-aware), and pushes (its blocks carry the ops) like any other root.
-/// What the buffered form gives up is *canonicality*, meaning two replicas with
-/// the same facts hash differently if they flushed at different points. That
-/// costs convergence detection, not correctness: a fast-forward check compares
-/// roots, so such replicas fail to recognize each other as equal and do merge
-/// work that finds nothing.
+/// The one-shot composition of [`BufferedBatch::apply`] and
+/// [`BufferedBatch::seal`], for callers with no record entries to interleave
+/// (the commit path has, and uses the three-step [`BufferedBatch`] surface
+/// directly). See those for the semantics, including why both the canonical
+/// and the buffered form are publishable.
 #[tracing::instrument(skip_all, name = "apply_buffered")]
 pub async fn apply_buffered<S, I>(
     tree: &mut ArtifactTree,
@@ -257,28 +408,9 @@ where
         + ConditionalSync,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-    // Keys are built under the target tree's own format, read from the
-    // manifest its root node carries.
-    let manifest = tree.manifest(&storage).await?;
-    let (buffered, changed) = write_instructions(
-        HitchhikerTree::open(tree),
-        store,
-        &storage,
-        version,
-        &manifest,
-        instructions,
-    )
-    .await?;
-    *tree = if canonicalize {
-        buffered.canonicalize(&storage, delta).await?
-    } else {
-        // Serialize the spine with its buffers intact and seal the resulting
-        // root: the hash covers the buffered ops, so this is a complete
-        // identity for the tree's content.
-        let root = buffered.persist(delta)?;
-        ArtifactTree::from_hash_with_cache(root, tree.node_cache())
-    };
+    let batch = BufferedBatch::apply(tree, store, version, instructions).await?;
+    let changed = batch.changed();
+    *tree = batch.seal(store, delta, canonicalize).await?;
     Ok(changed)
 }
 
@@ -292,11 +424,11 @@ mod tests {
     use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    use super::apply_buffered;
+    use super::{BufferedBatch, apply_buffered};
     use crate::history::{Edition, Origin, Version};
-    use crate::key::default_manifest;
+    use crate::key::{FromKey as _, default_manifest};
     use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
-    use crate::{Artifact, Instruction, Value};
+    use crate::{Artifact, AttributeKey, Datum, EntityKey, Instruction, State, Value};
 
     fn store() -> Storage<CborEncoder, MemoryStorageBackend<[u8; 32], Vec<u8>>> {
         Storage {
@@ -595,6 +727,119 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// Record entries appended through [`BufferedBatch::record`] are ordinary
+    /// buffered ops covered by the batch's single seal.
+    ///
+    /// Two pins: sealing with canonicalize lands on the identical root the
+    /// canonical path (`apply_versioned` + `record`) produces for the same
+    /// data and entries, so the record's placement is not path-dependent; and
+    /// sealing the buffered form keeps the record readable through the
+    /// novelty-aware read path. `apply` itself must leave the base tree
+    /// untouched, which is what makes dropping an unsealed no-op batch free.
+    #[dialog_common::test]
+    async fn it_seals_record_entries_with_the_batch_onto_the_canonical_root() -> Result<()> {
+        fn version() -> Version {
+            Version::new(Origin::from([7u8; 32]), Edition::new(1))
+        }
+        fn data() -> Vec<Instruction> {
+            vec![assert_of("user:1", "resident"), assert_of("user:2", "b")]
+        }
+        fn entries() -> Vec<(crate::Key, State<Datum>)> {
+            let artifact = Artifact {
+                the: "test/record".parse().unwrap(),
+                of: "rev:1".parse().unwrap(),
+                is: Value::String("record".to_string()),
+                cause: None,
+            };
+            let entity_key = EntityKey::from_artifact(&artifact, &default_manifest());
+            let attribute_key = AttributeKey::from_key(&entity_key);
+            let added = State::Added(Datum::for_artifact(&artifact));
+            vec![
+                (entity_key.into_key(), added.clone()),
+                (attribute_key.into_key(), added),
+            ]
+        }
+
+        // The canonical reference: data through the canonical edit path, then
+        // the record through the canonical `record` surface.
+        let mut direct_store = store();
+        let mut direct = ArtifactTree::empty();
+        let mut direct_delta = Delta::zero();
+        direct
+            .apply_versioned(
+                &mut direct_store,
+                &mut direct_delta,
+                Some(version()),
+                stream::iter(data()),
+            )
+            .await?;
+        direct
+            .record(&mut direct_store, &mut direct_delta, entries())
+            .await?;
+
+        // The batch surface, sealed canonical: the same fact set must land on
+        // the byte-identical root.
+        let mut batch_store = store();
+        let base = ArtifactTree::empty();
+        let mut delta = Delta::zero();
+        let batch = BufferedBatch::apply(
+            &base,
+            &mut batch_store,
+            Some(version()),
+            stream::iter(data()),
+        )
+        .await?;
+        assert!(batch.changed(), "the data writes change the indexes");
+        let batch = batch.record(&batch_store, entries()).await?;
+        let sealed = batch.seal(&batch_store, &mut delta, true).await?;
+        assert_eq!(
+            sealed.root(),
+            direct.root(),
+            "the batch-carried record must land on the canonical root"
+        );
+        assert_eq!(
+            base.root(),
+            ArtifactTree::empty().root(),
+            "applying a batch must not touch the base tree"
+        );
+
+        // The batch surface, sealed buffered: the record must read back
+        // through the novelty-aware read path.
+        let mut buffered_store = store();
+        let mut delta = Delta::zero();
+        let batch = BufferedBatch::apply(
+            &ArtifactTree::empty(),
+            &mut buffered_store,
+            Some(version()),
+            stream::iter(data()),
+        )
+        .await?;
+        let batch = batch.record(&buffered_store, entries()).await?;
+        let sealed = batch.seal(&buffered_store, &mut delta, false).await?;
+        for (hash, buffer) in delta.flush() {
+            buffered_store
+                .set(*hash.as_bytes(), buffer.as_ref().to_vec())
+                .await?;
+        }
+        let records = sealed
+            .select_record(
+                buffered_store.clone(),
+                &"rev:1".parse()?,
+                &"test/record".parse()?,
+            )
+            .await?;
+        assert_eq!(records.len(), 1, "the record reads back from the buffers");
+        assert_eq!(records[0].is, Value::String("record".to_string()));
+        assert!(
+            !sealed
+                .select_data(buffered_store, &"user:1".parse()?, &"test/field".parse()?)
+                .await?
+                .is_empty(),
+            "the batch's data survives alongside the record"
+        );
         Ok(())
     }
 }

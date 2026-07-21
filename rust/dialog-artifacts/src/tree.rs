@@ -867,18 +867,23 @@ impl ArtifactTreeExt for ArtifactTree {
             + Clone
             + ConditionalSync,
     {
-        let mut transient = self.edit();
-        {
+        let transient = {
             // Read through the delta: this tree's latest nodes may only
             // exist there (persisted by an earlier batch, not yet flushed).
             let storage = ContentAddressedStorage::new(DeltaReadThrough {
                 delta: &*delta,
                 store: store.clone(),
             });
+            // Open the edit under the tree's OWN manifest (as
+            // `apply_versioned` does), not the default: an edit through the
+            // default restamps the touched path with the default format,
+            // silently rewriting a tree built under other constants.
+            let mut transient = self.edit_with_manifest(&storage).await?;
             for (key, entry) in entries {
                 transient = transient.insert(key, entry, &storage).await?;
             }
-        }
+            transient
+        };
         *self = transient.persist(delta)?;
         Ok(())
     }

@@ -1489,14 +1489,51 @@ mod test {
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
 
-        let env = BenchEnv::temp().await?;
+        // Disk is the realistic default; `DIALOG_TXN_MEM` switches to the
+        // in-memory backend so an engine-side depth curve can be separated
+        // from the block store's own scaling (a filesystem backend's write
+        // cost grows with the number of stored blocks, which a profile
+        // otherwise attributes to the commit path). The two backends are
+        // distinct `BenchEnv` types, so the replay body lives in a generic
+        // helper rather than one `let`.
+        if env::var("DIALOG_TXN_MEM").is_ok() {
+            replay_log_reporting(BenchEnv::volatile().await?, &path, limit).await
+        } else {
+            replay_log_reporting(BenchEnv::temp().await?, &path, limit).await
+        }
+    }
+
+    /// Replays the transaction log on `env`, honoring `DIALOG_TXN_CURVE`, and
+    /// prints the `TXNLOG` report line. Shared by both backend arms of
+    /// [`it_replays_a_transaction_log`].
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn replay_log_reporting<Env>(env: BenchEnv<Env>, path: &str, limit: usize) -> Result<()>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<SpaceLoad>
+            + Provider<SpaceCreate>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        // `DIALOG_TRACE=1` attributes replay time to the commit path's
+        // existing tracing spans (totals printed when the guard drops), so
+        // depth growth can be assigned to a phase without adding probes.
+        let _trace = trace_phases();
         let start = Instant::now();
         // `DIALOG_TXN_CURVE` interleaves a fixed query at each power-of-two
         // depth, so one run reports both the commit curve and the query curve.
         let entities = if env::var("DIALOG_TXN_CURVE").is_ok() {
-            env.replay_transaction_log_with_curve(&path, limit).await?
+            env.replay_transaction_log_with_curve(path, limit).await?
         } else {
-            env.import_transaction_log(&path, limit).await?
+            env.import_transaction_log(path, limit).await?
         };
         let elapsed = start.elapsed();
 

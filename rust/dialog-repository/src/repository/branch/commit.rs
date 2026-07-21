@@ -3,7 +3,6 @@ use crate::{
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
 use dialog_artifacts::history::{Context, Edition, TreeHistory, Version, context_of, extend_skips};
-use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{DialogArtifactsError, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -177,29 +176,30 @@ where
         // cardinality-one supersession, retraction — and, because the
         // writes are version-tagged, each instruction's history record,
         // whose cause lists the versions of the exact claims the write
-        // superseded — all live in the shared
-        // `ArtifactTreeExt::apply_versioned` so the key layout stays
-        // uniform. Data and history land in the same tree: one root covers
-        // both. The batch's new nodes accumulate in `delta`.
+        // superseded — all live in the shared instruction semantics so the
+        // key layout stays uniform. Data and history land in the same tree:
+        // one root covers both.
         // Writes go through the node buffers: a commit appends its ops instead
         // of rebuilding and re-hashing the leaves they belong in, and the
         // reshape happens later, amortized, when a buffer overflows. The
         // published root still identifies its content exactly (a node's hash
         // covers its buffers), so the head, pull, and push paths are unchanged.
         //
-        // `canonicalize()` on the builder flushes to the leaves first, for
-        // callers that want the history-independent form (see
+        // Nothing is persisted yet: the batch stays open so the revision
+        // record minted below (which needs the batch's outcome and signs over
+        // its content, so it cannot ride the instruction stream) is appended
+        // to the SAME buffered tree, and one seal below covers data and
+        // record together. A no-op batch is simply dropped, leaving the delta
+        // untouched and the tree root unchanged.
+        //
+        // `canonicalize()` on the builder flushes to the leaves at seal time,
+        // for callers that want the history-independent form (see
         // `Commit::canonicalize`).
         let mut delta = Delta::zero();
-        let changed = dialog_artifacts::apply_buffered(
-            &mut tree,
-            &mut store,
-            &mut delta,
-            Some(version),
-            changes,
-            self.canonicalize,
-        )
-        .await?;
+        let batch =
+            dialog_artifacts::BufferedBatch::apply(&tree, &mut store, Some(version), changes)
+                .await?;
+        let changed = batch.changed();
 
         // A batch that left the indexes untouched (e.g. a transaction
         // re-asserting metadata that is already in place) is a no-op:
@@ -298,16 +298,23 @@ where
         record.signature = Attest::new(record.payload()?).perform(env).await?;
         debug_assert_eq!(record.version(), version);
         // The record's key carries its value through the tree's own
-        // inline-vs-spill threshold, so read it off the tree rather than
-        // assuming the default.
-        let manifest = tree.format_manifest(store.clone(), &delta).await?;
-        tree.record(&mut store, &mut delta, record.entries(&manifest)?)
-            .await?;
+        // inline-vs-spill threshold, so build its entries under the manifest
+        // the batch captured from the tree rather than assuming the default.
+        // The entries are appended to the batch's still open buffered tree:
+        // they ride the same buffered write as the data, so the record costs
+        // a buffer append instead of a second canonical spine-to-leaf edit.
+        let entries = record.entries(batch.manifest())?;
+        let batch = batch.record(&store, entries).await?;
         // Seed the verified-record memo with what we just minted. The next
         // commit's skip-table walk starts at this very record, so without this
         // it is read back out of the tree and its signature re-verified on the
         // immediately following commit.
         branch.records().insert(version, record.clone());
+
+        // ONE seal covers the data writes and the record entries, into the
+        // batch delta (flushing buffers to the leaves first when the caller
+        // asked to canonicalize).
+        tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
 
         // Persist the tree's pending nodes before referencing the root in
         // a revision; a revision must only point at durable blocks. The
