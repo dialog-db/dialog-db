@@ -127,17 +127,17 @@ pub struct Attest {
 
 impl Attest {
     /// Attest the given payload.
+    ///
+    /// Payloads must be domain-separated by their kind: every signing
+    /// payload this effect is used for opens with a kind-specific tag
+    /// (see `dialog_capability::HEAD_SIGNING_DOMAIN` and its
+    /// revision-record counterpart), so a signature obtained for one
+    /// kind can never verify as another even though one session key
+    /// signs them all.
     pub fn new(payload: Vec<u8>) -> Self {
         Self { payload }
     }
-}
 
-impl Command for Attest {
-    type Input = Self;
-    type Output = Result<Vec<u8>, AuthorityError>;
-}
-
-impl Attest {
     /// Perform this command against an env that can provide it.
     pub async fn perform<Env>(self, env: &Env) -> Result<Vec<u8>, AuthorityError>
     where
@@ -145,6 +145,11 @@ impl Attest {
     {
         env.execute(self).await
     }
+}
+
+impl Command for Attest {
+    type Input = Self;
+    type Output = Result<Vec<u8>, AuthorityError>;
 }
 
 /// Extension trait for `Capability<Operator>` providing convenient

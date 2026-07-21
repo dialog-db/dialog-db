@@ -58,6 +58,14 @@ impl Version {
     /// metadata can be attached to (or queried from) a revision without
     /// holding it — this is the entity its revision record is recorded under.
     ///
+    /// The `did:key:z6Mk<base58(hash)>` shape follows the repository-wide
+    /// convention for content-derived entities (see `EntityExt::of` in
+    /// `dialog-repository`'s schema): the `6Mk` prefix nominally means
+    /// ed25519 key material, but the bytes here are a blake3 hash and
+    /// nothing validates the multicodec — the string is an opaque,
+    /// deterministic name, not a resolvable key DID. If the convention
+    /// ever changes, it changes everywhere at once.
+    ///
     /// Returned as a string: `Entity` lives in `dialog-artifacts`, which
     /// depends on this crate, so the parse happens there (see
     /// `Version::entity`).

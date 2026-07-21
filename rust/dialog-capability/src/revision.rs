@@ -223,7 +223,14 @@ impl Revision {
     /// the signature, deterministically encoded. Variable-width fields are
     /// length-prefixed to keep the encoding injective.
     ///
+    /// The payload opens with [`HEAD_SIGNING_DOMAIN`]: the same session
+    /// key signs both heads and in-tree revision records (through the
+    /// same attest effect), and the domain tag is what makes the two
+    /// payload spaces disjoint by construction — a signature over one
+    /// kind can never verify as the other, whatever the field contents.
+    ///
     /// ```text
+    /// domain tag ("dialog/head@1\n")
     /// (length (8, big-endian) ++ UTF-8) for branch, issuer
     /// tree (32)
     /// edition (8, big-endian)
@@ -239,7 +246,7 @@ impl Revision {
     /// length for any fixed prefix, so the encoding stays injective: a
     /// signature over one can never validate the other.
     pub fn payload(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+        let mut bytes = HEAD_SIGNING_DOMAIN.to_vec();
         for field in [self.branch.as_str(), self.issuer.as_str()] {
             bytes.extend_from_slice(&(field.len() as u64).to_be_bytes());
             bytes.extend_from_slice(field.as_bytes());
@@ -302,6 +309,14 @@ impl Revision {
         Ok(())
     }
 }
+
+/// The domain tag opening every head signing payload. Signing payload
+/// kinds sharing one key (heads here, in-tree revision records in
+/// `dialog-artifacts`) each open with their own tag, so the payload
+/// spaces are disjoint by construction and a signature can never be
+/// replayed across kinds. The trailing newline keeps any future tag
+/// from being a prefix of another.
+pub const HEAD_SIGNING_DOMAIN: &[u8] = b"dialog/head@1\n";
 
 /// The highest edition a verified head (or any watermark entry it
 /// publishes) may carry. Editions grow by one per commit or merge, so no
@@ -384,6 +399,19 @@ mod tests {
                 "edition {hostile} must be refused despite the valid signature"
             );
         }
+    }
+
+    /// Every head signing payload opens with the head domain tag, so the
+    /// head and record payload spaces are disjoint byte spaces: one
+    /// session key signs both kinds, and a signature over one must never
+    /// verify as the other whatever the field contents.
+    #[test]
+    fn it_domain_separates_the_head_signing_payload() {
+        let head = signed_head(&key(1), |_| {});
+        assert!(
+            head.payload().starts_with(HEAD_SIGNING_DOMAIN),
+            "the head payload opens with its domain tag"
+        );
     }
 
     /// The ceiling guards the published watermark too: a hostile entry at

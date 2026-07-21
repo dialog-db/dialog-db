@@ -66,6 +66,11 @@ pub struct RevisionRecord {
 /// The current [`RevisionRecord::format`]
 pub const REVISION_RECORD_FORMAT: u8 = 0;
 
+/// The domain tag opening every revision-record signing payload; the
+/// counterpart of `dialog_capability::HEAD_SIGNING_DOMAIN` for the other
+/// payload kind the same session key signs.
+pub const RECORD_SIGNING_DOMAIN: &[u8] = b"dialog/revision-record@1\n";
+
 impl RevisionRecord {
     /// Encode this record into the bytes carried by its [`Value::Record`]
     pub fn to_bytes(&self) -> Result<Vec<u8>, DialogArtifactsError> {
@@ -79,12 +84,18 @@ impl RevisionRecord {
             .map_err(|error| DialogArtifactsError::InvalidValue(format!("{error}")))
     }
 
-    /// The canonical signing payload: this record, dag-cbor encoded with an
-    /// empty signature field
+    /// The canonical signing payload: the record signing domain tag
+    /// followed by this record dag-cbor encoded with an empty signature
+    /// field. The tag makes the record and head payload spaces disjoint
+    /// by construction — the same session key signs both, and a
+    /// signature over one kind must never verify as the other (see
+    /// `dialog_capability::HEAD_SIGNING_DOMAIN`).
     pub fn payload(&self) -> Result<Vec<u8>, DialogArtifactsError> {
         let mut unsigned = self.clone();
         unsigned.signature = Vec::new();
-        unsigned.to_bytes()
+        let mut payload = RECORD_SIGNING_DOMAIN.to_vec();
+        payload.extend_from_slice(&unsigned.to_bytes()?);
+        Ok(payload)
     }
 
     /// The [`Origin`] of this record's revision, derived from the lineage
