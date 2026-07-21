@@ -193,9 +193,8 @@ where
 
     /// Every buffered op of this node, concatenated in child order — which is
     /// ascending key order, since the links partition the key space in order.
-    /// This is the flat form the transient spine holds
-    /// ([`TransientIndex::novelty`](crate::TransientIndex)); decoding and
-    /// re-encoding round-trips it exactly.
+    /// The flat drain the differential's settling and a canonicalize replay
+    /// consume; decoding and re-encoding round-trips it exactly.
     pub fn all_novelty<Key>(&self) -> Result<Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
     where
         Key: self::Key,
@@ -745,6 +744,16 @@ mod tests {
                 out.push(&self.0[..2]);
                 out.push(&self.0[2..]);
             }
+
+            fn components_of<'a>(
+                bytes: &'a [u8],
+                _layout: u8,
+                out: &mut Vec<&'a [u8]>,
+            ) -> Result<(), crate::DialogSearchTreeError> {
+                out.push(&bytes[..2]);
+                out.push(&bytes[2..]);
+                Ok(())
+            }
         }
 
         let entries = vec![Entry {
@@ -967,6 +976,20 @@ mod tests {
                     out.push(&self.0[at..at + width]);
                     at += width;
                 }
+            }
+
+            fn components_of<'a>(
+                bytes: &'a [u8],
+                layout: u8,
+                out: &mut Vec<&'a [u8]>,
+            ) -> Result<(), DialogSearchTreeError> {
+                let widths: [usize; 3] = if layout == 0 { [1, 2, 1] } else { [1, 1, 2] };
+                let mut at = 0;
+                for width in widths {
+                    out.push(&bytes[at..at + width]);
+                    at += width;
+                }
+                Ok(())
             }
         }
 

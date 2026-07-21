@@ -16,8 +16,9 @@
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
     DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest, Node,
-    NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Rank, TransientIndex, TransientNode,
-    TransientSegment, TreeWalker, Value, regroup_children, regroup_entries,
+    Novelty, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Rank, TransientIndex,
+    TransientNode, TransientSegment, TreeWalker, Value, link_bounds, regroup_children,
+    regroup_entries,
 };
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
@@ -250,7 +251,7 @@ where
                         entries: vec![entry],
                         separator,
                     }))],
-                    novelty: Vec::new(),
+                    novelty: Novelty::new(),
                 })
             }
             Some(root) => Edit::Upsert(entry)
@@ -322,14 +323,16 @@ where
                     // lands in a node's buffer and only reaches a leaf when that
                     // buffer overflows. Resolving them on the way down is what
                     // makes a read of a lifted node agree with a read of the
-                    // same node in its stored form.
-                    if let Some(op) = crate::resolve_pending(&index.novelty, key.as_ref()) {
+                    // same node in its stored form. Ops ride the link that
+                    // routes them, so the descended link's buffer is the only
+                    // one that can cover the key.
+                    let at = child_for::<Key, Value>(&index.children, key)?;
+                    if let Some(op) = index.novelty.resolve::<Key>(at, key.as_ref())? {
                         return Ok(match op {
-                            NoveltyOp::Assert(value) => Some(value.clone()),
+                            NoveltyOp::Assert(value) => Some(value),
                             NoveltyOp::Retract => None,
                         });
                     }
-                    let at = child_for::<Key, Value>(&index.children, key)?;
                     match &index.children[at] {
                         Node::Persistent(link) => {
                             return self.persistent_get(&link.node, key, storage).await;
@@ -621,7 +624,7 @@ where
                         parts.push((
                             TransientNode::Index(TransientIndex {
                                 children: run,
-                                novelty: Vec::new(),
+                                novelty: Novelty::new(),
                             }),
                             1,
                             None,
@@ -678,32 +681,36 @@ where
                         // joins pad as little as possible.
                         let mut node = run.pop().expect("run has one node").into_transient()?;
                         // Ops the join lifted off the seam are pending against
-                        // this run; re-attach them to the node that covers it.
+                        // this run; re-attach them to the node that covers it,
+                        // each op routed to its link.
                         if !seam_novelty.is_empty() {
                             match &mut node {
                                 TransientNode::Index(index) => {
-                                    index.novelty.extend(seam_novelty);
-                                    index.novelty.sort_by(|a, b| a.key.cmp(&b.key));
+                                    let bounds = link_bounds(&index.children)?;
+                                    index.novelty.route::<Key>(&bounds, seam_novelty)?;
                                 }
                                 // A segment cannot hold a buffer, so wrap it in
-                                // an index that can.
+                                // an index that can; a single link takes every
+                                // op.
                                 TransientNode::Segment(_) => {
+                                    let mut novelty = Novelty::new();
+                                    novelty.route::<Key>(&[], seam_novelty)?;
                                     node = TransientNode::Index(TransientIndex {
                                         children: vec![node.into()],
-                                        novelty: seam_novelty,
+                                        novelty,
                                     });
                                 }
                             }
                         }
                         (node, target)
                     } else {
-                        (
-                            TransientNode::Index(TransientIndex {
-                                children: run,
-                                novelty: seam_novelty,
-                            }),
-                            target + 1,
-                        )
+                        let mut index = TransientIndex {
+                            children: run,
+                            novelty: Novelty::new(),
+                        };
+                        let bounds = link_bounds(&index.children)?;
+                        index.novelty.route::<Key>(&bounds, seam_novelty)?;
+                        (TransientNode::Index(index), target + 1)
                     }
                 }
             });
@@ -723,20 +730,20 @@ where
             Some((node @ TransientNode::Segment(_), _)) => {
                 seal_root::<Key, Value, D, _>(vec![node.into()], 0, &manifest, &accessor).await?
             }
-            Some((TransientNode::Index(index), height)) => {
+            Some((TransientNode::Index(mut index), height)) => {
                 // `seal_root` reshapes the children into a canonical root and
                 // strips single-child chains, so the node holding this buffer
                 // may not survive. Carry the ops onto whatever root it returns:
                 // they are pending against this whole subtree, and the root is
                 // the one node guaranteed to cover it.
-                let novelty = index.novelty;
+                let novelty = index.novelty.take_all::<Key>()?;
                 let sealed =
                     seal_root::<Key, Value, D, _>(index.children, height - 1, &manifest, &accessor)
                         .await?;
                 match sealed {
                     Some(TransientNode::Index(mut root)) if !novelty.is_empty() => {
-                        root.novelty.extend(novelty);
-                        root.novelty.sort_by(|left, right| left.key.cmp(&right.key));
+                        let bounds = link_bounds(&root.children)?;
+                        root.novelty.route::<Key>(&bounds, novelty)?;
                         Some(TransientNode::Index(root))
                     }
                     other => other,
@@ -872,12 +879,11 @@ where
                     // would keep shadowing that leaf on every read (buffered ops
                     // win over stored entries), so the write would be invisible.
                     // Drop it: the edit supersedes it, and after this descent the
-                    // leaf is the only place the key lives.
-                    index
-                        .novelty
-                        .retain(|entry| entry.key.as_slice() != key.as_ref());
-
+                    // leaf is the only place the key lives. Ops ride the link
+                    // that routes them, so only the descended link's buffer can
+                    // hold one.
                     let at = child_for::<Key, Value>(&index.children, key)?;
+                    index.novelty.remove_key::<Key>(at, key.as_ref())?;
                     lift(&mut index.children[at], accessor).await?;
                     path.push(at);
                 }
@@ -1004,6 +1010,16 @@ where
                 // when the minimum did not change.
                 if let Some(first) = segment.entries.first() {
                     segment.separator = D::reseparate(first.key.as_ref(), &segment.separator);
+                }
+                // A moved separator moves a link boundary in the deepest
+                // ancestor where this leaf is not on the leftmost edge, and
+                // buffered ops are grouped BY those boundaries: re-home the
+                // ops the move re-ranged, or the grouping goes stale and a
+                // read or flush of the wrong link misses them. The re-shape
+                // paths re-route buffers wholesale, so only this in-place
+                // fast path needs it.
+                if min_move.is_some() {
+                    reroute_moved_seam::<Key, Value>(&mut root, &path)?;
                 }
                 return Ok(Some(root));
             }
@@ -1157,6 +1173,42 @@ where
     let old_rank = D::seam_rank(old_separator, manifest);
     let new_rank = D::seam_rank(new_separator, manifest);
     new_rank > BOTTOM_RANK + 1 && new_rank > old_rank
+}
+
+/// Re-homes buffered ops after a fast-path min-move edit changed the
+/// separator of the leaf at `path`.
+///
+/// A leaf's separator is the separator of every ancestor it is the leftmost
+/// leaf of, so the moved seam surfaces as a link boundary exactly once: in
+/// the deepest ancestor where the remaining path leaves the leftmost edge.
+/// Per-link buffers are grouped by those boundaries, so the ops around the
+/// moved bound must be re-checked against it ([`Novelty`]'s reroute). A path
+/// on the tree's global leftmost edge moved no interior boundary and needs
+/// nothing.
+fn reroute_moved_seam<Key, Value>(
+    root: &mut TransientNode<Key, Value>,
+    path: &[usize],
+) -> Result<(), DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+{
+    // The deepest depth whose position leaves the leftmost edge: below it the
+    // path is all zeros, so the leaf's separator IS the boundary at this
+    // ancestor's descended link.
+    let mut depth = path.len();
+    while depth > 0 && path[depth - 1] == 0 {
+        depth -= 1;
+    }
+    if depth == 0 {
+        return Ok(());
+    }
+    let at = path[depth - 1];
+    let ancestor = follow(root, &path[..depth - 1])?.as_index_mut()?;
+    // The descended child's separator is the leaf's new separator, threaded
+    // up through leftmost-first-child derivation.
+    let bound = ancestor.children[at].separator()?.to_vec();
+    ancestor.novelty.reroute_boundary::<Key>(at, &bound)
 }
 
 /// Walks `root` down the recorded child indices in `path`, lifting the node at
@@ -1414,7 +1466,7 @@ where
             // buffered here have nowhere to live unless they are carried over:
             // they are pending against this subtree, and the run covers exactly
             // that subtree.
-            let carried = std::mem::take(&mut node.as_index_mut()?.novelty);
+            let carried = node.as_index_mut()?.novelty.take_all::<Key>()?;
             let children = &mut node.as_index_mut()?.children;
             let (run, mut lifted) = if left_fuse == Some(0) {
                 // The replacement's left-edge seam rank dropped: its head
@@ -1452,7 +1504,8 @@ where
 ///
 /// Separators are lower bounds, so the owning node is the last one whose
 /// separator is at or below the key; a key below every separator belongs to the
-/// leftmost node, matching how routing clamps.
+/// leftmost node, matching how routing clamps. Within the chosen node the op is
+/// then routed to its link, keeping the per-link grouping fresh.
 ///
 /// A run of segments cannot hold ops at all, so those are wrapped in an index
 /// that can. Dropping them instead would lose pending writes.
@@ -1471,6 +1524,11 @@ where
         return Ok(run);
     }
 
+    // Partition the ops across the run first (preserving their order, which
+    // carries the precedence: older ops arrive before newer ones and the
+    // stable per-link sort keeps the newest op for a key last), then attach
+    // each bucket with one routed merge.
+    let mut buckets: Vec<Vec<NoveltyEntry<Value>>> = run.iter().map(|_| Vec::new()).collect();
     for entry in novelty {
         // The node covering this key, by the same lower-bound rule routing
         // uses: the last node whose separator is at or below the key.
@@ -1481,26 +1539,32 @@ where
                 _ => break,
             }
         }
+        buckets[at].push(entry);
+    }
 
+    for (at, bucket) in buckets.into_iter().enumerate() {
+        if bucket.is_empty() {
+            continue;
+        }
         match &mut run[at] {
             Node::Transient(TransientNode::Index(index)) => {
-                index.novelty.push(entry);
-                index
-                    .novelty
-                    .sort_by(|left, right| left.key.cmp(&right.key));
+                let bounds = link_bounds(&index.children)?;
+                index.novelty.route::<Key>(&bounds, bucket)?;
             }
             // Leaves and persistent links cannot carry a buffer, so wrap the
             // node in an index that can. The wrapper keeps the same key range,
-            // so routing is unchanged.
+            // so routing is unchanged; its single link takes every op.
             other => {
                 let placeholder = Node::Transient(TransientNode::Segment(TransientSegment {
                     entries: Vec::new(),
                     separator: Vec::new(),
                 }));
                 let wrapped = std::mem::replace(other, placeholder);
+                let mut novelty = Novelty::new();
+                novelty.route::<Key>(&[], bucket)?;
                 *other = Node::Transient(TransientNode::Index(TransientIndex {
                     children: vec![wrapped],
-                    novelty: vec![entry],
+                    novelty,
                 }));
             }
         }
@@ -1617,7 +1681,7 @@ where
         // Regrouping below replaces this node, so its buffer is carried onto
         // the run that takes its place (see `carry_novelty`), together with
         // the buffers the fusion lifts off the two dismantled children.
-        let carried = std::mem::take(&mut node.as_index_mut()?.novelty);
+        let carried = node.as_index_mut()?.novelty.take_all::<Key>()?;
         let children = &mut node.as_index_mut()?.children;
         let main = take_transient(children, at)?;
         // After removing the main child the neighbour shifted left into `at`.
@@ -1651,7 +1715,7 @@ where
         left_fuse.and_then(|depth| depth.checked_sub(1)),
         manifest,
     )?;
-    let carried = std::mem::take(&mut node.as_index_mut()?.novelty);
+    let carried = node.as_index_mut()?.novelty.take_all::<Key>()?;
     let children = &mut node.as_index_mut()?.children;
     let (run, mut lifted) = if left_fuse == Some(0) {
         children.remove(at);
@@ -1753,10 +1817,6 @@ where
                 manifest,
             )?;
 
-            let mut combined = main.children;
-            combined.extend(fused);
-            combined.extend(neighbor.children);
-
             // Both destructured nodes' buffers are pending against the run
             // being built, and the regroup discards the nodes that held them.
             // Lift them out for the caller, deepest first: the seam ops come
@@ -1764,8 +1824,12 @@ where
             // The two fused nodes cover disjoint ranges, so their relative
             // order carries no precedence.
             let mut novelty = seam_novelty;
-            novelty.extend(main.novelty);
-            novelty.extend(neighbor.novelty);
+            novelty.extend(main.novelty.take_all::<Key>()?);
+            novelty.extend(neighbor.novelty.take_all::<Key>()?);
+
+            let mut combined = main.children;
+            combined.extend(fused);
+            combined.extend(neighbor.children);
 
             Ok((
                 regroup_children::<Key, Value, D>(combined, height, manifest)?,
@@ -1865,7 +1929,7 @@ where
         Some(Node::Persistent(link)) => {
             return Ok(Some(TransientNode::Index(TransientIndex {
                 children: vec![Node::Persistent(link)],
-                novelty: Vec::new(),
+                novelty: Novelty::new(),
             })));
         }
         None => return Ok(None),
@@ -1886,24 +1950,22 @@ where
         }
         match &index.children[0] {
             Node::Transient(TransientNode::Index(_)) => {
-                let novelty = std::mem::take(&mut index.novelty);
+                let novelty = index.novelty.take_all::<Key>()?;
                 let child = index.children.pop().expect("single child present");
                 let Node::Transient(mut child) = child else {
                     unreachable!("matched transient index above");
                 };
                 // The stripped wrapper's buffer is pending against exactly
                 // the subtree the surviving child roots (they cover the same
-                // range), so it moves onto the child. The wrapper sat one
-                // level shallower, so its ops are the newer: append them
-                // after the child's own and stable-sort so the newest op for
-                // a key stays last, the position last-op-wins resolution
-                // reads.
+                // range), so it moves onto the child, each op routed to its
+                // link. The wrapper sat one level shallower, so its ops are
+                // the newer: the routed merge appends them after the child's
+                // own for equal keys, keeping the newest op for a key last,
+                // the position last-op-wins resolution reads.
                 if !novelty.is_empty() {
                     let child_index = child.as_index_mut()?;
-                    child_index.novelty.extend(novelty);
-                    child_index
-                        .novelty
-                        .sort_by(|left, right| left.key.cmp(&right.key));
+                    let bounds = link_bounds(&child_index.children)?;
+                    child_index.novelty.route::<Key>(&bounds, novelty)?;
                 }
                 root = child;
             }
@@ -2054,13 +2116,20 @@ where
             // the range the way it cuts a segment's entries. Ops outside the
             // range belong to the pieces being carved away; ops inside must
             // survive, or the carved piece silently loses every write still
-            // pending against it.
-            let buffered_before = index.novelty.len();
-            index.novelty.retain(|entry| {
-                (!trim_start || entry.key.as_slice() >= range.start().as_ref())
-                    && (!trim_end || entry.key.as_slice() <= range.end().as_ref())
-            });
-            let buffered_trimmed = index.novelty.len() != buffered_before;
+            // pending against it. The per-link grouping is positional against
+            // the child list this trim is about to shorten, so take the ops
+            // flat first and route the survivors back over whatever children
+            // remain at the end.
+            let buffered = index.novelty.take_all::<Key>()?;
+            let buffered_before = buffered.len();
+            let buffered: Vec<NoveltyEntry<Value>> = buffered
+                .into_iter()
+                .filter(|entry| {
+                    (!trim_start || entry.key.as_slice() >= range.start().as_ref())
+                        && (!trim_end || entry.key.as_slice() <= range.end().as_ref())
+                })
+                .collect();
+            let buffered_trimmed = buffered.len() != buffered_before;
 
             let children = &mut index.children;
             let mut changed = buffered_trimmed;
@@ -2140,6 +2209,14 @@ where
             if children.is_empty() {
                 return Ok(Trim::Empty);
             }
+
+            // Route the surviving ops over the trimmed child list. Every
+            // surviving key is within the range, and the surviving children
+            // cover the whole range (below-all keys clamp into the new
+            // leftmost child, the new last child runs open-ended), so no op
+            // is stranded.
+            let bounds = link_bounds(children)?;
+            index.novelty.route::<Key>(&bounds, buffered)?;
 
             Ok(if changed {
                 Trim::Trimmed
@@ -2252,7 +2329,7 @@ fn raise<Key, Value>(
     (from..to).fold(node, |node, _| {
         TransientNode::Index(TransientIndex {
             children: vec![node.into()],
-            novelty: Vec::new(),
+            novelty: Novelty::new(),
         })
     })
 }
@@ -2315,10 +2392,6 @@ where
             let (seam, seam_novelty) =
                 concat_levels::<Key, Value, D>(left_last, right_first, height - 1, manifest)?;
 
-            let mut combined = left.children;
-            combined.extend(seam);
-            combined.extend(right.children);
-
             // Both joined nodes' buffers are pending against the run being
             // built, and regrouping discards the nodes that held them. Hand
             // them back so the caller re-attaches them to a node that covers
@@ -2329,9 +2402,13 @@ where
             // keeps the newest op for a key last. The two joined nodes cover
             // disjoint ranges, so their relative order carries no precedence.
             let mut novelty = seam_novelty;
-            novelty.extend(left.novelty);
-            novelty.extend(right.novelty);
+            novelty.extend(left.novelty.take_all::<Key>()?);
+            novelty.extend(right.novelty.take_all::<Key>()?);
             novelty.sort_by(|a, b| a.key.cmp(&b.key));
+
+            let mut combined = left.children;
+            combined.extend(seam);
+            combined.extend(right.children);
 
             Ok((
                 regroup_children::<Key, Value, D>(combined, height, manifest)?,

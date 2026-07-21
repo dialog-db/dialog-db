@@ -1499,8 +1499,42 @@ mod test {
         if env::var("DIALOG_TXN_MEM").is_ok() {
             replay_log_reporting(BenchEnv::volatile().await?, &path, limit).await
         } else {
-            replay_log_reporting(BenchEnv::temp().await?, &path, limit).await
+            // On the disk backend, also report the store's on-disk growth:
+            // the replay's block files all land under the temp storage base
+            // (unique per-run space names keep concurrent leftovers additive,
+            // so the before/after delta is this run's footprint).
+            let base = ::dialog_storage::temp_storage_base();
+            let before = dir_size(&base);
+            let result = replay_log_reporting(BenchEnv::temp().await?, &path, limit).await;
+            let after = dir_size(&base);
+            eprintln!(
+                "TXNLOG store_bytes={} (base {before} -> {after})",
+                after.saturating_sub(before)
+            );
+            result
         }
+    }
+
+    /// Total size in bytes of every regular file under `path`, recursively;
+    /// missing or unreadable entries count as zero (best effort, measurement
+    /// only).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn dir_size(path: &Path) -> u64 {
+        let Ok(entries) = read_dir(path) else {
+            return 0;
+        };
+        let mut total = 0u64;
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                total += dir_size(&entry.path());
+            } else if kind.is_file() {
+                total += entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            }
+        }
+        total
     }
 
     /// Replays the transaction log on `env`, honoring `DIALOG_TXN_CURVE`, and
@@ -1698,6 +1732,11 @@ mod test {
     }
 
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::fs::read_dir;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::path::Path;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);

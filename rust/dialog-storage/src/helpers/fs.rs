@@ -119,6 +119,14 @@ impl Resource<Location> for TempFileSystem {
 pub type NativeTempSpace =
     Space<TempFileSystem, TempFileSystem, TempFileSystem, TempFileSystem, TempFileSystem>;
 
+/// The base directory every [`TempFileSystem`] location resolves under:
+/// `{env::temp_dir()}/dialog`. Exposed so a benchmark harness can measure the
+/// on-disk footprint a [`Storage::temp`]-backed run leaves behind without
+/// duplicating the redirection rule.
+pub fn temp_storage_base() -> std::path::PathBuf {
+    env::temp_dir().join(STORAGE_NAMESPACE)
+}
+
 impl Storage<NativeTempSpace> {
     /// Create a filesystem-backed storage whose roots live under the
     /// platform temp directory, via [`TempFileSystem`] redirection.

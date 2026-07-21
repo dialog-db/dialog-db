@@ -378,6 +378,22 @@ impl TreeKey for Key {
             None => out.push(&self.0),
         }
     }
+
+    fn components_of<'a>(
+        bytes: &'a [u8],
+        _layout: u8,
+        out: &mut Vec<&'a [u8]>,
+    ) -> Result<(), DialogSearchTreeError> {
+        // The same split as `components`, straight from the stored bytes: a
+        // typed key wraps exactly these bytes, so the two agree by
+        // construction, and the encoders can split without reconstructing
+        // (copying) the key first.
+        match varkey::split_components(bytes) {
+            Some(slices) => out.extend(slices),
+            None => out.push(bytes),
+        }
+        Ok(())
+    }
 }
 
 /// Trait for constructing key views with minimum and maximum values.

@@ -7,16 +7,18 @@
 //! expensive canonical rebuild is amortized across many writes instead of paid
 //! eagerly on every one.
 //!
-//! The algorithm mirrors the reference hitchhiker tree's `enqueue`:
+//! The algorithm mirrors the reference hitchhiker tree's `enqueue`, with the
+//! buffer grouped per child link (see [`crate::Novelty`]):
 //!
 //! - A **leaf** does not buffer. Ops that reach a leaf are deferred and applied
 //!   through the canonical [`TransientTree`] insert/delete path, which reshapes
 //!   exactly as a sequential edit would.
-//! - An **index with room** (`novelty.len() + msgs.len() <= op_buf_size`)
-//!   appends the ops to its `novelty`, keeping it sorted by key.
-//! - An **index that overflows** takes `novelty ++ msgs`, stable-sorts by key,
-//!   partitions the ops by which child's key range they fall into, and recurses
-//!   one level down into each child. Its own `novelty` is then cleared.
+//! - An **index** routes each arriving op to the child link covering it (one
+//!   binary search over the separators, the same rule stored routing uses) and
+//!   merges it into that link's buffer, newest op for a key last.
+//! - An **index that overflows** cascades one level down: each child receives
+//!   its own link's buffer verbatim (the grouping already happened at enqueue,
+//!   so there is no partition step) and the node's buffers are left empty.
 //!
 //! [`canonicalize`](HitchhikerTree::canonicalize) forces a full flush: every
 //! buffer is pushed all the way to the leaves, leaving all `novelty` empty. The
@@ -43,7 +45,7 @@ use crate::{
     Accessor, ArchivedNodeBody, Buffer, Cache, ContentAddressedStorage, Delta,
     DialogSearchTreeError, Distribution, Entry, Geometric, Key, Manifest, Node, NoveltyEntry,
     NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientRootParts, TransientSegment,
-    TransientTree, Value, resolve_pending,
+    TransientTree, Value, link_bounds,
 };
 
 /// The default per-node novelty capacity.
@@ -473,14 +475,16 @@ where
             match node {
                 TransientNode::Index(index) => {
                     // A higher buffer holds the most recent op, so a covering op
-                    // here wins over anything deeper.
-                    if let Some(op) = resolve_pending(&index.novelty, key.as_ref()) {
+                    // here wins over anything deeper. Ops ride the link that
+                    // routes them, so the descended link's buffer is the only
+                    // one that can cover the key.
+                    let at = child_index::<Key, Value>(&index.children, key.as_ref())?;
+                    if let Some(op) = index.novelty.resolve::<Key>(at, key.as_ref())? {
                         return Ok(match op {
-                            NoveltyOp::Assert(value) => Some(value.clone()),
+                            NoveltyOp::Assert(value) => Some(value),
                             NoveltyOp::Retract => None,
                         });
                     }
-                    let at = child_index::<Key, Value>(&index.children, key.as_ref())?;
                     match &index.children[at] {
                         Node::Persistent(link) => {
                             return self.persistent_get(&link.node, key, storage).await;
@@ -527,21 +531,29 @@ where
     {
         // The winning buffered op per key across the whole spine, in key order.
         // Collected up front (not inside the stream) so the returned stream owns
-        // everything it touches and borrows nothing from `self`.
+        // everything it touches and borrows nothing from `self`. A decode
+        // error (a malformed sealed buffer) is carried into the stream and
+        // surfaced as its first item.
         let mut pending: Vec<NoveltyEntry<Value>> = Vec::new();
-        if let HitchhikerRoot::Loaded(node) = &self.root {
-            collect_novelty_in_range::<Key, Value, R>(node, &range, &mut pending);
-            pending.sort_by(|left, right| left.key.cmp(&right.key));
-            // Root-most wins, and `collect_novelty_in_range` pushes in
-            // root-to-leaf order, so the FIRST op for a key is the winner.
-            pending.dedup_by(|later, earlier| later.key == earlier.key);
-        }
+        let collected: Result<(), DialogSearchTreeError> = match &self.root {
+            HitchhikerRoot::Loaded(node) => {
+                collect_novelty_in_range::<Key, Value, R>(node, &range, &mut pending).map(|_| {
+                    pending.sort_by(|left, right| left.key.cmp(&right.key));
+                    // Root-most wins, and `collect_novelty_in_range` pushes in
+                    // root-to-leaf order, so the FIRST op for a key is the
+                    // winner.
+                    pending.dedup_by(|later, earlier| later.key == earlier.key);
+                })
+            }
+            HitchhikerRoot::Unloaded(_) => Ok(()),
+        };
 
         let base = self.persistent_range(range, storage);
 
         async_stream::try_stream! {
             futures_util::pin_mut!(base);
 
+            collected?;
             let mut buffered = pending.into_iter().peekable();
             let mut stored = futures_util::StreamExt::next(&mut base).await.transpose()?;
 
@@ -673,50 +685,22 @@ where
     }
 }
 
-/// The largest number of ops bound for any single child, counting what the node
-/// already buffers plus what is arriving.
-///
-/// Routing follows the same child bounds a flush uses, so this measures the
-/// batch a flush would actually deliver down its heaviest edge. That is the
-/// quantity [`FlushTrigger::PerChild`] thresholds on: a flush is worth paying
-/// for when at least one child receives a real batch, rather than when the
-/// buffer merely happens to be full of ops scattered one-per-child.
-fn per_child_peak<Key, Value>(
-    buffered: &[NoveltyEntry<Value>],
-    incoming: &[NoveltyEntry<Value>],
-    children: &[Node<Key, Value>],
-) -> Result<usize, DialogSearchTreeError>
-where
-    Key: self::Key,
-    Value: self::Value,
-{
-    if children.is_empty() {
-        return Ok(0);
-    }
-    let mut counts = vec![0usize; children.len()];
-    for entry in buffered.iter().chain(incoming.iter()) {
-        let at = child_index::<Key, Value>(children, &entry.key)?;
-        counts[at] += 1;
-    }
-    Ok(counts.into_iter().max().unwrap_or(0))
-}
-
 /// Routes `msgs` into the subtree rooted at `node`, cascading one level on
 /// overflow, collecting leaf-bound ops into `deferred`.
 ///
-/// This is the faithful counterpart of the reference hitchhiker `enqueue`:
+/// This is the faithful counterpart of the reference hitchhiker `enqueue`,
+/// over the per-link grouped buffer:
 ///
 /// - **Leaf**: a segment buffers nothing; its `msgs` are appended to `deferred`
 ///   for the caller to apply through the canonical edit path.
-/// - **Index with room**: `msgs` are merged into `node.novelty` (kept sorted)
-///   and the node is returned.
-/// - **Index overflow**: `node.novelty ++ msgs` is stable-sorted by key and
-///   partitioned by the children's lower-bound separators; each child receives
-///   the ops in its range via a recursive one-level `enqueue`, and
-///   `node.novelty` is cleared. Child `at` takes the ops in
-///   `[sep(at), sep(at + 1))`, the last child runs open-ended, and a key below
-///   every separator clamps into the leftmost child, matching how the read
-///   descent routes.
+/// - **Index with room**: each op in `msgs` is routed to the child link
+///   covering it (child `at` takes `[sep(at), sep(at + 1))`, the last child
+///   runs open-ended, and a key below every separator clamps into the
+///   leftmost child, matching how the read descent routes) and merged into
+///   that link's buffer, kept sorted with the newest op for a key last.
+/// - **Index overflow**: each child receives its own link's buffer verbatim
+///   via a recursive one-level `enqueue`. The grouping already happened at
+///   enqueue, so a flush partitions nothing.
 fn enqueue<'a, Key, Value, D, Backend>(
     node: TransientNode<Key, Value>,
     msgs: Vec<NoveltyEntry<Value>>,
@@ -748,65 +732,49 @@ where
             TransientNode::Index(index) => index,
         };
 
-        // Does this node flush? `Capacity` asks whether the buffer would
-        // overflow; `PerChild` asks whether any one child now has a batch worth
-        // writing, which scales the decision to this node's own fan-out.
+        // Route the arriving ops to their links up front: this is the one
+        // grouping the design has, shared by reads, flushes, and the stored
+        // form, so it happens exactly once per op.
+        {
+            let bounds = link_bounds(&index.children)?;
+            index.novelty.route::<Key>(&bounds, msgs)?;
+        }
+
+        // Does this node flush? `Capacity` asks whether the buffer
+        // overflowed; `PerChild` asks whether any one child now has a batch
+        // worth writing, which scales the decision to this node's own
+        // fan-out. Both read lengths the grouped buffer already tracks.
         let flushes = match trigger {
-            FlushTrigger::Capacity => index.novelty.len() + msgs.len() > op_buf_size,
+            FlushTrigger::Capacity => index.novelty.len() > op_buf_size,
             FlushTrigger::PerChild { floor } => {
                 // Never exceed the buffer's capacity, whatever the per-child
                 // threshold works out to.
-                if index.novelty.len() + msgs.len() > op_buf_size {
+                if index.novelty.len() > op_buf_size {
                     true
                 } else {
                     let children = index.children.len().max(1);
                     let threshold = (op_buf_size / children).max(floor).max(1);
-                    per_child_peak::<Key, Value>(&index.novelty, &msgs, &index.children)?
-                        >= threshold
+                    index.novelty.peak() >= threshold
                 }
             }
         };
 
-        // Room: merge into this node's novelty and stop.
+        // Room: the ops stay where routing put them.
         if !flushes {
-            merge_sorted(&mut index.novelty, msgs);
             return Ok(node);
         }
 
-        // Overflow: combine the buffered ops with the incoming ones, stable-sort
-        // by key, and cascade one level into the children.
-        let mut combined = std::mem::take(&mut index.novelty);
-        combined.extend(msgs);
-        combined.sort_by(|a, b| a.key.cmp(&b.key));
-
-        // Lift every child so the recursion can descend into editable nodes.
+        // Overflow: cascade one level into the children. Lift every child so
+        // the recursion can descend into editable nodes.
         for child in &mut index.children {
             lift_child(child, accessor).await?;
         }
 
-        // Partition the ops by the children's lower-bound separators, left to
-        // right. Child `at` ends where child `at + 1` begins, so the cut is the
-        // NEXT child's separator, and the last child takes everything that
-        // remains. The ops sorting below the first separator stay with child 0,
-        // which is the same clamp routing applies, so no op is stranded.
+        // Each child takes its own link's buffer verbatim: the grouping
+        // happened at enqueue, so there is no partition step to run here.
         let child_count = index.children.len();
-        let mut rest = combined.into_iter().peekable();
         for at in 0..child_count {
-            let took: Vec<NoveltyEntry<Value>> = if at + 1 == child_count {
-                rest.by_ref().collect()
-            } else {
-                let bound = index.children[at + 1].separator()?.to_vec();
-                let mut took = Vec::new();
-                while let Some(entry) = rest.peek() {
-                    if entry.key.as_slice() < bound.as_slice() {
-                        took.push(rest.next().expect("peeked"));
-                    } else {
-                        break;
-                    }
-                }
-                took
-            };
-
+            let took = index.novelty.take_link::<Key>(at)?;
             if took.is_empty() {
                 continue;
             }
@@ -870,74 +838,45 @@ where
     Ok(())
 }
 
-/// Merges `incoming` into the already-sorted `novelty`, keeping it sorted by key
-/// and stable within equal keys (so the last op for a key remains last, which
-/// last-op-wins resolution relies on).
-fn merge_sorted<Value>(novelty: &mut Vec<NoveltyEntry<Value>>, incoming: Vec<NoveltyEntry<Value>>) {
-    novelty.extend(incoming);
-    novelty.sort_by(|a, b| a.key.cmp(&b.key));
-}
-
 /// Appends every buffered op whose key falls in `range` to `pending`, walking
 /// the live spine root to leaf.
 ///
 /// Push order is root-most first, which is the precedence order: ops flow
 /// downward, so a shallower buffer holds the more recent op for a key. Within a
-/// single node's buffer the last entry wins, matching
-/// [`novelty_lookup`]. Persistent children are skipped: their buffers, if any,
-/// were sealed into the stored bytes and are read back by
+/// single node's buffer the last entry wins; the per-link collection walks the
+/// links in child order, which is key order, and a sealed link decodes only its
+/// winners. Persistent children are skipped: their buffers, if any, were
+/// sealed into the stored bytes and are read back by
 /// [`persistent_range`](HitchhikerTree::persistent_range) as part of the base.
 fn collect_novelty_in_range<Key, Value, R>(
     node: &TransientNode<Key, Value>,
     range: &R,
     pending: &mut Vec<NoveltyEntry<Value>>,
-) where
+) -> Result<(), DialogSearchTreeError>
+where
     Key: self::Key,
     Value: self::Value + Clone,
     R: RangeBounds<Key>,
 {
     let TransientNode::Index(index) = node else {
-        return;
+        return Ok(());
     };
 
-    // Buffers are sorted by key, so the in-range ops are a contiguous run:
-    // seek to its start rather than walking the whole buffer. A buffer holds
-    // ops for its entire subtree, so scanning it per query makes a slot lookup
-    // cost the size of the buffer instead of the size of the answer.
-    //
     // A buffered key is raw bytes and a range bound is a typed key; `Key`'s
     // order agrees with its bytes, so the two compare through `as_ref`.
-    let from = match range.start_bound() {
-        Bound::Included(start) => index
-            .novelty
-            .partition_point(|entry| entry.key.as_slice() < start.as_ref()),
-        Bound::Excluded(start) => index
-            .novelty
-            .partition_point(|entry| entry.key.as_slice() <= start.as_ref()),
-        Bound::Unbounded => 0,
+    let start = match range.start_bound() {
+        Bound::Included(start) => Bound::Included(start.as_ref()),
+        Bound::Excluded(start) => Bound::Excluded(start.as_ref()),
+        Bound::Unbounded => Bound::Unbounded,
     };
-
-    // Later entries win within one buffer, so keep only the last op per key.
-    let mut at = from;
-    while at < index.novelty.len() {
-        // Past the range: the rest of this sorted buffer is too.
-        match range.end_bound() {
-            Bound::Included(end) if index.novelty[at].key.as_slice() > end.as_ref() => break,
-            Bound::Excluded(end) if index.novelty[at].key.as_slice() >= end.as_ref() => break,
-            _ => {}
-        }
-        let mut last = at;
-        while last + 1 < index.novelty.len() && index.novelty[last + 1].key == index.novelty[at].key
-        {
-            last += 1;
-        }
-        let winner = &index.novelty[last];
-        pending.push(NoveltyEntry {
-            key: winner.key.clone(),
-            op: winner.op.clone(),
-        });
-        at = last + 1;
-    }
+    let end = match range.end_bound() {
+        Bound::Included(end) => Bound::Included(end.as_ref()),
+        Bound::Excluded(end) => Bound::Excluded(end.as_ref()),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    index
+        .novelty
+        .collect_winners_in_range::<Key>(start, end, pending)?;
 
     // Descend only into children whose span can intersect the range, so the
     // walk costs the span rather than the spine.
@@ -970,9 +909,10 @@ fn collect_novelty_in_range<Key, Value, R>(
             && below_end
             && let Node::Transient(child) = child
         {
-            collect_novelty_in_range(child, range, pending);
+            collect_novelty_in_range(child, range, pending)?;
         }
     }
+    Ok(())
 }
 
 /// One step of a stored-entry stream over a live spine.
@@ -1184,7 +1124,7 @@ where
                     drain_novelty(child, ops, accessor).await?;
                 }
             }
-            ops.append(&mut index.novelty);
+            ops.extend(index.novelty.take_all::<Key>()?);
         }
         Ok(())
     })
@@ -1203,8 +1143,9 @@ mod tests {
         DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
     };
     use crate::{
-        ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta, Manifest,
-        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientTree, tree_spec,
+        ArchivedNodeBody, Buffer, Cache, Change, ContentAddressedStorage, Delta, Manifest, Node,
+        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientTree,
+        tree_spec,
     };
 
     /// The three flush policies, so an oracle can assert behavior is identical
@@ -2788,6 +2729,101 @@ mod tests {
             canonical.root(),
             expected.root(),
             "canonicalize must replay and stamp under the tree's own manifest"
+        );
+        Ok(())
+    }
+
+    /// Lifts every sealed link buffer on the live spine, discarding all cached
+    /// stored encodings, so the next persist re-encodes every buffer from its
+    /// decoded ops.
+    fn lift_all_buffers(node: &mut TransientNode<[u8; 4], Vec<u8>>) -> Result<()> {
+        if let TransientNode::Index(index) = node {
+            index.novelty.lift_all::<[u8; 4]>()?;
+            for child in &mut index.children {
+                if let Node::Transient(child) = child {
+                    lift_all_buffers(child)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Counts the link buffers on the live spine still carrying their sealed
+    /// stored encoding.
+    fn count_sealed_buffers(node: &TransientNode<[u8; 4], Vec<u8>>) -> usize {
+        match node {
+            TransientNode::Segment(_) => 0,
+            TransientNode::Index(index) => {
+                index.novelty.sealed_links()
+                    + index
+                        .children
+                        .iter()
+                        .map(|child| match child {
+                            Node::Transient(child) => count_sealed_buffers(child),
+                            Node::Persistent(_) => 0,
+                        })
+                        .sum::<usize>()
+            }
+        }
+    }
+
+    /// The persist path that reuses sealed buffer encodings must produce a
+    /// node byte-identical (same root hash) to the path that re-encodes every
+    /// buffer from its decoded ops. This is THE cache-correctness pin: the
+    /// stored bytes may never depend on whether a link's buffer was touched.
+    #[dialog_common::test]
+    async fn it_persists_sealed_buffers_byte_identical_to_fresh_encodes() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // A tree with buffered novelty across several links: build a broad
+        // base, then buffer scattered writes at the root and seal them.
+        let keys: Vec<u32> = (0..500).collect();
+        let base = sequential(&keys, &mut storage).await?;
+        let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(100_000);
+        for k in (500..560u32).step_by(3) {
+            buffered = buffered
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let root = buffered.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        // Both paths reopen the sealed tree and write the same small batch,
+        // which touches at most a couple of links and leaves the rest sealed.
+        let batch: Vec<u32> = vec![700, 701];
+        let mut roots = Vec::new();
+        for fresh in [false, true] {
+            let sealed: TestTree = PersistentTree::seal(root.clone(), Cache::new());
+            let mut tree = HitchhikerTree::open(&sealed).with_op_buf_size(100_000);
+            for &k in &batch {
+                tree = tree
+                    .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                    .await?;
+            }
+            let super::HitchhikerRoot::Loaded(node) = &mut tree.root else {
+                panic!("a written tree must hold a loaded root");
+            };
+            if fresh {
+                lift_all_buffers(node)?;
+                assert_eq!(
+                    count_sealed_buffers(node),
+                    0,
+                    "the fresh path must have no sealed buffer left"
+                );
+            } else {
+                assert!(
+                    count_sealed_buffers(node) > 0,
+                    "the cached path must actually exercise sealed buffers"
+                );
+            }
+            let mut delta = Delta::zero();
+            roots.push(tree.persist(&mut delta)?);
+        }
+
+        assert_eq!(
+            roots[0], roots[1],
+            "reused sealed encodings must persist byte-identical to fresh encodes"
         );
         Ok(())
     }

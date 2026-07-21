@@ -568,6 +568,20 @@ mod tests {
                     at += width;
                 }
             }
+
+            fn components_of<'a>(
+                bytes: &'a [u8],
+                layout: u8,
+                out: &mut Vec<&'a [u8]>,
+            ) -> Result<(), DialogSearchTreeError> {
+                let widths: [usize; 3] = if layout == 0 { [1, 2, 1] } else { [1, 1, 2] };
+                let mut at = 0;
+                for width in widths {
+                    out.push(&bytes[at..at + width]);
+                    at += width;
+                }
+                Ok(())
+            }
         }
     }
 

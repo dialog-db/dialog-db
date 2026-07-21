@@ -94,6 +94,31 @@ pub trait Key:
     fn components<'a>(&'a self, out: &mut Vec<&'a [u8]>) {
         out.push(self.as_ref());
     }
+
+    /// Splits a key's raw stored bytes into its component slices for `layout`,
+    /// borrowing from `bytes`, without reconstructing the typed key.
+    ///
+    /// Must agree with [`components`](Key::components) on every valid key:
+    /// `components_of(key.as_ref(), key.layout(), out)` pushes exactly the
+    /// slices `key.components(out)` pushes. The column encoders split from
+    /// raw bytes through this (a buffered op stores raw key bytes, and even a
+    /// typed key's slices borrow from the same bytes), so no key is copied or
+    /// parsed into typed form just to be taken apart again.
+    ///
+    /// The default pushes the whole key as the single opaque component,
+    /// matching the default [`schema`](Key::schema); a key type that
+    /// overrides `schema`/`components` must override this to match. A
+    /// mismatch cannot pass silently: the encoders check the slice count and
+    /// coverage against the schema and refuse to encode.
+    fn components_of<'a>(
+        bytes: &'a [u8],
+        layout: u8,
+        out: &mut Vec<&'a [u8]>,
+    ) -> Result<(), DialogSearchTreeError> {
+        let _ = layout;
+        out.push(bytes);
+        Ok(())
+    }
 }
 
 impl<const N: usize> Key for [u8; N] {
