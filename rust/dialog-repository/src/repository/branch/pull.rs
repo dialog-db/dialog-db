@@ -1,4 +1,3 @@
-use crate::RevisionExt as _;
 use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
@@ -542,11 +541,12 @@ impl<'a> Pull<'a> {
                 }
 
                 let authority = Identify.perform(env).await?;
-                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
+                let branch_entity =
+                    crate::branch_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    lineage.as_str(),
+                    branch_entity.clone(),
                     authority.did(),
                 );
                 let mut record = revision.record(
@@ -698,11 +698,12 @@ impl<'a> Pull<'a> {
                 // merged ancestry is both parents', and both watermarks
                 // are in hand.
                 let authority = Identify.perform(env).await?;
-                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
+                let branch_entity =
+                    crate::branch_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    lineage.as_str(),
+                    branch_entity.clone(),
                     authority.did(),
                 );
                 let mut record = revision.record(
@@ -841,11 +842,12 @@ impl<'a> Pull<'a> {
             // root is replaced once those records are in the tree.
             Some(local) => {
                 let authority = Identify.perform(env).await?;
-                let lineage = crate::lineage_of(branch.of(), authority.profile(), branch.name());
+                let branch_entity =
+                    crate::branch_of(branch.of(), authority.profile(), branch.name());
                 let mut revision = local.merge(
                     &upstream_revision,
                     TreeReference::default(),
-                    lineage.as_str(),
+                    branch_entity.clone(),
                     authority.did(),
                 );
                 // A merge records no skip table: a skip chain must never
@@ -1412,7 +1414,6 @@ mod tests {
 #[cfg(test)]
 mod history_tests {
     use super::SMALL_DIVERGENCE;
-    use crate::RevisionExt as _;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -1784,9 +1785,11 @@ mod history_tests {
         assert_eq!(titles.len(), 1, "the superseded value must not resurrect");
         assert_eq!(titles[0].is, Value::String("Hi".to_string()));
 
-        // Skip tables regrow after the merge without ever crossing it: the
-        // first commit on top of a merge has no table (its parent has
-        // several parents), the next one leaps to the merge and stops.
+        // Skip tables regrow after the merge without ever crossing it: a
+        // fresh chain may anchor AT the merge (when the merge's edition
+        // reaches an anchor mark) but never carries anything from beyond
+        // it — every recorded leap on the new run lands at or above the
+        // merge.
         let after_merge = feature
             .commit(stream::iter(vec![assert_one("post/tag", "post:1", "a")]))
             .perform(&operator)
@@ -1798,24 +1801,19 @@ mod history_tests {
             .await?;
         feature.refresh(&operator).await?;
         let history = feature.history(&operator);
-        assert!(
-            history
-                .revision_record(&after_merge.version())
+        for version in [after_merge.version(), next.version()] {
+            let skips = history
+                .revision_record(&version)
                 .await?
                 .expect("the record is retrievable")
-                .skips
-                .is_empty(),
-            "a commit on top of a merge records no skip table"
-        );
-        assert_eq!(
-            history
-                .revision_record(&next.version())
-                .await?
-                .expect("the record is retrievable")
-                .skips,
-            vec![merged.version()],
-            "the regrown chain leaps to the merge and stops there"
-        );
+                .skips;
+            assert!(
+                skips
+                    .iter()
+                    .all(|target| target.edition >= merged.version().edition),
+                "no leap on the post-merge run reaches past the merge: {skips:?}"
+            );
+        }
 
         Ok(())
     }
@@ -1995,7 +1993,7 @@ mod history_tests {
         // signed by that issuer's key.
         let evil = repo.branch("evil").open().perform(&operator).await?;
         let forged = Revision {
-            branch: "evil".into(),
+            branch: "branch:evil".parse()?,
             issuer: operator.did(),
             tree: TreeReference::from([9u8; 32]),
             edition: Edition::GENESIS,

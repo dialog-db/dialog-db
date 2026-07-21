@@ -184,9 +184,6 @@ pub use settings::*;
 
 pub mod history;
 
-mod revision;
-pub use revision::*;
-
 mod ability;
 pub use ability::*;
 

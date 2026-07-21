@@ -129,7 +129,7 @@ pub(crate) fn builtin(concept: &Entity) -> Vec<DeductiveRule> {
                         RevisionQuery {
                             of: Term::var("record"),
                             this: Term::var("this"),
-                            lineage: Term::var("lineage"),
+                            branch: Term::var("branch"),
                             issuer: Term::var("issuer"),
                             authority: Term::var("authority"),
                             edition: Term::var("edition"),

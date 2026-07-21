@@ -81,7 +81,13 @@ gitGraph TB:
 
 Alice's `A:2` (edition 2) and Bob's `B:1` (edition 1) are ordered neither way by inspection alone, but Bob's merge has seen both, so it lands above both at edition 3.
 
-**The origin** answers "who is counting?": a hash folding together the user profile, the repository, the branch name, and the session key of the writing device. The same person on two branches, or on two devices, gets two origins. Each origin is therefore a **single sequential actor**: it produces revisions one at a time, never in parallel with itself.
+**The origin** answers "who is counting?". It is built from a three-step ladder of derived identities, each folding the previous:
+
+- A **replica** is a repository as seen by one profile: `hash(repository, profile)`.
+- A **branch** is a named line of work on a replica: `hash(replica, branch-name)`. This opaque identifier — never the name — is what published heads carry.
+- An **origin** is a branch as advanced by one session key: `hash(branch, operator)`.
+
+The same person on two branches, or on two devices, gets two origins. Each origin is therefore a **single sequential actor**: it produces revisions one at a time, never in parallel with itself.
 
 **The version** is the pair `(origin, edition)`, the globally unique name of a revision.
 
@@ -122,7 +128,7 @@ A test pins that all three agree (`it_publishes_the_watermark_with_the_head`, `i
 
 Records are stored in two of the three index orderings (by entity and by attribute, the two shapes queries take); the value ordering is skipped, since a record blob is unique to its revision and nothing looks one up by value. Readers memoize verified records by version (a version's record is immutable, so the memo never invalidates), which spares the tree read, the decode, and the signature verification on the repeated ancestry steps of skip extension, context walks, and causality. Because records are ordinary facts, history is queryable: "who committed this", "is X an ancestor of Y", "show the log" are normal queries over built-in derived relations, and records that do not verify are simply not projected.
 
-**Skip links**: besides its parent, a revision records shortcuts jumping 2, 4, 8, ... revisions back, so ancestor search takes logarithmically many steps. A shortcut never jumps across a merge (it would skip the ancestry entering through the other parent), and searches never jump below the edition they seek.
+**Skip links**: besides its parent, a revision records anchors deep in its first-parent run — the most recent ancestors whose editions are divisible by 2, 4, 8, ... (the distinct ones; at most log2(run length) entries) — so ancestor search takes logarithmically many steps. The anchor shape is what makes recording them free: a child's table is a pure function of its parent's version and table (the parent supersedes every anchor level its edition's power-of-two divisibility reaches; deeper anchors carry forward unchanged), so extending it costs one record lookup — memo-warm on a held branch handle — where the previous shape re-walked log2(depth) ancestor records out of the tree on every commit and was the single depth-growing term in the commit profile. A shortcut never jumps across a merge (it would skip the ancestry entering through the other parent; the child of a merge starts a fresh table that may anchor at the merge but carries nothing beyond it), and searches never jump below the edition they seek.
 
 **A known gap, stated honestly:** the record names the profile it acts for, but only the session key's signature backs that claim. Binding it cryptographically needs delegation proofs plus a time-anchoring story (delegations expire; revisions are forever; the history carries no wall clocks). Until then the profile field is attribution metadata; the session key is the bound identity.
 

@@ -42,7 +42,7 @@ pub use remote::*;
 // without linking `dialog-query` or the storage/transport stack.
 // Re-exported here at their historical
 // `dialog_repository::{Revision, TreeReference}` paths.
-pub use dialog_capability::{EMPTY_TREE_HASH, Revision, TreeReference};
+pub use dialog_artifacts::{EMPTY_TREE_HASH, Revision, TreeReference};
 
 /// A repository scoped to a specific subject.
 ///
@@ -1038,7 +1038,6 @@ mod tests {
     mod query_session {
 
         use super::query_engine::{Employee, employee};
-        use crate::RevisionExt as _;
         use crate::helpers::{test_operator_with_profile, test_repo};
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
@@ -1238,15 +1237,15 @@ mod tests {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-            let origin = schema::Origin::new(profile.did(), branch.of().clone());
-            let expected = schema::Branch::new(&origin, "main");
+            let replica = schema::Replica::new(profile.did(), branch.of().clone());
+            let expected = schema::Branch::new(&replica, "main");
 
             let results: Vec<schema::Branch> = branch
                 .query()
                 .select(Query::<schema::Branch> {
                     this: expected.this.clone().into(),
                     name: Term::var("name"),
-                    origin: Term::var("origin"),
+                    replica: Term::var("replica"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1255,13 +1254,13 @@ mod tests {
             assert_eq!(results.len(), 1, "schema::Branch must auto-surface");
             assert_eq!(results[0].this, expected.this);
             assert_eq!(results[0].name.0, "main");
-            assert_eq!(results[0].origin.0, origin.this);
+            assert_eq!(results[0].replica.0, replica.this);
             Ok(())
         }
 
         #[dialog_common::test]
         async fn it_auto_includes_origin_in_metadata() -> anyhow::Result<()> {
-            // branch.query() should also auto-surface the schema::Origin
+            // branch.query() should also auto-surface the schema::Replica
             // anchoring the branch — entity is (profile, subject)-derived
             // and carries the two DIDs as attributes.
             use crate::schema;
@@ -1270,11 +1269,11 @@ mod tests {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-            let expected = schema::Origin::new(profile.did(), branch.of().clone());
+            let expected = schema::Replica::new(profile.did(), branch.of().clone());
 
-            let results: Vec<schema::Origin> = branch
+            let results: Vec<schema::Replica> = branch
                 .query()
-                .select(Query::<schema::Origin> {
+                .select(Query::<schema::Replica> {
                     this: expected.this.clone().into(),
                     subject: Term::var("subject"),
                     profile: Term::var("profile"),
@@ -1283,7 +1282,7 @@ mod tests {
                 .try_vec()
                 .await?;
 
-            assert_eq!(results.len(), 1, "schema::Origin must auto-surface");
+            assert_eq!(results.len(), 1, "schema::Replica must auto-surface");
             assert_eq!(results[0].this, expected.this);
             assert_eq!(results[0].subject.0, branch.of().this());
             assert_eq!(results[0].profile.0, profile.did().this());
@@ -1308,8 +1307,8 @@ mod tests {
                 .await?;
             // Reload so the revision cell reflects the commit.
             let branch = repo.branch("main").load().perform(&operator).await?;
-            let origin = schema::Origin::new(profile.did(), branch.of().clone());
-            let branch_concept = schema::Branch::new(&origin, "main");
+            let replica = schema::Replica::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&replica, "main");
 
             let results: Vec<schema::BranchRevision> = branch
                 .query()
@@ -1341,8 +1340,8 @@ mod tests {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-            let origin = schema::Origin::new(profile.did(), branch.of().clone());
-            let branch_concept = schema::Branch::new(&origin, "main");
+            let replica = schema::Replica::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&replica, "main");
 
             let results: Vec<schema::BranchRevision> = branch
                 .query()
@@ -1375,8 +1374,8 @@ mod tests {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-            let origin = schema::Origin::new(profile.did(), branch.of().clone());
-            let branch_concept = schema::Branch::new(&origin, "main");
+            let replica = schema::Replica::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&replica, "main");
 
             // First commit.
             branch
@@ -1459,8 +1458,8 @@ mod tests {
             let head = branch.revision().expect("branch has a revision");
 
             // The overlay hands out the join key.
-            let origin = schema::Origin::new(profile.did(), branch.of().clone());
-            let branch_concept = schema::Branch::new(&origin, "main");
+            let replica = schema::Replica::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&replica, "main");
             let pointers: Vec<schema::BranchRevision> = branch
                 .query()
                 .select(Query::<schema::BranchRevision> {
@@ -1481,7 +1480,7 @@ mod tests {
                 .query()
                 .select(Query::<schema::Revision> {
                     this: revision_entity.into(),
-                    lineage: Term::var("lineage"),
+                    branch: Term::var("branch"),
                     issuer: Term::var("issuer"),
                     authority: Term::var("authority"),
                     edition: Term::var("edition"),
@@ -1492,7 +1491,7 @@ mod tests {
             assert_eq!(rows.len(), 1, "the revision projects exactly once");
             assert_eq!(rows[0].issuer.0, operator.did().this());
             assert_eq!(rows[0].authority.0, profile.did().this());
-            assert_eq!(rows[0].lineage.0, head.lineage());
+            assert_eq!(rows[0].branch.0, head.branch);
             assert_eq!(rows[0].edition.0, head.edition.value());
 
             Ok(())
@@ -1683,7 +1682,7 @@ mod tests {
                 .select(Query::<schema::Branch> {
                     this: Term::var("this"),
                     name: Term::var("name"),
-                    origin: Term::var("origin"),
+                    replica: Term::var("replica"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1692,10 +1691,10 @@ mod tests {
             assert_eq!(branches[0].name.0, "main");
 
             // (2) What's my origin (subject, profile)?
-            let origins: Vec<schema::Origin> = branch
+            let origins: Vec<schema::Replica> = branch
                 .query()
-                .select(Query::<schema::Origin> {
-                    this: branches[0].origin.0.clone().into(),
+                .select(Query::<schema::Replica> {
+                    this: branches[0].replica.0.clone().into(),
                     subject: Term::var("subject"),
                     profile: Term::var("profile"),
                 })
@@ -1742,9 +1741,9 @@ mod tests {
             let session_entity = schema::Session::entity();
 
             // Build the expected branch entities for the two in-scope branches.
-            let origin = schema::Origin::new(profile.did(), main.of().clone());
-            let main_branch = schema::Branch::new(&origin, "main");
-            let feature_branch = schema::Branch::new(&origin, "feature");
+            let replica = schema::Replica::new(profile.did(), main.of().clone());
+            let main_branch = schema::Branch::new(&replica, "main");
+            let feature_branch = schema::Branch::new(&replica, "feature");
             let mut expected_branches = vec![main_branch.this.clone(), feature_branch.this.clone()];
             expected_branches.sort();
 

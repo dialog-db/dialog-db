@@ -74,7 +74,7 @@ mod tests {
         assert!(branch.revision().is_none());
 
         let revision = Revision {
-            branch: "main".into(),
+            branch: "branch:main".parse()?,
             issuer: subject.did().clone(),
             tree: TreeReference::from(EMPTY_TREE_HASH),
             edition: Edition::GENESIS,

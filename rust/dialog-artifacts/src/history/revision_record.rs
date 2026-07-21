@@ -39,8 +39,10 @@ use super::{Edition, Origin, REVISION_ATTRIBUTE, Version, verify_issuer_signatur
 pub struct RevisionRecord {
     /// Encoding version of this record, for forward evolution
     pub format: u8,
-    /// The branch lineage entity this revision was minted on
-    pub lineage: Entity,
+    /// The branch entity this revision was minted on (the opaque
+    /// content-derived identifier folding replica and name — the same
+    /// one the head carries)
+    pub branch: Entity,
     /// DID of the operator (session key) that minted the revision — the
     /// key whose signature binds this record
     pub issuer: String,
@@ -53,8 +55,11 @@ pub struct RevisionRecord {
     /// Parent revision versions — the revision DAG edge. Empty for
     /// genesis; two entries for a merge.
     pub parents: Vec<Version>,
-    /// Skip links: entry `i` leaps 2^(i+1) first-parent steps back (see
-    /// [`extend_skips`](super::extend_skips)). Empty for genesis and merge
+    /// Skip links: the distinct 2-adic anchors of this revision's
+    /// first-parent run, in strictly decreasing edition order — the
+    /// level-`k` anchor (most recent ancestor whose edition is divisible
+    /// by `2^(k+1)`) is the first entry with that divisibility (see
+    /// [`carry_skips`](super::carry_skips)). Empty for genesis and merge
     /// revisions.
     pub skips: Vec<Version>,
     /// The issuer's Ed25519 signature over [`RevisionRecord::payload`] —
@@ -66,6 +71,11 @@ pub struct RevisionRecord {
 
 /// The current [`RevisionRecord::format`]
 pub const REVISION_RECORD_FORMAT: u8 = 0;
+
+/// The domain tag opening every revision-record signing payload; the
+/// counterpart of `crate::HEAD_SIGNING_DOMAIN` for the other
+/// payload kind the same session key signs.
+pub const RECORD_SIGNING_DOMAIN: &[u8] = b"dialog/revision-record@1\n";
 
 impl RevisionRecord {
     /// Encode this record into the bytes carried by its [`Value::Record`]
@@ -80,19 +90,25 @@ impl RevisionRecord {
             .map_err(|error| DialogArtifactsError::InvalidValue(format!("{error}")))
     }
 
-    /// The canonical signing payload: this record, dag-cbor encoded with an
-    /// empty signature field
+    /// The canonical signing payload: the record signing domain tag
+    /// followed by this record dag-cbor encoded with an empty signature
+    /// field. The tag makes the record and head payload spaces disjoint
+    /// by construction — the same session key signs both, and a
+    /// signature over one kind must never verify as the other (see
+    /// `crate::HEAD_SIGNING_DOMAIN`).
     pub fn payload(&self) -> Result<Vec<u8>, DialogArtifactsError> {
         let mut unsigned = self.clone();
         unsigned.signature = Vec::new();
-        unsigned.to_bytes()
+        let mut payload = RECORD_SIGNING_DOMAIN.to_vec();
+        payload.extend_from_slice(&unsigned.to_bytes()?);
+        Ok(payload)
     }
 
-    /// The [`Origin`] of this record's revision, derived from the lineage
-    /// and issuer the record itself names — the same derivation the minting
-    /// replica used
+    /// The [`Origin`] of this record's revision, derived from the branch
+    /// entity and issuer the record itself names — the same derivation the
+    /// minting replica used
     pub fn origin(&self) -> Origin {
-        Origin::derive_from_identifiers([self.lineage.as_str(), self.issuer.as_str()])
+        Origin::derive_from_identifiers([self.branch.as_str(), self.issuer.as_str()])
     }
 
     /// The [`Edition`] of this record's revision, derived from its parents:

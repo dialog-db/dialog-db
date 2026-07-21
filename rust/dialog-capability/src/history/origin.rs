@@ -74,19 +74,19 @@ impl Origin {
         ))
     }
 
-    /// Derive the [`Origin`] for a lineage identified by a sequence of
-    /// string identifiers — typically the issuer DID, the repository DID,
-    /// and the branch name.
+    /// Derive the [`Origin`] for a sequential actor identified by a
+    /// sequence of string identifiers — the branch entity (the opaque
+    /// replica-and-name identifier) and the issuer DID.
     ///
     /// Unlike [`Origin::derive`], where the fixed-width issuer key makes
     /// concatenation unambiguous, these identifiers are variable-width, so
     /// every component is length-prefixed to keep the derivation injective.
     ///
     /// The components must together identify a single sequential actor: a
-    /// branch head advances independently of every other branch, so within
-    /// a multi-branch repository the branch belongs in the scope — deriving
-    /// from the issuer and repository alone would let two branches advanced
-    /// by the same issuer mint colliding versions.
+    /// branch head advances independently of every other branch, so the
+    /// branch entity belongs in the scope — deriving from the issuer and
+    /// repository alone would let two branches advanced by the same issuer
+    /// mint colliding versions.
     pub fn derive_from_identifiers<'a>(identifiers: impl IntoIterator<Item = &'a str>) -> Self {
         let mut bytes = Vec::new();
         for identifier in identifiers {

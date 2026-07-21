@@ -50,7 +50,7 @@ use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
 ///
 /// At `.perform(env)` the layer resolves the operator's identity via
 /// [`Identify`] and folds in [`metadata`](Self::metadata): one
-/// [`Origin`](crate::schema::Origin) + [`Branch`](crate::schema::Branch)
+/// [`Origin`](crate::schema::Replica) + [`Branch`](crate::schema::Branch)
 /// (+ [`BranchRevision`](crate::schema::BranchRevision) when committed)
 /// per branch, plus a single [`Session`]. Callers don't pass the
 /// profile or operator DID, and nothing is written to any branch's

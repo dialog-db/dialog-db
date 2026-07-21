@@ -163,7 +163,6 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
 
 #[cfg(test)]
 mod tests {
-    use crate::RevisionExt as _;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -499,7 +498,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
 
-        let origin = schema::Origin::new(profile.did(), main.of().clone());
+        let origin = schema::Replica::new(profile.did(), main.of().clone());
         let main_branch = schema::Branch::new(&origin, "main");
 
         let session_entity = schema::Session::entity();

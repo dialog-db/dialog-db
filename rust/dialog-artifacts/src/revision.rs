@@ -12,8 +12,13 @@ use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
 
-use crate::Did;
-use crate::history::{Context, Edition, HistoryError, Origin, Version, verify_issuer_signature};
+use dialog_capability::Did;
+
+use crate::Entity;
+use crate::history::{
+    Context, Edition, HistoryError, Origin, REVISION_RECORD_FORMAT, RevisionRecord, Version,
+    verify_issuer_signature,
+};
 
 /// The raw 32-byte Blake3 hash a [`TreeReference`] wraps. Kept as a
 /// bare array (not a wrapper type) so the wire form is a plain byte
@@ -96,8 +101,7 @@ pub struct Revision {
     /// does not travel on published heads. (A guessable name is still
     /// enumerable from the hash by anyone holding the public DIDs —
     /// opacity hides casual exposure, not a determined probe.)
-    #[serde(default)]
-    pub branch: String,
+    pub branch: Entity,
 
     /// DID of the operator (ephemeral session key) that created this
     /// revision. A branch identifier is shared by every session advancing
@@ -144,7 +148,7 @@ pub struct Revision {
 impl Revision {
     /// Build the first revision of a branch, with no causal ancestor and
     /// the genesis edition.
-    pub fn new(tree: TreeReference, branch: impl Into<String>, issuer: Did) -> Self {
+    pub fn new(tree: TreeReference, branch: impl Into<Entity>, issuer: Did) -> Self {
         Self {
             branch: branch.into(),
             issuer,
@@ -168,7 +172,7 @@ impl Revision {
     /// and commits on top of it belong to this branch's scope, not the
     /// foreign one — otherwise the minted version would disagree with the
     /// version its own data was tagged with.
-    pub fn advance(&self, tree: TreeReference, branch: impl Into<String>, issuer: Did) -> Self {
+    pub fn advance(&self, tree: TreeReference, branch: impl Into<Entity>, issuer: Did) -> Self {
         Self {
             branch: branch.into(),
             issuer,
@@ -192,7 +196,7 @@ impl Revision {
         &self,
         upstream: &Revision,
         tree: TreeReference,
-        branch: impl Into<String>,
+        branch: impl Into<Entity>,
         issuer: Did,
     ) -> Self {
         Self {
@@ -223,7 +227,14 @@ impl Revision {
     /// the signature, deterministically encoded. Variable-width fields are
     /// length-prefixed to keep the encoding injective.
     ///
+    /// The payload opens with [`HEAD_SIGNING_DOMAIN`]: the same session
+    /// key signs both heads and in-tree revision records (through the
+    /// same attest effect), and the domain tag is what makes the two
+    /// payload spaces disjoint by construction — a signature over one
+    /// kind can never verify as the other, whatever the field contents.
+    ///
     /// ```text
+    /// domain tag ("dialog/head@1\n")
     /// (length (8, big-endian) ++ UTF-8) for branch, issuer
     /// tree (32)
     /// edition (8, big-endian)
@@ -239,7 +250,7 @@ impl Revision {
     /// length for any fixed prefix, so the encoding stays injective: a
     /// signature over one can never validate the other.
     pub fn payload(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+        let mut bytes = HEAD_SIGNING_DOMAIN.to_vec();
         for field in [self.branch.as_str(), self.issuer.as_str()] {
             bytes.extend_from_slice(&(field.len() as u64).to_be_bytes());
             bytes.extend_from_slice(field.as_bytes());
@@ -256,6 +267,40 @@ impl Revision {
             }
         }
         bytes
+    }
+
+    /// The content-derived entity identifying this revision — the entity
+    /// onto which commit metadata can be associated, like on any other
+    /// entity.
+    pub fn entity(&self) -> Entity {
+        use crate::history::VersionExt as _;
+        self.version().entity()
+    }
+
+    /// This revision's [`RevisionRecord`](crate::history::RevisionRecord) —
+    /// everything the revision states about itself as one atomic fact,
+    /// ready to be signed and written into the tree.
+    ///
+    /// The `authority` (the profile the issuer acts for) is passed in: the
+    /// head does not carry it — its identity is the branch entity plus the
+    /// issuer — but the record keeps the attribution readable. The
+    /// revision's tree root is deliberately not in the record: the record
+    /// lives in that tree, so the root cannot appear inside itself.
+    pub fn record(
+        &self,
+        authority: &Did,
+        parents: Vec<Version>,
+        skips: Vec<Version>,
+    ) -> RevisionRecord {
+        RevisionRecord {
+            format: REVISION_RECORD_FORMAT,
+            branch: self.branch.clone(),
+            issuer: self.issuer.to_string(),
+            authority: authority.to_string(),
+            parents,
+            skips,
+            signature: Vec::new(),
+        }
     }
 
     /// Verify that the signature is the issuer's Ed25519 signature over
@@ -303,6 +348,14 @@ impl Revision {
     }
 }
 
+/// The domain tag opening every head signing payload. Signing payload
+/// kinds sharing one key (heads here, in-tree revision records in
+/// `dialog-artifacts`) each open with their own tag, so the payload
+/// spaces are disjoint by construction and a signature can never be
+/// replayed across kinds. The trailing newline keeps any future tag
+/// from being a prefix of another.
+pub const HEAD_SIGNING_DOMAIN: &[u8] = b"dialog/head@1\n";
+
 /// The highest edition a verified head (or any watermark entry it
 /// publishes) may carry. Editions grow by one per commit or merge, so no
 /// legitimate chain approaches 2^62 sequential operations; anything at or
@@ -335,7 +388,11 @@ mod tests {
         edit: impl FnOnce(&mut Revision),
     ) -> Revision {
         let did = did_of(issuer);
-        let mut revision = Revision::new(TreeReference::from([7u8; 32]), "branch:opaque", did);
+        let mut revision = Revision::new(
+            TreeReference::from([7u8; 32]),
+            "branch:opaque".parse::<Entity>().unwrap(),
+            did,
+        );
         let mut context = Context::new();
         context.record(Version::new(Origin::from([1u8; 32]), Edition::new(4)));
         revision.context = Some(context);
@@ -384,6 +441,19 @@ mod tests {
                 "edition {hostile} must be refused despite the valid signature"
             );
         }
+    }
+
+    /// Every head signing payload opens with the head domain tag, so the
+    /// head and record payload spaces are disjoint byte spaces: one
+    /// session key signs both kinds, and a signature over one must never
+    /// verify as the other whatever the field contents.
+    #[test]
+    fn it_domain_separates_the_head_signing_payload() {
+        let head = signed_head(&key(1), |_| {});
+        assert!(
+            head.payload().starts_with(HEAD_SIGNING_DOMAIN),
+            "the head payload opens with its domain tag"
+        );
     }
 
     /// The ceiling guards the published watermark too: a hostile entry at

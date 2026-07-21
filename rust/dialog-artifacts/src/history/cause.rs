@@ -15,9 +15,20 @@ use super::{Edition, VERSION_LENGTH, Version};
 ///
 /// Entries are kept sorted and deduplicated so that the encoding of a cause
 /// is deterministic.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize)]
 #[repr(transparent)]
 pub struct Cause(Vec<Version>);
+
+/// Deserialization routes through [`Cause::new`], NOT the transparent
+/// derive: [`contains`](Cause::contains) is a binary search over the
+/// sorted-and-deduplicated invariant, so a wire-supplied unsorted cause
+/// would silently miss tier-1 citations in conflict detection. Every
+/// constructor enforces the invariant; the wire must too.
+impl<'de> Deserialize<'de> for Cause {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(Vec::<Version>::deserialize(deserializer)?))
+    }
+}
 
 impl Cause {
     /// An empty [`Cause`], as carried by a first write or a genesis revision
@@ -104,5 +115,31 @@ impl TryFrom<&[u8]> for Cause {
                 .map(Version::from_key_bytes)
                 .collect::<Result<Vec<_>, _>>()?,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::Origin;
+
+    /// A wire-supplied cause re-establishes the sorted-and-deduplicated
+    /// invariant on deserialization: `contains` is a binary search, so a
+    /// derive-deserialized unsorted cause would silently miss tier-1
+    /// citations in conflict detection.
+    #[test]
+    fn it_restores_the_invariant_on_deserialization() -> anyhow::Result<()> {
+        let early = Version::new(Origin::from([1u8; 32]), Edition::new(1));
+        let late = Version::new(Origin::from([2u8; 32]), Edition::new(5));
+
+        // Encode a RAW vec, unsorted with a duplicate — what a hostile or
+        // buggy peer could put on the wire where a cause is expected.
+        let wire = serde_ipld_dagcbor::to_vec(&vec![late, early, late])?;
+        let cause: Cause = serde_ipld_dagcbor::from_slice(&wire)?;
+
+        assert_eq!(cause.versions(), &[early, late], "sorted and deduplicated");
+        assert!(cause.contains(&early), "binary search finds every entry");
+        assert!(cause.contains(&late));
+        Ok(())
     }
 }
