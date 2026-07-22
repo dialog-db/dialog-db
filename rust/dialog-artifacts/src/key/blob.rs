@@ -21,7 +21,7 @@ const BLOB_HASH_OFFSET: usize = TAG_LENGTH;
 
 /// A view over a [`Key`] in the blob index.
 ///
-/// Layout: `BLOB_KEY_TAG ‖ blob_hash (32) ‖ 0…`. Blob keys therefore occupy a
+/// Layout: `BLOB_KEY_TAG ‖ blob_hash (32)`. Blob keys therefore occupy a
 /// contiguous, hash-ordered range disjoint from every other index.
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -30,24 +30,31 @@ pub struct BlobKey(pub Key);
 impl BlobKey {
     /// Construct the blob-index key for a blob hash.
     pub fn new(hash: &Blake3Hash) -> Self {
-        let mut key = Key::min().set_tag(BLOB_KEY_TAG);
-        key.as_mut()[BLOB_HASH_OFFSET..BLOB_HASH_OFFSET + BLOB_HASH_LENGTH].copy_from_slice(hash);
-        Self(key)
+        let mut bytes = Vec::with_capacity(TAG_LENGTH + BLOB_HASH_LENGTH);
+        bytes.push(BLOB_KEY_TAG);
+        bytes.extend_from_slice(hash);
+        Self(Key::from(bytes))
     }
 
-    /// The lowest key in the blob index (start of the `BLOB`-tag range).
+    /// The lowest key in the blob index (start of the `BLOB`-tag range): the
+    /// tag byte alone, smaller than any hashed blob key.
     pub fn min() -> Self {
-        Self(Key::min().set_tag(BLOB_KEY_TAG))
+        Self(Key::from(vec![BLOB_KEY_TAG]))
     }
 
-    /// The highest key in the blob index (end of the `BLOB`-tag range).
+    /// The highest key in the blob index (end of the `BLOB`-tag range): the tag
+    /// followed by an all-`0xFF` hash, larger than any real blob key.
     pub fn max() -> Self {
-        Self(Key::max().set_tag(BLOB_KEY_TAG))
+        let mut bytes = Vec::with_capacity(TAG_LENGTH + BLOB_HASH_LENGTH);
+        bytes.push(BLOB_KEY_TAG);
+        bytes.extend_from_slice(&[0xFFu8; BLOB_HASH_LENGTH]);
+        Self(Key::from(bytes))
     }
 
     /// The blob hash carried by this key.
     pub fn blob_hash(&self) -> Blake3Hash {
-        self.0.as_ref()[BLOB_HASH_OFFSET..BLOB_HASH_OFFSET + BLOB_HASH_LENGTH]
+        let bytes: &[u8] = self.0.as_ref();
+        bytes[BLOB_HASH_OFFSET..BLOB_HASH_OFFSET + BLOB_HASH_LENGTH]
             .try_into()
             .expect("blob key always carries 32 hash bytes")
     }

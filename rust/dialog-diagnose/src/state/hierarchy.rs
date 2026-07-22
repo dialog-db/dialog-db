@@ -2,9 +2,10 @@
 
 use std::sync::mpsc::Sender;
 
-use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, KeyBytes, State, Storage};
-use dialog_common::Blake3Hash as NodeHash;
-use dialog_search_tree::{ArchivedNodeBody, Buffer, Entry, PersistentNode, into_owned};
+use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Key, State, Storage};
+use dialog_search_tree::{
+    ArchivedNodeBody, Buffer, Entry, Key as TreeKey, PersistentNode, into_owned,
+};
 use dialog_storage::{Blake3Hash, MemoryStorageBackend, StorageBackend};
 
 use super::store::WorkerMessage;
@@ -24,8 +25,10 @@ pub enum TreeNode {
     },
     /// A branch node containing references to child nodes
     Branch {
-        /// The upper bound key for this branch
-        upper_bound: Key,
+        /// The separator at each child's left edge (the routing lower
+        /// bounds; the leftmost child of a level carries the empty
+        /// separator)
+        separators: Vec<Vec<u8>>,
         /// Hashes of child nodes
         children: Vec<Blake3Hash>,
     },
@@ -72,33 +75,22 @@ impl ArtifactsHierarchy {
                 return Ok(());
             };
 
-            let block: PersistentNode<KeyBytes, State<Datum>> =
-                PersistentNode::new(Buffer::from(bytes));
+            let block: PersistentNode<Key, State<Datum>> = PersistentNode::new(Buffer::from(bytes));
             let node = match block.body()? {
-                ArchivedNodeBody::Index(index) => TreeNode::Branch {
-                    upper_bound: Key::from(into_owned::<KeyBytes>(
-                        &index
-                            .links
-                            .last()
-                            .ok_or_else(|| {
-                                DialogArtifactsError::MalformedIndex(
-                                    "Index node had no children".into(),
-                                )
-                            })?
-                            .upper_bound,
-                    )?),
-                    children: index
-                        .links
-                        .iter()
-                        .map(|link| *<&NodeHash>::from(&link.node).as_bytes())
-                        .collect(),
-                },
+                ArchivedNodeBody::Index(index) => {
+                    let links = index.links()?;
+                    TreeNode::Branch {
+                        separators: links.iter().map(|link| link.separator.clone()).collect(),
+                        children: links.iter().map(|link| *link.node.as_bytes()).collect(),
+                    }
+                }
                 ArchivedNodeBody::Segment(segment) => {
-                    let mut entries = Vec::with_capacity(segment.entries.len());
-                    for entry in segment.entries.iter() {
+                    let mut entries = Vec::with_capacity(segment.len());
+                    let mut keys = segment.keys::<Key>()?;
+                    while let Some((at, key)) = keys.next_key()? {
                         entries.push(Entry {
-                            key: Key::from(into_owned::<KeyBytes>(&entry.key)?),
-                            value: into_owned::<State<Datum>>(&entry.value)?,
+                            key: <Key as TreeKey>::try_from_bytes(key)?,
+                            value: into_owned::<State<Datum>>(segment.value_at(at)?)?,
                         });
                     }
                     TreeNode::Segment { entries }

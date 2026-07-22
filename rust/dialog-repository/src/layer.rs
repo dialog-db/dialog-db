@@ -31,8 +31,8 @@ use futures_util::{StreamExt, stream};
 /// when grouping.
 pub(crate) fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
     (
-        artifact.the.key_bytes().to_vec(),
-        artifact.of.key_bytes().to_vec(),
+        artifact.the.as_str().as_bytes().to_vec(),
+        artifact.of.as_str().as_bytes().to_vec(),
     )
 }
 

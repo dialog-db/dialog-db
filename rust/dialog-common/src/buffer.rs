@@ -1,4 +1,6 @@
+use std::any::Any;
 use std::fmt::{Formatter, Result as FmtResult};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use rkyv::util::AlignedVec;
@@ -6,6 +8,26 @@ use serde::de::{Error as DeserializeError, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::Blake3Hash;
+
+/// A type-erased value memoized on a [`Buffer`]. A consumer decodes the
+/// buffer's bytes once into some owned artifact and caches it here, keyed by
+/// nothing but the buffer's identity; because a buffer is content-addressed and
+/// immutable, that artifact never goes stale.
+///
+/// The `Send + Sync` are real (not `ConditionalSend`/`ConditionalSync`): a
+/// type-erased trait object cannot combine the non-auto conditional markers,
+/// and the memo must be shareable across the threads that share the node cache.
+type Decoded = Arc<dyn Any + Send + Sync>;
+
+/// The interior of a [`Buffer`]: the aligned bytes, the lazily-computed content
+/// hash, a lazily-populated decode memo (see [`Buffer::decoded`]), and a touch
+/// counter used to decide when memoizing a decode is worthwhile.
+struct BufferInner {
+    bytes: AlignedVec,
+    hash: OnceLock<Blake3Hash>,
+    decoded: OnceLock<Decoded>,
+    touches: AtomicU32,
+}
 
 /// A reference-counted buffer with lazy hash computation.
 ///
@@ -17,16 +39,78 @@ use crate::Blake3Hash;
 /// 16-aligned blocks, masking the requirement, while the wasm allocator is
 /// free to return odd addresses for align-1 allocations, which surfaced as
 /// "unaligned pointer" errors when accessing nodes loaded from storage.
-#[derive(Clone, Debug)]
-pub struct Buffer(Arc<(AlignedVec, OnceLock<Blake3Hash>)>);
+#[derive(Clone)]
+pub struct Buffer(Arc<BufferInner>);
+
+impl std::fmt::Debug for Buffer {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("Buffer")
+            .field("len", &self.0.bytes.len())
+            .finish()
+    }
+}
 
 impl Buffer {
     /// Returns the [`Blake3Hash`] of this buffer's contents, computing it if
     /// necessary.
     pub fn blake3_hash(&self) -> &Blake3Hash {
         self.0
-            .1
-            .get_or_init(|| Blake3Hash::hash(self.0.0.as_slice()))
+            .hash
+            .get_or_init(|| Blake3Hash::hash(self.0.bytes.as_slice()))
+    }
+
+    /// Returns this buffer's already-memoized decode of type `T`, or `None` if
+    /// none is memoized yet — without ever decoding. A caller that wants to
+    /// populate the memo uses [`memoize_decode`](Self::memoize_decode).
+    pub fn memoized<T>(&self) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync, // bare-send-ok: type-erased memo needs real auto-trait bounds
+    {
+        self.0
+            .decoded
+            .get()
+            .and_then(|value| value.clone().downcast::<T>().ok())
+    }
+
+    /// Records a touch of this buffer and reports whether the caller should
+    /// *memoize* a decode rather than compute it transiently.
+    ///
+    /// A buffer touched once (a single range scan visiting each leaf once) gains
+    /// nothing from a cached decode and would only pay the materialization; a
+    /// buffer touched repeatedly (a join re-selecting the same branch, landing
+    /// on the same leaves once per outer binding) amortizes a memoized decode
+    /// across every later touch. So the first touch returns `false` (decode
+    /// transiently) and subsequent touches return `true` (memoize and reuse).
+    pub fn should_memoize(&self) -> bool {
+        self.0.touches.fetch_add(1, Ordering::Relaxed) >= 1
+    }
+
+    /// Memoizes a decode of type `T`, computing it via `decode` on the first
+    /// call and reusing it thereafter.
+    ///
+    /// Decoding a node body (e.g. a columnar leaf's keys) is pure work over the
+    /// immutable, content-addressed bytes, so the result is safe to memoize on
+    /// the buffer: every clone of the buffer shares one `Arc` interior, so a
+    /// value cached here is reused by every reader that holds the buffer — for
+    /// instance every scan served the same node from a shared node cache — and
+    /// never needs invalidation. `T` identifies the artifact (a buffer holds at
+    /// most one memoized decode); returns `None` only if a different `T` was
+    /// already memoized, which callers avoid by using one `T` per buffer role.
+    pub fn memoize_decode<T, E>(
+        &self,
+        decode: impl FnOnce() -> Result<T, E>,
+    ) -> Result<Option<Arc<T>>, E>
+    where
+        T: Any + Send + Sync, // bare-send-ok: type-erased memo needs real auto-trait bounds
+    {
+        // Populate the slot on the first call; ignore the race loser (both
+        // computed the same pure value). `get_or_try_init` is unstable, so do
+        // the fallible decode first and only memoize on success.
+        if self.0.decoded.get().is_none() {
+            let value: Decoded = Arc::new(decode()?);
+            let _ = self.0.decoded.set(value);
+        }
+        Ok(self.memoized())
     }
 
     /// Converts this [`Buffer`] into an owned `Vec<u8>`.
@@ -35,7 +119,7 @@ impl Buffer {
     /// allocation cannot be handed over to a `Vec<u8>` (the two deallocate
     /// with different alignments).
     pub fn into_vec(self) -> Vec<u8> {
-        self.0.0.as_slice().to_vec()
+        self.0.bytes.as_slice().to_vec()
     }
 }
 
@@ -51,7 +135,7 @@ impl Eq for Buffer {}
 
 impl AsRef<[u8]> for Buffer {
     fn as_ref(&self) -> &[u8] {
-        self.0.0.as_slice()
+        self.0.bytes.as_slice()
     }
 }
 
@@ -65,13 +149,18 @@ impl From<&[u8]> for Buffer {
     fn from(value: &[u8]) -> Self {
         let mut bytes = AlignedVec::with_capacity(value.len());
         bytes.extend_from_slice(value);
-        Self(Arc::new((bytes, OnceLock::new())))
+        Self::from(bytes)
     }
 }
 
 impl From<AlignedVec> for Buffer {
     fn from(value: AlignedVec) -> Self {
-        Self(Arc::new((value, OnceLock::new())))
+        Self(Arc::new(BufferInner {
+            bytes: value,
+            hash: OnceLock::new(),
+            decoded: OnceLock::new(),
+            touches: AtomicU32::new(0),
+        }))
     }
 }
 

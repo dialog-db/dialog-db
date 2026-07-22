@@ -286,4 +286,55 @@ mod tests {
 
         Ok(())
     }
+
+    /// Same two-commit typed-assert setup as `it_roundtrips_assert_and_typed_query`,
+    /// but reads back through `branch.claims().select()` instead of the query
+    /// engine, pinned to the entity pair that reproduced the `Replace`
+    /// supersede-scan data loss: the second-committed entity sorts before the
+    /// first, whose fact was then deleted as a "superseded prior".
+    #[dialog_common::test]
+    async fn it_selects_both_after_two_typed_commits() -> anyhow::Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // alice sorts AFTER bob; alice is committed first, then bob.
+        let alice: Entity = "did:key:z6MkQmQKzPsjyUz49pvaxYdiiZEuQXyNqeBkS88GTrvqnov".parse()?;
+        let bob: Entity = "did:key:z6MkDiL3ZaJ4V7VSdQruLenZLA4RNbu6cErR5m8K5Wj99wTF".parse()?;
+
+        branch
+            .transaction()
+            .assert(person::Name::of(alice.clone()).is("Alice"))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        branch
+            .transaction()
+            .assert(person::Name::of(bob.clone()).is("Bob"))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let results: Vec<_> = branch
+            .claims()
+            .select(ArtifactSelector::new().the("person/name".parse()?))
+            .perform(&operator)
+            .await?
+            .filter_map(|r| async { r.ok() })
+            .collect()
+            .await;
+
+        assert_eq!(
+            results.len(),
+            2,
+            "select() must see both facts after two typed commits; got {:?}",
+            results.iter().map(|a| a.of.to_string()).collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
 }

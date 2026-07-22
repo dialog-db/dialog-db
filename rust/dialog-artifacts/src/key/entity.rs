@@ -1,24 +1,14 @@
 use std::ops::Deref;
 
 use crate::KeyType;
-use arrayref::array_ref;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ATTRIBUTE_LENGTH, Artifact, AttributeKeyPart, ENTITY_LENGTH, EntityKeyPart, TAG_LENGTH,
-    VALUE_REFERENCE_LENGTH, ValueDataType, mutable_slice,
+    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, key::inline_threshold,
+    key::value_payload, key::varkey, key::varkey::KeyParts, key::varkey::ValuePayload,
 };
 
-use super::{
-    Key, KeyBytes, KeyView, KeyViewConstruct, KeyViewMut, VALUE_DATA_TYPE_LENGTH,
-    ValueReferenceKeyPart,
-};
-
-const ENTITY_OFFSET: usize = TAG_LENGTH;
-const ATTRIBUTE_OFFSET: usize = TAG_LENGTH + ENTITY_LENGTH;
-const VALUE_DATA_TYPE_OFFSET: usize = TAG_LENGTH + ENTITY_LENGTH + ATTRIBUTE_LENGTH;
-const VALUE_REFERENCE_OFFSET: usize =
-    TAG_LENGTH + ENTITY_LENGTH + ATTRIBUTE_LENGTH + VALUE_DATA_TYPE_LENGTH;
+use super::{Key, KeyView, KeyViewConstruct, KeyViewMut};
 
 /// Tag byte that identifies entity-based index keys
 pub const ENTITY_KEY_TAG: u8 = 0;
@@ -30,7 +20,7 @@ pub const ENTITY_KEY_TAG: u8 = 0;
 pub struct EntityKey<K>(pub K);
 
 impl EntityKey<Key> {
-    /// Converts this entity key into a generic key for storage in the prolly tree
+    /// Converts this entity key into a generic key for storage in the search tree
     pub fn into_key(self) -> Key {
         self.0
     }
@@ -38,85 +28,85 @@ impl EntityKey<Key> {
 
 impl KeyViewConstruct for EntityKey<Key> {
     fn min() -> Self {
-        Self(Key::min().set_tag(ENTITY_KEY_TAG))
+        Self(Key::from(varkey::build_key(&KeyParts::min(ENTITY_KEY_TAG))))
     }
 
     fn max() -> Self {
-        Self(Key::max().set_tag(ENTITY_KEY_TAG))
-    }
-
-    fn from_parts(
-        entity: EntityKeyPart,
-        attribute: AttributeKeyPart,
-        value_type: ValueDataType,
-        value_reference: ValueReferenceKeyPart,
-    ) -> Self {
-        Self::default()
-            .set_entity(entity)
-            .set_attribute(attribute)
-            .set_value_type(value_type)
-            .set_value_reference(value_reference)
+        Self(Key::from(varkey::build_key(&KeyParts::max(ENTITY_KEY_TAG))))
     }
 }
 
 impl<K> KeyView for EntityKey<K>
 where
-    K: AsRef<KeyBytes> + Clone,
+    K: AsRef<[u8]> + Clone,
 {
     fn entity(&self) -> EntityKeyPart<'_> {
-        EntityKeyPart(array_ref![self.0.as_ref(), ENTITY_OFFSET, ENTITY_LENGTH])
+        EntityKeyPart(varkey::field(
+            self.0.as_ref(),
+            ENTITY_KEY_TAG,
+            varkey::Field::Entity,
+        ))
     }
 
     fn attribute(&self) -> AttributeKeyPart<'_> {
-        AttributeKeyPart(array_ref![
+        AttributeKeyPart(varkey::field(
             self.0.as_ref(),
-            ATTRIBUTE_OFFSET,
-            ATTRIBUTE_LENGTH
-        ])
+            ENTITY_KEY_TAG,
+            varkey::Field::Attribute,
+        ))
     }
 
     fn value_type(&self) -> ValueDataType {
-        self.0.as_ref()[VALUE_DATA_TYPE_OFFSET].into()
+        varkey::value_type(self.0.as_ref(), ENTITY_KEY_TAG)
     }
 
-    fn value_reference(&self) -> ValueReferenceKeyPart<'_> {
-        ValueReferenceKeyPart(array_ref![
-            self.0.as_ref(),
-            VALUE_REFERENCE_OFFSET,
-            VALUE_REFERENCE_LENGTH
-        ])
+    fn value_payload(&self) -> &[u8] {
+        varkey::value_payload(self.0.as_ref(), ENTITY_KEY_TAG)
+    }
+
+    fn value_is_spilled(&self) -> bool {
+        varkey::value_is_spilled(self.0.as_ref(), ENTITY_KEY_TAG)
+    }
+
+    fn value_spill_hash(&self) -> Option<&[u8]> {
+        varkey::value_spill_hash(self.0.as_ref(), ENTITY_KEY_TAG)
     }
 }
 
-impl<K> KeyViewMut for EntityKey<K>
-where
-    K: AsRef<KeyBytes> + AsMut<KeyBytes> + Clone,
-{
-    fn set_entity(mut self, entity: EntityKeyPart) -> Self {
-        mutable_slice![self.0.as_mut(), ENTITY_OFFSET, ENTITY_LENGTH].copy_from_slice(entity.0);
-        self
+impl KeyViewMut for EntityKey<Key> {
+    fn set_entity(self, entity: EntityKeyPart) -> Self {
+        Self(rebuild(self.0, |parts| parts.entity = entity.0.to_vec()))
     }
 
-    fn set_attribute(mut self, attribute: AttributeKeyPart) -> Self {
-        mutable_slice![self.0.as_mut(), ATTRIBUTE_OFFSET, ATTRIBUTE_LENGTH]
-            .copy_from_slice(attribute.0);
-        self
+    fn set_attribute(self, attribute: AttributeKeyPart) -> Self {
+        Self(rebuild(self.0, |parts| {
+            parts.attribute = attribute.0.to_vec()
+        }))
     }
 
-    fn set_value_type(mut self, value_type: ValueDataType) -> Self {
-        self.0.as_mut()[VALUE_DATA_TYPE_OFFSET] = value_type.into();
-        self
+    fn set_value(self, value_type: ValueDataType, value: ValuePayload) -> Self {
+        Self(rebuild(self.0, |parts| {
+            parts.value_type = value_type;
+            parts.value = value;
+        }))
     }
+}
 
-    fn set_value_reference(mut self, value_reference: ValueReferenceKeyPart) -> Self {
-        mutable_slice!(
-            self.0.as_mut(),
-            VALUE_REFERENCE_OFFSET,
-            VALUE_REFERENCE_LENGTH
-        )
-        .copy_from_slice(value_reference.0);
-        self
-    }
+/// Parse `key`'s components, mutate them, and rebuild the key bytes for the
+/// [`ENTITY_KEY_TAG`] ordering.
+///
+/// Every real key AND both bound sentinels parse cleanly (the max filler byte
+/// is `0xFE`, chosen so the built sentinel never contains a `0x00 0xFF`
+/// escape-collision at a field boundary), so chained `set_*` calls preserve
+/// previously-set fields. The max-parts fallback is a safety net for
+/// malformed input only; falling back to MIN here would silently collapse an
+/// upper bound onto its lower bound.
+fn rebuild(key: Key, mutate: impl FnOnce(&mut KeyParts)) -> Key {
+    let mut parts =
+        varkey::parse_key(key.as_ref()).unwrap_or_else(|| KeyParts::max(ENTITY_KEY_TAG));
+    parts.tag = ENTITY_KEY_TAG;
+    mutate(&mut parts);
+    Key::from(varkey::build_key(&parts))
 }
 
 impl Default for EntityKey<Key> {
@@ -125,18 +115,18 @@ impl Default for EntityKey<Key> {
     }
 }
 
-impl<K> AsRef<KeyBytes> for EntityKey<K>
+impl<K> AsRef<[u8]> for EntityKey<K>
 where
-    K: AsRef<KeyBytes>,
+    K: AsRef<[u8]>,
 {
-    fn as_ref(&self) -> &KeyBytes {
+    fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
     }
 }
 
 impl<K> Deref for EntityKey<K>
 where
-    K: Deref<Target = KeyBytes>,
+    K: Deref<Target = [u8]>,
 {
     type Target = K::Target;
 
@@ -150,17 +140,19 @@ impl From<&Artifact> for EntityKey<Key> {
         EntityKey::<Key>::default()
             .set_entity(EntityKeyPart::from(&fact.of))
             .set_attribute(AttributeKeyPart::from(&fact.the))
-            .set_value_type(fact.is.data_type())
-            .set_value_reference(ValueReferenceKeyPart(&fact.is.to_reference()))
+            .set_value(
+                fact.is.data_type(),
+                value_payload(&fact.is, inline_threshold()),
+            )
     }
 }
 
 impl<K> KeyType for EntityKey<K>
 where
-    K: AsRef<KeyBytes> + AsMut<KeyBytes> + Clone + KeyType,
+    K: AsRef<[u8]> + Clone + KeyType,
 {
     fn bytes(&self) -> &[u8] {
-        self.as_ref().as_ref()
+        self.0.as_ref()
     }
 }
 

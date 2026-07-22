@@ -27,24 +27,33 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, Entry, PersistentTree, Value as TreeValue,
+    Buffer, ContentAddressedStorage, Delta, PersistentTree, Value as TreeValue,
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
+use std::collections::{HashMap, VecDeque};
+use std::iter::repeat_n;
 use std::ops::RangeInclusive;
+use std::sync::{Arc, Mutex};
 
 use crate::{
-    ATTRIBUTE_LENGTH, Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum,
-    DialogArtifactsError, ENTITY_LENGTH, ENTITY_RAW_HEAD, EntityKey, EntityKeyPart, FromKey,
-    Instruction, Key, KeyBytes, KeyView, KeyViewConstruct, KeyViewMut, MatchCandidate, State,
-    ValueKey, selector::Constrained,
+    Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum, DialogArtifactsError,
+    EntityKey, EntityKeyPart, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut,
+    SelectorMatch, State, Value, ValueDataType, ValueKey, encode_bytes, encode_value_owned,
+    key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
+    key::{
+        artifact_index_keys, inline_threshold, reproject_index_keys, spill_prefix, value_spills,
+    },
+    match_selector_and_key_ref,
+    selector::Constrained,
+    value_predicates_admit,
 };
 
 /// The concrete search-tree type the artifact indexes use.
 ///
 /// Keys are the raw fixed-size bytes of [`Key`]; values are [`State`]
 /// payloads stored in the tree's native (rkyv) encoding.
-pub type ArtifactTree = PersistentTree<KeyBytes, State<Datum>>;
+pub type ArtifactTree = PersistentTree<Key, State<Datum>>;
 
 impl TreeValue for State<Datum> {}
 
@@ -75,17 +84,262 @@ where
     }
 }
 
-/// A fixed-width key segment bounding a string prefix: the prefix's
-/// raw bytes (capped at `head` — the order-preserving span of the
-/// segment) followed by `fill`. With `fill = 0x00` this is the
-/// smallest segment any matching value can have, with `fill = 0xFF`
-/// the largest, so the pair brackets the prefix's key range.
-fn prefix_segment<const N: usize>(prefix: &str, head: usize, fill: u8) -> [u8; N] {
-    let mut segment = [fill; N];
-    let raw = prefix.as_bytes();
-    let take = raw.len().min(head).min(N);
-    segment[..take].copy_from_slice(&raw[..take]);
-    segment
+/// Writes a spilling value's raw bytes as a content-addressed block into the
+/// raw archive block `store`, keyed by the value's 32-byte reference. A no-op
+/// for a value that stays inline (its bytes live in the key). Idempotent:
+/// content-addressed, so the same value writes the same block.
+///
+/// This uses the raw backend directly, NOT the tree's `ContentAddressedStorage`
+/// bridge: a spilled value is a plain block addressed by its value reference,
+/// living in the same store the tree nodes do.
+async fn store_spilled_value<S>(
+    store: &mut S,
+    artifact: &Artifact,
+) -> Result<(), DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    if value_spills(&artifact.is) {
+        let reference = artifact.is.to_reference();
+        store.set(reference, artifact.is.to_bytes()).await?;
+    }
+    Ok(())
+}
+
+/// A byte-bounded cache of spilled value blocks, keyed by their 32-byte
+/// content reference.
+///
+/// Spilled blocks are content-addressed, so a reference always maps to the
+/// same bytes: cached entries never go stale and need no invalidation. The
+/// bound is a TOTAL BYTE budget rather than an entry count: every spilled
+/// value is individually large and individually unbounded (a single 100 MB
+/// document is one entry), so a count cap pins an unpredictable amount of
+/// memory. Eviction is FIFO — with no staleness there is nothing smarter to
+/// protect, and the scan/join access pattern re-touches recent references. A
+/// block larger than the whole budget is served but never cached.
+#[derive(Clone, Debug)]
+pub struct SpillCache {
+    state: Arc<Mutex<SpillCacheState>>,
+    budget: usize,
+}
+
+#[derive(Debug, Default)]
+struct SpillCacheState {
+    map: HashMap<Blake3Hash, Vec<u8>>,
+    order: VecDeque<Blake3Hash>,
+    bytes: usize,
+}
+
+impl SpillCache {
+    /// Creates a cache bounded to at most `budget` total cached bytes.
+    pub fn with_budget(budget: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(SpillCacheState::default())),
+            budget,
+        }
+    }
+
+    /// The cached bytes for `key`, if present.
+    pub fn get(&self, key: &Blake3Hash) -> Option<Vec<u8>> {
+        let state = self.state.lock().expect("spill cache lock");
+        state.map.get(key).cloned()
+    }
+
+    /// Inserts a block, evicting oldest entries until the budget holds. A
+    /// block exceeding the whole budget is not cached.
+    pub fn insert(&self, key: Blake3Hash, value: Vec<u8>) {
+        if value.len() > self.budget {
+            return;
+        }
+        let mut state = self.state.lock().expect("spill cache lock");
+        if state.map.contains_key(&key) {
+            return;
+        }
+        while state.bytes + value.len() > self.budget {
+            let Some(oldest) = state.order.pop_front() else {
+                break;
+            };
+            if let Some(evicted) = state.map.remove(&oldest) {
+                state.bytes -= evicted.len();
+            }
+        }
+        state.bytes += value.len();
+        state.order.push_back(key);
+        state.map.insert(key, value);
+    }
+
+    /// Retrieves a block from the cache, or fetches (and caches) it using the
+    /// provided function. The lock is never held across the fetch.
+    pub async fn get_or_fetch<F, E>(
+        &self,
+        key: &Blake3Hash,
+        fetcher: F,
+    ) -> Result<Option<Vec<u8>>, E>
+    where
+        F: AsyncFnOnce(&Blake3Hash) -> Result<Option<Vec<u8>>, E>,
+    {
+        if let Some(hit) = self.get(key) {
+            return Ok(Some(hit));
+        }
+        Ok(match fetcher(key).await? {
+            Some(value) => {
+                self.insert(*key, value.clone());
+                Some(value)
+            }
+            None => None,
+        })
+    }
+}
+
+/// Byte budget for a [`SpillCache`]: enough to keep a working set of spilled
+/// blocks warm across a join without letting a large-document workload pin
+/// unbounded memory.
+pub const SPILL_CACHE_BUDGET: usize = 8 * 1024 * 1024;
+
+/// Creates a [`SpillCache`] with the default [`SPILL_CACHE_BUDGET`].
+pub fn spill_cache() -> SpillCache {
+    SpillCache::with_budget(SPILL_CACHE_BUDGET)
+}
+
+/// The spilled value reference a key carries, or `None` for an inline key.
+///
+/// A single `parse_key` walk yields the value payload as an already-classified
+/// [`ValuePayload`] (inline vs reference), so this reads the spill flag and the
+/// reference bytes from one parse rather than re-splitting the key per accessor.
+fn spilled_reference(key: &Key) -> Result<Option<Blake3Hash>, DialogArtifactsError> {
+    let Some(parts) = varkey::parse_key(key.as_ref()) else {
+        // An unparseable key is corruption, not an inline value: classifying
+        // it as "no spill" would silently read a wrong value.
+        return Err(DialogArtifactsError::InvalidKey(
+            "key does not parse while resolving its spill reference".to_string(),
+        ));
+    };
+    let ValuePayload::Spilled { hash, .. } = parts.value else {
+        return Ok(None);
+    };
+    let reference: Blake3Hash = hash.as_slice().try_into().map_err(|_| {
+        DialogArtifactsError::InvalidKey("spilled value reference is not 32 bytes".to_string())
+    })?;
+    Ok(Some(reference))
+}
+
+/// Fetches the raw bytes of a spilled value for `key` from the raw archive block
+/// `store`. Returns `None` for an inline key (its value lives in the key, no
+/// block to fetch), `Some(bytes)` for a spilled key. Errors if a spilled key's
+/// block is missing from the store.
+///
+/// Uses the raw backend directly (the value block is addressed by the key's
+/// 32-byte reference), not the tree node bridge.
+pub async fn fetch_spilled<S>(store: &S, key: &Key) -> Result<Option<Vec<u8>>, DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    let Some(reference) = spilled_reference(key)? else {
+        return Ok(None);
+    };
+    let bytes = store.get(&reference).await?.ok_or_else(|| {
+        DialogArtifactsError::InvalidValue("spilled value block missing from store".to_string())
+    })?;
+    Ok(Some(bytes))
+}
+
+/// Like [`fetch_spilled`], but serves and populates a [`SpillCache`]: a hit
+/// returns the cached bytes without touching `store`; a miss fetches from
+/// `store` and inserts. Because spilled blocks are content-addressed the cache
+/// never serves stale bytes.
+pub async fn fetch_spilled_cached<S>(
+    store: &S,
+    cache: &SpillCache,
+    key: &Key,
+) -> Result<Option<Vec<u8>>, DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    let Some(reference) = spilled_reference(key)? else {
+        return Ok(None);
+    };
+    fetch_spilled_reference(store, cache, reference.as_ref())
+        .await
+        .map(Some)
+}
+
+/// Fetches (and caches) the bytes of a spilled value block by its raw 32-byte
+/// content-addressed reference. The scan path holds the reference already
+/// (parsed from the key), so it fetches directly rather than re-deriving the
+/// reference from the key. Errors if the block is missing.
+pub async fn fetch_spilled_reference<S>(
+    store: &S,
+    cache: &SpillCache,
+    reference: &[u8],
+) -> Result<Vec<u8>, DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    let reference: Blake3Hash = reference.try_into().map_err(|_| {
+        DialogArtifactsError::InvalidKey("spilled value reference is not 32 bytes".to_string())
+    })?;
+    cache
+        .get_or_fetch(&reference, async |reference: &Blake3Hash| {
+            store.get(reference).await
+        })
+        .await
+        .map_err(DialogArtifactsError::from)?
+        .ok_or_else(|| {
+            DialogArtifactsError::InvalidValue("spilled value block missing from store".to_string())
+        })
+}
+
+/// Filler length appended to a prefix to form its inclusive upper bound. Keys
+/// are lossless and order-preserving, so `prefix ‖ 0xFE…` dominates every
+/// UTF-8 continuation of `prefix` up to this many trailing bytes.
+// TODO(m3): like `KeyParts::max`, this bounds an unbounded field with a
+// generous but finite filler; exact for the 64-byte attribute cap,
+// best-effort for arbitrarily long entity URIs. Revisit with exclusive
+// (prefix-successor) range bounds.
+const PREFIX_FILLER: usize = 256;
+
+/// The lower key-segment bound for a byte prefix: the prefix's raw bytes.
+/// Every value beginning with the prefix is >= this.
+fn prefix_lower(prefix: &[u8]) -> Vec<u8> {
+    prefix.to_vec()
+}
+
+/// The upper key-segment bound for a byte prefix: the prefix followed by a
+/// `0xFE` filler, >= every UTF-8 value beginning with the prefix (UTF-8 bytes
+/// are `<= 0xF4`). `0xFE` rather than `0xFF`: a field must never begin with
+/// the `ordkey` escape byte, or the preceding field's terminator misreads as
+/// an escaped zero (see `varkey::MAX_FILLER_BYTE`); with an empty prefix the
+/// filler's first byte IS the field's first byte.
+fn prefix_upper(prefix: &[u8]) -> Vec<u8> {
+    let mut bytes = prefix.to_vec();
+    bytes.extend(repeat_n(0xFEu8, PREFIX_FILLER));
+    bytes
+}
+
+/// The lower range edge for a value bound: its full order-preserving
+/// encoding, with two widenings that keep the scanned range a superset of the
+/// true matches (the per-entry check keeps the result exact):
+///
+/// - A variable-length bound longer than the spilled key-prefix widens to its
+///   prefix-cluster start: a spilled value sharing the bound's first
+///   `spill_prefix` bytes carries only those bytes in its key and so sorts
+///   BELOW the full bound bytes.
+/// - A zero float widens across the `-0.0`/`+0.0` encoding cluster.
+fn value_lower_edge(value: &Value) -> Vec<u8> {
+    if let Value::Float(float) = value
+        && *float == 0.0
+    {
+        return encode_value_owned(&Value::Float(-0.0));
+    }
+    if numeric_width(value.data_type()) == 0 {
+        let raw = value.to_bytes();
+        if raw.len() > spill_prefix() {
+            let mut out = Vec::new();
+            encode_bytes(&raw[..spill_prefix()], &mut out);
+            return out;
+        }
+    }
+    encode_value_owned(value)
 }
 
 /// Tighten a scan's `(start, end)` key pair with the selector's
@@ -93,9 +347,8 @@ fn prefix_segment<const N: usize>(prefix: &str, head: usize, fill: u8) -> [u8; N
 /// constraint is skipped — the exact value is already in the keys
 /// and is strictly tighter. Applying a prefix to a non-leading key
 /// dimension is sound (the range stays a superset of the matches;
-/// [`MatchCandidate::matches_selector`] filters the rest) and
-/// tightens the range whenever every more-significant dimension is
-/// exact.
+/// [`match_selector_and_key_ref`] filters the rest) and tightens the
+/// range whenever every more-significant dimension is exact.
 fn apply_prefix_bounds<K: KeyViewMut>(
     start: K,
     end: K,
@@ -106,20 +359,120 @@ fn apply_prefix_bounds<K: KeyViewMut>(
     if selector.attribute().is_none()
         && let Some(prefix) = selector.attribute_prefix()
     {
-        let lo = prefix_segment::<ATTRIBUTE_LENGTH>(prefix, ATTRIBUTE_LENGTH, u8::MIN);
-        let hi = prefix_segment::<ATTRIBUTE_LENGTH>(prefix, ATTRIBUTE_LENGTH, u8::MAX);
+        let lo = prefix_lower(prefix.as_bytes());
+        let hi = prefix_upper(prefix.as_bytes());
         start = start.set_attribute(AttributeKeyPart(&lo));
         end = end.set_attribute(AttributeKeyPart(&hi));
     }
     if selector.entity().is_none()
         && let Some(prefix) = selector.entity_prefix()
     {
-        let lo = prefix_segment::<ENTITY_LENGTH>(prefix, ENTITY_RAW_HEAD, u8::MIN);
-        let hi = prefix_segment::<ENTITY_LENGTH>(prefix, ENTITY_RAW_HEAD, u8::MAX);
+        let lo = prefix_lower(prefix.as_bytes());
+        let hi = prefix_upper(prefix.as_bytes());
         start = start.set_entity(EntityKeyPart(&lo));
         end = end.set_entity(EntityKeyPart(&hi));
     }
+    let has_value_bounds = selector.value_lower().is_some() || selector.value_upper().is_some();
+    // A value prefix bounds the value tail directly: the payload's inline
+    // order-preserving bytes for a string are the raw UTF-8, so the prefix's
+    // raw bytes are the lower bound and `prefix ‖ 0xFE…` the upper (mirroring
+    // the entity/attribute prefixes, but on the value slot). An exact value
+    // takes precedence and skips this. Only sound on the VAE ordering, where
+    // the value tail leads the key; on EAV/AEV the value is trailing, so
+    // `selector_range` routes a value-prefix scan to `ValueKey`.
+    //
+    // When explicit value bounds are ALSO present they take the value slot
+    // instead (below) and the prefix stays a per-entry filter: the prefix's
+    // range payload is an unterminated fragment, so a later `set_value` on
+    // top of it cannot re-parse the key and would fall back to
+    // `KeyParts::max`, discarding every previously set field. The bound
+    // range is a superset of the intersection, so results are exact either
+    // way.
+    if selector.value().is_none()
+        && !has_value_bounds
+        && let Some(prefix) = selector.value_prefix()
+    {
+        // A probe longer than the spilled key-prefix clamps its LOWER edge to
+        // the prefix-cluster start: a spilled string matching the probe
+        // carries only its first `spill_prefix` bytes in the key and sorts
+        // below the full probe bytes. The upper edge needs no clamp (cluster
+        // keys terminate before the probe's next byte) and the per-entry
+        // check re-establishes exactness.
+        let bytes = prefix.as_bytes();
+        let lo = prefix_lower(&bytes[..bytes.len().min(spill_prefix())]);
+        let hi = prefix_upper(bytes);
+        start = start.set_value(ValueDataType::String, ValuePayload::Inline(lo));
+        end = end.set_value(ValueDataType::String, ValuePayload::Inline(hi));
+    }
+    // A numeric value range bounds the value tail to a sub-band. A bound value
+    // encodes order-preservingly, so its bytes are a key range edge; the open
+    // side is the band edge of the bound's type (its lowest/highest inline
+    // value). Exclusive bounds (`>`/`<`) still set the key edge at the bound
+    // value — the range stays a superset and the per-entry re-check drops the
+    // boundary value. An exact value takes precedence and skips this.
+    if selector.value().is_none() && has_value_bounds {
+        // Both edges must sit in the same type band, so derive the band type
+        // from whichever bound is present (they share a type when both are).
+        let band = selector
+            .value_lower()
+            .or(selector.value_upper())
+            .map(|bound| bound.value.data_type())
+            .unwrap_or_else(ValueDataType::min);
+        let lo = match selector.value_lower() {
+            Some(bound) => value_lower_edge(&bound.value),
+            None => value_band_min(band),
+        };
+        let hi = match selector.value_upper() {
+            Some(bound) => match &bound.value {
+                Value::Float(float) if *float == 0.0 => encode_value_owned(&Value::Float(0.0)),
+                value => encode_value_owned(value),
+            },
+            None => value_band_max(band),
+        };
+        start = start.set_value(band, ValuePayload::Inline(lo));
+        end = end.set_value(band, ValuePayload::Inline(hi));
+    }
     (start, end)
+}
+
+/// The lowest inline value byte-encoding of a type's band: all-zero bytes of
+/// the type's fixed width for numerics, or the terminated empty encoding
+/// (`[0x00]`) for variable-length types — the smallest VALID payload, so the
+/// bound key still parses (an empty payload would let the following key
+/// component slide into the value position and corrupt the range edge).
+fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
+    match numeric_width(value_type) {
+        0 => vec![0x00],
+        width => vec![0x00; width],
+    }
+}
+
+/// The highest inline value byte-encoding of a type's band: all-`0xFF` bytes
+/// of the type's fixed width for numerics. For variable-length types, a run
+/// of `0xFF` one longer than the inline threshold: every inline payload is at
+/// most `threshold + 1` encoded bytes (value bytes plus terminator) and its
+/// terminator (`0x00`) sorts below `0xFF`, so this sits above the whole
+/// band. Used only as a raw range edge; it deliberately does not parse (it
+/// is the last field set on the bound).
+fn value_band_max(value_type: ValueDataType) -> Vec<u8> {
+    match numeric_width(value_type) {
+        0 => vec![0xFF; inline_threshold() + 2],
+        width => vec![0xFF; width],
+    }
+}
+
+/// The fixed inline width of a numeric value type's order-preserving encoding.
+/// Variable-length types (strings, bytes, symbols) have no fixed width and
+/// return 0; their band edges come from the terminated-empty / over-long
+/// `0xFF` forms above.
+fn numeric_width(value_type: ValueDataType) -> usize {
+    match value_type {
+        ValueDataType::UnsignedInt | ValueDataType::SignedInt => 16,
+        // `f64` encodes to 8 bytes (see `encode_f64` / `value_payload_len`).
+        ValueDataType::Float => 8,
+        ValueDataType::Boolean => 1,
+        _ => 0,
+    }
 }
 
 /// Shared mutation + scan operations on an [`ArtifactTree`].
@@ -169,10 +522,13 @@ pub trait ArtifactTreeExt {
     /// the `Removed` state are filtered out.
     ///
     /// Consumes `self` (the tree is moved into the returned stream to
-    /// pin its root); `store` is the storage backing it.
+    /// pin its root); `store` is the storage backing it, and `cache` serves
+    /// spilled value blocks across scans so a repeated read of the same large
+    /// value skips the store fetch.
     fn scan<'s, S>(
         self,
         store: S,
+        cache: SpillCache,
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
     where
@@ -217,21 +573,22 @@ impl ArtifactTreeExt for ArtifactTree {
         while let Some(instruction) = instructions.next().await {
             match instruction {
                 Instruction::Assert(artifact) => {
-                    let entity_key = EntityKey::from(&artifact);
-                    let value_key = ValueKey::from_key(&entity_key);
-                    let attribute_key = AttributeKey::from_key(&entity_key);
+                    let (entity_key, attribute_key, value_key) = artifact_index_keys(&artifact);
 
-                    let datum = Datum::from(artifact);
+                    // Persist a spilling value's bytes as a content-addressed
+                    // block before recording the fact; the key holds only the
+                    // 32-byte reference to it.
+                    store_spilled_value(store, &artifact).await?;
+
+                    let datum = Datum::for_artifact(&artifact);
                     let added = State::Added(datum);
                     transient = transient
-                        .insert(entity_key.into_key().into(), added.clone(), &storage)
+                        .insert(entity_key, added.clone(), &storage)
                         .await?;
                     transient = transient
-                        .insert(attribute_key.into_key().into(), added.clone(), &storage)
+                        .insert(attribute_key, added.clone(), &storage)
                         .await?;
-                    transient = transient
-                        .insert(value_key.into_key().into(), added, &storage)
-                        .await?;
+                    transient = transient.insert(value_key, added, &storage).await?;
                 }
                 Instruction::Replace(artifact) => {
                     let entity_key = EntityKey::from(&artifact);
@@ -254,73 +611,78 @@ impl ArtifactTreeExt for ArtifactTree {
                             .set_entity(entity_key.entity())
                             .set_attribute(entity_key.attribute())
                             .into_key();
-                        let search_stream = transient.stream_range(
-                            KeyBytes::from(search_start)..=KeyBytes::from(search_end),
-                            &storage,
-                        );
+                        let search_stream =
+                            transient.stream_range(search_start..=search_end, &storage);
                         tokio::pin!(search_stream);
                         while let Some(candidate) = search_stream.next().await {
                             let candidate = candidate?;
-                            if let State::Added(current_element) = candidate.value {
-                                let current = Artifact::try_from(current_element)?;
+                            if let State::Added(current_element) = &candidate.value {
+                                // A prior with a spilled value carries only a
+                                // reference in its key; fetch the block so the
+                                // value comparison below sees the real value.
+                                let spilled = fetch_spilled(store, &candidate.key).await?;
+                                let current = Artifact::from_key_datum_with_value(
+                                    &candidate.key,
+                                    current_element,
+                                    spilled,
+                                )?;
+                                // Supersession is scoped to this exact
+                                // (entity, attribute). The range should already
+                                // guarantee that, but deleting is destructive
+                                // and unconditional across all three indexes,
+                                // so verify rather than trust the bounds: a
+                                // range-construction bug once widened this
+                                // scan to unrelated entities and erased their
+                                // facts.
+                                if current.of != artifact.of || current.the != artifact.the {
+                                    continue;
+                                }
                                 if current.is == artifact.is {
                                     found_same_value = true;
                                 } else {
-                                    superseded_keys.push(Key::from(candidate.key));
+                                    superseded_keys.push(candidate.key);
                                 }
                             }
                         }
                     }
 
                     for key in superseded_keys {
-                        let entity_key = EntityKey(key);
-                        let value_key = ValueKey::from_key(&entity_key);
-                        let attribute_key = AttributeKey::from_key(&entity_key);
+                        let (entity_key, attribute_key, value_key) = reproject_index_keys(&key)?;
 
-                        transient = transient
-                            .delete(&entity_key.into_key().into(), &storage)
-                            .await?;
-                        transient = transient
-                            .delete(&value_key.into_key().into(), &storage)
-                            .await?;
-                        transient = transient
-                            .delete(&attribute_key.into_key().into(), &storage)
-                            .await?;
+                        transient = transient.delete(&entity_key, &storage).await?;
+                        transient = transient.delete(&value_key, &storage).await?;
+                        transient = transient.delete(&attribute_key, &storage).await?;
                     }
 
                     if found_same_value {
                         continue;
                     }
 
-                    let entity_key = EntityKey::from(&artifact);
-                    let value_key = ValueKey::from_key(&entity_key);
-                    let attribute_key = AttributeKey::from_key(&entity_key);
-                    let datum = Datum::from(artifact);
+                    let (entity_key, attribute_key, value_key) = artifact_index_keys(&artifact);
+
+                    // Persist a spilling value's bytes as a content-addressed
+                    // block before recording the fact.
+                    store_spilled_value(store, &artifact).await?;
+
+                    let datum = Datum::for_artifact(&artifact);
                     let added = State::Added(datum);
                     transient = transient
-                        .insert(entity_key.into_key().into(), added.clone(), &storage)
+                        .insert(entity_key, added.clone(), &storage)
                         .await?;
                     transient = transient
-                        .insert(attribute_key.into_key().into(), added.clone(), &storage)
+                        .insert(attribute_key, added.clone(), &storage)
                         .await?;
-                    transient = transient
-                        .insert(value_key.into_key().into(), added, &storage)
-                        .await?;
+                    transient = transient.insert(value_key, added, &storage).await?;
                 }
                 Instruction::Retract(artifact) => {
-                    let entity_key = EntityKey::from(&artifact);
-                    let value_key = ValueKey::from_key(&entity_key);
-                    let attribute_key = AttributeKey::from_key(&entity_key);
+                    let (entity_key, attribute_key, value_key) = artifact_index_keys(&artifact);
 
                     // Was this exact fact committed *before* this batch? Read the
                     // value key (the fact identity) from the base snapshot, not
                     // the transient tree — so an assert earlier in this same
                     // batch doesn't count as a prior.
-                    let committed = matches!(
-                        base.get(&value_key.clone().into_key().into(), &storage)
-                            .await?,
-                        Some(State::Added(_))
-                    );
+                    let committed =
+                        matches!(base.get(&value_key, &storage).await?, Some(State::Added(_)));
 
                     if committed {
                         // Retracting a durable fact: replace it with a `Removed`
@@ -328,29 +690,21 @@ impl ArtifactTreeExt for ArtifactTree {
                         // survives a merge and beats a stale remote assert.
                         let removed: State<Datum> = State::Removed;
                         transient = transient
-                            .insert(entity_key.into_key().into(), removed.clone(), &storage)
+                            .insert(entity_key, removed.clone(), &storage)
                             .await?;
                         transient = transient
-                            .insert(attribute_key.into_key().into(), removed.clone(), &storage)
+                            .insert(attribute_key, removed.clone(), &storage)
                             .await?;
-                        transient = transient
-                            .insert(value_key.into_key().into(), removed, &storage)
-                            .await?;
+                        transient = transient.insert(value_key, removed, &storage).await?;
                     } else {
                         // No committed prior: the fact only exists (if at all) as
                         // an assert earlier in this batch. Delete the keys so the
                         // assert and retract cancel to nothing — no tombstone,
                         // no tree churn. Deleting an absent key is a no-op, so a
                         // retract of a fact that never existed changes nothing.
-                        transient = transient
-                            .delete(&entity_key.into_key().into(), &storage)
-                            .await?;
-                        transient = transient
-                            .delete(&attribute_key.into_key().into(), &storage)
-                            .await?;
-                        transient = transient
-                            .delete(&value_key.into_key().into(), &storage)
-                            .await?;
+                        transient = transient.delete(&entity_key, &storage).await?;
+                        transient = transient.delete(&attribute_key, &storage).await?;
+                        transient = transient.delete(&value_key, &storage).await?;
                     }
                 }
             }
@@ -365,6 +719,7 @@ impl ArtifactTreeExt for ArtifactTree {
     fn scan<'s, S>(
         self,
         store: S,
+        cache: SpillCache,
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
     where
@@ -374,6 +729,9 @@ impl ArtifactTreeExt for ArtifactTree {
             + 's,
     {
         let tree = self;
+        // Keep the raw backend to fetch spilled value blocks by reference; the
+        // bridge below is only for reading tree nodes.
+        let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         try_stream! {
             let range = selector_range(&selector);
@@ -382,15 +740,45 @@ impl ArtifactTreeExt for ArtifactTree {
             tokio::pin!(stream);
             for await item in stream {
                 let raw = item?;
-                let entry = Entry {
-                    key: Key::from(raw.key),
-                    value: raw.value,
-                };
-                if entry.matches_selector(&selector)
-                    && let Entry { value: State::Added(datum), .. } = entry
-                {
-                    yield Artifact::try_from(datum)?;
+                // Parse each entry's key ONCE into borrowed components, and reuse
+                // that single parse for matching, spill resolution, and
+                // reconstruction. The previous flow re-split the key many times
+                // per entry (once per `KeyView` accessor in `matches_selector`,
+                // again in the spill lookup, again in reconstruction); on the
+                // variable-length M3 key that per-entry re-splitting dominated
+                // scan cost.
+                // A key that does not parse is corruption; dropping it
+                // silently would make the corrupt entry vanish from results
+                // with no signal.
+                let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                    DialogArtifactsError::InvalidKey(
+                        "scanned entry's key does not parse".to_string(),
+                    )
+                })?;
+                let verdict = match_selector_and_key_ref(&selector, &parts);
+                if verdict == SelectorMatch::Excluded {
+                    continue;
                 }
+                let State::Added(datum) = &raw.value else {
+                    continue;
+                };
+                let spilled = match &parts.value {
+                    ValueRef::Spilled { hash, .. } => {
+                        Some(fetch_spilled_reference(&raw_store, &cache, hash).await?)
+                    }
+                    ValueRef::Inline(_) => None,
+                };
+                let artifact = Artifact::from_key_ref_datum_value(&parts, datum, spilled)?;
+                // A NeedsValue verdict means some value predicate's answer
+                // lies beyond the spilled value's in-key prefix; the block is
+                // in hand now (it was fetched for reconstruction anyway), so
+                // re-check semantically before yielding.
+                if verdict == SelectorMatch::NeedsValue
+                    && !value_predicates_admit(&selector, &artifact.is)
+                {
+                    continue;
+                }
+                yield artifact;
             }
         }
     }
@@ -413,7 +801,7 @@ impl ArtifactTreeExt for ArtifactTree {
 /// it as the unit of a demand cover — a range that came back empty is
 /// still demanded (the emptiness was read), so a later write into it
 /// must invalidate the reader.
-pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusive<KeyBytes> {
+pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusive<Key> {
     if selector.entity().is_some()
         || (selector.entity_prefix().is_some()
             && selector.value().is_none()
@@ -425,23 +813,164 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
             <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
             selector,
         );
-        KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
-    } else if selector.value().is_some() {
+        start.into_key()..=end.into_key()
+    } else if selector.value().is_some()
+        || selector.value_prefix().is_some()
+        || selector.value_lower().is_some()
+        || selector.value_upper().is_some()
+    {
         let (start, end) = apply_prefix_bounds(
             <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
             <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
             selector,
         );
-        KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
+        start.into_key()..=end.into_key()
     } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
         let (start, end) = apply_prefix_bounds(
             <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
             <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
             selector,
         );
-        KeyBytes::from(start.into_key())..=KeyBytes::from(end.into_key())
+        start.into_key()..=end.into_key()
     } else {
         // `Constrained` guarantees at least one field is set.
         unreachable!("ArtifactSelector will always have at least one field specified")
+    }
+}
+
+#[cfg(test)]
+mod spill_cache_tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{
+        ArtifactTree, ArtifactTreeExt, SpillCache, fetch_spilled, fetch_spilled_cached, spill_cache,
+    };
+    use crate::{Artifact, EntityKey, Instruction, KeyView, Value};
+    use dialog_search_tree::Delta;
+    use dialog_storage::{Blake3Hash, MeasuredStorage, MemoryStorageBackend, StorageBackend};
+    use futures_util::stream;
+
+    /// The spill cache is bounded by TOTAL BYTES: inserting past the budget
+    /// evicts the oldest blocks, and a block larger than the whole budget is
+    /// served uncached rather than pinning it.
+    #[dialog_common::test]
+    fn it_bounds_the_spill_cache_by_bytes() {
+        let cache = SpillCache::with_budget(10_000);
+        let key = |byte: u8| -> Blake3Hash { [byte; 32] };
+
+        cache.insert(key(1), vec![0; 4_000]);
+        cache.insert(key(2), vec![0; 4_000]);
+        cache.insert(key(3), vec![0; 4_000]);
+        assert!(cache.get(&key(1)).is_none(), "oldest block evicted");
+        assert!(cache.get(&key(2)).is_some());
+        assert!(cache.get(&key(3)).is_some());
+
+        cache.insert(key(4), vec![0; 20_000]);
+        assert!(
+            cache.get(&key(4)).is_none(),
+            "an over-budget block is never cached"
+        );
+        assert!(
+            cache.get(&key(2)).is_some(),
+            "an over-budget insert evicts nothing"
+        );
+    }
+
+    /// Commits one spilling fact and returns the store (with the spilled block
+    /// written) plus the EAV key that references it.
+    async fn spilled_setup() -> (
+        MeasuredStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+        crate::Key,
+        Value,
+    ) {
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let value = Value::String("q".repeat(inline_n + 1));
+        let mut store = MeasuredStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+        let mut tree = ArtifactTree::empty();
+        let artifact = Artifact {
+            the: "doc/body".parse().unwrap(),
+            of: "doc:1".parse().unwrap(),
+            is: value.clone(),
+            cause: None,
+        };
+        tree.apply(
+            &mut store,
+            &mut delta,
+            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+        )
+        .await
+        .unwrap();
+        for (_, buffer) in delta.flush() {
+            store
+                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                .await
+                .unwrap();
+        }
+        let key = EntityKey::from(&artifact).into_key();
+        assert!(EntityKey(&key).value_is_spilled(), "value must spill");
+        (store, key, value)
+    }
+
+    /// A cached fetch of the same spilled block reads the store once: the
+    /// second fetch is a cache hit that touches no storage.
+    #[dialog_common::test]
+    async fn it_serves_a_cached_spilled_block_without_a_store_read() -> anyhow::Result<()> {
+        let (store, key, value) = spilled_setup().await;
+        let cache = spill_cache();
+
+        let before = store.reads();
+        let first = fetch_spilled_cached(&store, &cache, &key).await?;
+        let after_miss = store.reads();
+        let second = fetch_spilled_cached(&store, &cache, &key).await?;
+        let after_hit = store.reads();
+
+        assert_eq!(first, Some(value.to_bytes()), "miss returns the block");
+        assert_eq!(second, first, "hit returns the same bytes");
+        assert!(after_miss > before, "the miss reads the store");
+        assert_eq!(
+            after_hit, after_miss,
+            "the hit reads nothing from the store"
+        );
+        Ok(())
+    }
+
+    /// The cached fetch and the uncached fetch return identical bytes.
+    #[dialog_common::test]
+    async fn it_matches_the_uncached_fetch() -> anyhow::Result<()> {
+        let (store, key, _value) = spilled_setup().await;
+        let cache = spill_cache();
+        let cached = fetch_spilled_cached(&store, &cache, &key).await?;
+        let uncached = fetch_spilled(&store, &key).await?;
+        assert_eq!(cached, uncached);
+        assert!(cached.is_some());
+        Ok(())
+    }
+
+    /// An inline key spills nothing: both fetches return `None` and read no
+    /// block regardless of the cache.
+    #[dialog_common::test]
+    async fn it_returns_none_for_an_inline_key() -> anyhow::Result<()> {
+        let mut store = MeasuredStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+        let mut tree = ArtifactTree::empty();
+        let artifact = Artifact {
+            the: "user/name".parse().unwrap(),
+            of: "user:1".parse().unwrap(),
+            is: Value::String("Alice".to_string()),
+            cause: None,
+        };
+        tree.apply(
+            &mut store,
+            &mut delta,
+            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+        )
+        .await?;
+        let key = EntityKey::from(&artifact).into_key();
+        let cache = spill_cache();
+        assert_eq!(fetch_spilled_cached(&store, &cache, &key).await?, None);
+        assert_eq!(fetch_spilled(&store, &key).await?, None);
+        Ok(())
     }
 }

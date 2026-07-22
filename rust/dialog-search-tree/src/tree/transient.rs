@@ -15,8 +15,8 @@
 
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Node, PersistentNode,
-    PersistentTree, Rank, SymmetryWith, TransientIndex, TransientNode, TransientSegment,
+    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest, Node,
+    PersistentNode, PersistentTree, Rank, TransientIndex, TransientNode, TransientSegment,
     TreeWalker, Value, regroup_children, regroup_entries,
 };
 use async_stream::try_stream;
@@ -33,7 +33,10 @@ use rkyv::{
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
-use std::{marker::PhantomData, ops::RangeBounds};
+use std::{
+    marker::PhantomData,
+    ops::{Bound, RangeBounds},
+};
 
 /// The root of a [`TransientTree`].
 ///
@@ -59,7 +62,6 @@ enum TransientRoot<Key, Value> {
 pub struct TransientTree<Key, Value, D = Geometric>
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
     D: Distribution,
 {
@@ -69,27 +71,22 @@ where
     /// nor touches storage.
     root: TransientRoot<Key, Value>,
     cache: Cache<Blake3Hash, Buffer>,
+    /// The tree's format header, stamped into every node this batch persists
+    /// and read by the boundary coin during reshaping. Every node in a tree
+    /// carries the same manifest.
+    // TODO: when editing an existing NON-default tree, adopt the manifest from
+    // the loaded root node (via `PersistentNode::manifest`) so an edit
+    // preserves the tree's format. That read is async (it loads the root),
+    // which the synchronous `edit()`/`new` entry cannot do; today every tree
+    // uses `Manifest::default()`, so this is correct until non-default trees
+    // exist. See `PersistentTree::edit`.
+    manifest: Manifest,
     distribution: PhantomData<D>,
 }
 
 impl<Key, Value, D> TransientTree<Key, Value, D>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value
         + ConditionalSync
         + 'static
@@ -112,15 +109,25 @@ where
         Self {
             root: TransientRoot::Unloaded(root),
             cache,
+            manifest: Manifest::default(),
             distribution: PhantomData,
         }
     }
 
     /// Loads the root into a transient node for editing, returning `None` for an
     /// empty tree (a null root hash, which cannot be loaded).
+    ///
+    /// The root's stored header must equal the edit's manifest: editing a tree
+    /// under different format parameters would re-coin the touched spine with
+    /// the wrong branching/length-guard settings and stamp mixed headers into
+    /// one tree — silent shape divergence between replicas. Until an edit
+    /// adopts the loaded root's manifest (see the TODO on `manifest`), a
+    /// mismatch fails loudly instead. Every node of a well-formed tree carries
+    /// the root's manifest, so the root check covers the tree.
     async fn load<Backend>(
         root: TransientRoot<Key, Value>,
         accessor: &Accessor<Backend>,
+        manifest: &Manifest,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -131,7 +138,16 @@ where
             TransientRoot::Unloaded(hash) if &hash == NULL_BLAKE3_HASH => Ok(None),
             TransientRoot::Unloaded(hash) => {
                 let node: PersistentNode<Key, Value> = accessor.get_node(&hash).await?;
-                Ok(Some(TransientNode::try_from(&node)?))
+                let header = node.manifest()?;
+                if header != *manifest {
+                    return Err(DialogSearchTreeError::Node(format!(
+                        "Tree manifest mismatch: the root was written under \
+                         {header:?} but the edit runs under {manifest:?}"
+                    )));
+                }
+                // The root's left edge is the tree's global leftmost seam,
+                // whose separator is the empty string (negative infinity).
+                Ok(Some(TransientNode::open(&node, Vec::new())?))
             }
         }
     }
@@ -149,18 +165,31 @@ where
     {
         let entry = Entry { key, value };
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let manifest = self.manifest;
 
-        let node = match Self::load(self.root, &accessor).await? {
+        let node = match Self::load(self.root, &accessor, &self.manifest).await? {
             // The first entry of an empty tree becomes a lone segment wrapped in
             // a single-child index, matching the canonical root invariant that
             // the root is always an index.
-            None => TransientNode::Index(TransientIndex {
-                children: vec![Node::Transient(TransientNode::Segment(TransientSegment {
-                    entries: vec![entry],
-                }))],
-            }),
+            None => {
+                // The first segment of a tree sits at the global leftmost
+                // seam. Its separator is seeded through the distribution's
+                // own rule (re-derived over the empty floor) rather than
+                // hardcoded: later min-moves refresh it with `reseparate`,
+                // and a seed the rule would not itself reproduce makes the
+                // tree's bytes depend on edit history. Under the production
+                // rule the empty floor is a fixed point, so this IS the
+                // empty separator there.
+                let separator = D::reseparate(entry.key.as_ref(), &[]);
+                TransientNode::Index(TransientIndex {
+                    children: vec![Node::Transient(TransientNode::Segment(TransientSegment {
+                        entries: vec![entry],
+                        separator,
+                    }))],
+                })
+            }
             Some(root) => Edit::Upsert(entry)
-                .apply::<Backend, D>(root, &accessor)
+                .apply::<Backend, D>(root, &accessor, &manifest)
                 .await?
                 .expect("an insert never empties the tree"),
         };
@@ -180,14 +209,15 @@ where
             + ConditionalSync,
     {
         let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let manifest = self.manifest;
 
-        let Some(root) = Self::load(self.root, &accessor).await? else {
+        let Some(root) = Self::load(self.root, &accessor, &self.manifest).await? else {
             // Deleting from an empty tree is a no-op; leave it empty.
             self.root = TransientRoot::Unloaded(NULL_BLAKE3_HASH.clone());
             return Ok(self);
         };
         let edited = Edit::Delete(key.clone())
-            .apply::<Backend, D>(root, &accessor)
+            .apply::<Backend, D>(root, &accessor, &manifest)
             .await?;
         self.root = match edited {
             Some(node) => TransientRoot::Loaded(node),
@@ -223,7 +253,7 @@ where
         loop {
             match node {
                 TransientNode::Index(index) => {
-                    let at = child_for::<Key, Value>(&index.children, key);
+                    let at = child_for::<Key, Value>(&index.children, key)?;
                     match &index.children[at] {
                         Node::Persistent(link) => {
                             return self.persistent_get(&link.node, key, storage).await;
@@ -296,7 +326,7 @@ where
             TransientRoot::Unloaded(hash) => vec![StreamStep::Persistent(hash.clone())],
             TransientRoot::Loaded(node) => {
                 let mut plan = Vec::new();
-                collect_stream_plan(node, &mut plan);
+                collect_stream_plan(node, &bounds, &mut plan);
                 plan
             }
         };
@@ -340,7 +370,9 @@ where
             // loaded; its hash is already durable and is returned verbatim,
             // touching no storage.
             TransientRoot::Unloaded(hash) => hash,
-            TransientRoot::Loaded(transient) => transient.persist(delta)?.hash().clone(),
+            TransientRoot::Loaded(transient) => {
+                transient.persist(delta, &self.manifest)?.hash().clone()
+            }
         };
 
         Ok(PersistentTree::seal(root, self.cache))
@@ -437,22 +469,7 @@ impl<Key, Value> Edit<Key, Value> {
 
 impl<Key, Value> Edit<Key, Value>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value
         + ConditionalSync
         + 'static
@@ -479,12 +496,19 @@ where
         self,
         mut root: TransientNode<Key, Value>,
         accessor: &Accessor<Backend>,
+        manifest: &Manifest,
     ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
         D: Distribution,
     {
+        // The manifest supplies the branching parameter and the length-guard
+        // bound to the rank coin, threaded down the reshape chain so every rank
+        // decision uses the tree's own format parameters. It is the same
+        // manifest stamped into every node this batch persists.
+        let manifest = *manifest;
+
         // Phase one: lift the path to the target leaf, recording the child index
         // chosen at each level. The routing key is borrowed from this edit, so
         // the descent clones no separate key.
@@ -494,7 +518,7 @@ where
             let node = follow(&mut root, &path)?;
             match node {
                 TransientNode::Index(index) => {
-                    let at = child_for::<Key, Value>(&index.children, key);
+                    let at = child_for::<Key, Value>(&index.children, key)?;
                     lift(&mut index.children[at], accessor).await?;
                     path.push(at);
                 }
@@ -534,21 +558,176 @@ where
         //     it is canonical unless it empties the leaf (which must remove the
         //     segment from its parent).
         //
+        // An orphan append: a non-boundary key that sorts after the segment's
+        // terminating boundary. Under lower-bound routing a key in the gap
+        // between two segments routes LEFT (it is below the right segment's
+        // separator), so it lands past the boundary that closes the left
+        // segment. No cut is justified after a rank-1 key, so the appended
+        // entry belongs with the right neighbor's leftmost leaf: the same
+        // rightward fusion a boundary delete needs for its orphaned tail.
+        let is_orphan_append = match (&self, follow(&mut root, &path)?) {
+            (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
+                // Cheapest test first: only a key sorting past the segment's
+                // last entry can be an orphan append, so the two rank hashes
+                // are paid only on true appends.
+                match segment.entries.last() {
+                    Some(last) if entry.key > last.key => {
+                        D::rank(last.key.as_ref(), &manifest) > BOTTOM_RANK
+                            && D::rank(entry.key.as_ref(), &manifest) <= BOTTOM_RANK
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+
+        // A min-move edit replaces the segment's first key (an insert sorting
+        // before it, or a delete of it), which rewrites the separator at the
+        // segment's left edge. `min_move` captures the (old, new) separator
+        // pair for such an edit; `None` when the edit leaves the minimum in
+        // place. A single-entry segment empties outright; its joined seam is
+        // evaluated below, once the right neighbor's minimum is reachable.
+        let min_move = match (&self, follow(&mut root, &path)?) {
+            (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
+                match segment.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                    Err(0) => Some((
+                        segment.separator.clone(),
+                        D::reseparate(entry.key.as_ref(), &segment.separator),
+                    )),
+                    _ => None,
+                }
+            }
+            (Edit::Delete(key), TransientNode::Segment(segment)) => {
+                match segment.entries.binary_search_by(|e| e.key.cmp(key)) {
+                    Ok(0) if segment.entries.len() > 1 => Some((
+                        segment.separator.clone(),
+                        D::reseparate(segment.entries[1].key.as_ref(), &segment.separator),
+                    )),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
+        // When the new separator's seam rank no longer sustains an index-level
+        // cut the old one punched, that cut must dissolve, which merges the
+        // edited subtree LEFTWARD across its parent seam: the local re-shape
+        // cannot see the left sibling, so the left neighbor's spine must be
+        // lifted and fused, mirroring the boundary-delete machinery on the
+        // right edge. The global leftmost seam (the empty separator) is a
+        // fixed point of the floor rule, so it can never trigger this.
+        let dissolves_left_cut = min_move
+            .as_ref()
+            .map(|(old, new)| seam_cut_dissolves::<D>(old, new, &manifest))
+            .unwrap_or(false);
+
+        // The mirror image: a seam-rank RISE that starts punching cuts the old
+        // separator did not. The new cut is a split realized by the local
+        // regroup, so no neighbor is needed — but the fast path performs no
+        // regroup at all, so it must be bypassed for the re-shape to see it.
+        let raises_left_cut = min_move
+            .as_ref()
+            .map(|(old, new)| seam_cut_punches::<D>(old, new, &manifest))
+            .unwrap_or(false);
+
         // Anything not provably canonical falls through to the re-shaping paths.
-        if !is_boundary_delete {
+        if !is_boundary_delete && !is_orphan_append && !dissolves_left_cut && !raises_left_cut {
             let TransientNode::Segment(segment) = follow(&mut root, &path)? else {
                 return Err(DialogSearchTreeError::Node(
                     "Path did not reach a segment".into(),
                 ));
             };
-            if fast_path_keeps_canonical::<Key, Value, D>(&segment.entries, &self) {
+            if fast_path_keeps_canonical::<Key, Value, D>(&segment.entries, &self, &manifest) {
                 apply_to_segment(&mut segment.entries, self);
+                // The seam at the segment's left edge moves with its first
+                // key. Re-derive the separator from the new minimum against
+                // the old separator as the floor; the rule is idempotent
+                // when the minimum did not change.
+                if let Some(first) = segment.entries.first() {
+                    segment.separator = D::reseparate(first.key.as_ref(), &segment.separator);
+                }
                 return Ok(Some(root));
             }
         }
 
-        let neighbor_path = if is_boundary_delete {
+        let neighbor_path = if is_boundary_delete || is_orphan_append {
             lift_right_neighbor_spine(&mut root, &path, accessor).await?
+        } else {
+            None
+        };
+
+        // The right-LCA: the deepest level where the main and right-neighbor
+        // paths diverge (for a boundary delete).
+        let lca_depth = match &neighbor_path {
+            Some(neighbor_path) => Some(
+                path.iter()
+                    .zip(neighbor_path.iter())
+                    .position(|(a, b)| a != b)
+                    .ok_or_else(|| {
+                        DialogSearchTreeError::Node(
+                            "Boundary delete had no diverging neighbor path".into(),
+                        )
+                    })?,
+            ),
+            None => None,
+        };
+
+        // A single-entry boundary delete removes the whole segment, joining
+        // its left seam with the right neighbor's: the joined separator is
+        // re-derived from the neighbor's minimum over the vanished segment's
+        // floor, and its rank may likewise dissolve a punched cut.
+        let dissolves_left_cut = dissolves_left_cut
+            || match &neighbor_path {
+                Some(neighbor_path) => {
+                    let floor = match follow(&mut root, &path)? {
+                        TransientNode::Segment(segment) if segment.entries.len() == 1 => {
+                            Some(segment.separator.clone())
+                        }
+                        _ => None,
+                    };
+                    match floor {
+                        Some(floor) => match follow(&mut root, neighbor_path)? {
+                            TransientNode::Segment(neighbor) => match neighbor.entries.first() {
+                                Some(first) => seam_cut_dissolves::<D>(
+                                    &floor,
+                                    &D::reseparate(first.key.as_ref(), &floor),
+                                    &manifest,
+                                ),
+                                None => false,
+                            },
+                            _ => false,
+                        },
+                        None => false,
+                    }
+                }
+                None => false,
+            };
+
+        // Lift the left neighbor's spine and locate the fusion depth: the
+        // deepest ancestor where the edited subtree has a left sibling. For
+        // a boundary delete, a divergence deeper than the right-LCA lies
+        // INSIDE the fused window (the fusion regroups the main subtree's
+        // own left siblings wholesale), so only a crossing at or above the
+        // LCA needs the explicit left fusion.
+        let left_fuse = if dissolves_left_cut {
+            match lift_left_neighbor_spine(&mut root, &path, accessor).await? {
+                Some(left_path) => {
+                    let depth = path
+                        .iter()
+                        .zip(left_path.iter())
+                        .position(|(a, b)| a != b)
+                        .ok_or_else(|| {
+                            DialogSearchTreeError::Node(
+                                "Left fusion had no diverging neighbor path".into(),
+                            )
+                        })?;
+                    match lca_depth {
+                        Some(lca) if depth > lca => None,
+                        _ => Some(depth),
+                    }
+                }
+                None => None,
+            }
         } else {
             None
         };
@@ -556,34 +735,69 @@ where
         // Phase two: synchronous re-shape. The whole touched region is transient, so
         // the re-shape needs no further loads and runs without any borrow spanning
         // an await.
-        let replacement = match &neighbor_path {
-            Some(neighbor_path) => {
-                // A boundary delete: the LCA is the deepest level where the main
-                // and neighbor paths diverge. Re-shape the shared prefix down to
-                // the LCA, where the two child subtrees fuse. `self` is not moved
-                // on this arm, so the boundary key is borrowed from it directly.
-                let lca_depth = path
-                    .iter()
-                    .zip(neighbor_path.iter())
-                    .position(|(a, b)| a != b)
-                    .ok_or_else(|| {
-                        DialogSearchTreeError::Node(
-                            "Boundary delete had no diverging neighbor path".into(),
-                        )
-                    })?;
+        let replacement = match (&neighbor_path, lca_depth) {
+            (Some(neighbor_path), Some(lca_depth)) => {
+                // A rightward fusion: re-shape the shared prefix down to the
+                // LCA, where the two child subtrees fuse. A boundary delete
+                // pops its key at the facing leaves; an orphan append is
+                // applied to the leaf up front and nothing is popped.
+                let pop = match self {
+                    Edit::Delete(key) => Some(key),
+                    upsert @ Edit::Upsert(_) => {
+                        let TransientNode::Segment(segment) = follow(&mut root, &path)? else {
+                            return Err(DialogSearchTreeError::Node(
+                                "Path did not reach a segment".into(),
+                            ));
+                        };
+                        apply_to_segment(&mut segment.entries, upsert);
+                        None
+                    }
+                };
                 reshape_fused::<Key, Value, D>(
                     &mut root,
                     &path,
                     neighbor_path,
                     lca_depth,
-                    self.key(),
+                    pop.as_ref(),
                     height,
+                    left_fuse,
+                    &manifest,
                 )?
             }
-            None => reshape_path::<Key, Value, D>(&mut root, &path, self, height)?,
+            _ => {
+                reshape_path::<Key, Value, D>(&mut root, &path, self, height, left_fuse, &manifest)?
+            }
         };
-        seal_root::<Key, Value, D>(replacement, height)
+        seal_root::<Key, Value, D, _>(replacement, height, &manifest, accessor).await
     }
+}
+
+/// Whether replacing a seam's separator dissolves an index-level cut the old
+/// separator punched: true when the old seam rank cut at least level 1 and
+/// the new rank is lower. (Punched levels form the range `1..=rank - 2`, so
+/// a drop from any rank of 3 or more removes cuts; a rise only adds them,
+/// which the local regroup realizes as a split without neighbor content.)
+fn seam_cut_dissolves<D>(old_separator: &[u8], new_separator: &[u8], manifest: &Manifest) -> bool
+where
+    D: Distribution,
+{
+    let old_rank = D::seam_rank(old_separator, manifest);
+    let new_rank = D::seam_rank(new_separator, manifest);
+    old_rank > BOTTOM_RANK + 1 && new_rank < old_rank
+}
+
+/// Whether replacing a seam's separator punches an index-level cut the old
+/// separator did not: true when the new seam rank cuts at least level 1 and
+/// rose above the old rank. The cut is realized as a split by the local
+/// regroup (no neighbor content is needed), but only a re-shape runs that
+/// regroup — the fast path must not swallow such an edit.
+fn seam_cut_punches<D>(old_separator: &[u8], new_separator: &[u8], manifest: &Manifest) -> bool
+where
+    D: Distribution,
+{
+    let old_rank = D::seam_rank(old_separator, manifest);
+    let new_rank = D::seam_rank(new_separator, manifest);
+    new_rank > BOTTOM_RANK + 1 && new_rank > old_rank
 }
 
 /// Walks `root` down the recorded child indices in `path`, lifting the node at
@@ -625,14 +839,7 @@ async fn lift<Key, Value, Backend>(
     accessor: &Accessor<Backend>,
 ) -> Result<(), DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -642,7 +849,11 @@ where
 {
     if let Node::Persistent(link) = node {
         let persistent = accessor.get_node(&link.node).await?;
-        *node = TransientNode::try_from(&persistent)?.into();
+        // The link's separator is the seam at the opened subtree's left edge;
+        // it moves onto the transient node (a segment stores it, an index
+        // derives it from its first child's link).
+        let separator = link.separator.clone();
+        *node = TransientNode::open(&persistent, separator)?.into();
     }
     Ok(())
 }
@@ -663,19 +874,7 @@ async fn lift_right_neighbor_spine<Key, Value, Backend>(
     accessor: &Accessor<Backend>,
 ) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -726,6 +925,70 @@ where
     Ok(Some(neighbor_path))
 }
 
+/// Lifts the right spine of the subtree immediately to the left of `path`, so
+/// a left fusion (a min-move whose seam rank drop dissolves an index cut) can
+/// merge the edited subtree into that neighbor during the re-shape.
+///
+/// The mirror of [`lift_right_neighbor_spine`]: the neighbor is found by
+/// climbing `path` to the deepest ancestor whose descended child has a left
+/// sibling, then walking that sibling's rightmost edge down to its leaf,
+/// lifting each node on the way. Returns the path to the neighbor's rightmost
+/// leaf, or `None` when `path` runs along the tree's leftmost edge.
+async fn lift_left_neighbor_spine<Key, Value, Backend>(
+    root: &mut TransientNode<Key, Value>,
+    path: &[usize],
+    accessor: &Accessor<Backend>,
+) -> Result<Option<Vec<usize>>, DialogSearchTreeError>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+{
+    let mut neighbor_path: Option<Vec<usize>> = None;
+    for depth in (0..path.len()).rev() {
+        let ancestor = follow(root, &path[..depth])?;
+        if let TransientNode::Index(_) = ancestor
+            && path[depth] > 0
+        {
+            let mut prefix = path[..depth].to_vec();
+            prefix.push(path[depth] - 1);
+            neighbor_path = Some(prefix);
+            break;
+        }
+    }
+
+    let Some(mut neighbor_path) = neighbor_path else {
+        return Ok(None);
+    };
+
+    // Lift the left sibling itself so the rightmost descent below can follow
+    // into it.
+    let sibling = neighbor_path[neighbor_path.len() - 1];
+    let parent = follow(root, &neighbor_path[..neighbor_path.len() - 1])?;
+    lift(&mut parent.as_index_mut()?.children[sibling], accessor).await?;
+
+    // Walk the neighbor subtree's rightmost edge to its leaf, lifting each
+    // node so the whole spine is transient.
+    loop {
+        let node = follow(root, &neighbor_path)?;
+        match node {
+            TransientNode::Index(index) => {
+                let last = index.children.len() - 1;
+                lift(&mut index.children[last], accessor).await?;
+                neighbor_path.push(last);
+            }
+            TransientNode::Segment(_) => break,
+        }
+    }
+
+    Ok(Some(neighbor_path))
+}
+
 /// Re-shapes the path from `node` down to the target leaf after applying `edit`,
 /// returning the canonical run of nodes that should replace `node` in its
 /// parent.
@@ -738,21 +1001,20 @@ where
 ///
 /// `height` is the height of `node` (0 for the leaf). A node at height `h`
 /// groups its height-`h - 1` children with the level-`h` threshold.
+///
+/// `left_fuse` names the depth (relative to `node`) of the ancestor at which
+/// the rebuilt run's head must fuse into its left sibling, when the edit
+/// dissolved the cut at the edited subtree's left edge; see [`fuse_left_run`].
 fn reshape_path<Key, Value, D>(
     node: &mut TransientNode<Key, Value>,
     path: &[usize],
     edit: Edit<Key, Value>,
     height: Rank,
+    left_fuse: Option<usize>,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -768,21 +1030,99 @@ where
                 ));
             };
             apply_to_segment(&mut segment.entries, edit);
-            Ok(regroup_entries::<Key, Value, D>(std::mem::take(
-                &mut segment.entries,
-            )))
+            // The segment's separator becomes the floor for the regrouped
+            // run: its first group re-derives against it, and an emptied
+            // segment propagates its removal through the boundary-delete
+            // paths, which have the neighbor's keys in memory.
+            let floor = std::mem::take(&mut segment.separator);
+            Ok(regroup_entries::<Key, Value, D>(
+                std::mem::take(&mut segment.entries),
+                floor,
+                manifest,
+            ))
         }
         Some((&at, rest)) => {
             let child = node.child_mut(at)?;
-            let replacement = reshape_path::<Key, Value, D>(child, rest, edit, height - 1)?;
-            splice_and_regroup::<Key, Value, D>(
-                &mut node.as_index_mut()?.children,
-                at..at + 1,
-                replacement,
-                height,
-            )
+            let replacement = reshape_path::<Key, Value, D>(
+                child,
+                rest,
+                edit,
+                height - 1,
+                left_fuse.and_then(|depth| depth.checked_sub(1)),
+                manifest,
+            )?;
+            let children = &mut node.as_index_mut()?.children;
+            if left_fuse == Some(0) {
+                // The replacement's left-edge seam rank dropped: its head
+                // must merge into the left sibling. The edited child is
+                // consumed by its replacement either way.
+                children.remove(at);
+                fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)
+            } else {
+                splice_and_regroup::<Key, Value, D>(
+                    children,
+                    at..at + 1,
+                    replacement,
+                    height,
+                    manifest,
+                )
+            }
         }
     }
+}
+
+/// Splices `run` into `children` at `insert_at` after fusing the run's first
+/// node with the child immediately to the left, then re-cuts the child list.
+///
+/// This realizes a dissolved left-edge cut: the seam at the run's left edge
+/// no longer sustains its index-level boundary, so the neighboring subtrees'
+/// contents are combined level by level ([`fuse_subtrees`] with nothing to
+/// pop) and the pointwise regroup decides every cut afresh; if the seam's
+/// new rank still punches some levels, the regroup simply recreates those
+/// cuts, so an over-wide window is safe. An empty run degenerates to a plain
+/// re-cut.
+fn fuse_left_run<Key, Value, D>(
+    children: &mut Vec<Node<Key, Value>>,
+    insert_at: usize,
+    mut run: Vec<Node<Key, Value>>,
+    height: Rank,
+    manifest: &Manifest,
+) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    D: Distribution,
+{
+    if insert_at == 0 {
+        return Err(DialogSearchTreeError::Node(
+            "Left fusion requires a left sibling".into(),
+        ));
+    }
+    if run.is_empty() {
+        return splice_and_regroup::<Key, Value, D>(
+            children,
+            insert_at..insert_at,
+            run,
+            height,
+            manifest,
+        );
+    }
+
+    let left_sibling = take_transient(children, insert_at - 1)?;
+    let first = run.remove(0).into_transient()?;
+    let mut fused =
+        fuse_subtrees::<Key, Value, D>(left_sibling, first, None, height - 1, manifest)?;
+    fused.extend(run);
+    splice_and_regroup::<Key, Value, D>(
+        children,
+        (insert_at - 1)..(insert_at - 1),
+        fused,
+        height,
+        manifest,
+    )
 }
 
 /// Re-shapes the shared prefix of a boundary delete down to the lowest common
@@ -794,23 +1134,29 @@ where
 /// `path[lca_depth] + 1` (the neighbour subtree) are fused by [`fuse_subtrees`]
 /// into one canonical run that replaces both, then the LCA's child list is
 /// re-cut. The returned run replaces `node` in its parent.
+///
+/// `left_fuse` names the depth (relative to `node`) at which the rebuilt
+/// run's head must additionally fuse into its LEFT sibling (a dissolved
+/// left-edge cut); it is never deeper than the LCA, since divergences below
+/// it lie inside the fused window, whose wholesale regroup re-decides those
+/// cuts anyway.
+// The fused-reshape path genuinely needs each of these distinct inputs (both
+// descent paths, the LCA depth, the pop key, the height, the left-fuse index,
+// and now the manifest for the coin); grouping them into a struct would only
+// move the argument list, not simplify it.
+#[allow(clippy::too_many_arguments)]
 fn reshape_fused<Key, Value, D>(
     node: &mut TransientNode<Key, Value>,
     path: &[usize],
     neighbor_path: &[usize],
     lca_depth: usize,
-    key: &Key,
+    key: Option<&Key>,
     height: Rank,
+    left_fuse: Option<usize>,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -825,8 +1171,12 @@ where
         let main = take_transient(children, at)?;
         // After removing the main child the neighbour shifted left into `at`.
         let neighbor = take_transient(children, at)?;
-        let fused = fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1)?;
-        return splice_and_regroup::<Key, Value, D>(children, at..at, fused, height);
+        let fused = fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1, manifest)?;
+        return if left_fuse == Some(0) {
+            fuse_left_run::<Key, Value, D>(children, at, fused, height, manifest)
+        } else {
+            splice_and_regroup::<Key, Value, D>(children, at..at, fused, height, manifest)
+        };
     }
 
     // Above the LCA: recurse through the shared prefix, then splice and re-cut.
@@ -838,13 +1188,16 @@ where
         lca_depth - 1,
         key,
         height - 1,
+        left_fuse.and_then(|depth| depth.checked_sub(1)),
+        manifest,
     )?;
-    splice_and_regroup::<Key, Value, D>(
-        &mut node.as_index_mut()?.children,
-        at..at + 1,
-        replacement,
-        height,
-    )
+    let children = &mut node.as_index_mut()?.children;
+    if left_fuse == Some(0) {
+        children.remove(at);
+        fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)
+    } else {
+        splice_and_regroup::<Key, Value, D>(children, at..at + 1, replacement, height, manifest)
+    }
 }
 
 /// Fuses the main subtree (whose rightmost leaf lost its boundary) with the
@@ -864,18 +1217,12 @@ where
 fn fuse_subtrees<Key, Value, D>(
     main: TransientNode<Key, Value>,
     neighbor: TransientNode<Key, Value>,
-    key: &Key,
+    key: Option<&Key>,
     height: Rank,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -886,13 +1233,19 @@ where
         (TransientNode::Segment(mut main), TransientNode::Segment(neighbor)) => {
             // The leaf level: drop the dissolved boundary key (the main leaf's
             // last entry), then concatenate the orphans with the neighbour's
-            // entries and re-cut into segments.
-            if main.entries.last().map(|e| &e.key == key).unwrap_or(false) {
+            // entries and re-cut into segments. The main segment's separator
+            // is the floor for the fused run: the run's left seam is the main
+            // segment's left seam (the neighbour's own seam dissolves and is
+            // re-derived fresh if regrouping recreates it).
+            let floor = std::mem::take(&mut main.separator);
+            if let Some(key) = key
+                && main.entries.last().map(|e| &e.key == key).unwrap_or(false)
+            {
                 main.entries.pop();
             }
             let mut entries = main.entries;
             entries.extend(neighbor.entries);
-            Ok(regroup_entries::<Key, Value, D>(entries))
+            Ok(regroup_entries::<Key, Value, D>(entries, floor, manifest))
         }
         (TransientNode::Index(mut main), TransientNode::Index(mut neighbor)) => {
             // The main spine descends through the last child; the neighbour
@@ -906,12 +1259,18 @@ where
             let neighbor_first = remove_first(&mut neighbor.children)?;
             let neighbor_first = neighbor_first.into_transient()?;
 
-            let fused = fuse_subtrees::<Key, Value, D>(main_last, neighbor_first, key, height - 1)?;
+            let fused = fuse_subtrees::<Key, Value, D>(
+                main_last,
+                neighbor_first,
+                key,
+                height - 1,
+                manifest,
+            )?;
 
             let mut combined = main.children;
             combined.extend(fused);
             combined.extend(neighbor.children);
-            regroup_children::<Key, Value, D>(combined, height)
+            regroup_children::<Key, Value, D>(combined, height, manifest)
         }
         _ => Err(DialogSearchTreeError::Node(
             "Fused subtrees had mismatched heights".into(),
@@ -928,16 +1287,10 @@ fn splice_and_regroup<Key, Value, D>(
     range: std::ops::Range<usize>,
     replacement: Vec<Node<Key, Value>>,
     height: Rank,
+    manifest: &Manifest,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -948,7 +1301,7 @@ where
     if children.is_empty() {
         return Ok(vec![]);
     }
-    regroup_children::<Key, Value, D>(std::mem::take(children), height)
+    regroup_children::<Key, Value, D>(std::mem::take(children), height, manifest)
 }
 
 /// Turns the root's replacement run (the nodes that stand for the old root after
@@ -961,23 +1314,27 @@ where
 /// while it holds more than one node, then any single-child index-over-index
 /// wrapper is stripped, leaving the multi-child index, or the lone index over a
 /// single segment.
-fn seal_root<Key, Value, D>(
+///
+/// Stripping may need a load: when a delete empties the rightmost subtree, the
+/// surviving sibling can still be a persistent link (its spine was never
+/// lifted), and whether the wrapper above it is canonical depends on the
+/// linked node's kind — an index child makes the wrapper a non-canonical
+/// chain, a segment child makes it the canonical root. The child is lifted to
+/// find out.
+async fn seal_root<Key, Value, D, Backend>(
     mut replacement: Vec<Node<Key, Value>>,
     height: Rank,
+    manifest: &Manifest,
+    accessor: &Accessor<Backend>,
 ) -> Result<Option<TransientNode<Key, Value>>, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
     D: Distribution,
 {
     if replacement.is_empty() {
@@ -995,7 +1352,7 @@ where
             Some(Node::Transient(TransientNode::Segment(_)))
         )
     {
-        replacement = regroup_children::<Key, Value, D>(replacement, level)?;
+        replacement = regroup_children::<Key, Value, D>(replacement, level, manifest)?;
         level += 1;
     }
 
@@ -1013,13 +1370,18 @@ where
         None => return Ok(None),
     };
 
-    // Strip a non-canonical chain of single-child index nodes over indices.
+    // Strip a non-canonical chain of single-child index nodes over indices. A
+    // persistent single child is lifted first: its kind (index or segment)
+    // decides whether the wrapper above it is canonical.
     loop {
         let TransientNode::Index(index) = &mut root else {
             break;
         };
         if index.children.len() != 1 {
             break;
+        }
+        if matches!(&index.children[0], Node::Persistent(_)) {
+            lift(&mut index.children[0], accessor).await?;
         }
         match &index.children[0] {
             Node::Transient(TransientNode::Index(_)) => {
@@ -1082,10 +1444,10 @@ fn remove_first<Key, Value>(
 fn fast_path_keeps_canonical<Key, Value, D>(
     entries: &[Entry<Key, Value>],
     edit: &Edit<Key, Value>,
+    manifest: &Manifest,
 ) -> bool
 where
     Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     D: Distribution,
 {
     match edit {
@@ -1094,7 +1456,7 @@ where
             if found.is_ok() {
                 return true; // value update only, shape unchanged
             }
-            if D::rank(entry.key.as_ref()) > BOTTOM_RANK {
+            if D::rank(entry.key.as_ref(), manifest) > BOTTOM_RANK {
                 return false; // inserting a boundary splits the segment
             }
             let at = found.unwrap_err();
@@ -1102,7 +1464,7 @@ where
             let appends_last = at == entries.len();
             let last_is_boundary = entries
                 .last()
-                .map(|e| D::rank(e.key.as_ref()) > BOTTOM_RANK)
+                .map(|e| D::rank(e.key.as_ref(), manifest) > BOTTOM_RANK)
                 .unwrap_or(false);
             !(appends_last && last_is_boundary)
         }
@@ -1133,31 +1495,28 @@ where
     }
 }
 
-/// Index of the child whose subtree covers `key`: the first child whose upper
-/// bound is `>= key`, or the last child when the key exceeds every bound.
-fn child_for<Key, Value>(children: &[Node<Key, Value>], key: &Key) -> usize
+/// Index of the child whose subtree covers `key`: the last child whose
+/// separator is at or below the key (a probe equal to a separator belongs to
+/// the seam's right side), clamped to the leftmost child when the key sits
+/// below every separator. A child whose separator cannot be read is a
+/// corrupt node: the error surfaces instead of silently routing the edit
+/// into the wrong subtree.
+fn child_for<Key, Value>(
+    children: &[Node<Key, Value>],
+    key: &Key,
+) -> Result<usize, DialogSearchTreeError>
 where
-    Key: self::Key + PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
-    Value: self::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
+    Key: self::Key,
 {
     let mut at = 0usize;
     while at + 1 < children.len() {
-        match children[at].upper_bound_ref() {
-            Ok(bound) if bound < key => at += 1,
-            _ => break,
+        if children[at + 1].separator()? <= key.as_ref() {
+            at += 1;
+        } else {
+            break;
         }
     }
-    at
+    Ok(at)
 }
 
 /// One step of an ascending traversal plan over a transient spine, captured so
@@ -1177,27 +1536,62 @@ enum StreamStep<Key, Value> {
 /// Walks the transient `node` left to right, appending each persistent subtree
 /// (as a hash) and each transient leaf entry (cloned) to `plan` in ascending
 /// key order.
+///
+/// Children whose key span cannot intersect `bounds` are pruned: a child's
+/// span is `[its separator, the next sibling's separator)` under lower-bound
+/// routing, so a subtree entirely below the range start or at/above the range
+/// end contributes nothing and costs neither a clone (transient) nor a root
+/// fetch and descent (persistent). A sibling whose separator cannot be read
+/// is treated as unbounded — pruning degrades, correctness does not.
 fn collect_stream_plan<Key, Value>(
     node: &TransientNode<Key, Value>,
+    bounds: &(Bound<Key>, Bound<Key>),
     plan: &mut Vec<StreamStep<Key, Value>>,
 ) where
-    Key: Clone,
+    Key: self::Key,
     Value: Clone,
 {
+    // Whether a child spanning `[span_start, span_end)` (separator bytes;
+    // `None` when unknown) could hold a key inside `bounds`.
+    let intersects = |span_start: Option<&[u8]>, span_end: Option<&[u8]>| {
+        let below = match (&bounds.0, span_end) {
+            // Keys are < span_end <= start: every key sorts below the range.
+            (Bound::Included(start) | Bound::Excluded(start), Some(end)) => end <= start.as_ref(),
+            _ => false,
+        };
+        let above = match (&bounds.1, span_start) {
+            // Keys are >= span_start > end (or >= end when exclusive).
+            (Bound::Included(end), Some(start)) => start > end.as_ref(),
+            (Bound::Excluded(end), Some(start)) => start >= end.as_ref(),
+            _ => false,
+        };
+        !below && !above
+    };
+
     match node {
         TransientNode::Index(index) => {
-            for child in &index.children {
+            for (at, child) in index.children.iter().enumerate() {
+                let span_start = child.separator().ok();
+                let span_end = index
+                    .children
+                    .get(at + 1)
+                    .and_then(|sibling| sibling.separator().ok());
+                if !intersects(span_start, span_end) {
+                    continue;
+                }
                 match child {
                     Node::Persistent(link) => {
                         plan.push(StreamStep::Persistent(link.node.clone()));
                     }
-                    Node::Transient(child) => collect_stream_plan(child, plan),
+                    Node::Transient(child) => collect_stream_plan(child, bounds, plan),
                 }
             }
         }
         TransientNode::Segment(segment) => {
             for entry in &segment.entries {
-                plan.push(StreamStep::Entry(entry.clone()));
+                if bounds.contains(&entry.key) {
+                    plan.push(StreamStep::Entry(entry.clone()));
+                }
             }
         }
     }
@@ -1282,6 +1676,40 @@ mod tests {
             expected.root(),
             "batched inserts must match sequential inserts"
         );
+        Ok(())
+    }
+
+    /// Building and then editing a tree stamps the manifest into the root node
+    /// both times: an edit re-persists with the same manifest, so the format
+    /// is stable across edits and readable from any node.
+    #[dialog_common::test]
+    async fn it_stamps_the_manifest_into_the_root_across_edits() -> Result<()> {
+        use crate::{Accessor, Cache, Manifest, PersistentNode};
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let built = sequential(&(0..200).collect::<Vec<u32>>(), &mut storage).await?;
+
+        // A fresh cache reads the persisted nodes straight from storage.
+        let accessor = Accessor::new(Cache::new(), storage.clone());
+        let root: PersistentNode<[u8; 4], Vec<u8>> = accessor.get_node(built.root()).await?;
+        assert_eq!(root.manifest()?, Manifest::default());
+
+        // Edit the built tree and persist; the new root still carries the
+        // manifest.
+        let mut delta = Delta::zero();
+        let edited = built
+            .edit()
+            .insert(9999u32.to_le_bytes(), vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        let edited_root: PersistentNode<[u8; 4], Vec<u8>> =
+            accessor.get_node(edited.root()).await?;
+        assert_eq!(edited_root.manifest()?, Manifest::default());
         Ok(())
     }
 
@@ -1491,10 +1919,10 @@ mod tests {
                 };
             }
             let mut batched_delta = Delta::zero();
-            let tree = edit.persist(&mut batched_delta)?;
+            let batched = edit.persist(&mut batched_delta)?;
 
             assert_eq!(
-                tree.root(),
+                batched.root(),
                 tree.root(),
                 "seed {seed}: interleaved batched ops must match sequential"
             );
@@ -1930,45 +2358,378 @@ mod tests {
         Ok(())
     }
 
+    /// A bounded stream over a lightly-edited tree reads only blocks on the
+    /// range's own path: persistent siblings whose separator spans cannot
+    /// intersect the bounds are pruned from the stream plan. Regression
+    /// guard — the plan once listed EVERY persistent subtree, so a small
+    /// interior range over a tree edited at both ends paid a root fetch and
+    /// descent per untouched subtree.
+    #[dialog_common::test]
+    async fn it_prunes_out_of_range_subtrees_from_bounded_streams() -> Result<()> {
+        use crate::helpers::test_storage;
+        use futures_util::StreamExt as _;
+
+        fn make_key(i: u32) -> [u8; 8] {
+            let mut key = [0u8; 8];
+            key[..4].copy_from_slice(&i.to_be_bytes());
+            key
+        }
+
+        let mut storage = test_storage();
+        let mut tree = PersistentTree::<[u8; 8], Vec<u8>>::empty();
+        let mut delta = Delta::zero();
+        for i in 0..5_000u32 {
+            tree = tree
+                .edit()
+                .insert(make_key(i), i.to_le_bytes().to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        // Reopen cold (fresh node cache) so every touched block is a real
+        // read, then edit both ends WITHOUT persisting: the spine is
+        // transient at the edges and the middle stays persistent.
+        let tree = PersistentTree::<[u8; 8], Vec<u8>>::from_hash(tree.root().clone());
+        let edit = tree
+            .edit()
+            .insert(make_key(0), vec![9], &storage)
+            .await?
+            .insert(make_key(4_999), vec![9], &storage)
+            .await?;
+
+        storage.backend().clear_journal();
+        let stream = edit.stream_range(make_key(2_400)..make_key(2_420), &storage);
+        futures_util::pin_mut!(stream);
+        let mut yielded = 0usize;
+        while let Some(entry) = stream.next().await {
+            entry?;
+            yielded += 1;
+        }
+        assert_eq!(yielded, 20, "the bounded stream yields exactly the range");
+        let reads = storage.backend().get_reads().len();
+        assert!(
+            reads <= 2,
+            "reads stay proportional to the range's path, got {reads}"
+        );
+        Ok(())
+    }
+
+    /// Keys longer than `max_separator` are permanently rank 0 (the
+    /// length-guarded coin), so a set of only oversized keys can never cut a
+    /// boundary: edits must still terminate, produce one open segment, read
+    /// back completely, and converge with a from-scratch rebuild after
+    /// deletes. This is the history-region band (512..4096-byte keys).
+    #[dialog_common::test]
+    async fn it_handles_a_band_of_permanently_rank_zero_keys() -> Result<()> {
+        const OVERSIZED: usize = 600; // above the default max_separator of 512
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        type BandTree = PersistentTree<[u8; OVERSIZED], Vec<u8>>;
+
+        let make_key = |i: u32| {
+            let mut key = [0u8; OVERSIZED];
+            key[..4].copy_from_slice(&i.to_be_bytes());
+            key
+        };
+
+        let mut delta = Delta::zero();
+        let mut tree = BandTree::empty();
+        for i in 0..60u32 {
+            tree = tree
+                .edit()
+                .insert(make_key(i), i.to_le_bytes().to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        for i in 0..60u32 {
+            let found = tree.get(&make_key(i), &storage).await?;
+            assert!(found.is_some(), "oversized key {i} reads back");
+        }
+
+        // Delete a third and compare against the from-scratch build.
+        for i in (0..60u32).step_by(3) {
+            tree = tree
+                .edit()
+                .delete(&make_key(i), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+        let mut scratch = BandTree::empty();
+        for i in 0..60u32 {
+            if i % 3 == 0 {
+                continue;
+            }
+            scratch = scratch
+                .edit()
+                .insert(make_key(i), i.to_le_bytes().to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+        assert_eq!(
+            tree.root(),
+            scratch.root(),
+            "the all-rank-0 band converges under deletes"
+        );
+        Ok(())
+    }
+
+    /// Editing a tree whose root was written under a different manifest must
+    /// fail loudly: re-coining the touched spine under other format
+    /// parameters (and stamping mixed headers into one tree) would silently
+    /// break shape convergence between replicas. This pins the tripwire until
+    /// edits adopt the loaded root's manifest.
+    #[dialog_common::test]
+    async fn it_rejects_editing_a_tree_with_a_mismatched_manifest() -> Result<()> {
+        use crate::{Manifest, PersistentNodeBody};
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let foreign = Manifest {
+            fanout_n: 4,
+            ..Manifest::default()
+        };
+        let entries = vec![crate::Entry {
+            key: 7u32.to_le_bytes(),
+            value: 7u32.to_le_bytes().to_vec(),
+        }];
+        let body = PersistentNodeBody::segment_from_entries(entries, foreign)?;
+        let buffer = Buffer::from(body.as_bytes()?);
+        let root = buffer.blake3_hash();
+        storage.store(buffer.as_ref().to_vec(), root).await?;
+
+        let tree = TestTree::from_hash(root.clone());
+        let result = tree
+            .edit()
+            .insert(9u32.to_le_bytes(), 9u32.to_le_bytes().to_vec(), &storage)
+            .await;
+        assert!(
+            result.is_err(),
+            "editing under a mismatched manifest must fail, not silently re-coin"
+        );
+        Ok(())
+    }
+
+    /// Deleting a random subset must converge to the from-scratch build of
+    /// the survivors. The rebuild is an oracle independent of the delete
+    /// path, so any delete that reshapes non-canonically fails here even if
+    /// batched and sequential deletes agree with each other.
+    #[dialog_common::test]
+    async fn it_matches_scratch_rebuild_for_random_deletes() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        for seed in 0..25u64 {
+            let mut rng = Rng::new(seed);
+            let keys: Vec<u32> = (0..300).collect();
+            let mut tree = sequential(&keys, &mut storage).await?;
+
+            let doomed: Vec<u32> = keys
+                .iter()
+                .copied()
+                .filter(|_| rng.next_u32().is_multiple_of(3))
+                .collect();
+
+            let mut delta = Delta::zero();
+            for key in &doomed {
+                tree = tree
+                    .edit()
+                    .delete(&key.to_le_bytes(), &storage)
+                    .await?
+                    .persist(&mut delta)?;
+                flush_into(&mut delta, &mut storage).await?;
+            }
+
+            let survivors: Vec<u32> = keys
+                .iter()
+                .copied()
+                .filter(|k| !doomed.contains(k))
+                .collect();
+            let scratch = sequential(&survivors, &mut storage).await?;
+
+            assert_eq!(
+                tree.root(),
+                scratch.root(),
+                "seed {seed}: deleting {} keys must match the scratch rebuild",
+                doomed.len()
+            );
+        }
+        Ok(())
+    }
+
+    /// A fast-path delete of a segment's minimum rewrites the separator in
+    /// place; when the re-derived separator's seam rank RISES enough to punch
+    /// an index-level cut the old separator did not, the tree must regroup to
+    /// create that cut, exactly as a from-scratch build of the surviving keys
+    /// would. The simulator bakes the ranks into the key bytes: deleting `b`
+    /// promotes `c` (seam rank 3) to segment minimum, so the seam must now
+    /// punch a level-1 cut.
+    #[dialog_common::test]
+    async fn it_recreates_index_cuts_when_min_delete_raises_seam_rank() -> Result<()> {
+        use crate::helpers::{DistributionSimulator, SpecKey, encode_key, test_storage};
+        type SpecTree = PersistentTree<SpecKey, Vec<u8>, DistributionSimulator>;
+
+        let mut storage = test_storage();
+        let a = encode_key(b"a", 2, 1); // leaf boundary, quiet seam
+        let b = encode_key(b"b", 1, 1); // interior, quiet seam
+        let c = encode_key(b"c", 1, 3); // interior, seam punches level 1
+
+        let mut delta = Delta::zero();
+        let mut tree = SpecTree::empty();
+        for key in [a, b, c] {
+            tree = tree
+                .edit()
+                .insert(key, key.to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        let deleted = tree
+            .edit()
+            .delete(&b, &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let mut scratch = SpecTree::empty();
+        for key in [a, c] {
+            scratch = scratch
+                .edit()
+                .insert(key, key.to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        assert_eq!(
+            deleted.root(),
+            scratch.root(),
+            "a min-delete that raises the seam rank must recreate the index cut"
+        );
+        Ok(())
+    }
+
+    /// Deleting the sole key of the rightmost subtree, when the surviving
+    /// sibling subtree was persisted in an earlier batch, must not leave a
+    /// single-child index-over-index root: the result must match the
+    /// from-scratch build of the surviving keys.
+    #[dialog_common::test]
+    async fn it_strips_a_persistent_single_child_root_after_rightmost_delete() -> Result<()> {
+        use crate::helpers::{DistributionSimulator, SpecKey, encode_key, test_storage};
+        type SpecTree = PersistentTree<SpecKey, Vec<u8>, DistributionSimulator>;
+
+        let mut storage = test_storage();
+        let a = encode_key(b"a", 2, 1); // leaf boundary, quiet seam
+        let b = encode_key(b"b", 1, 3); // interior, seam punches level 1
+
+        let mut delta = Delta::zero();
+        let mut tree = SpecTree::empty();
+        for key in [a, b] {
+            tree = tree
+                .edit()
+                .insert(key, key.to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        let deleted = tree
+            .edit()
+            .delete(&b, &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let mut scratch = SpecTree::empty();
+        for key in [a] {
+            scratch = scratch
+                .edit()
+                .insert(key, key.to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        assert_eq!(
+            deleted.root(),
+            scratch.root(),
+            "emptying the rightmost subtree must strip the leftover root level"
+        );
+        Ok(())
+    }
+
     /// Deleting the sole entry of a single-entry segment (a boundary whose
     /// segment holds only itself) must still produce a canonical tree.
     #[dialog_common::test]
     async fn it_produces_canonical_tree_after_emptying_a_segment() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
-        let all_keys: Vec<u32> = (0..2000).collect();
+        // Construct the single-entry segment deterministically: take the first
+        // two boundaries in byte order and EXCLUDE every key strictly between
+        // them from the fixture, so the second boundary's segment holds only
+        // itself. This holds under any coin — no dependence on two boundaries
+        // happening to be byte-adjacent in a dense range.
         let boundaries = boundary_keys(0..2000);
-
-        // Find a boundary that forms a single-entry segment: its predecessor in
-        // byte order is also a boundary, so no interior entry sits between them.
         let mut byte_boundaries: Vec<(u32, [u8; 4])> =
             boundaries.iter().map(|&k| (k, k.to_le_bytes())).collect();
         byte_boundaries.sort_by(|a, b| a.1.cmp(&b.1));
+        assert!(
+            byte_boundaries.len() >= 2,
+            "fixture must contain two boundaries"
+        );
+        let (_, first_bytes) = byte_boundaries[0];
+        let (solo_key, solo_bytes) = byte_boundaries[1];
 
-        let mut solo_boundary = None;
-        for pair in byte_boundaries.windows(2) {
-            let (_, prev_bytes) = pair[0];
-            let (curr_u32, curr_bytes) = pair[1];
-
-            let entries_between = all_keys
-                .iter()
-                .filter(|&&k| {
-                    let kb = k.to_le_bytes();
-                    kb > prev_bytes && kb < curr_bytes
-                })
-                .count();
-
-            if entries_between == 0 {
-                solo_boundary = Some(curr_u32);
-                break;
-            }
-        }
-
-        // No single-entry segment in this key set is possible but unlikely with
-        // 2000 keys; nothing to assert if so.
-        let Some(solo_key) = solo_boundary else {
-            return Ok(());
-        };
+        let all_keys: Vec<u32> = (0..2000u32)
+            .filter(|&k| {
+                let kb = k.to_le_bytes();
+                !(kb > first_bytes && kb < solo_bytes)
+            })
+            .collect();
 
         let full_tree = sequential(&all_keys, &mut storage).await?;
 
@@ -2071,6 +2832,182 @@ mod tests {
             tree_from_scratch.root(),
             "deleting last entry (key {last_u32}) should produce a canonical tree"
         );
+
+        Ok(())
+    }
+
+    /// The future of a recursive invariant walk, resolving to the subtree's
+    /// (min, max) leaf keys.
+    type LeafBounds<'a> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<([u8; 4], [u8; 4])>> + 'a>>;
+
+    /// Walks a persisted subtree verifying the separator invariants, and
+    /// returns the subtree's (min, max) leaf keys:
+    ///
+    /// - a link's separator equals the canonical shortest-distinguishing
+    ///   string of its seam (the shortest prefix of its own subtree's minimum
+    ///   leaf key that sorts strictly above the left-adjacent subtree's
+    ///   maximum), and
+    /// - a node's first link carries the separator the node itself carries in
+    ///   its parent (propagation), with the tree's global leftmost chain
+    ///   carrying the empty separator.
+    fn assert_separator_invariants<'a>(
+        hash: &'a Blake3Hash,
+        expected_leftmost: &'a [u8],
+        storage: &'a TestStorage,
+    ) -> LeafBounds<'a> {
+        Box::pin(async move {
+            use crate::{ArchivedNodeBody, Buffer, PersistentNode, distribution};
+
+            let bytes = storage
+                .retrieve(hash)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
+            let node: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::new(Buffer::from(bytes));
+
+            match node.body()? {
+                ArchivedNodeBody::Segment(segment) => {
+                    let first: [u8; 4] = segment.first_key::<[u8; 4]>()?.as_slice().try_into()?;
+                    let last: [u8; 4] = segment.last_key::<[u8; 4]>()?.as_slice().try_into()?;
+                    Ok((first, last))
+                }
+                ArchivedNodeBody::Index(index) => {
+                    let mut previous_max: Option<[u8; 4]> = None;
+                    let mut bounds: Option<([u8; 4], [u8; 4])> = None;
+                    for (at, link) in index.links()?.into_iter().enumerate() {
+                        let child: Blake3Hash = link.node;
+                        let separator: Vec<u8> = link.separator;
+                        let expected_child_leftmost = if at == 0 {
+                            expected_leftmost.to_vec()
+                        } else {
+                            separator.clone()
+                        };
+                        let (child_min, child_max) =
+                            assert_separator_invariants(&child, &expected_child_leftmost, storage)
+                                .await?;
+
+                        match previous_max {
+                            None => assert_eq!(
+                                separator, expected_leftmost,
+                                "a node's first link must carry the node's own separator"
+                            ),
+                            Some(previous_max) => assert_eq!(
+                                separator,
+                                distribution::shortest_separator(&previous_max, &child_min),
+                                "separator at seam {previous_max:02x?}|{child_min:02x?} \
+                                 must be the canonical shortest-distinguishing string"
+                            ),
+                        }
+
+                        previous_max = Some(child_max);
+                        bounds = Some((bounds.map(|(min, _)| min).unwrap_or(child_min), child_max));
+                    }
+                    bounds.ok_or_else(|| anyhow::anyhow!("index node had no children"))
+                }
+            }
+        })
+    }
+
+    /// Every link in a built tree stores the canonical shortest-distinguishing
+    /// separator of its seam, first links propagate their node's own
+    /// separator, and the global leftmost chain is empty. This pins the
+    /// stored bytes, not just the root hash: two wrong separators that
+    /// happen to agree across build orders would pass the canonical-form
+    /// tests but fail here.
+    #[dialog_common::test]
+    async fn it_stores_canonical_shortest_separators() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let keys: Vec<u32> = (0..600).collect();
+        let tree = sequential(&keys, &mut storage).await?;
+
+        assert_separator_invariants(tree.root(), &[], &storage).await?;
+
+        Ok(())
+    }
+
+    /// A variable-length opaque key for exercising the variable-length insert
+    /// paths (the fixed `[u8; N]` keys never share a long common prefix, so
+    /// they cannot reproduce a new-minimum split within one leaf).
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct VarKey(Vec<u8>);
+
+    impl AsRef<[u8]> for VarKey {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    impl crate::Key for VarKey {
+        fn try_from_bytes(bytes: &[u8]) -> Result<Self, crate::DialogSearchTreeError> {
+            Ok(VarKey(bytes.to_vec()))
+        }
+        fn min() -> Self {
+            VarKey(Vec::new())
+        }
+        fn max() -> Self {
+            VarKey(vec![u8::MAX; 64])
+        }
+    }
+
+    type VarTree = PersistentTree<VarKey, Vec<u8>>;
+
+    /// The geometric rank of a variable-length key.
+    fn var_rank(key: &[u8]) -> Rank {
+        distribution::geometric::rank(&Blake3Hash::hash(key))
+    }
+
+    /// Regression: inserting a NEW MINIMUM variable-length key into a
+    /// single-entry tree must not drop the existing entry. Mirrors the
+    /// artifact two-commit bug where a second entity whose key sorts before
+    /// the first wiped the first. Fixed-width `[u8;4]` tests never exercise a
+    /// new-minimum split because equal-length keys share no long prefix.
+    #[dialog_common::test]
+    async fn it_keeps_prior_when_inserting_new_minimum_variable_key() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // Sweep suffixes so the new-minimum `low` lands on a boundary rank at
+        // least once (a boundary new-minimum insert is the trigger).
+        let prefix = b"prefix/shared/".to_vec();
+        let mut high_bytes = prefix.clone();
+        high_bytes.extend_from_slice(b"zzzzzzzzzzzzzzzzzzzz");
+        let high = VarKey(high_bytes);
+
+        for n in 0..300u32 {
+            let mut low_bytes = prefix.clone();
+            low_bytes.extend_from_slice(format!("aaaa-{n:04}").as_bytes());
+            let low = VarKey(low_bytes);
+            assert!(low < high, "low must sort before high");
+
+            // Commit 1: insert `high` and persist.
+            let mut delta = Delta::zero();
+            let tree = VarTree::empty()
+                .edit()
+                .insert(high.clone(), high.0.clone(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            flush_into(&mut delta, &mut storage).await?;
+
+            // Commit 2: insert `low` (the new minimum) over the persisted tree.
+            let mut delta = Delta::zero();
+            let tree = tree
+                .edit()
+                .insert(low.clone(), low.0.clone(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            flush_into(&mut delta, &mut storage).await?;
+
+            let got_high = tree.get(&high, &storage).await?;
+            let got_low = tree.get(&low, &storage).await?;
+            if got_low.is_none() || got_high.is_none() {
+                panic!(
+                    "n={n} rank(low)={} rank(high)={}: low_present={} high_present={}",
+                    var_rank(low.as_ref()),
+                    var_rank(high.as_ref()),
+                    got_low.is_some(),
+                    got_high.is_some(),
+                );
+            }
+        }
 
         Ok(())
     }

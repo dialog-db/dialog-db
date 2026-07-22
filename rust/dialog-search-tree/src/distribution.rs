@@ -1,27 +1,156 @@
 use dialog_common::Blake3Hash;
 
+use crate::Manifest;
+
 /// The rank of a node in the prolly tree.
 pub type Rank = u64;
 
-/// Strategy for assigning ranks to keys.
+/// Strategy for assigning ranks to keys and separators, and for deriving the
+/// separators themselves.
 ///
-/// The distribution decides which keys become node boundaries, and thereby
-/// the shape of the tree. The default, [`Geometric`], derives ranks from the
-/// blake3 hash of the key bytes, producing the canonical production shape.
-/// Tests may inject an alternative distribution to force exact tree shapes.
+/// The distribution decides which entries end leaf segments (the leaf coin,
+/// [`rank`](Self::rank)), which seams punch boundaries through index levels
+/// (the seam coin, [`seam_rank`](Self::seam_rank)), and what byte string an
+/// index link stores to route across a seam ([`separator`](Self::separator)).
+/// Together these determine the shape of the tree as a pure function of its
+/// key set, which is what keeps it history-independent.
+///
+/// A separator follows the lower-bound convention: the separator carried by a
+/// link is the shortest byte string that sorts strictly above everything in
+/// the left-adjacent subtree and at or below everything in the link's own
+/// subtree. The global leftmost link at every level carries the empty
+/// separator (negative infinity). Because a separator is always a prefix of
+/// its own subtree's minimum leaf key, it can be maintained from the edited
+/// side of a seam alone (see [`reseparate`](Self::reseparate)).
+///
+/// The default, [`Geometric`], hashes keys and separators with blake3 and
+/// stores shortest-distinguishing separators, producing the canonical
+/// production shape. Tests may inject an alternative distribution to force
+/// exact tree shapes.
 pub trait Distribution {
-    /// Computes the rank of a key from its bytes.
-    fn rank(key: &[u8]) -> Rank;
+    /// The leaf coin: computes the rank of an entry key from its bytes and the
+    /// tree's [`Manifest`]. An entry whose rank exceeds
+    /// [`BOTTOM_RANK`](crate::BOTTOM_RANK) ends its leaf segment.
+    ///
+    /// A key longer than `manifest.max_separator` is forced to rank 0 so it
+    /// can never become a boundary; this bounds every separator by
+    /// construction (plan 5.7a), since a separator is the shortest prefix of
+    /// the right segment's first key exceeding the (now bounded) boundary key.
+    /// The branching parameter (`manifest.branch_factor`) sets the split
+    /// probability, i.e. the expected fanout.
+    fn rank(key: &[u8], manifest: &Manifest) -> Rank;
+
+    /// The seam coin: computes the rank of a seam from its separator bytes.
+    /// A child whose separator rank exceeds the level threshold starts a new
+    /// index node at that level. The same separator string serves every level
+    /// along a vertical boundary, so a high rank punches through several
+    /// levels at once, exactly like the key-rank recursion it replaces.
+    ///
+    /// The default applies the key coin to the separator bytes, which is the
+    /// right choice for any hash-based distribution (the two coins stay
+    /// independent because their inputs never collide: a separator sorts
+    /// strictly between two keys). Separators are bounded by construction at
+    /// `max_separator + 1` bytes (a prefix of the right key one byte past
+    /// the divergence from a boundary key of at most `max_separator` bytes),
+    /// so the length guard can fire only on that one-byte edge, forcing that
+    /// seam quiet — deterministic on both build and rebuild, so canonical
+    /// form is unaffected.
+    fn seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
+        Self::rank(separator, manifest)
+    }
+
+    /// Derives the separator for a fresh seam from the two keys adjacent to
+    /// it: `left` is the last leaf key before the seam and `right` the first
+    /// leaf key after it, with `left < right`. Defaults to the canonical
+    /// shortest-distinguishing prefix of `right`.
+    fn separator(left: &[u8], right: &[u8]) -> Vec<u8> {
+        shortest_separator(left, right)
+    }
+
+    /// Re-derives a child's separator after an edit may have changed the
+    /// child's minimum leaf key, without access to the left neighbor.
+    ///
+    /// `min` is the child's (possibly new) minimum leaf key and `floor` its
+    /// previous separator. The previous separator encodes everything needed
+    /// about the unloaded left neighbor: it sorts strictly above the
+    /// neighbor's maximum, and routing guarantees `min >= floor` (every key
+    /// an edit delivers to the child was routed by `key >= separator`). The
+    /// canonical result is the shortest prefix of `min` that is `>= floor`,
+    /// the default.
+    ///
+    /// An override must stay consistent with [`separator`](Self::separator):
+    /// for any valid seam, `reseparate(min, separator(left, min))` must
+    /// reproduce `separator(left, min)`, or canonical form breaks.
+    fn reseparate(min: &[u8], floor: &[u8]) -> Vec<u8> {
+        raise_to_floor(min, floor)
+    }
 }
 
-/// The default [`Distribution`]: a geometric distribution over the blake3
-/// hash of the key bytes (see [`geometric`]).
+/// The default [`Distribution`]: geometric coins over blake3 hashes with
+/// shortest-distinguishing separators (see [`geometric`]).
 #[derive(Clone, Debug, Default)]
 pub struct Geometric;
 
 impl Distribution for Geometric {
-    fn rank(key: &[u8]) -> Rank {
-        geometric::rank(&Blake3Hash::hash(key))
+    fn rank(key: &[u8], manifest: &Manifest) -> Rank {
+        // Oversized keys never become boundaries (plan 5.7a), keeping every
+        // separator bounded by construction.
+        if key.len() as u32 > manifest.max_separator {
+            return 0;
+        }
+        geometric::compute_geometric_rank(&Blake3Hash::hash(key), manifest.branch_factor())
+    }
+}
+
+/// The shortest prefix of `right` that sorts strictly above `left`, given
+/// `left < right`: the canonical shortest-distinguishing separator of a seam
+/// (RocksDB's `FindShortestSeparator`, taken as a prefix of the right-hand
+/// key so the lower-bound convention holds).
+///
+/// `left < right` guarantees `right` is not a prefix of `left`, so the byte
+/// at the divergence point always exists in `right`.
+pub fn shortest_separator(left: &[u8], right: &[u8]) -> Vec<u8> {
+    debug_assert!(
+        left < right,
+        "separator requires ordered seam keys: {left:02x?} < {right:02x?}"
+    );
+    let lcp = left
+        .iter()
+        .zip(right.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    right[..=lcp.min(right.len() - 1)].to_vec()
+}
+
+/// The shortest prefix of `min` that sorts at or above `floor`: the canonical
+/// separator of a seam whose right-hand minimum is `min`, re-derived from the
+/// seam's previous separator `floor` instead of the (unavailable) left key.
+///
+/// Correctness relies on two invariants the tree maintains: `floor` sorts
+/// strictly above the left neighbor's maximum and diverges from it exactly at
+/// its own last byte, and `min >= floor` (routing sends a key into the seam's
+/// right side only when the key is at or above the stored separator). Under
+/// those, the result equals `shortest_separator(left_max, min)` byte for
+/// byte, so incremental maintenance and a fresh build converge.
+pub fn raise_to_floor(min: &[u8], floor: &[u8]) -> Vec<u8> {
+    let lcp = min
+        .iter()
+        .zip(floor.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if lcp == floor.len() {
+        // The floor is a prefix of (or equal to) min: it remains the shortest
+        // prefix of min at or above itself. In particular an empty floor (the
+        // global leftmost seam) stays empty.
+        floor.to_vec()
+    } else if lcp < min.len() && min[lcp] > floor[lcp] {
+        min[..=lcp].to_vec()
+    } else {
+        // min < floor: outside the maintained invariant. The full minimum is
+        // always a correct (if untruncated) separator, so degrade gracefully
+        // rather than misroute.
+        debug_assert!(false, "reseparate invariant violated: min < floor");
+        min.to_vec()
     }
 }
 
@@ -31,13 +160,13 @@ pub mod geometric {
 
     use super::Rank;
 
-    /// The branch factor of the trees built from this distribution: the
-    /// average number of children per node.
-    pub const BRANCH_FACTOR: u64 = 254;
-
-    /// Computes the rank of a node from its hash using a geometric distribution.
+    /// Computes the rank of a node from its hash using a geometric
+    /// distribution with the default [`Manifest`](crate::Manifest)'s branch
+    /// factor — the same modulus [`Geometric`](super::Geometric) uses for a
+    /// default-manifest tree, so callers (test oracles, diagnostics)
+    /// classify boundaries exactly as the tree does.
     pub fn rank(hash: &Blake3Hash) -> Rank {
-        compute_geometric_rank(hash, BRANCH_FACTOR)
+        compute_geometric_rank(hash, crate::Manifest::default().branch_factor())
     }
 
     /// Compute the rank of a hash using a threshold-based geometric
@@ -60,7 +189,7 @@ pub mod geometric {
     ///
     /// The loop terminates on its own: integer division drives the threshold
     /// to zero after `floor(log_m(2^64))` steps, and no prefix is below zero,
-    /// so ranks naturally top out at `floor(log_m(2^64)) + 1` (9 for m=254,
+    /// so ranks naturally top out at `floor(log_m(2^64)) + 1` (9 for m=256,
     /// enough for trees with ~10^19 entries).
     pub(crate) fn compute_geometric_rank(hash: &Blake3Hash, m: u64) -> Rank {
         debug_assert!(m >= 2, "branch factor must be at least 2, got {m}");

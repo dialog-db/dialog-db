@@ -3,21 +3,31 @@ pub use persistent::*;
 
 mod archive;
 
+pub(crate) mod codec;
+
+/// Front-codes a sorted key list into `(prefix, stream)`. Exposed for
+/// benchmarking the whole-key encoding against the columnar columns.
+pub fn encode_keys_public<K: AsRef<[u8]>>(keys: &[K]) -> (Vec<u8>, Vec<u8>) {
+    codec::encode_keys(keys)
+}
+
+pub(crate) mod columnar;
+pub use columnar::{ArchivedColumnData, ColumnData, ColumnSlices, StreamingLeaf};
+
 mod transient;
 pub use transient::*;
 
 use dialog_common::Blake3Hash;
 use rkyv::{
-    Deserialize, Serialize,
+    Serialize,
     bytecheck::CheckBytes,
-    de::Pool,
     rancor::Strategy,
     ser::{Serializer, allocator::ArenaHandle, sharing::Share},
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{Buffer, Delta, DialogSearchTreeError, Key, Link, SymmetryWith, Value};
+use crate::{Buffer, Delta, DialogSearchTreeError, Key, Link, Manifest, Value};
 
 /// A tree node in either of its two representations.
 ///
@@ -27,16 +37,16 @@ use crate::{Buffer, Delta, DialogSearchTreeError, Key, Link, SymmetryWith, Value
 /// edits is in flight). Editing builds [`Node::Transient`] subtrees in place;
 /// persisting resolves them bottom-up back into [`Node::Persistent`].
 ///
-/// The persistent arm holds a [`Link`] (hash plus upper bound), not a loaded
+/// The persistent arm holds a [`Link`] (hash plus separator), not a loaded
 /// node: untouched subtrees stay as cheap references and are loaded only when
 /// an edit descends into them, at which point they are replaced by a
 /// [`Node::Transient`]. This is what gives the edit batch its structural
-/// sharing, and lets [`persist`](Node::persist) re-emit an untouched child's
-/// link without re-serializing it.
+/// sharing, and lets [`persist`](TransientNode::persist) re-emit an untouched
+/// child's link without re-serializing it.
 #[derive(Debug)]
 pub enum Node<Key, Value> {
     /// A reference to a serialized, content-addressed node.
-    Persistent(Link<Key>),
+    Persistent(Link),
     /// A live, editable node not yet serialized.
     Transient(TransientNode<Key, Value>),
 }
@@ -55,6 +65,20 @@ impl<Key, Value> Node<Key, Value> {
             )),
         }
     }
+
+    /// The separator at this node's left edge, borrowed without cloning.
+    ///
+    /// A persistent node's separator lives in its owned [`Link`]; a transient
+    /// node's is stored on its leftmost descendant segment (or the leftmost
+    /// persistent link on the way down), reached by following first children.
+    /// Used for routing and for the seam coin, so descending never copies a
+    /// separator. Errors if a node on the leftmost path is empty.
+    pub fn separator(&self) -> Result<&[u8], DialogSearchTreeError> {
+        match self {
+            Node::Persistent(link) => Ok(link.separator.as_slice()),
+            Node::Transient(transient) => transient.separator(),
+        }
+    }
 }
 
 impl<Key, Value> From<TransientNode<Key, Value>> for Node<Key, Value> {
@@ -66,66 +90,6 @@ impl<Key, Value> From<TransientNode<Key, Value>> for Node<Key, Value> {
 impl<Key, Value> Node<Key, Value>
 where
     Key: self::Key,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
-    Value: self::Value,
-    Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-{
-    /// Returns the upper bound key of this node as an owned key.
-    ///
-    /// For a persistent node the bound is recovered from its serialized buffer;
-    /// for a transient node it is read from the live structure. Errors if the
-    /// node is empty or a persistent bound cannot be recovered.
-    pub fn upper_bound(&self) -> Result<Key, DialogSearchTreeError> {
-        self.upper_bound_ref().cloned()
-    }
-
-    /// Borrows the upper bound key of this node without cloning it.
-    ///
-    /// A persistent node's bound lives in its owned [`Link`]; a transient node's
-    /// is the key of its rightmost descendant entry, reached by following the
-    /// last child down to a segment. Used on the read-only descent so routing a
-    /// key never copies a bound. Errors if a node on the rightmost path is
-    /// empty.
-    pub fn upper_bound_ref(&self) -> Result<&Key, DialogSearchTreeError> {
-        match self {
-            Node::Persistent(link) => Ok(&link.upper_bound),
-            Node::Transient(TransientNode::Index(index)) => index
-                .children
-                .last()
-                .ok_or_else(|| DialogSearchTreeError::Node("Index was unexpectedly empty".into()))?
-                .upper_bound_ref(),
-            Node::Transient(TransientNode::Segment(segment)) => segment
-                .entries
-                .last()
-                .map(|entry| &entry.key)
-                .ok_or_else(|| {
-                    DialogSearchTreeError::Node("Segment was unexpectedly empty".into())
-                }),
-        }
-    }
-}
-
-impl<Key, Value> Node<Key, Value>
-where
-    Key: self::Key
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
     Value: self::Value
         + for<'a> Serialize<
             Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
@@ -138,17 +102,22 @@ where
     /// recording any newly created nodes in `delta`.
     ///
     /// A [`Node::Persistent`] already is a link and is returned as-is, with no
-    /// re-serialization. A [`Node::Transient`] is serialized bottom-up (see
-    /// [`TransientNode::persist`]) and converted to a link. This makes no shape
-    /// decisions; the shape was already established by the edits that built the
-    /// transient.
+    /// re-serialization; its separator rides along unchanged. A
+    /// [`Node::Transient`] captures its separator (stored on its leftmost
+    /// segment) before serializing bottom-up (see [`TransientNode::persist`]).
+    /// This makes no shape decisions; the shape was already established by the
+    /// edits that built the transient.
     pub fn into_link(
         self,
         delta: &mut Delta<Blake3Hash, Buffer>,
-    ) -> Result<Link<Key>, DialogSearchTreeError> {
+        manifest: &Manifest,
+    ) -> Result<Link, DialogSearchTreeError> {
         match self {
             Node::Persistent(link) => Ok(link),
-            Node::Transient(transient) => transient.persist(delta)?.to_link(),
+            Node::Transient(transient) => {
+                let separator = transient.separator()?.to_vec();
+                transient.persist(delta, manifest)?.to_link(separator)
+            }
         }
     }
 }

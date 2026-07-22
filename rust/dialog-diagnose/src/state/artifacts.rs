@@ -6,7 +6,7 @@ use std::{
 };
 
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{CborEncoder, DialogArtifactsError, Index, Key, KeyBytes, Storage};
+use dialog_artifacts::{CborEncoder, DialogArtifactsError, Index, Key, Storage};
 use dialog_search_tree::ContentAddressedStorage as TreeStorage;
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 use futures_util::{Stream, TryStreamExt};
@@ -89,16 +89,17 @@ impl ArtifactsCursor {
 
             let tree_storage = TreeStorage::new(TreeStorageBridge(storage));
             let mut stream: Pin<Box<dyn Stream<Item = _> + Send>> = match state.last_key.clone() {
-                Some(key) => Box::pin(tree.stream_range(KeyBytes::from(key).., &tree_storage)),
+                Some(key) => Box::pin(tree.stream_range(key.., &tree_storage)),
                 None => Box::pin(tree.stream(&tree_storage)),
             };
 
             while let Some(element) = stream.try_next().await? {
-                state.last_key = Some(Key::from(element.key));
+                state.last_key = Some(element.key.clone());
 
                 if tx
                     .send(WorkerMessage::Fact {
                         index: state.next_index,
+                        key: element.key,
                         data: element.value,
                     })
                     .is_err()

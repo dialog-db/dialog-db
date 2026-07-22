@@ -140,6 +140,6 @@ impl Select<'_> {
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
         // scans agree on key order — that adjacency invariant is what
         // the cardinality-one sliding window relies on.
-        Ok(tree.scan(store, self.selector))
+        Ok(tree.scan(store, self.branch.spill_cache(), self.selector))
     }
 }

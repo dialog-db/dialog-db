@@ -3,8 +3,8 @@
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Index, KeyBytes, State, Storage};
-use dialog_common::{Blake3Hash as NodeHash, NULL_BLAKE3_HASH};
+use dialog_artifacts::{CborEncoder, Datum, DialogArtifactsError, Index, Key, State, Storage};
+use dialog_common::NULL_BLAKE3_HASH;
 use dialog_search_tree::{
     Accessor, ArchivedNodeBody, Cache, ContentAddressedStorage as TreeStorage, PersistentNode,
 };
@@ -83,16 +83,15 @@ impl ArtifactsTreeAnalysis {
                 let mut next_level = vec![];
 
                 for hash in level {
-                    let node: PersistentNode<KeyBytes, State<Datum>> =
-                        accessor.get_node(&hash).await?;
+                    let node: PersistentNode<Key, State<Datum>> = accessor.get_node(&hash).await?;
                     match node.body()? {
                         ArchivedNodeBody::Index(index) => {
-                            for link in index.links.iter() {
-                                next_level.push(<&NodeHash>::from(&link.node).clone());
+                            for at in 0..index.len() {
+                                next_level.push(index.hash_at(at)?.clone());
                             }
                         }
                         ArchivedNodeBody::Segment(segment) => {
-                            let entry_count = segment.entries.len();
+                            let entry_count = segment.len();
 
                             segment_sizes.push(entry_count);
                             stats.total_entries += entry_count;

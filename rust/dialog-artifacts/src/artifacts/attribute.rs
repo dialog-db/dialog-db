@@ -28,6 +28,11 @@ impl Attribute {
     pub fn key_bytes(&self) -> &[u8; ATTRIBUTE_LENGTH] {
         &self.1
     }
+
+    /// The attribute's raw `namespace/predicate` string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl TryFrom<String> for Attribute {
@@ -47,6 +52,17 @@ impl TryFrom<String> for Attribute {
                 "Attribute format is \"namespace/predicate\", but got \"{value}\""
             )));
         };
+
+        // The variable-length key encoding relies on attributes being NUL-free
+        // (`0x00` is the field terminator; see `key::varkey::field`, which
+        // returns the raw segment on that premise). An interior NUL would
+        // double-escape when a key is re-projected across orderings, writing
+        // AEV/VAE keys whose attribute no longer parses.
+        if value.as_bytes().contains(&0x00) {
+            return Err(DialogArtifactsError::InvalidAttribute(format!(
+                "Attribute must not contain a NUL byte: {value:?}"
+            )));
+        }
 
         let mut bytes = [0; ATTRIBUTE_LENGTH];
         bytes[0..value.len()].copy_from_slice(value.as_bytes());
@@ -79,5 +95,28 @@ impl From<&Attribute> for String {
 impl Display for Attribute {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "{}", String::from(self))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(unexpected_cfgs)]
+
+    use std::str::FromStr;
+
+    use super::Attribute;
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// An interior NUL must be rejected at construction: `0x00` terminates
+    /// variable-length key fields, and an attribute carrying one corrupts the
+    /// AEV/VAE keys projected from the EAV key (the escaped segment would be
+    /// re-escaped and no longer parse as UTF-8).
+    #[dialog_common::test]
+    fn it_rejects_attributes_containing_nul() {
+        assert!(Attribute::from_str("a/b\u{0}c").is_err());
+        assert!(Attribute::from_str("a\u{0}/bc").is_err());
+        assert!(Attribute::from_str("a/bc").is_ok());
     }
 }

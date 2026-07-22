@@ -1,14 +1,15 @@
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{BlobChange, BlobIndexExt as _, blob_changes};
+use dialog_artifacts::{BlobChange, BlobIndexExt as _, ShipmentRef, shipment_refs};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, TreeDifference};
+use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use crate::{
@@ -164,58 +165,73 @@ impl Push<'_> {
                 // stream type and produces large futures.
                 Box::pin(upload).await?;
 
-                // Ship blobs newly referenced since the sync checkpoint. The
-                // entry-level view of the same differential, restricted to the
-                // BLOB tag, names exactly what the remote lacks under
-                // fast-forward. Bytes must land on the remote before we publish
+                // Ship the blocks the tree nodes reference but the node upload
+                // does not carry: blob bytes and spilled value blocks. Both
+                // are surfaced by ONE entry-level drain of the SAME
+                // differential the node upload just walked (`shipment_refs`),
+                // so the changed paths are read once per push instead of once
+                // per concern. Bytes must land on the remote before we publish
                 // a revision that references them, so a failed upload here
                 // aborts the push with the revision still unpublished.
                 let blob_store = LocalIndex::new(env, index.clone());
                 let current_index = Index::from_hash(NodeHash::from(*revision.tree.hash()));
                 let address = remote.address();
-                let mut changes = std::pin::pin!(blob_changes(
-                    Index::from_hash(NodeHash::from(*base.hash())),
-                    Index::from_hash(NodeHash::from(*revision.tree.hash())),
-                    blob_store.clone(),
-                ));
-                while let Some(change) = changes.next().await {
-                    // Removals ship nothing; the remote keeps its bytes.
-                    let BlobChange::Added(hash) = change? else {
-                        continue;
-                    };
-                    let digest = dialog_common::Blake3Hash::from(hash);
-                    // Size from the current tree's blob index (no byte fetch).
-                    let record = current_index
-                        .get_blob(&blob_store, &hash)
-                        .await?
-                        .ok_or_else(|| {
-                            BlobError::ExecutionError(format!(
-                                "blob {digest:?} referenced by the tree but absent from its index"
-                            ))
-                        })?;
-                    // Local bytes -> remote import sink. Mirrors the remote
-                    // `Read` fork in `branch/blob.rs` and `RemotePut`'s `Put`
-                    // fork in `remote/archive.rs`, substituting the blob
-                    // `Import` effect (single-part on the current providers).
-                    let mut source = branch
-                        .archive()
-                        .blob()
-                        .read(digest.clone())
-                        .perform(env)
-                        .await?;
-                    let mut sink = address
-                        .subject
-                        .clone()
-                        .archive()
-                        .blob()
-                        .import(digest.clone(), record.size)
-                        .fork(address.site())
-                        .perform(env)
-                        .await?;
-                    while let Some(chunk) = source.next().await? {
-                        sink.write_all(&chunk).await?;
+                let mut refs = std::pin::pin!(shipment_refs(&difference));
+                while let Some(shipment) = refs.next().await {
+                    match shipment? {
+                        // Removals ship nothing; the remote keeps its bytes.
+                        ShipmentRef::Blob(BlobChange::Removed(_)) => {}
+                        ShipmentRef::Blob(BlobChange::Added(hash)) => {
+                            let digest = dialog_common::Blake3Hash::from(hash);
+                            // Size from the current tree's blob index (no byte
+                            // fetch).
+                            let record = current_index
+                                .get_blob(&blob_store, &hash)
+                                .await?
+                                .ok_or_else(|| {
+                                    BlobError::ExecutionError(format!(
+                                        "blob {digest:?} referenced by the tree but absent from its index"
+                                    ))
+                                })?;
+                            // Local bytes -> remote import sink. Mirrors the
+                            // remote `Read` fork in `branch/blob.rs` and
+                            // `RemotePut`'s `Put` fork in `remote/archive.rs`,
+                            // substituting the blob `Import` effect
+                            // (single-part on the current providers).
+                            let mut source = branch
+                                .archive()
+                                .blob()
+                                .read(digest.clone())
+                                .perform(env)
+                                .await?;
+                            let mut sink = address
+                                .subject
+                                .clone()
+                                .archive()
+                                .blob()
+                                .import(digest.clone(), record.size)
+                                .fork(address.site())
+                                .perform(env)
+                                .await?;
+                            while let Some(chunk) = source.next().await? {
+                                sink.write_all(&chunk).await?;
+                            }
+                            sink.finish().await?;
+                        }
+                        // A value larger than the inline threshold lives as a
+                        // content-addressed block (addressed by its 32-byte
+                        // value reference) in the same store as the tree
+                        // nodes. Local bytes -> remote block put, mirroring
+                        // the novel node upload.
+                        ShipmentRef::SpilledValue(reference) => {
+                            let bytes = blob_store.get(&reference).await?.ok_or_else(|| {
+                                BlobError::ExecutionError(format!(
+                                    "spilled value block {reference:?} referenced by the tree but absent from the local archive"
+                                ))
+                            })?;
+                            remote_index.put(Buffer::from(bytes)).perform(env).await?;
+                        }
                     }
-                    sink.finish().await?;
                 }
 
                 upstream.publish(revision.clone()).perform(env).await?;
@@ -243,7 +259,7 @@ mod tests {
     use anyhow::Result;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
-    use futures_util::stream;
+    use futures_util::{StreamExt as _, stream};
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> Result<()> {
@@ -276,6 +292,76 @@ mod tests {
             .revision()
             .expect("main should have a revision after push");
         assert_eq!(main_rev.tree, feature_revision.tree);
+
+        Ok(())
+    }
+
+    /// Pushing a spilling value ships its block to the local upstream, a
+    /// spilled value shared by many facts ships once, and a re-push with
+    /// nothing new is a no-op (no re-upload).
+    #[dialog_common::test]
+    async fn it_pushes_spilled_value_blocks_once() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let big = "z".repeat(inline_n + 1);
+        let value = Value::String(big);
+
+        // Two facts share the same large value -> one spilled block.
+        feature
+            .commit(stream::iter(vec![
+                Instruction::Assert(Artifact {
+                    the: "doc/body".parse()?,
+                    of: "doc:a".parse()?,
+                    is: value.clone(),
+                    cause: None,
+                }),
+                Instruction::Assert(Artifact {
+                    the: "doc/body".parse()?,
+                    of: "doc:b".parse()?,
+                    is: value.clone(),
+                    cause: None,
+                }),
+            ]))
+            .perform(&operator)
+            .await?;
+
+        let first = feature.push().perform(&operator).await?;
+        assert!(first.is_some(), "the first push lands the commit");
+
+        // The main branch (the upstream) can now read both facts back,
+        // reconstructing the shared spilled value from the shipped block.
+        let main_reloaded = repo.branch("main").load().perform(&operator).await?;
+        let results: Vec<_> = main_reloaded
+            .claims()
+            .select(dialog_artifacts::ArtifactSelector::new().the("doc/body".parse()?))
+            .perform(&operator)
+            .await?
+            .filter_map(|r| async { r.ok() })
+            .collect()
+            .await;
+        assert_eq!(
+            results.len(),
+            2,
+            "both facts hydrate from the shipped block"
+        );
+        assert!(
+            results.iter().all(|r| r.is == value),
+            "the shared spilled value reconstructs for both facts"
+        );
+
+        // A re-push with nothing new is a no-op.
+        let second = feature.push().perform(&operator).await?;
+        assert_eq!(
+            second.map(|r| r.tree),
+            first.map(|r| r.tree),
+            "a re-push with nothing new returns the same revision"
+        );
 
         Ok(())
     }

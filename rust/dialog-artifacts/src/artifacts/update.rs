@@ -1,4 +1,5 @@
 use crate::artifacts::query::Select;
+use crate::key::value_tail_bytes;
 use crate::selector::Constrained;
 use crate::{
     Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Entity,
@@ -203,25 +204,20 @@ impl Stream for ChangeStream {
     }
 }
 
-/// The full sort key for an [`Artifact`] — `(the, of, value_type,
-/// value_reference)`.
+/// The full sort key for an [`Artifact`] — `(the, of, value_tail)`.
 ///
-/// - `the` / `of` — raw attribute / entity key bytes (fixed length,
-///   so tuple comparison equals lexicographic byte comparison of the
-///   concatenation).
-/// - `value_type` — the `ValueDataType` discriminant byte.
-/// - `value_reference` — `blake3(value.to_bytes())`, the same hash
-///   the tree keys carry.
+/// - `the` / `of` — raw attribute / entity key bytes.
+/// - `value_tail` — the key's value tail bytes (see below).
 ///
 /// # Why this exact component order
 ///
-/// The artifact prolly tree keeps three indexes, each a fixed-layout
-/// byte key (see `dialog_artifacts::key`):
+/// The artifact prolly tree keeps three indexes, each a byte key (see
+/// `dialog_artifacts::key`):
 ///
 /// ```text
-///   EAV:  tag | entity    | attribute | value_type | value_reference
-///   AEV:  tag | attribute | entity    | value_type | value_reference
-///   VAE:  tag | value_type | value_reference | attribute | entity
+///   EAV:  tag | entity    | attribute | value_tail
+///   AEV:  tag | attribute | entity    | value_tail
+///   VAE:  tag | value_tail | attribute | entity
 /// ```
 ///
 /// A query scan pins whichever dimension the selector constrains and
@@ -230,18 +226,17 @@ impl Stream for ChangeStream {
 /// comparison — what's left is the index's *residual* order:
 ///
 /// ```text
-///   .of(entity)    → EAV → residual (attribute, value_type, value_reference)
-///   .the(attr)     → AEV → residual (entity,    value_type, value_reference)
+///   .of(entity)    → EAV → residual (attribute, value_tail)
+///   .the(attr)     → AEV → residual (entity,    value_tail)
 ///   .is(value)     → VAE → residual (attribute, entity)
 /// ```
 ///
-/// `SortKey = (attribute, entity, value_type, value_reference)` is the
-/// **unique** total order whose restriction (delete the pinned
-/// component) reproduces every one of those residuals:
+/// `SortKey = (attribute, entity, value_tail)` is the **unique**
+/// total order whose restriction (delete the pinned component)
+/// reproduces every one of those residuals:
 ///
 /// - lock `entity`  → `attribute` is the next live component ✓ (EAV)
-/// - lock `value`   → `value_type`+`value_reference` drop out,
-///   `attribute` is next ✓ (VAE)
+/// - lock `value`   → `value_tail` drops out, `attribute` is next ✓ (VAE)
 /// - lock `attribute` → `attribute` itself drops out, `entity` is
 ///   next ✓ (AEV)
 ///
@@ -255,26 +250,35 @@ impl Stream for ChangeStream {
 /// multi-constraint selectors:
 /// pinning two dimensions just removes both from the comparison.
 ///
-/// The four-component key (vs. the bare `(the, of)` group key) also
+/// The value-tail component (vs. the bare `(the, of)` group key) also
 /// fixes interleaving *within* a cardinality-many group: same-`(the,
-/// of)` items from different streams order by `value_reference`
-/// rather than by stream index.
-pub type SortKey = (Vec<u8>, Vec<u8>, u8, [u8; 32]);
+/// of)` items from different streams order by their value tail rather
+/// than by stream index.
+///
+/// The third component is the key's *value tail* (the spill-flagged type
+/// byte followed by the inline order-preserving value or the spilled
+/// reference), not a bare type discriminant plus reference: the tree orders
+/// same-`(the, of)` facts by exactly those tail bytes, and the tail's leading
+/// byte carries the SPILL flag, so a separate unflagged type component would
+/// order a spilled String (tail `0x83…`) before an inline UnsignedInt (tail
+/// `0x04…`) while the tree does the opposite.
+pub type SortKey = (Vec<u8>, Vec<u8>, Vec<u8>);
 
 /// Compute the [`SortKey`] for an artifact.
 ///
-/// Uses the same `key_bytes()` / `data_type()` / `to_reference()`
-/// the tree's own index keys are built from
-/// (`EntityKey::from(&Artifact)` and friends), so a `SortKey` sort
-/// reproduces the tree's byte order exactly — not just an
-/// approximation of it. See [`SortKey`] for why the component order
-/// is correct across all three scan modes.
+/// Uses the same entity/attribute bytes and value tail the tree's own index
+/// keys are built from (`EntityKey::from(&Artifact)` and friends), so a
+/// `SortKey` sort reproduces the tree's byte order exactly, not just an
+/// approximation of it. In particular the value component is the inline
+/// order-preserving encoding (or spilled reference) the key carries, so
+/// same-`(the, of, type)` facts order by value exactly as the tree does. See
+/// [`SortKey`] for why the component order is correct across all three scan
+/// modes.
 pub fn sort_key(artifact: &Artifact) -> SortKey {
     (
-        artifact.the.key_bytes().to_vec(),
-        artifact.of.key_bytes().to_vec(),
-        artifact.is.data_type().into(),
-        artifact.is.to_reference(),
+        artifact.the.as_str().as_bytes().to_vec(),
+        artifact.of.as_str().as_bytes().to_vec(),
+        value_tail_bytes(&artifact.is),
     )
 }
 
@@ -402,6 +406,43 @@ mod tests {
     }
     fn role_attr() -> Attribute {
         "test/role".parse().expect("valid attribute")
+    }
+
+    /// `sort_key` must reproduce the tree's EAV key byte order exactly,
+    /// including when a value spills: the tree orders same-`(the, of)` facts
+    /// by the spill-FLAGGED type byte leading the value tail, so a bare
+    /// (unflagged) type component would order a spilled String (tail `0x83…`)
+    /// before an inline UnsignedInt (tail `0x04…`) while the tree does the
+    /// opposite, corrupting the k-way merge order.
+    #[dialog_common::test]
+    fn it_orders_sort_keys_exactly_as_the_tree_orders_keys() {
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let facts: Vec<Artifact> = vec![
+            Value::String("z".repeat(inline_n + 1)), // spilled: tail 0x83…
+            Value::UnsignedInt(1),                   // inline: tail 0x04…
+            Value::String("abc".into()),             // inline: tail 0x03…
+            Value::Float(1.5),                       // inline: tail 0x06…
+        ]
+        .into_iter()
+        .map(|is| Artifact {
+            the: name_attr(),
+            of: alice(),
+            is,
+            cause: None,
+        })
+        .collect();
+
+        let mut by_sort_key = facts.clone();
+        by_sort_key.sort_by_key(sort_key);
+        let mut by_tree_key = facts;
+        by_tree_key.sort_by_key(|fact| crate::EntityKey::from(fact).into_key());
+
+        let sorted: Vec<&Value> = by_sort_key.iter().map(|fact| &fact.is).collect();
+        let expected: Vec<&Value> = by_tree_key.iter().map(|fact| &fact.is).collect();
+        assert_eq!(
+            sorted, expected,
+            "sort_key order must equal tree key byte order"
+        );
     }
 
     #[dialog_common::test]

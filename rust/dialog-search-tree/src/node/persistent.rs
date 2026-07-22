@@ -2,15 +2,56 @@ use dialog_common::Blake3Hash;
 use rkyv::{
     Archive, Deserialize, Serialize,
     bytecheck::CheckBytes,
-    de::Pool,
     rancor::Strategy,
     ser::{Serializer, allocator::ArenaHandle, sharing::Share},
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
-use crate::{Buffer, DialogSearchTreeError, Entry, Key, Link, SymmetryWith, Value, into_owned};
+use crate::{
+    Buffer, DialogSearchTreeError, Entry, Key, Link, Manifest, Value,
+    node::codec::common_prefix,
+    node::columnar::{ColumnData, encode_columns},
+};
 use std::marker::PhantomData;
+use std::sync::Arc;
+
+/// A leaf segment's decoded keys in entry order, stored as one flat arena with
+/// per-entry end offsets rather than a `Vec<Vec<u8>>`.
+///
+/// Decoding a leaf then costs two allocations (arena + offsets), not one per
+/// key, so memoizing the decode (see [`PersistentNode::decoded_keys`]) stays as
+/// allocation-frugal as the streaming decoder on the common single-touch scan
+/// while letting a re-touched leaf reuse the decode.
+#[derive(Debug)]
+pub struct DecodedKeys {
+    arena: Vec<u8>,
+    ends: Vec<usize>,
+}
+
+impl DecodedKeys {
+    /// The number of keys.
+    pub fn len(&self) -> usize {
+        self.ends.len()
+    }
+
+    /// Whether there are no keys.
+    pub fn is_empty(&self) -> bool {
+        self.ends.is_empty()
+    }
+
+    /// The key at `index`, borrowed from the arena.
+    pub fn get(&self, index: usize) -> Option<&[u8]> {
+        let end = *self.ends.get(index)?;
+        let start = if index == 0 { 0 } else { self.ends[index - 1] };
+        self.arena.get(start..end)
+    }
+
+    /// Iterates the keys in entry order, each borrowed from the arena.
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        (0..self.len()).map(|index| self.get(index).expect("index in range"))
+    }
+}
 
 /// A tree node in its serialized, content-addressed form.
 ///
@@ -29,13 +70,6 @@ pub struct PersistentNode<Key, Value> {
 impl<Key, Value> PersistentNode<Key, Value>
 where
     Key: self::Key,
-    Key::Archived: for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-        + PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -60,34 +94,103 @@ where
         &self.buffer
     }
 
-    /// Converts this node into a [`Link`] referencing it.
-    pub fn to_link(&self) -> Result<Link<Key>, DialogSearchTreeError> {
-        let upper_bound: Key = self.body()?.upper_bound().and_then(into_owned)?;
-        let self_hash = self.buffer.blake3_hash().clone();
-
+    /// Converts this node into a [`Link`] referencing it, carrying the
+    /// separator at the subtree's left edge.
+    ///
+    /// The separator is a seam property, not derivable from the node's own
+    /// body (it depends on the left-adjacent subtree), so the caller threads
+    /// it in from the context that knows the seam.
+    pub fn to_link(&self, separator: Vec<u8>) -> Result<Link, DialogSearchTreeError> {
         Ok(Link {
-            upper_bound,
-            node: self_hash,
+            separator,
+            node: self.buffer.blake3_hash().clone(),
         })
     }
 
-    /// Returns the upper bound key of this node, if it has one.
-    pub fn upper_bound(&self) -> Result<Option<&Key::Archived>, DialogSearchTreeError> {
-        self.body().map(|body| match body {
-            ArchivedNodeBody::Index(index) => index.upper_bound(),
-            ArchivedNodeBody::Segment(segment) => segment.upper_bound(),
-        })
+    /// Returns the upper bound (last) key of this segment node, decoded to
+    /// its bytes, if it has one.
+    ///
+    /// Index nodes carry no full keys (their table holds separators), so this
+    /// returns `None` for an index; full bounds exist only in leaves.
+    pub fn upper_bound(&self) -> Result<Option<Vec<u8>>, DialogSearchTreeError> {
+        match self.body()? {
+            ArchivedNodeBody::Index(_) => Ok(None),
+            ArchivedNodeBody::Segment(segment) => segment.last_key::<Key>().map(Some),
+        }
     }
 
     /// Accesses the deserialized body of this node.
-    pub fn body(&self) -> Result<&ArchivedNodeBody<Key, Value>, DialogSearchTreeError> {
+    pub fn body(&self) -> Result<&ArchivedNodeBody<Value>, DialogSearchTreeError> {
         rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
+            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
+    }
+
+    /// Whether a scan over this leaf should reuse a memoized decode
+    /// ([`memoized_keys`](Self::memoized_keys)) rather than stream it fresh.
+    ///
+    /// The columnar leaf must be decoded (front-decode + dictionary resolve)
+    /// before its keys can be compared against a scan range. A leaf touched only
+    /// once (a single range scan visits each leaf once) gains nothing from a
+    /// cached decode and would only pay to materialize it, so the first touch
+    /// returns `false` (the walker streams the keys) and only from the second
+    /// touch on does this return `true` — a join re-selects the same branch once
+    /// per outer binding and lands on the same few leaves each time, and those
+    /// repeat touches reuse one decode memoized on the node's [`Buffer`] instead
+    /// of re-decoding the leaf once per select.
+    pub fn should_memoize_keys(&self) -> bool {
+        self.buffer.should_memoize()
+    }
+
+    /// This segment's keys as a memoized flat-arena decode, shared via `Arc`.
+    /// Populates the memo on the first call and reuses it thereafter. Use only
+    /// once [`should_memoize_keys`](Self::should_memoize_keys) has returned
+    /// `true`; a single-touch scan streams instead (see the walker).
+    pub fn memoized_keys(&self) -> Result<Arc<DecodedKeys>, DialogSearchTreeError> {
+        self.buffer
+            .memoize_decode(|| self.materialize_keys())?
+            .ok_or_else(|| {
+                DialogSearchTreeError::Access("node buffer memoized a different decode".to_string())
+            })
+    }
+
+    /// Decodes this segment's keys into the flat-arena form. Used both to
+    /// populate the memo and, on a first (un-memoized) touch, transiently.
+    fn materialize_keys(&self) -> Result<DecodedKeys, DialogSearchTreeError> {
+        match self.body()? {
+            ArchivedNodeBody::Segment(segment) => {
+                let mut keys = segment.keys::<Key>()?;
+                let mut arena = Vec::new();
+                let mut ends = Vec::new();
+                while let Some((_, key)) = keys.next_key()? {
+                    arena.extend_from_slice(key);
+                    ends.push(arena.len());
+                }
+                Ok(DecodedKeys { arena, ends })
+            }
+            ArchivedNodeBody::Index(_) => Err(DialogSearchTreeError::Access(
+                "decoded_keys called on an index node".to_string(),
+            )),
+        }
+    }
+
+    /// The tree's format header carried by this node.
+    ///
+    /// Every node embeds the same [`Manifest`], so reading it from any node
+    /// (in particular a root) recovers the tree's format constants (branching
+    /// parameter, separator bound, value inline-vs-spill threshold) without a
+    /// side channel: any node hash is a complete, self-describing tree root.
+    pub fn manifest(&self) -> Result<Manifest, DialogSearchTreeError> {
+        let header = match self.body()? {
+            ArchivedNodeBody::Index(index) => &index.header,
+            ArchivedNodeBody::Segment(segment) => &segment.header,
+        };
+        rkyv::deserialize::<Manifest, rkyv::rancor::Error>(header)
             .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
     }
 
     /// Interprets this node as an index node, returning an error if it's a
     /// segment.
-    pub fn as_index(&self) -> Result<&ArchivedIndex<Key>, DialogSearchTreeError> {
+    pub fn as_index(&self) -> Result<&ArchivedIndex, DialogSearchTreeError> {
         self.body().and_then(|body| match body {
             ArchivedNodeBody::Index(index) => Ok(index),
             ArchivedNodeBody::Segment(_) => Err(DialogSearchTreeError::Access(
@@ -98,7 +201,7 @@ where
 
     /// Interprets this node as a segment node, returning an error if it's an
     /// index.
-    pub fn as_segment(&self) -> Result<&ArchivedSegment<Key, Value>, DialogSearchTreeError> {
+    pub fn as_segment(&self) -> Result<&ArchivedSegment<Value>, DialogSearchTreeError> {
         self.body().and_then(|body| match body {
             ArchivedNodeBody::Segment(segment) => Ok(segment),
             ArchivedNodeBody::Index(_) => Err(DialogSearchTreeError::Access(
@@ -106,88 +209,207 @@ where
             )),
         })
     }
-
-    /// Finds the index of the child containing the given key.
-    pub fn get_child_index(
-        &self,
-        key: &Key::Archived,
-    ) -> Result<Option<usize>, DialogSearchTreeError> {
-        self.body().map(|body| match body {
-            ArchivedNodeBody::Index(index) => index
-                .links
-                .binary_search_by(|link| Ord::cmp(&link.upper_bound, key))
-                .ok(),
-            ArchivedNodeBody::Segment(segment) => segment
-                .entries
-                .binary_search_by(|entry| Ord::cmp(&entry.key, key))
-                .ok(),
-        })
-    }
 }
 
-/// An index node containing links to child nodes.
+/// An index node holding its children as a front-coded separator table.
+///
+/// Each child contributes its lower-bound separator (see [`Link`]); the table
+/// stores the longest common prefix of all separators once and each
+/// separator's remaining suffix contiguously. Routing compares a probe
+/// against the prefix once, then against suffix slices, reconstructing
+/// nothing.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedIndex)]
-pub struct PersistentIndex<Key> {
-    /// The child node links stored in this index.
-    pub links: Vec<Link<Key>>,
+pub struct PersistentIndex {
+    /// The tree's format header, carried by every node so any node hash is a
+    /// complete, self-describing tree root. Identical across a tree's nodes,
+    /// so structural sharing stores it once in practice.
+    pub header: Manifest,
+    /// Longest common prefix of all child separators, stored once.
+    pub prefix: Vec<u8>,
+    /// Concatenated separator suffixes (each separator minus `prefix`), in
+    /// child order.
+    pub suffixes: Vec<u8>,
+    /// End offset of each child's suffix within `suffixes`; one per child,
+    /// monotonically nondecreasing, the last equal to `suffixes.len()`.
+    pub ends: Vec<u32>,
+    /// Child node content hashes, in child order.
+    pub hashes: Vec<Blake3Hash>,
 }
 
-impl<Key> PersistentIndex<Key>
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-{
-    /// Creates a new [`PersistentIndex`] containing a single link.
-    pub fn new(link: Link<Key>) -> Self {
-        Self { links: vec![link] }
-    }
-}
+impl PersistentIndex {
+    /// Builds the separator table from child links, in order.
+    ///
+    /// The table layout is a pure function of the links: the prefix is the
+    /// longest common prefix of the first and last separator (separators are
+    /// sorted), so identical link lists yield identical bytes.
+    pub fn from_links(links: Vec<Link>, header: Manifest) -> Self {
+        let prefix_length = match (links.first(), links.last()) {
+            (Some(first), Some(last)) => common_prefix(&first.separator, &last.separator),
+            _ => 0,
+        };
+        let prefix = links
+            .first()
+            .map(|link| link.separator[..prefix_length].to_vec())
+            .unwrap_or_default();
 
-/// A leaf segment containing key-value entries.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[rkyv(archived = ArchivedSegment)]
-pub struct PersistentSegment<Key, Value> {
-    /// The key-value entries stored in this segment.
-    pub entries: Vec<Entry<Key, Value>>,
-}
+        let mut suffixes = Vec::new();
+        let mut ends = Vec::with_capacity(links.len());
+        let mut hashes = Vec::with_capacity(links.len());
+        for link in links {
+            // Sorted separators make the first/last LCP a prefix of every
+            // middle separator (any middle string is sandwiched between them
+            // and must share it); an unsorted caller breaks the tree invariant
+            // upstream, so surface it as a debug failure and degrade to a
+            // saturated slice rather than panicking at persist time.
+            debug_assert!(
+                link.separator.len() >= prefix_length && link.separator.starts_with(&prefix),
+                "index links must be sorted: separator {:02x?} does not carry the prefix {prefix:02x?}",
+                link.separator
+            );
+            let at = prefix_length.min(link.separator.len());
+            suffixes.extend_from_slice(&link.separator[at..]);
+            ends.push(suffixes.len() as u32);
+            hashes.push(link.node);
+        }
 
-impl<Key, Value> PersistentSegment<Key, Value>
-where
-    Key: self::Key,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
-    Value: self::Value,
-{
-    /// Creates a new [`PersistentSegment`] containing a single entry.
-    pub fn new(entry: Entry<Key, Value>) -> Self {
         Self {
-            entries: vec![entry],
+            header,
+            prefix,
+            suffixes,
+            ends,
+            hashes,
         }
     }
+}
 
-    /// Returns the key of the last entry in this segment.
-    pub fn upper_bound(&self) -> Option<&Key> {
-        self.entries.last().map(|entry| &entry.key)
+/// Layout id marking a leaf that straddles a layout boundary and so holds
+/// keys of more than one layout. Such a leaf is encoded under the opaque
+/// whole-key schema rather than any single layout's columnar schema. Chosen
+/// as `u8::MAX` so it never collides with a real layout id (which are small
+/// tag-derived values).
+pub const MIXED_LAYOUT: u8 = u8::MAX;
+
+/// A leaf segment holding entries columnar: one column per key component
+/// (see [`Schema`](crate::Schema)) plus an index-aligned value table.
+///
+/// Each key is split into its schema components and each component stored in
+/// the column that fits it: large mostly-distinct components (entity, value)
+/// in front-coded byte arenas, small highly-repeated components (namespace,
+/// name, value type) in per-leaf content-derived dictionaries. A key type
+/// with no finer structure reports a single whole-key arena column, under
+/// which this degrades to a single front-coded key stream. Values stay
+/// individually archived, index-aligned with the entries.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedSegment)]
+pub struct PersistentSegment<Value> {
+    /// The tree's format header, carried by every node so any node hash is a
+    /// complete, self-describing tree root. Identical across a tree's nodes,
+    /// so structural sharing stores it once in practice.
+    pub header: Manifest,
+    /// Number of entries in the segment.
+    pub count: u32,
+    /// The layout id shared by every key in this leaf (see
+    /// [`Key::layout`](crate::Key::layout)); selects the schema the columns
+    /// were encoded under.
+    pub layout: u8,
+    /// One encoded column per key-schema component, in schema order.
+    pub columns: Vec<ColumnData>,
+    /// Entry values, index-aligned with the entries.
+    pub values: Vec<Value>,
+}
+
+impl<Value> PersistentSegment<Value>
+where
+    Value: self::Value,
+{
+    /// Encodes sorted entries into the columnar segment form, splitting each
+    /// key into its schema components.
+    ///
+    /// A leaf is normally single-layout (keys are partitioned by their
+    /// leading component, so leaves rarely straddle a layout boundary). When
+    /// every entry shares a layout, the leaf is encoded under that layout's
+    /// schema. When a leaf *does* straddle a boundary and holds more than one
+    /// layout, it is encoded under the opaque whole-key schema and marked
+    /// with [`MIXED_LAYOUT`], so decode stays correct without a tree-shape
+    /// change; such leaves are rare (one per layout boundary in the tree).
+    pub fn from_entries<Key: self::Key>(
+        entries: Vec<Entry<Key, Value>>,
+        header: Manifest,
+    ) -> Result<Self, DialogSearchTreeError> {
+        let count = entries.len() as u32;
+        let first_layout = entries
+            .first()
+            .map(|entry| entry.key.layout())
+            .ok_or_else(|| {
+                DialogSearchTreeError::Node("Attempted to encode an empty segment".into())
+            })?;
+        let uniform = entries
+            .iter()
+            .all(|entry| entry.key.layout() == first_layout);
+
+        let (layout, schema) = if uniform {
+            (first_layout, Key::schema(first_layout))
+        } else {
+            (MIXED_LAYOUT, crate::Schema::opaque())
+        };
+
+        // Split every key into its component slices, borrowing from the keys.
+        // Under the mixed-layout opaque schema, `components` for a structured
+        // key would push its own (varying) components, so use the whole key
+        // as the single opaque component directly.
+        let mut rows: Vec<Vec<&[u8]>> = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            if layout == MIXED_LAYOUT {
+                rows.push(vec![entry.key.as_ref()]);
+            } else {
+                let mut row = Vec::with_capacity(schema.len());
+                entry.key.components(&mut row);
+                // Enforce the `Key` contract before anything is encoded: the
+                // slice count must match the schema (a surplus slice would
+                // otherwise be silently dropped by the column encoder — data
+                // loss in a content-addressed node) and the slices must cover
+                // the key's comparison bytes exactly.
+                if row.len() != schema.len() {
+                    return Err(DialogSearchTreeError::Node(format!(
+                        "Key split into {} components for a schema of {}",
+                        row.len(),
+                        schema.len()
+                    )));
+                }
+                if row.iter().map(|slice| slice.len()).sum::<usize>() != entry.key.as_ref().len() {
+                    return Err(DialogSearchTreeError::Node(
+                        "Key components do not cover the key's bytes".into(),
+                    ));
+                }
+                rows.push(row);
+            }
+        }
+        let columns = encode_columns(&schema, &rows)?;
+
+        let values = entries.into_iter().map(|entry| entry.value).collect();
+        Ok(Self {
+            header,
+            count,
+            layout,
+            columns,
+            values,
+        })
     }
 }
 
 /// The body of a tree node, either an index or a leaf segment.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedNodeBody)]
-pub enum PersistentNodeBody<Key, Value> {
+pub enum PersistentNodeBody<Value> {
     /// An index node containing links to child nodes.
-    Index(PersistentIndex<Key>),
+    Index(PersistentIndex),
     /// A leaf segment containing key-value entries.
-    Segment(PersistentSegment<Key, Value>),
+    Segment(PersistentSegment<Value>),
 }
 
-impl<Key, Value> PersistentNodeBody<Key, Value>
+impl<Value> PersistentNodeBody<Value>
 where
-    Key: self::Key
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value
         + for<'a> Serialize<
             Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
@@ -203,28 +425,42 @@ where
     }
 }
 
-impl<Key, Value> TryFrom<Vec<Link<Key>>> for PersistentNodeBody<Key, Value> {
-    type Error = DialogSearchTreeError;
-
-    fn try_from(links: Vec<Link<Key>>) -> Result<Self, Self::Error> {
+impl<Value> PersistentNodeBody<Value>
+where
+    Value: self::Value,
+{
+    /// Builds an index node body from child links, stamping the tree's format
+    /// header.
+    pub fn index_from_links(
+        links: Vec<Link>,
+        header: Manifest,
+    ) -> Result<Self, DialogSearchTreeError> {
         if links.is_empty() {
             return Err(DialogSearchTreeError::Node(
                 "Attempted to create an index from zero links".into(),
             ));
         }
-        Ok(PersistentNodeBody::Index(PersistentIndex { links }))
+        Ok(PersistentNodeBody::Index(PersistentIndex::from_links(
+            links, header,
+        )))
     }
-}
 
-impl<Key, Value> TryFrom<Vec<Entry<Key, Value>>> for PersistentNodeBody<Key, Value> {
-    type Error = DialogSearchTreeError;
-
-    fn try_from(entries: Vec<Entry<Key, Value>>) -> Result<Self, Self::Error> {
+    /// Builds a leaf segment node body from entries, stamping the tree's
+    /// format header.
+    pub fn segment_from_entries<Key>(
+        entries: Vec<Entry<Key, Value>>,
+        header: Manifest,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Key: self::Key,
+    {
         if entries.is_empty() {
             return Err(DialogSearchTreeError::Node(
-                "Attempted to create an index from zero links".into(),
+                "Attempted to create a segment from zero entries".into(),
             ));
         }
-        Ok(PersistentNodeBody::Segment(PersistentSegment { entries }))
+        Ok(PersistentNodeBody::Segment(
+            PersistentSegment::from_entries(entries, header)?,
+        ))
     }
 }

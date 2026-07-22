@@ -1,7 +1,7 @@
 //! Remote archive operations -- upload blocks to remote storage.
 
 use crate::{RemoteRepository, RemoteSite, UploadError};
-use dialog_artifacts::{Datum, KeyBytes, State};
+use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt, CatalogExt};
@@ -98,7 +98,7 @@ impl RemoteArchiveIndex<'_> {
     /// `local_catalog` is used to read raw bytes from local storage.
     pub fn upload<'a, S>(&'a self, nodes: S) -> Upload<'a, S>
     where
-        S: Stream<Item = Result<PersistentNode<KeyBytes, State<Datum>>, DialogSearchTreeError>>,
+        S: Stream<Item = Result<PersistentNode<Key, State<Datum>>, DialogSearchTreeError>>,
     {
         Upload { index: self, nodes }
     }
@@ -114,7 +114,7 @@ const UPLOAD_CONCURRENCY: usize = 16;
 
 impl<S> Upload<'_, S>
 where
-    S: Stream<Item = Result<PersistentNode<KeyBytes, State<Datum>>, DialogSearchTreeError>>,
+    S: Stream<Item = Result<PersistentNode<Key, State<Datum>>, DialogSearchTreeError>>,
 {
     /// Execute the upload, writing the nodes' own buffers to the remote
     /// with up to 16 concurrent uploads.

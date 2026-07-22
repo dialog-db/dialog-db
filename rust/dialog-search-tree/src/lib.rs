@@ -143,6 +143,12 @@ pub use dialog_common::Buffer;
 mod kv;
 pub use kv::*;
 
+mod component;
+pub use component::*;
+
+mod manifest;
+pub use manifest::*;
+
 mod link;
 pub use link::*;
 
@@ -178,9 +184,6 @@ pub use encoding::*;
 
 mod walker;
 pub use walker::*;
-
-mod compare;
-pub use compare::*;
 
 /// Helpers for testing and development.
 ///

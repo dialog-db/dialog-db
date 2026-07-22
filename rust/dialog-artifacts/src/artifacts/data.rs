@@ -1,56 +1,59 @@
 //! Internal data representation for storing artifacts in indexes.
 //!
-//! This module defines the [`Datum`] type which is the internal serializable
-//! representation of artifacts stored within the prolly tree indexes.
+//! This module defines the [`Datum`] type: the per-entry payload stored
+//! alongside a key in the prolly tree indexes.
+//!
+//! The key already carries the entity, attribute, value type, and (for a value
+//! within the inline threshold) the value itself in order-preserving form, so
+//! the payload no longer duplicates them. For a *spilled* value (whose key
+//! carries just a 32-byte reference), the raw value bytes are not in the payload
+//! either: they live as a content-addressed block in the archive block store,
+//! keyed by that same 32-byte reference (written on commit by
+//! [`ArtifactTreeExt::apply`](crate::tree::ArtifactTreeExt::apply) and fetched
+//! on read). The payload holds only the [`Cause`], which the key cannot
+//! reconstruct. A [`Artifact`] is reconstructed from the key plus this payload
+//! (plus the fetched spilled block, if any) by
+//! [`Artifact::from_key_datum`]/[`Artifact::from_key_datum_with_value`].
 
-use crate::ValueType;
-use dialog_storage::Blake3Hash;
 use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 
-use crate::{Artifact, Cause, make_reference};
+use crate::ValueType;
+
+use crate::{Artifact, Cause};
 
 #[cfg(doc)]
-use crate::{Artifacts, Attribute, Entity};
+use crate::{Artifacts, Attribute, Entity, Value};
 
-/// A [`Datum`] is the layout of data stored in one of the indexes of [`Artifacts`]
+/// A [`Datum`] is the per-entry payload stored against a key in the
+/// [`Artifacts`] indexes: the parts of a fact the key does not already carry.
 #[derive(
     Clone, Debug, PartialEq, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
 pub struct Datum {
-    /// The stringified [`Entity`] associated with this [`Datum`]
-    pub entity: String,
-    /// The stringified [`Attribute`] associated with this [`Datum`]
-    pub attribute: String,
-    /// The type of the [`Value`] associated with this [`Datum`]
-    pub value_type: u8,
-    /// The raw byte representation of the [`Value`] associated with this [`Datum`]
-    pub value: Vec<u8>,
-    /// Get the [`Cause`] of this [`ValueDatum`], if any
+    /// The [`Cause`] of this fact, if any: a reference to an ancestor version
+    /// with a different [`Value`].
     pub cause: Option<Cause>,
+    /// An opaque record carried ONLY by the blob index
+    /// ([`BlobRecord`](crate::BlobRecord)), never by an EAV/AEV/VAE fact. Blob
+    /// keys occupy a tag range disjoint from the fact indexes, so a blob
+    /// entry's `Datum` is never seen by the fact scan; this field is its
+    /// storage. It is NOT the raw bytes of a spilled value — those live as a
+    /// content-addressed block in the archive, keyed by the key's 32-byte
+    /// reference.
+    pub blob: Option<Vec<u8>>,
 }
 
 impl Datum {
-    /// Returns the hash reference that corresponds to this [`Datum`]'s [`Value`].
-    ///
-    /// This hash is used for indexing by value and enables efficient value-based
-    /// queries in the triple store.
-    pub fn value_reference(&self) -> Blake3Hash {
-        // TODO: Cache this
-        make_reference(&self.value)
+    /// The payload for `artifact`: only the cause. A spilled value's bytes are
+    /// written separately as a content-addressed block in the archive (keyed by
+    /// the key's 32-byte reference), so the payload never carries value bytes.
+    pub fn for_artifact(artifact: &Artifact) -> Self {
+        Self {
+            cause: artifact.cause.clone(),
+            blob: None,
+        }
     }
 }
 
 impl ValueType for Datum {}
-
-impl From<Artifact> for Datum {
-    fn from(artifact: Artifact) -> Self {
-        Self {
-            entity: artifact.of.to_string(),
-            attribute: artifact.the.to_string(),
-            value_type: artifact.is.data_type().into(),
-            value: artifact.is.to_bytes(),
-            cause: artifact.cause,
-        }
-    }
-}

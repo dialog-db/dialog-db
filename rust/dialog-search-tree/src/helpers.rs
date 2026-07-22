@@ -52,7 +52,7 @@ use rkyv::{
 
 use crate::{
     ArchivedNodeBody, Buffer, ContentAddressedStorage, Delta, DialogSearchTreeError, Distribution,
-    Key, Link, PersistentNode, PersistentTree, Rank, SymmetryWith, Value, into_owned,
+    Key, Manifest, PersistentNode, PersistentTree, Rank, Value,
 };
 
 /// Traversal order for tree iteration.
@@ -127,8 +127,6 @@ impl<T> TraversalQueue<T> {
 pub trait Traversable<Key, Value>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
 {
     /// Returns an async stream that traverses all nodes in the specified order.
@@ -154,18 +152,6 @@ where
 impl<Key, Value, D> Traversable<Key, Value> for PersistentTree<Key, Value, D>
 where
     Key: self::Key + ConditionalSync + 'static,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key: for<'b> Serialize<
-        Strategy<Serializer<AlignedVec, ArenaHandle<'b>, Share>, rkyv::rancor::Error>,
-    >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value + ConditionalSync + 'static,
     Value: for<'b> Serialize<
         Strategy<Serializer<AlignedVec, ArenaHandle<'b>, Share>, rkyv::rancor::Error>,
@@ -197,10 +183,10 @@ where
 
                     if let ArchivedNodeBody::Index(index) = node.body()? {
                         let children = index
-                            .links
-                            .iter()
-                            .map(|link| Ok(into_owned::<Link<Key>>(link)?.node))
-                            .collect::<Result<Vec<_>, DialogSearchTreeError>>()?;
+                            .links()?
+                            .into_iter()
+                            .map(|link| link.node)
+                            .collect::<Vec<_>>();
                         queue.enqueue(children);
                     }
 
@@ -218,14 +204,6 @@ async fn load_node<Key, Value, Backend>(
 ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
@@ -248,8 +226,6 @@ pub trait TreeNodes<Key, Value>:
     Stream<Item = Result<PersistentNode<Key, Value>, DialogSearchTreeError>>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
 {
     /// Collects all node hashes into a `HashSet`, ignoring errors.
@@ -261,14 +237,6 @@ where
 impl<Key, Value, S> TreeNodes<Key, Value> for S
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + for<'b> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
     Value: self::Value,
     Value::Archived: for<'b> CheckBytes<
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
@@ -281,14 +249,20 @@ where
     }
 }
 
-/// Fixed width of spec keys: base bytes, a `0x00` separator, a rank byte,
-/// and zero padding.
+/// Fixed width of spec keys: base bytes, a `0x00` delimiter, a leaf-rank
+/// byte, a seam-rank byte, and zero padding.
 pub const SPEC_KEY_LENGTH: usize = 8;
 
-/// Key type used by spec trees, encoded as `[base.., 0x00, rank, 0x00..]`.
+/// Key type used by spec trees, encoded as
+/// `[base.., 0x00, leaf_rank, seam_rank, 0x00..]`.
 ///
-/// The zero separator sorts below every alphabetic base byte, so the rank
-/// suffix never affects ordering between distinct bases.
+/// The zero delimiter sorts below every alphabetic base byte, so the rank
+/// suffix never affects ordering between distinct bases. Two rank bytes are
+/// needed because the tree rolls two independent coins: the leaf coin over
+/// entry keys (cuts a segment after the entry) and the seam coin over
+/// separators (starts an index node before the child). The simulator forces
+/// full-key separators (see [`DistributionSimulator::separator`]), so a
+/// separator is a whole spec key and both bytes are always present in it.
 pub type SpecKey = [u8; SPEC_KEY_LENGTH];
 
 /// Type alias for the journaled storage backend used in tree specs.
@@ -307,33 +281,62 @@ pub fn test_storage() -> TestStorage {
 
 /// A distribution that reads ranks directly from keys.
 ///
-/// Spec keys are encoded as `[base bytes, 0x00, rank byte, zero padding]`,
-/// which makes the distribution trivial: find the separator and read the
-/// next byte as the rank.
+/// Spec keys are encoded as `[base, 0x00, leaf_rank, seam_rank, padding]`,
+/// which makes the coins trivial: find the delimiter and read the byte at
+/// the wanted offset. To make seam coins controllable at all, the simulator
+/// stores the FULL right-hand key as every separator (the Dolt end of the
+/// design space) instead of the shortest-distinguishing prefix: a shortest
+/// prefix of distinct alphabetic bases would never include the rank bytes.
+/// Both separator rules are canonical (a pure function of the seam keys), so
+/// every tree property except byte-level compactness is exercised the same
+/// way as production.
 #[derive(Clone, Debug)]
 pub struct DistributionSimulator;
 
-impl Distribution for DistributionSimulator {
-    fn rank(key: &[u8]) -> Rank {
-        match key.iter().position(|byte| *byte == 0) {
-            Some(separator) if separator + 1 < key.len() && key[separator + 1] != 0 => {
-                key[separator + 1] as Rank
-            }
-            _ => 1,
+/// Reads the rank byte at `offset` past the `0x00` delimiter of a spec key
+/// (or full-key separator), defaulting to rank 1 when absent or zero.
+fn rank_byte(bytes: &[u8], offset: usize) -> Rank {
+    match bytes.iter().position(|byte| *byte == 0) {
+        Some(delimiter) if delimiter + offset < bytes.len() && bytes[delimiter + offset] != 0 => {
+            bytes[delimiter + offset] as Rank
         }
+        _ => 1,
     }
 }
 
-/// Encodes a base key and rank into a fixed-width [`SpecKey`].
-pub fn encode_key(base: &[u8], rank: Rank) -> SpecKey {
+impl Distribution for DistributionSimulator {
+    // The simulator drives tree shape from bytes baked into the spec keys, so
+    // it ignores the manifest's branching parameter and length guard: tests
+    // that use it want an exact, byte-controlled shape, not a coin.
+    fn rank(key: &[u8], _manifest: &Manifest) -> Rank {
+        rank_byte(key, 1)
+    }
+
+    fn seam_rank(separator: &[u8], _manifest: &Manifest) -> Rank {
+        rank_byte(separator, 2)
+    }
+
+    fn separator(_left: &[u8], right: &[u8]) -> Vec<u8> {
+        right.to_vec()
+    }
+
+    fn reseparate(min: &[u8], _floor: &[u8]) -> Vec<u8> {
+        min.to_vec()
+    }
+}
+
+/// Encodes a base key with its leaf and seam ranks into a fixed-width
+/// [`SpecKey`].
+pub fn encode_key(base: &[u8], leaf_rank: Rank, seam_rank: Rank) -> SpecKey {
     assert!(
-        base.len() + 2 <= SPEC_KEY_LENGTH,
+        base.len() + 3 <= SPEC_KEY_LENGTH,
         "spec key base too long: {:?}",
         String::from_utf8_lossy(base)
     );
     let mut key = [0u8; SPEC_KEY_LENGTH];
     key[..base.len()].copy_from_slice(base);
-    key[base.len() + 1] = rank as u8;
+    key[base.len() + 1] = leaf_rank as u8;
+    key[base.len() + 2] = seam_rank as u8;
     key
 }
 
@@ -372,25 +375,54 @@ fn next_alpha_key(key: &[u8]) -> Vec<u8> {
     result
 }
 
-/// Build a rank map from the tree spec.
+/// Build the two coin maps from the tree spec's per-level segments (each a
+/// `(explicit first key, upper bound)` pair, top level first).
 ///
-/// Height 0 boundaries get rank 2, height 1 boundaries rank 3, and so on.
-/// If a boundary appears at multiple heights, it gets the HIGHEST rank.
-pub fn build_rank_map(levels: &[Vec<Vec<u8>>]) -> HashMap<Vec<u8>, Rank> {
-    let mut rank_map = HashMap::new();
+/// The leaf coin: every bottom-level upper bound gets leaf rank 2 (it ends
+/// its segment); every other key gets the default 1. The seam coin: a node
+/// at height `h >= 1` that is not the first of its level starts at a seam
+/// that must punch through heights `1..=h`, so its first key gets seam rank
+/// `h + 2` (`> BOTTOM_RANK + h`, and not above); a key starting nodes at
+/// several heights keeps the highest. First keys are inferred the same way
+/// the key inference does: an explicit range start, or the successor of the
+/// previous node's bound.
+pub fn build_coin_maps(
+    levels: &[Vec<(Option<&str>, Vec<u8>)>],
+) -> (HashSet<Vec<u8>>, HashMap<Vec<u8>, Rank>) {
+    let leaf_boundaries: HashSet<Vec<u8>> = levels
+        .last()
+        .map(|bottom| bottom.iter().map(|(_, bound)| bound.clone()).collect())
+        .unwrap_or_default();
 
-    // Process from bottom to top, so higher levels overwrite lower levels.
-    // This ensures keys appearing at multiple heights get the HIGHEST rank.
-    for (level_idx, boundaries) in levels.iter().enumerate().rev() {
+    let mut seam_ranks: HashMap<Vec<u8>, Rank> = HashMap::new();
+    for (level_idx, segments) in levels.iter().enumerate() {
         let height = levels.len() - level_idx - 1;
+        if height == 0 {
+            continue;
+        }
         let rank = (height + 2) as Rank;
 
-        for boundary in boundaries {
-            rank_map.insert(boundary.clone(), rank);
+        let mut expected_next: Option<Vec<u8>> = None;
+        for (first_key, bound) in segments {
+            let start = match (first_key, &expected_next) {
+                (Some(first), _) => first.as_bytes().to_vec(),
+                (None, Some(next)) => next.clone(),
+                // The first node of a level sits at the global leftmost
+                // seam; nothing cuts before it, so it needs no seam rank.
+                (None, None) => {
+                    expected_next = Some(next_alpha_key(bound));
+                    continue;
+                }
+            };
+            if expected_next.is_some() {
+                let entry = seam_ranks.entry(start).or_insert(rank);
+                *entry = (*entry).max(rank);
+            }
+            expected_next = Some(next_alpha_key(bound));
         }
     }
 
-    rank_map
+    (leaf_boundaries, seam_ranks)
 }
 
 /// Expected operation on a node during differentiation
@@ -509,13 +541,11 @@ impl TreeDescriptor {
 
         // First, collect metadata to build the tree
         let mut all_segments = Vec::new();
-        let mut boundaries_per_level = Vec::new();
         // Track expected operations for each boundary
         let mut expected_ops: HashMap<(Vec<u8>, usize), Expect> = HashMap::new();
 
         for (level_idx, level_descriptors) in self.0.iter().enumerate() {
             let mut level_segment_specs = Vec::new();
-            let mut level_boundaries = Vec::new();
 
             let height = self.0.len() - 1 - level_idx;
 
@@ -540,11 +570,9 @@ impl TreeDescriptor {
 
                 expected_ops.insert((boundary.clone(), height), expected_op);
                 level_segment_specs.push((first_key, boundary.clone()));
-                level_boundaries.push(boundary);
             }
 
             all_segments.push(level_segment_specs);
-            boundaries_per_level.push(level_boundaries);
         }
 
         // Infer all keys from the bottom level
@@ -553,19 +581,21 @@ impl TreeDescriptor {
             .expect("tree_spec requires at least one level");
         let collection = Self::infer_keys_from_segments(bottom_segments);
 
-        // Build rank map
-        let ranks = build_rank_map(&boundaries_per_level);
+        // Build the coin maps: leaf boundaries end segments, seam ranks
+        // start index nodes.
+        let (leaf_boundaries, seam_ranks) = build_coin_maps(&all_segments);
 
-        // Build the tree by inserting every key with its rank encoded into
-        // the key bytes, where DistributionSimulator reads it back out.
+        // Build the tree by inserting every key with its coins encoded into
+        // the key bytes, where DistributionSimulator reads them back out.
         // Values carry the decoded base key.
         let mut tree = TestTree::empty();
         let mut delta = Delta::zero();
         for key in &collection {
-            let rank = ranks.get(key).copied().unwrap_or(1);
+            let leaf_rank = if leaf_boundaries.contains(key) { 2 } else { 1 };
+            let seam_rank = seam_ranks.get(key).copied().unwrap_or(1);
             tree = tree
                 .edit()
-                .insert(encode_key(key, rank), key.clone(), &storage)
+                .insert(encode_key(key, leaf_rank, seam_rank), key.clone(), &storage)
                 .await?
                 .persist(&mut delta)?;
 
@@ -630,16 +660,47 @@ impl TreeDescriptor {
         keys
     }
 
-    /// Recursively build NodeSpecs from the tree structure
+    /// Recursively build NodeSpecs from the tree structure, returning the
+    /// subtree's upper bound key.
+    ///
+    /// The spec identifies nodes by their decoded upper bound. Index links no
+    /// longer carry bounds (they hold separators), so an index derives its
+    /// own bound from its last child's, which the recursion computes anyway;
+    /// specs are therefore pushed post-order, which the set-based assertions
+    /// do not observe.
     async fn build_spec_from_node(
         spec: &mut [Vec<NodeSpec>],
         hash: &Blake3Hash,
         storage: &TestStorage,
         height: usize,
         expected_ops: &HashMap<(Vec<u8>, usize), Expect>,
-    ) -> Result<(), DialogSearchTreeError> {
+    ) -> Result<SpecKey, DialogSearchTreeError> {
         let node = load_node::<SpecKey, Vec<u8>, JournaledBackend>(storage, hash).await?;
-        let upper_bound: SpecKey = node.body()?.upper_bound().and_then(into_owned)?;
+
+        let upper_bound: SpecKey = match node.body()? {
+            ArchivedNodeBody::Segment(segment) => {
+                SpecKey::try_from_bytes(&segment.last_key::<SpecKey>()?)?
+            }
+            ArchivedNodeBody::Index(index) => {
+                let mut last: Option<SpecKey> = None;
+                for link in index.links()? {
+                    last = Some(
+                        Box::pin(Self::build_spec_from_node(
+                            spec,
+                            &link.node,
+                            storage,
+                            height.saturating_sub(1),
+                            expected_ops,
+                        ))
+                        .await?,
+                    );
+                }
+                last.ok_or_else(|| {
+                    DialogSearchTreeError::Node("Index was unexpectedly empty".into())
+                })?
+            }
+        };
+
         let decoded_boundary = decode_key(upper_bound.as_ref());
 
         // Look up the expected operation for this node
@@ -657,24 +718,7 @@ impl TreeDescriptor {
             expected_op,
         ));
 
-        // Only recurse if we have more levels to go and height won't underflow
-        if height > 0
-            && let ArchivedNodeBody::Index(index) = node.body()?
-        {
-            for link in index.links.iter() {
-                let link = into_owned::<Link<SpecKey>>(link)?;
-                Box::pin(Self::build_spec_from_node(
-                    spec,
-                    &link.node,
-                    storage,
-                    height - 1,
-                    expected_ops,
-                ))
-                .await?;
-            }
-        }
-
-        Ok(())
+        Ok(upper_bound)
     }
 }
 
@@ -772,17 +816,28 @@ impl TreeSpec {
                 output.push_str(&format!("{prefix}(missing node {hash})\n"));
                 return;
             };
-            let Ok(upper_bound) = node
-                .body()
-                .and_then(|body| body.upper_bound().and_then(into_owned::<SpecKey>))
-            else {
-                output.push_str(&format!("{prefix}(malformed node {hash})\n"));
-                return;
+            // Label nodes by their key span where full keys exist (segments)
+            // and by child count for indexes, whose links carry only
+            // separators.
+            let (key_str, rank) = match node.body() {
+                Ok(ArchivedNodeBody::Segment(segment)) => match segment.last_key::<SpecKey>() {
+                    Ok(upper_bound) => (
+                        String::from_utf8_lossy(&decode_key(&upper_bound)).to_string(),
+                        DistributionSimulator::rank(&upper_bound, &Manifest::default()),
+                    ),
+                    Err(_) => {
+                        output.push_str(&format!("{prefix}(malformed node {hash})\n"));
+                        return;
+                    }
+                },
+                Ok(ArchivedNodeBody::Index(index)) => (format!("({} children)", index.len()), 0),
+                Err(_) => {
+                    output.push_str(&format!("{prefix}(malformed node {hash})\n"));
+                    return;
+                }
             };
 
             let branch = if is_last { "└── " } else { "├── " };
-            let key_str = String::from_utf8_lossy(&decode_key(upper_bound.as_ref())).to_string();
-            let rank = DistributionSimulator::rank(upper_bound.as_ref());
 
             let bytes = node.hash().as_bytes();
             let hash_str = format!(
@@ -801,11 +856,11 @@ impl TreeSpec {
 
             if let Ok(ArchivedNodeBody::Index(index)) = node.body() {
                 let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
-                let child_count = index.links.len();
-                for (i, link) in index.links.iter().enumerate() {
-                    let Ok(link) = into_owned::<Link<SpecKey>>(link) else {
-                        continue;
-                    };
+                let child_count = index.len();
+                let Ok(links) = index.links() else {
+                    return;
+                };
+                for (i, link) in links.iter().enumerate() {
                     let is_last_child = i == child_count - 1;
                     Self::visualize_node(output, &link.node, storage, &new_prefix, is_last_child)
                         .await;
