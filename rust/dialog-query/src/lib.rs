@@ -76,6 +76,9 @@ pub mod statement;
 pub mod stream;
 /// Term types for pattern matching with variables and constants.
 pub mod term;
+
+mod sort_order;
+pub use sort_order::*;
 /// Unified schema-layer type system (`Type`, `Primitive`,
 /// `Refinement`, set-operations).
 pub mod type_system;
