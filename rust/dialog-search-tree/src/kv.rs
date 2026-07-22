@@ -144,6 +144,23 @@ impl<const N: usize> Key for [u8; N] {
 ///
 /// Values must be cloneable and serializable.
 pub trait Value: Clone + Debug + Sized + Archive + ConditionalSend {
+    /// The weight this value's payload contributes to its entry for byte
+    /// pacing (`Manifest::max_segment`): an estimate of the value's encoded
+    /// footprint in a leaf, in bytes. A pure function of the value's
+    /// content — it feeds boundary decisions, so two replicas holding the
+    /// same value must weigh it identically.
+    ///
+    /// The default is the historical fixed slot estimate (32 bytes), which
+    /// keeps every existing value type's tree shapes unchanged. Types whose
+    /// payloads vary meaningfully (the artifact `State<Datum>` carries
+    /// cause and version data from a dozen bytes to hundreds) override it
+    /// with a calibrated per-content estimate so leaves pace against real
+    /// encoded bytes rather than a flat guess — otherwise value-heavy
+    /// leaves overshoot the byte target by whatever the guess missed.
+    fn payload_weight(&self) -> usize {
+        32
+    }
+
     /// Domain-specific conflict resolution for
     /// [`integrate`](crate::TransientTree::integrate): when two
     /// *different* values contend for the same key, return `Some(true)`

@@ -896,6 +896,17 @@ where
         delta: &mut Delta<Blake3Hash, Buffer>,
         manifest: &Manifest,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
+        // Measurement-only (uncommitted, env-gated): classify the node being
+        // sealed so a duplicate store downstream can be attributed to a kind.
+        let audit_kind = if dialog_storage::dup_audit::enabled() {
+            Some(match &self {
+                TransientNode::Segment(_) => "segment",
+                TransientNode::Index(index) if index.novelty.is_empty() => "index-quiet",
+                TransientNode::Index(_) => "index-buffered",
+            })
+        } else {
+            None
+        };
         let body = match self {
             TransientNode::Segment(segment) => {
                 PersistentNodeBody::segment_from_entries(segment.entries, *manifest)?
@@ -911,6 +922,10 @@ where
         };
 
         let node = PersistentNode::new(Buffer::from(body.as_bytes()?));
+        crate::distribution::audit::node(node.buffer().as_ref().len());
+        if let Some(kind) = audit_kind {
+            dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
+        }
         delta.add(node.hash().clone(), node.buffer().clone());
         Ok(node)
     }
@@ -957,15 +972,66 @@ where
     D: Distribution,
 {
     let threshold = BOTTOM_RANK + level;
+
+    // Coin pass: a child whose seam rank exceeds the level threshold starts
+    // a new group. Decisions are collected first so the ceiling overlay can
+    // see the whole frame structure before any child moves.
+    let mut cut_before = vec![false; children.len()];
+    for (at, child) in children.iter().enumerate() {
+        cut_before[at] = at > 0 && D::seam_rank(child.separator()?, manifest) > threshold;
+    }
+
+    // The index-level frame ceiling: under byte pacing, a frame (the run of
+    // children between this level's coin cuts) whose summed link weight
+    // exceeds the ceiling is force-split at elected seams, exactly like the
+    // leaf machinery — bounding the seam ladder's own exponential tail (a
+    // root that drew no cuts would otherwise accumulate every link).
+    //
+    // Unlike leaf anchors, index anchors need NO stored mark: whether a
+    // stored seam is a coin cut is a pure function of its separator (the
+    // ladder), so a forced seam self-identifies as "split here, but the
+    // ladder says no cut" and can never be promoted at the next level —
+    // quietness and piece contiguity are derived, and any later regroup of
+    // the parent's children (always a whole-frame window, since frames stay
+    // contiguous under one parent) re-derives the same anchors.
+    if manifest.max_segment > 0 && manifest.frame_ceiling() > 0 {
+        let ceiling = manifest.frame_ceiling();
+        let mut weights = Vec::with_capacity(children.len());
+        for child in &children {
+            weights.push(cap::link_weight(child.separator()?));
+        }
+        let mut separators: Vec<&[u8]> = Vec::with_capacity(children.len());
+        for child in &children {
+            separators.push(child.separator()?);
+        }
+        let mut start = 0usize;
+        for end in 0..children.len() {
+            let closes_frame = end + 1 == children.len() || cut_before[end + 1];
+            if !closes_frame {
+                continue;
+            }
+            if end > start {
+                for cut in cap::index_frame_cut_positions(
+                    &separators[start..=end],
+                    &weights[start..=end],
+                    ceiling,
+                    manifest,
+                ) {
+                    cut_before[start + cut] = true;
+                }
+            }
+            start = end + 1;
+        }
+    }
+
     let mut groups: Vec<Node<Key, Value>> = vec![];
     let mut pending: Vec<Node<Key, Value>> = vec![];
 
     // Reshaping produces canonical index nodes: novelty lives on the nodes
     // the write path buffered it at, and a regrouped node is a fresh one, so
     // it starts empty. A flush is what moves buffered ops downward.
-    for child in children {
-        let rank = D::seam_rank(child.separator()?, manifest);
-        if rank > threshold && !pending.is_empty() {
+    for (at, child) in children.into_iter().enumerate() {
+        if cut_before[at] && !pending.is_empty() {
             groups.push(
                 TransientNode::Index(TransientIndex {
                     children: std::mem::take(&mut pending),
@@ -1020,10 +1086,45 @@ where
 /// is computed directly. Returns one [`Node::Transient`] segment per group;
 /// an empty entry list produces no groups (the caller propagates the removal,
 /// and with it the floor, per the boundary-delete paths).
+/// The provenance of one untouched piece inside a widened regroup window:
+/// the entry range it contributed to the merged window and the stored link
+/// it came from. When the regroup reproduces exactly that range as a group
+/// (and derives the same separator), the piece's persistent link is passed
+/// through verbatim — no re-encode, no re-hash, no re-store of a
+/// byte-identical block. Provenance is the only sound signal here: store
+/// identity is not observable at persist time.
+#[derive(Clone, Debug)]
+pub(crate) struct PieceOrigin {
+    /// First entry index (inclusive) this piece contributed.
+    pub start: usize,
+    /// One past the last entry index this piece contributed.
+    pub end: usize,
+    /// The stored link the piece was opened from.
+    pub link: Link,
+}
+
 pub(crate) fn regroup_entries<Key, Value, D>(
     entries: Vec<Entry<Key, Value>>,
     floor: Vec<u8>,
     manifest: &Manifest,
+) -> Vec<Node<Key, Value>>
+where
+    Key: self::Key,
+    Value: self::Value,
+    D: Distribution,
+{
+    regroup_entries_reusing::<Key, Value, D>(entries, floor, manifest, &[])
+}
+
+/// [`regroup_entries`] with piece provenance: any group that exactly
+/// reproduces an untouched origin piece — same entry range, same derived
+/// separator — is emitted as its original persistent link instead of a
+/// fresh transient segment. See [`PieceOrigin`].
+pub(crate) fn regroup_entries_reusing<Key, Value, D>(
+    entries: Vec<Entry<Key, Value>>,
+    floor: Vec<u8>,
+    manifest: &Manifest,
+    origins: &[PieceOrigin],
 ) -> Vec<Node<Key, Value>>
 where
     Key: self::Key,
@@ -1051,6 +1152,13 @@ where
     // "weight since the last cut" (which would cascade decisions off coin
     // outcomes and break convergence). See `Distribution::leaf_cut`.
     let count = entries.len();
+    // Every pacing decision below meters entries by their full weight (key
+    // bytes plus the value's payload weight), computed once per window.
+    let weights: Vec<usize> = if manifest.max_segment == 0 {
+        Vec::new()
+    } else {
+        entries.iter().map(Entry::weight).collect()
+    };
     let mut vetoed = vec![false; count.saturating_sub(1)];
     let mut cut_after = vec![false; count];
     let mut bank = 0usize;
@@ -1061,9 +1169,16 @@ where
             // The coin is skipped entirely for vetoed seams: the veto
             // overrides whatever it would say, and the weight moves into
             // the bank instead.
-            bank += cap::entry_weight(key);
+            if manifest.max_segment > 0 {
+                bank += weights[at];
+            }
         } else {
-            cut_after[at] = D::leaf_cut(key, bank, manifest);
+            let weight = if manifest.max_segment == 0 {
+                0
+            } else {
+                bank + weights[at]
+            };
+            cut_after[at] = D::leaf_cut(key, weight, manifest);
             bank = 0;
         }
     }
@@ -1098,7 +1213,7 @@ where
             // The stretch covers keys `start..=at` (the last vetoed seam
             // joins keys `at - 1` and `at`).
             let keys: Vec<&Key> = entries[start..=at].iter().map(|entry| &entry.key).collect();
-            for cut in cap::forced_cut_positions(&keys, manifest) {
+            for cut in cap::forced_cut_positions(&keys, &weights[start..=at], manifest) {
                 cut_after[start + cut - 1] = true;
                 forced_start[start + cut] = true;
             }
@@ -1124,7 +1239,7 @@ where
                     .map(|entry| &entry.key)
                     .collect();
                 let seams = &vetoed[start..end];
-                for cut in cap::frame_cut_positions(&keys, seams, manifest) {
+                for cut in cap::frame_cut_positions(&keys, &weights[start..=end], seams, manifest) {
                     cut_after[start + cut - 1] = true;
                     forced_start[start + cut] = true;
                 }
@@ -1133,6 +1248,12 @@ where
         }
     }
 
+    let origin_for = |start: usize, end: usize| -> Option<&Link> {
+        origins
+            .iter()
+            .find(|origin| origin.start == start && origin.end == end)
+            .map(|origin| &origin.link)
+    };
     let mut group_start = 0usize;
     for (at, entry) in entries.into_iter().enumerate() {
         pending.push(entry);
@@ -1144,6 +1265,7 @@ where
                 &floor,
                 forced_start[group_start],
                 manifest,
+                origin_for(group_start, at + 1),
             );
             group_start = at + 1;
         }
@@ -1157,6 +1279,7 @@ where
             &floor,
             forced_start[group_start],
             manifest,
+            origin_for(group_start, count),
         );
     }
 
@@ -1168,6 +1291,7 @@ where
 /// long forced form when the group starts at a backstop anchor, and the
 /// canonical shortest-distinguishing prefix against the previous group's
 /// last key everywhere else.
+#[allow(clippy::too_many_arguments)]
 fn seal<Key, Value, D>(
     pending: &mut Vec<Entry<Key, Value>>,
     previous_last: &mut Option<Key>,
@@ -1175,6 +1299,7 @@ fn seal<Key, Value, D>(
     floor: &[u8],
     forced: bool,
     manifest: &Manifest,
+    origin: Option<&Link>,
 ) where
     Key: self::Key,
     Value: self::Value,
@@ -1199,6 +1324,16 @@ fn seal<Key, Value, D>(
         Some(previous) => D::separator(previous.as_ref(), first.as_ref()),
     };
     *previous_last = Some(last);
+    // A group that reproduces an untouched origin piece byte-for-byte —
+    // same entries (the exact-range match) and same separator — passes the
+    // original link through: `into_link` will hand it on with no encode,
+    // no hash, and no delta entry.
+    if let Some(link) = origin
+        && link.separator == separator
+    {
+        groups.push(Node::Persistent(link.clone()));
+        return;
+    }
     groups.push(TransientNode::Segment(TransientSegment { entries, separator }).into());
 }
 

@@ -1,6 +1,105 @@
-use dialog_common::Blake3Hash;
-
 use crate::{BOTTOM_RANK, Manifest};
+
+/// Measurement-only hash accounting (uncommitted experiment plumbing): every
+/// blake3 invocation on the shaping paths bumps a counter, split by purpose,
+/// so a replay can attribute hash cost. Snapshot and reset from the harness.
+#[allow(missing_docs, clippy::missing_docs_in_private_items)]
+pub mod audit {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub static KEY_HASHES: AtomicU64 = AtomicU64::new(0);
+    pub static KEY_HASH_BYTES: AtomicU64 = AtomicU64::new(0);
+    pub static SEAM_HASHES: AtomicU64 = AtomicU64::new(0);
+    pub static SEAM_HASH_BYTES: AtomicU64 = AtomicU64::new(0);
+    pub static ELECTION_HASHES: AtomicU64 = AtomicU64::new(0);
+    pub static ELECTION_HASH_BYTES: AtomicU64 = AtomicU64::new(0);
+    pub static NODE_HASHES: AtomicU64 = AtomicU64::new(0);
+    pub static NODE_HASH_BYTES: AtomicU64 = AtomicU64::new(0);
+
+    pub fn key(bytes: usize) {
+        KEY_HASHES.fetch_add(1, Ordering::Relaxed);
+        KEY_HASH_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    pub fn seam(bytes: usize) {
+        SEAM_HASHES.fetch_add(1, Ordering::Relaxed);
+        SEAM_HASH_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    pub fn election(bytes: usize) {
+        ELECTION_HASHES.fetch_add(1, Ordering::Relaxed);
+        ELECTION_HASH_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    pub fn node(bytes: usize) {
+        NODE_HASHES.fetch_add(1, Ordering::Relaxed);
+        NODE_HASH_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    pub static MEMO_HITS: AtomicU64 = AtomicU64::new(0);
+    pub static MEMO_HIT_BYTES: AtomicU64 = AtomicU64::new(0);
+    pub fn memo_hit(bytes: usize) {
+        MEMO_HITS.fetch_add(1, Ordering::Relaxed);
+        MEMO_HIT_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+    pub fn report() -> String {
+        format!(
+            "key_hashes={} key_bytes={} seam_hashes={} seam_bytes={} election_hashes={} election_bytes={} node_hashes={} node_bytes={}",
+            KEY_HASHES.swap(0, Ordering::Relaxed),
+            KEY_HASH_BYTES.swap(0, Ordering::Relaxed),
+            SEAM_HASHES.swap(0, Ordering::Relaxed),
+            SEAM_HASH_BYTES.swap(0, Ordering::Relaxed),
+            ELECTION_HASHES.swap(0, Ordering::Relaxed),
+            ELECTION_HASH_BYTES.swap(0, Ordering::Relaxed),
+            NODE_HASHES.swap(0, Ordering::Relaxed),
+            NODE_HASH_BYTES.swap(0, Ordering::Relaxed),
+        ) + &format!(
+            " memo_hits={} memo_hit_bytes={}",
+            MEMO_HITS.swap(0, Ordering::Relaxed),
+            MEMO_HIT_BYTES.swap(0, Ordering::Relaxed),
+        )
+    }
+}
+
+/// A bounded, thread-local memo of `blake3(bytes)` for the shaping paths:
+/// the coins, the ladders, and the anchor elections all hash the same key
+/// and separator strings over and over — every regroup of a widened run
+/// rehashes its whole window, and the audit measured those recomputations
+/// at ~95% of the pacing machinery's added hash bytes. A memo of a pure
+/// function changes no decision; it only remembers. Keys are the exact
+/// input bytes (full compare on lookup, so collisions are impossible), the
+/// map is cleared wholesale when it reaches capacity (regularly-reused
+/// strings immediately repopulate), and thread-locality keeps it lock-free
+/// on native and trivially correct on wasm.
+mod hash_memo {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use dialog_common::Blake3Hash;
+
+    /// Entries retained before the memo resets. At ~150 bytes per typical
+    /// key this bounds the memo near 20 MB per thread, far under the node
+    /// cache's own footprint.
+    const CAPACITY: usize = 1 << 17;
+
+    thread_local! {
+        static MEMO: RefCell<HashMap<Vec<u8>, Blake3Hash>> =
+            RefCell::new(HashMap::with_capacity(1024));
+    }
+
+    /// The blake3 hash of `bytes`, memoized.
+    pub fn hash(bytes: &[u8]) -> Blake3Hash {
+        MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            if let Some(hash) = memo.get(bytes) {
+                super::audit::memo_hit(bytes.len());
+                return hash.clone();
+            }
+            if memo.len() >= CAPACITY {
+                memo.clear();
+            }
+            let hash = Blake3Hash::hash(bytes);
+            memo.insert(bytes.to_vec(), hash.clone());
+            hash
+        })
+    }
+}
 
 /// The rank of a node in the prolly tree.
 pub type Rank = u64;
@@ -118,11 +217,14 @@ pub trait Distribution {
     }
 
     /// The authoritative leaf-level cut decision for the ACCEPTED seam after
-    /// `key`, given the weight `banked` since the previous accepted seam.
+    /// `key`, given `weight`: the total charge this seam meters — the
+    /// entry's own weight ([`Entry::weight`](crate::Entry::weight), key
+    /// bytes plus the value's payload weight) plus the bank accumulated
+    /// since the previous accepted seam.
     ///
-    /// `banked` is the bank rule's accumulator: walking seams left to right,
-    /// every vetoed seam adds its left key's entry weight to the bank (no
-    /// cut is possible there), and every accepted seam spends the bank into
+    /// The bank is the rule's accumulator: walking seams left to right,
+    /// every vetoed seam adds its left entry's weight to the bank (no cut
+    /// is possible there), and every accepted seam spends the bank into
     /// this decision and resets it — RESET AT EVERY ACCEPTED SEAM, cut or
     /// no cut. That makes the bank "weight since the last accepted seam", a
     /// structural property of the key sequence, never "weight since the
@@ -134,17 +236,17 @@ pub trait Distribution {
     /// across near-duplicate clusters instead of flipping one key-sized
     /// coin per cluster.
     ///
-    /// Away from vetoed stretches every accepted seam sees `banked == 0`
-    /// and this is exactly the per-key weight coin. With `max_segment == 0`
-    /// the bank is ignored entirely and the decision is the entry-counted
-    /// geometric coin (`rank`), byte for byte the shipped baseline. Index
-    /// levels never consult this: seam ranks stay separator-geometric
-    /// ([`seam_rank`](Self::seam_rank)).
-    fn leaf_cut(key: &[u8], banked: usize, manifest: &Manifest) -> bool {
+    /// The draw still reads only the KEY's hash; the weight — including the
+    /// value's payload — sets the threshold. A value change therefore moves
+    /// this decision, and the edit path treats payload-weight changes as
+    /// shape-relevant wherever pacing is armed. With `max_segment == 0` the
+    /// weight is ignored entirely and the decision is the entry-counted
+    /// geometric coin (`rank`), byte for byte the shipped baseline.
+    fn leaf_cut(key: &[u8], weight: usize, manifest: &Manifest) -> bool {
         if manifest.max_segment == 0 {
             Self::rank(key, manifest) > BOTTOM_RANK
         } else {
-            weight_paced_cut(key, banked + cap::entry_weight(key), manifest)
+            weight_paced_cut(key, weight, manifest)
         }
     }
 
@@ -197,31 +299,88 @@ impl Distribution for Geometric {
         // the target so segments average `max_segment` weighted bytes
         // whatever the key-size mix (see [`weight_paced_rank`]).
         if manifest.max_segment == 0 {
-            geometric::compute_geometric_rank(&Blake3Hash::hash(key), manifest.branch_factor())
+            audit::key(key.len());
+            geometric::compute_geometric_rank(&hash_memo::hash(key), manifest.branch_factor())
         } else {
             weight_paced_rank(key, manifest)
         }
     }
 
-    /// The seam coin stays geometric under BOTH leaf coins: index levels
-    /// subsample leaf boundaries uniformly at `1/m` per level (each accepted
-    /// seam's separator punches level `n` when its own geometric rank
-    /// exceeds `BOTTOM_RANK + n`), which is the right ladder even when the
-    /// leaf coin paces by bytes — index entries are separator-sized, so
-    /// entry-counted fanout is exactly what bounds an index node's size.
-    /// Routing the seam coin through `Self::rank` would cap it at the
-    /// weight coin's two outcomes and flatten the tree above level 1.
+    /// The seam coin follows the leaf coin's mode. With `max_segment == 0`
+    /// it is the entry-counted geometric ladder over the separator's hash,
+    /// byte for byte the shipped baseline. Under byte pacing it becomes the
+    /// weight-paced ladder ([`weight_paced_seam_rank`]): one independent
+    /// coin per index level over the separator's hash, each firing with the
+    /// probability that is the LINK's weight share of `max_segment` — so
+    /// index nodes average `max_segment` bytes of links at every level,
+    /// exactly as leaves average `max_segment` bytes of entries, and no
+    /// level escapes pacing. Nesting is unchanged in shape: the rank is the
+    /// count of consecutive levels the ladder fires, and `regroup_children`
+    /// keeps its monotone thresholds, so a level-n cut is a level-(n-1) cut
+    /// by construction.
     ///
     /// The length guard is the stored-form face of the veto, exactly as in
     /// the trait default: accepted seams are within the bound by
-    /// construction, so it fires only for forced separators (the cap
+    /// construction, so it fires only for forced leaf separators (the cap
     /// backstop), keeping them leaf-level only.
     fn seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
         if separator.len() as u32 > manifest.max_separator {
             return 0;
         }
-        geometric::compute_geometric_rank(&Blake3Hash::hash(separator), manifest.branch_factor())
+        audit::seam(separator.len());
+        if manifest.max_segment == 0 {
+            geometric::compute_geometric_rank(&hash_memo::hash(separator), manifest.branch_factor())
+        } else {
+            weight_paced_seam_rank(separator, manifest)
+        }
     }
+}
+
+/// The byte-pacing seam ladder: the paced analog of the geometric seam
+/// rank. Level `k`'s coin fires with probability
+/// `link_weight(separator) / max_segment`, drawn from lane `k` of the
+/// separator's blake3 hash (eight bytes at offset `8 * ((k - 1) % 4)`), and
+/// the rank is `BOTTOM_RANK + 1` plus the number of consecutive levels that
+/// fire — the same monotone scale `regroup_children` thresholds against, so
+/// a seam that cuts level `n` cuts every level below it and nesting holds
+/// by construction.
+///
+/// Per-level lanes keep the levels independent: the SAME separator string
+/// serves a node's left seam at every level of its spine, so a single draw
+/// would promote all-or-nothing. Lane 1 reuses the leaf coin's byte range,
+/// which is safe because the leaf coin hashes KEYS and this ladder hashes
+/// separators — under the cut-after convention a separator is never the
+/// coin key of its own seam. Levels beyond four wrap lanes; a paced tree
+/// reaches level five only past roughly `(max_segment / 100)^4` leaves,
+/// where the wrapped correlation (all-or-nothing promotion between level
+/// `k` and `k + 4`) is structurally harmless because nesting is enforced by
+/// the recursion, not by the draws.
+///
+/// Expected fanout per level is `max_segment / mean link weight` (several
+/// hundred at the default target), so index nodes are byte-bounded at the
+/// same scale as leaves — which is what keeps the per-commit root rewrite
+/// flat as the tree grows, instead of one flat root accumulating every leaf
+/// link.
+pub fn weight_paced_seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
+    let hash = hash_memo::hash(separator);
+    let bytes = *hash.as_bytes();
+    let weight = cap::link_weight(separator) as u128;
+    let target = manifest.max_segment as u128;
+    let mut rank = BOTTOM_RANK + 1;
+    for level in 0..8usize {
+        let lane = (level % 4) * 8;
+        let draw = u64::from_le_bytes(
+            bytes[lane..lane + 8]
+                .try_into()
+                .expect("lane slice is eight bytes"),
+        );
+        if (draw as u128) * target < (weight << 64) {
+            rank += 1;
+        } else {
+            break;
+        }
+    }
+    rank
 }
 
 /// The byte-pacing leaf coin in its bank-zero form: cut after `key` with
@@ -269,7 +428,8 @@ pub fn weight_paced_rank(key: &[u8], manifest: &Manifest) -> Rank {
 /// stretch several times the target cuts with certainty, which is exactly
 /// the pacing intent).
 pub fn weight_paced_cut(key: &[u8], weight: usize, manifest: &Manifest) -> bool {
-    let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *Blake3Hash::hash(key).as_bytes();
+    audit::key(key.len());
+    let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *hash_memo::hash(key).as_bytes();
     let draw = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
     let weight = weight as u128;
     let target = manifest.max_segment as u128;
@@ -389,6 +549,95 @@ pub mod cap {
         key.len() + ENTRY_WEIGHT_OVERHEAD
     }
 
+    /// Weight charged per link beyond its separator bytes at index levels:
+    /// the 32-byte child hash plus per-link encoding overhead (offsets,
+    /// front-coding bookkeeping). The index analog of
+    /// [`ENTRY_WEIGHT_OVERHEAD`].
+    pub const LINK_WEIGHT_OVERHEAD: usize = 16;
+
+    /// The weight a link contributes toward an index node's `max_segment`
+    /// budget: its separator bytes plus the child hash plus fixed overhead.
+    pub fn link_weight(separator: &[u8]) -> usize {
+        separator.len() + 32 + LINK_WEIGHT_OVERHEAD
+    }
+
+    /// Deterministic forced cut positions bounding an INDEX-level frame —
+    /// the run of children between one level's coin cuts — at `ceiling`
+    /// weighted bytes of links. Returns positions `p` (a cut falls BEFORE
+    /// child `p` of the frame), sorted ascending; empty when the frame
+    /// fits.
+    ///
+    /// The index analog of [`frame_cut_positions`], with two
+    /// simplifications the derived-quietness property allows: every
+    /// interior seam is a candidate (no stored mark is needed, so no
+    /// candidacy test), and the anchor identity is the seam's separator
+    /// (the seam's one canonical name at index levels). Elections order by
+    /// the separator hash's tail ([`anchor_order`]) under the same selector
+    /// knob; the hybrid's semantic metric is the separator's own length
+    /// (index separators are already shortest-form).
+    pub fn index_frame_cut_positions(
+        separators: &[&[u8]],
+        weights: &[usize],
+        ceiling: usize,
+        manifest: &Manifest,
+    ) -> Vec<usize> {
+        if separators.len() < 2 || weights.iter().sum::<usize>() <= ceiling {
+            return Vec::new();
+        }
+        let mut candidates: Vec<Anchor> = Vec::new();
+        // The index `at` is the anchor's identity (stored in `Anchor.at` and
+        // returned as a cut position), not just a way to reach the element.
+        #[allow(clippy::needless_range_loop)]
+        for at in 1..separators.len() {
+            // A long separator marks a forced LEAF seam: cutting an index
+            // frame there would scatter that leaf run's pieces across two
+            // parents and break the leaf widening's contiguity contract, so
+            // such seams are never index anchors.
+            if separators[at].len() as u32 > manifest.max_separator {
+                continue;
+            }
+            super::audit::election(separators[at].len());
+            candidates.push(Anchor {
+                at,
+                separator_len: separators[at].len(),
+                hash: super::hash_memo::hash(separators[at]),
+            });
+        }
+        // Prefix weights over the frame's links.
+        let mut prefix = Vec::with_capacity(weights.len() + 1);
+        prefix.push(0usize);
+        for weight in weights {
+            let last = *prefix.last().expect("prefix starts non-empty");
+            prefix.push(last + weight);
+        }
+        let selector = AnchorSelector::from_manifest(manifest);
+        let mut cuts = Vec::new();
+        let mut pieces = vec![(0usize, separators.len())];
+        while let Some((lo, hi)) = pieces.pop() {
+            if prefix[hi] - prefix[lo] <= ceiling {
+                continue;
+            }
+            let best = candidates
+                .iter()
+                .filter(|anchor| anchor.at > lo && anchor.at < hi)
+                .min_by(|a, b| match selector {
+                    AnchorSelector::Rendezvous => anchor_order(&a.hash).cmp(anchor_order(&b.hash)),
+                    AnchorSelector::Hybrid => a
+                        .separator_len
+                        .cmp(&b.separator_len)
+                        .then_with(|| anchor_order(&a.hash).cmp(anchor_order(&b.hash))),
+                });
+            let Some(anchor) = best else {
+                continue;
+            };
+            cuts.push(anchor.at);
+            pieces.push((lo, anchor.at));
+            pieces.push((anchor.at, hi));
+        }
+        cuts.sort_unstable();
+        cuts
+    }
+
     /// Longest common prefix length of two byte strings.
     fn lcp(a: &[u8], b: &[u8]) -> usize {
         a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
@@ -493,28 +742,25 @@ pub mod cap {
     /// creates and dissolves cuts, no hysteresis — because any
     /// trajectory-dependent rule would break the byte-identity independent
     /// imports and canonicalize promise.
-    fn choose_cuts<K>(
-        keys: &[&K],
+    fn choose_cuts(
+        weights: &[usize],
         candidates: &[Anchor],
         threshold: usize,
         selector: AnchorSelector,
-    ) -> Vec<usize>
-    where
-        K: Key,
-    {
+    ) -> Vec<usize> {
         if candidates.is_empty() {
             return Vec::new();
         }
-        // Prefix weights: weight of keys[lo..hi] is prefix[hi] - prefix[lo].
-        let mut prefix = Vec::with_capacity(keys.len() + 1);
+        // Prefix weights: weight of items[lo..hi] is prefix[hi] - prefix[lo].
+        let mut prefix = Vec::with_capacity(weights.len() + 1);
         prefix.push(0usize);
-        for key in keys {
+        for weight in weights {
             let last = *prefix.last().expect("prefix starts non-empty");
-            prefix.push(last + entry_weight(key.as_ref()));
+            prefix.push(last + weight);
         }
 
         let mut cuts = Vec::new();
-        let mut pieces = vec![(0usize, keys.len())];
+        let mut pieces = vec![(0usize, weights.len())];
         while let Some((lo, hi)) = pieces.pop() {
             if prefix[hi] - prefix[lo] <= threshold {
                 continue;
@@ -567,7 +813,11 @@ pub mod cap {
     /// run of short keys offers no separator the quietness rule accepts);
     /// in the fully vetoed stretches the backstop is scoped to, every seam
     /// qualifies, so this is a formality there.
-    pub fn forced_cut_positions<K>(keys: &[&K], manifest: &Manifest) -> Vec<usize>
+    pub fn forced_cut_positions<K>(
+        keys: &[&K],
+        weights: &[usize],
+        manifest: &Manifest,
+    ) -> Vec<usize>
     where
         K: Key,
     {
@@ -575,12 +825,7 @@ pub mod cap {
         if cap == 0 || keys.len() < 2 {
             return Vec::new();
         }
-        if keys
-            .iter()
-            .map(|key| entry_weight(key.as_ref()))
-            .sum::<usize>()
-            <= cap
-        {
+        if weights.iter().sum::<usize>() <= cap {
             return Vec::new();
         }
 
@@ -589,15 +834,16 @@ pub mod cap {
             let left = keys[at - 1].as_ref();
             let right = keys[at].as_ref();
             if is_forced_candidate(left, right, manifest) {
+                super::audit::election(right.len());
                 candidates.push(Anchor {
                     at,
                     separator_len: shortest_separator_len(left, right),
-                    hash: Blake3Hash::hash(right),
+                    hash: super::hash_memo::hash(right),
                 });
             }
         }
         choose_cuts(
-            keys,
+            weights,
             &candidates,
             cap,
             AnchorSelector::from_manifest(manifest),
@@ -663,7 +909,12 @@ pub mod cap {
     /// function's own output, or the stretch backstop's) never feed back
     /// into frame definition, so there is no cascade: the frame partition
     /// is a pure function of the key set, and so are the anchors.
-    pub fn frame_cut_positions<K>(keys: &[&K], vetoed: &[bool], manifest: &Manifest) -> Vec<usize>
+    pub fn frame_cut_positions<K>(
+        keys: &[&K],
+        weights: &[usize],
+        vetoed: &[bool],
+        manifest: &Manifest,
+    ) -> Vec<usize>
     where
         K: Key,
     {
@@ -671,12 +922,7 @@ pub mod cap {
         if ceiling == 0 || keys.len() < 2 {
             return Vec::new();
         }
-        if keys
-            .iter()
-            .map(|key| entry_weight(key.as_ref()))
-            .sum::<usize>()
-            <= ceiling
-        {
+        if weights.iter().sum::<usize>() <= ceiling {
             return Vec::new();
         }
 
@@ -688,15 +934,16 @@ pub mod cap {
             let left = keys[at - 1].as_ref();
             let right = keys[at].as_ref();
             if is_frame_candidate(left, right, manifest) {
+                super::audit::election(right.len());
                 candidates.push(Anchor {
                     at,
                     separator_len: shortest_separator_len(left, right),
-                    hash: Blake3Hash::hash(right),
+                    hash: super::hash_memo::hash(right),
                 });
             }
         }
         choose_cuts(
-            keys,
+            weights,
             &candidates,
             ceiling,
             AnchorSelector::from_manifest(manifest),

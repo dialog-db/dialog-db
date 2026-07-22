@@ -15,10 +15,10 @@
 
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest, Node,
-    Novelty, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Rank, TransientIndex,
-    TransientNode, TransientSegment, TreeWalker, Value, distribution::cap, link_bounds,
-    regroup_children, regroup_entries,
+    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Link, Manifest, Node,
+    Novelty, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, PieceOrigin, Rank,
+    TransientIndex, TransientNode, TransientSegment, TreeWalker, Value, link_bounds,
+    regroup_children, regroup_entries, regroup_entries_reusing,
 };
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
@@ -907,19 +907,45 @@ where
             false
         } else {
             match (&self, follow(&mut root, &path)?) {
-                (Edit::Upsert(entry), TransientNode::Segment(segment)) => segment
-                    .entries
-                    .binary_search_by(|e| e.key.cmp(&entry.key))
-                    .is_err(),
+                (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
+                    match segment.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                        // A value update with a changed payload weight moves
+                        // pacing decisions just like a membership change.
+                        Ok(at) => {
+                            segment.entries[at].value.payload_weight()
+                                != entry.value.payload_weight()
+                        }
+                        Err(_) => true,
+                    }
+                }
                 (Edit::Delete(key), TransientNode::Segment(segment)) => {
                     segment.entries.binary_search_by(|e| e.key.cmp(key)).is_ok()
                 }
                 _ => true,
             }
         };
-        let widened = if changes_membership {
+        let piece_origins = if changes_membership {
             merge_forced_run::<Key, Value, Backend>(&mut root, &mut path, accessor, &manifest)
                 .await?
+        } else {
+            None
+        };
+        let widened = piece_origins.is_some();
+
+        // The same widening, per INDEX level: a force-split index frame's
+        // pieces are separate stored nodes, and this level's regroup window
+        // is one node's children — so an edit descending through a piece
+        // must merge the frame's pieces first, or elections would re-derive
+        // anchors over a fragment and orders would diverge. A seam between
+        // siblings is a forced one exactly when its separator's seam rank
+        // fails the level threshold that grouped them (derived, no stored
+        // mark); ordinary paths see two rank probes per level and merge
+        // nothing.
+        let index_widened = if changes_membership && manifest.frame_ceiling() > 0 {
+            merge_forced_index_runs::<Key, Value, D, Backend>(
+                &mut root, &mut path, accessor, &manifest,
+            )
+            .await?
         } else {
             false
         };
@@ -935,13 +961,9 @@ where
         } else {
             match follow(&mut root, &path)? {
                 TransientNode::Segment(segment) => {
-                    let weight: usize = segment
-                        .entries
-                        .iter()
-                        .map(|entry| cap::entry_weight(entry.key.as_ref()))
-                        .sum();
+                    let weight: usize = segment.entries.iter().map(Entry::weight).sum();
                     let weight = match &self {
-                        Edit::Upsert(entry) => weight + cap::entry_weight(entry.key.as_ref()),
+                        Edit::Upsert(entry) => weight + entry.weight(),
                         Edit::Delete(_) => weight,
                     };
                     weight > manifest.frame_ceiling()
@@ -1015,9 +1037,9 @@ where
                                 &segment.entries,
                                 &manifest,
                             );
-                            !D::leaf_cut(entry.key.as_ref(), bank, &manifest)
+                            !D::leaf_cut(entry.key.as_ref(), bank + entry.weight(), &manifest)
                         } else {
-                            !D::leaf_cut(entry.key.as_ref(), 0, &manifest)
+                            !D::leaf_cut(entry.key.as_ref(), entry.weight(), &manifest)
                         }
                     }
                     _ => false,
@@ -1062,7 +1084,7 @@ where
                                 let last = entries
                                     .last()
                                     .expect("segment with a found key is non-empty");
-                                !D::leaf_cut(last.key.as_ref(), bank, &manifest)
+                                !D::leaf_cut(last.key.as_ref(), bank + last.weight(), &manifest)
                             } else {
                                 false
                             }
@@ -1123,6 +1145,18 @@ where
             .map(|(old, new)| seam_cut_punches::<D>(old, new, &manifest))
             .unwrap_or(false);
 
+        // Under a frame ceiling, index-level decisions read separator BYTES
+        // (link weights, anchor elections), not just seam ranks: a min-move
+        // that rewrites the separator can re-weigh its enclosing index
+        // frames and move their anchors even when the seam RANK is
+        // unchanged, which only a re-shape re-derives. Rank-only fast paths
+        // stay valid when the ceiling is off.
+        let moves_seam_under_ceiling = manifest.frame_ceiling() > 0
+            && min_move
+                .as_ref()
+                .map(|(old, new)| old != new)
+                .unwrap_or(false);
+
         // Anything not provably canonical falls through to the re-shaping
         // paths. A widened window always re-shapes: the merge left the
         // stretch as one oversized segment that only the regroup re-splits.
@@ -1131,7 +1165,9 @@ where
             && !dissolves_terminal_cut
             && !dissolves_left_cut
             && !raises_left_cut
+            && !moves_seam_under_ceiling
             && !widened
+            && !index_widened
             && !over_ceiling
         {
             let TransientNode::Segment(segment) = follow(&mut root, &path)? else {
@@ -1171,9 +1207,10 @@ where
         // A rightward fusion hands the neighbor's leftmost leaf new
         // predecessors, and if that leaf is the head of a force-split
         // vetoed stretch its anchors are a function of the whole stretch:
-        // widen the neighbor across its forced seams too, so the fusion
-        // regroups against complete membership. For any non-cluster
-        // neighbor the scan reads one separator length and joins nothing.
+        // widen the neighbor across its forced seams too — leaf runs and
+        // index frames alike — so the fusion regroups against complete
+        // membership. For any non-cluster neighbor the scan reads one
+        // separator length and joins nothing.
         let neighbor_path = match neighbor_path {
             Some(mut neighbor_path) if manifest.max_segment > 0 => {
                 merge_forced_run::<Key, Value, Backend>(
@@ -1183,6 +1220,15 @@ where
                     &manifest,
                 )
                 .await?;
+                if manifest.frame_ceiling() > 0 {
+                    merge_forced_index_runs::<Key, Value, D, Backend>(
+                        &mut root,
+                        &mut neighbor_path,
+                        accessor,
+                        &manifest,
+                    )
+                    .await?;
+                }
                 Some(neighbor_path)
             }
             other => other,
@@ -1243,7 +1289,33 @@ where
         // LCA needs the explicit left fusion.
         let left_fuse = if dissolves_left_cut {
             match lift_left_neighbor_spine(&mut root, &path, accessor).await? {
-                Some(left_path) => {
+                Some(mut left_path) => {
+                    // The fusion folds the left spine's nodes level by
+                    // level, so any of them that is a force-split piece
+                    // must first rejoin its run — leaf runs and index
+                    // frames alike — or the fold regroups against
+                    // fragments. Forced seams between the left spine and
+                    // the main path were already dissolved by the main
+                    // path's own widening, so these scans stop before
+                    // touching path-tracked nodes.
+                    if manifest.max_segment > 0 {
+                        merge_forced_run::<Key, Value, Backend>(
+                            &mut root,
+                            &mut left_path,
+                            accessor,
+                            &manifest,
+                        )
+                        .await?;
+                        if manifest.frame_ceiling() > 0 {
+                            merge_forced_index_runs::<Key, Value, D, Backend>(
+                                &mut root,
+                                &mut left_path,
+                                accessor,
+                                &manifest,
+                            )
+                            .await?;
+                        }
+                    }
                     let depth = path
                         .iter()
                         .zip(left_path.iter())
@@ -1299,9 +1371,15 @@ where
                     &manifest,
                 )?
             }
-            _ => {
-                reshape_path::<Key, Value, D>(&mut root, &path, self, height, left_fuse, &manifest)?
-            }
+            _ => reshape_path::<Key, Value, D>(
+                &mut root,
+                &path,
+                self,
+                height,
+                left_fuse,
+                &manifest,
+                piece_origins.as_deref().unwrap_or(&[]),
+            )?,
         };
         seal_root::<Key, Value, D, _>(replacement, height, &manifest, accessor).await
     }
@@ -1388,7 +1466,7 @@ where
     D: Distribution,
 {
     let mut at = entries.len() - 1;
-    let mut weight = cap::entry_weight(entries[at].key.as_ref());
+    let mut weight = entries[at].weight();
     while at > 0
         && D::vetoes(
             entries[at - 1].key.as_ref(),
@@ -1397,7 +1475,7 @@ where
         )
     {
         at -= 1;
-        weight += cap::entry_weight(entries[at].key.as_ref());
+        weight += entries[at].weight();
     }
     weight
 }
@@ -1428,12 +1506,120 @@ where
             entries[*cur].key.as_ref(),
             manifest,
         ) {
-            bank += cap::entry_weight(entries[*prev].key.as_ref());
+            bank += entries[*prev].weight();
         } else {
             break;
         }
     }
     bank
+}
+
+/// Widens an edit's window across force-split INDEX frames at every level
+/// along `path`: wherever the descended node is a piece of a frame the
+/// ceiling split (its seam to a sibling carries a separator whose seam rank
+/// fails the threshold that grouped them — the derived mark of an index
+/// forced cut), the run of pieces is merged into one index node so the
+/// re-shape's regroup re-derives that level's cuts and elections over the
+/// complete frame. Top-down, adjusting the deeper path indices as children
+/// concatenate. Long (leaf-forced) separators never join at index levels:
+/// elections exclude them, so a piece boundary can never sit on one.
+async fn merge_forced_index_runs<Key, Value, D, Backend>(
+    root: &mut TransientNode<Key, Value>,
+    path: &mut [usize],
+    accessor: &Accessor<Backend>,
+    manifest: &Manifest,
+) -> Result<bool, DialogSearchTreeError>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    D: Distribution,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+{
+    let mut merged_any = false;
+    let depths = path.len();
+    for d in 1..depths {
+        // The node at depth `d` has height `depths - d`, and a boundary
+        // between height-k siblings is minted when height-(k-1) children
+        // are grouped at threshold `BOTTOM_RANK + k`: a sibling seam whose
+        // rank fails that threshold is a forced (ceiling) cut, not a coin
+        // cut.
+        let threshold = BOTTOM_RANK + (depths - d) as Rank;
+        let at = path[d - 1];
+        let parent_path = path[..d - 1].to_vec();
+
+        let (lo, hi) = {
+            let children = &follow(root, &parent_path)?.as_index()?.children;
+            let forced = |i: usize| -> Result<bool, DialogSearchTreeError> {
+                let separator = children[i].separator()?;
+                Ok(separator.len() as u32 <= manifest.max_separator
+                    && D::seam_rank(separator, manifest) <= threshold)
+            };
+            let mut lo = at;
+            while lo > 0 && forced(lo)? {
+                lo -= 1;
+            }
+            let mut hi = at;
+            while hi + 1 < children.len() && forced(hi + 1)? {
+                hi += 1;
+            }
+            (lo, hi)
+        };
+        if lo == hi {
+            continue;
+        }
+
+        for member in lo..=hi {
+            let parent = follow(root, &parent_path)?.as_index_mut()?;
+            lift(&mut parent.children[member], accessor).await?;
+        }
+
+        let parent = follow(root, &parent_path)?.as_index_mut()?;
+        let pending = parent.novelty.take_all::<Key>()?;
+        let members: Vec<Node<Key, Value>> = parent
+            .children
+            .splice(lo..=hi, std::iter::empty())
+            .collect();
+        let mut merged_children: Vec<Node<Key, Value>> = Vec::new();
+        let mut carried: Vec<NoveltyEntry<Value>> = Vec::new();
+        let mut lead = 0usize;
+        for (offset, member) in members.into_iter().enumerate() {
+            let TransientNode::Index(mut piece) = member.into_transient()? else {
+                return Err(DialogSearchTreeError::Node(
+                    "Forced index run member was not an index node".into(),
+                ));
+            };
+            carried.extend(piece.novelty.take_all::<Key>()?);
+            if offset < at - lo {
+                lead += piece.children.len();
+            }
+            merged_children.append(&mut piece.children);
+        }
+        let mut merged = TransientIndex {
+            children: merged_children,
+            novelty: Novelty::new(),
+        };
+        if !carried.is_empty() {
+            let bounds = link_bounds(&merged.children)?;
+            merged.novelty.route::<Key>(&bounds, carried)?;
+        }
+        let parent = follow(root, &parent_path)?.as_index_mut()?;
+        parent
+            .children
+            .insert(lo, Node::Transient(TransientNode::Index(merged)));
+        if !pending.is_empty() {
+            let bounds = link_bounds(&parent.children)?;
+            parent.novelty.route::<Key>(&bounds, pending)?;
+        }
+        path[d - 1] = lo;
+        path[d] += lead;
+        merged_any = true;
+    }
+    Ok(merged_any)
 }
 
 /// Widens an edit's window to the whole force-split run around the leaf at
@@ -1468,7 +1654,7 @@ async fn merge_forced_run<Key, Value, Backend>(
     path: &mut [usize],
     accessor: &Accessor<Backend>,
     manifest: &Manifest,
-) -> Result<bool, DialogSearchTreeError>
+) -> Result<Option<Vec<PieceOrigin>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + ConditionalSync + 'static,
@@ -1480,7 +1666,7 @@ where
         + ConditionalSync,
 {
     if path.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let at = path[path.len() - 1];
     let parent_path = path[..path.len() - 1].to_vec();
@@ -1499,11 +1685,23 @@ where
         (lo, hi)
     };
     if lo == hi {
-        return Ok(false);
+        return Ok(None);
     }
 
-    // Untouched pieces may still be persistent links; lift each so the
-    // merge below can consume their entries.
+    // Untouched pieces may still be persistent links: remember each one's
+    // link before lifting, so the regroup can pass unchanged pieces
+    // through without re-encoding them ([`PieceOrigin`]). The edited leaf
+    // itself is already transient and gets no origin.
+    let mut piece_links: Vec<Option<Link>> = Vec::with_capacity(hi - lo + 1);
+    {
+        let children = &follow(root, &parent_path)?.as_index()?.children;
+        for child in children.iter().take(hi + 1).skip(lo) {
+            piece_links.push(match child {
+                Node::Persistent(link) => Some(link.clone()),
+                Node::Transient(_) => None,
+            });
+        }
+    }
     for member in lo..=hi {
         let parent = follow(root, &parent_path)?.as_index_mut()?;
         lift(&mut parent.children[member], accessor).await?;
@@ -1521,6 +1719,7 @@ where
         .collect();
     let mut entries = Vec::new();
     let mut separator = Vec::new();
+    let mut origins: Vec<PieceOrigin> = Vec::new();
     for (offset, member) in members.into_iter().enumerate() {
         let TransientNode::Segment(segment) = member.into_transient()? else {
             return Err(DialogSearchTreeError::Node(
@@ -1529,6 +1728,13 @@ where
         };
         if offset == 0 {
             separator = segment.separator;
+        }
+        if let Some(link) = piece_links[offset].take() {
+            origins.push(PieceOrigin {
+                start: entries.len(),
+                end: entries.len() + segment.entries.len(),
+                link,
+            });
         }
         entries.extend(segment.entries);
     }
@@ -1545,7 +1751,7 @@ where
     }
     let leaf = path.len() - 1;
     path[leaf] = lo;
-    Ok(true)
+    Ok(Some(origins))
 }
 
 /// Walks `root` down the recorded child indices in `path`, lifting the node at
@@ -1597,6 +1803,8 @@ where
 {
     if let Node::Persistent(link) = node {
         let persistent = accessor.get_node(&link.node).await?;
+        // Measurement-only (uncommitted, env-gated) lift breadcrumb.
+        dialog_storage::dup_audit::note_lift(link.node.as_bytes(), "edit_lift");
         // The link's separator is the seam at the opened subtree's left edge;
         // it moves onto the transient node (a segment stores it, an index
         // derives it from its first child's link).
@@ -1753,6 +1961,9 @@ where
 /// `left_fuse` names the depth (relative to `node`) of the ancestor at which
 /// the rebuilt run's head must fuse into its left sibling, when the edit
 /// dissolved the cut at the edited subtree's left edge; see [`fuse_left_run`].
+// The origin slice rides to the leaf arm only; grouping the arguments would
+// hide which levels consume which.
+#[allow(clippy::too_many_arguments)]
 fn reshape_path<Key, Value, D>(
     node: &mut TransientNode<Key, Value>,
     path: &[usize],
@@ -1760,6 +1971,7 @@ fn reshape_path<Key, Value, D>(
     height: Rank,
     left_fuse: Option<usize>,
     manifest: &Manifest,
+    origins: &[PieceOrigin],
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -1777,16 +1989,62 @@ where
                     "Reshape reached an index where a leaf was expected".into(),
                 ));
             };
+            // The edit's landing position decides which origin pieces stay
+            // reusable: the piece it lands inside is dirty, later pieces
+            // shift by the entry-count delta, earlier ones stand.
+            let (landed, shift) = match &edit {
+                Edit::Upsert(entry) => {
+                    match segment.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                        Ok(at) => (at, 0isize),
+                        Err(at) => (at, 1),
+                    }
+                }
+                Edit::Delete(key) => match segment.entries.binary_search_by(|e| e.key.cmp(key)) {
+                    Ok(at) => (at, -1isize),
+                    Err(at) => (at, 0),
+                },
+            };
             apply_to_segment(&mut segment.entries, edit);
+            let adjusted: Vec<PieceOrigin> = origins
+                .iter()
+                .filter_map(|origin| {
+                    // An insert AT a piece's start slips in front of it; only
+                    // a strictly interior landing (or a hit, for updates and
+                    // deletes) dirties the piece.
+                    let dirty = if shift == 1 {
+                        origin.start < landed && landed < origin.end
+                    } else {
+                        origin.start <= landed && landed < origin.end
+                    };
+                    if dirty {
+                        return None;
+                    }
+                    let moved = landed <= origin.start;
+                    Some(PieceOrigin {
+                        start: if moved {
+                            (origin.start as isize + shift) as usize
+                        } else {
+                            origin.start
+                        },
+                        end: if moved {
+                            (origin.end as isize + shift) as usize
+                        } else {
+                            origin.end
+                        },
+                        link: origin.link.clone(),
+                    })
+                })
+                .collect();
             // The segment's separator becomes the floor for the regrouped
             // run: its first group re-derives against it, and an emptied
             // segment propagates its removal through the boundary-delete
             // paths, which have the neighbor's keys in memory.
             let floor = std::mem::take(&mut segment.separator);
-            Ok(regroup_entries::<Key, Value, D>(
+            Ok(regroup_entries_reusing::<Key, Value, D>(
                 std::mem::take(&mut segment.entries),
                 floor,
                 manifest,
+                &adjusted,
             ))
         }
         Some((&at, rest)) => {
@@ -1798,6 +2056,7 @@ where
                 height - 1,
                 left_fuse.and_then(|depth| depth.checked_sub(1)),
                 manifest,
+                origins,
             )?;
             // Regrouping replaces `node` with a run of new nodes, so the ops
             // buffered here have nowhere to live unless they are carried over:
@@ -2796,16 +3055,26 @@ fn fast_path_keeps_canonical<Key, Value, D>(
 ) -> bool
 where
     Key: self::Key,
+    Value: self::Value,
     D: Distribution,
 {
     match edit {
         Edit::Upsert(entry) => {
             let found = entries.binary_search_by(|e| e.key.cmp(&entry.key));
-            if found.is_ok() {
-                return true; // value update only, shape unchanged
+            if let Ok(at) = found {
+                // A value update moves no key, but under byte pacing the
+                // value's payload weight funds boundary decisions: a
+                // changed weight can move cuts, so only a weight-neutral
+                // update is provably shape-free.
+                return manifest.max_segment == 0
+                    || entries[at].value.payload_weight() == entry.value.payload_weight();
             }
-            if D::rank(entry.key.as_ref(), manifest) > BOTTOM_RANK {
-                return false; // inserting a high coin may split the segment
+            // The full bank-zero coin: the seam the newcomer creates is
+            // preceded by an accepted seam whenever this fast path can
+            // apply (vetoed adjacency is rejected below), so its bank is
+            // zero and the entry's own weight is the exact charge.
+            if D::leaf_cut(entry.key.as_ref(), entry.weight(), manifest) {
+                return false; // inserting a cutting coin splits the segment
             }
             let at = found.unwrap_err();
             // Appending after a boundary last entry would leave it interior.
@@ -5232,12 +5501,14 @@ mod tests {
                     VarKey(bytes)
                 };
                 let keys: Vec<VarKey> = (0..5u32).map(make).collect();
-                let bank: usize = keys[..4]
+                // The terminal coin's charge mirrors production: the vetoed
+                // stretch's bank plus the terminal entry's own full weight.
+                let charge: usize = keys
                     .iter()
                     .map(|key| distribution::cap::entry_weight(&key.0))
                     .sum();
                 let last = &keys[4];
-                if !<Geometric as Distribution>::leaf_cut(&last.0, bank, &manifest) {
+                if !<Geometric as Distribution>::leaf_cut(&last.0, charge, &manifest) {
                     break keys;
                 }
                 tag += 1;
@@ -5268,6 +5539,119 @@ mod tests {
                 !cluster_interior.contains(anchor.as_slice()),
                 "a frame anchor landed inside the vetoed cluster: {:?}",
                 String::from_utf8_lossy(anchor)
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Every persisted index node's stats, by BFS depth: its summed link
+    /// weight and child count. The shape probe the index-pacing tests read.
+    async fn index_nodes(
+        root: &Blake3Hash,
+        storage: &ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    ) -> Result<Vec<(usize, usize, usize)>> {
+        let mut stats = Vec::new();
+        if root == NULL_BLAKE3_HASH {
+            return Ok(stats);
+        }
+        let accessor = Accessor::new(Cache::new(), storage.clone());
+        let mut frontier = vec![root.clone()];
+        let mut depth = 0usize;
+        while !frontier.is_empty() {
+            let mut next = Vec::new();
+            for hash in &frontier {
+                let node: PersistentNode<VarKey, Vec<u8>> = accessor.get_node(hash).await?;
+                if let Ok(index) = node.as_index() {
+                    let mut weight = 0usize;
+                    for at in 0..index.len() {
+                        weight += distribution::cap::link_weight(&index.separator(at)?);
+                        next.push(index.hash_at(at)?.clone());
+                    }
+                    stats.push((depth, weight, index.len()));
+                }
+            }
+            frontier = next;
+            depth += 1;
+        }
+        Ok(stats)
+    }
+
+    /// Index-level pacing convergence: with the paced seam ladder, index
+    /// frames, and the index ceiling all armed, trees deep enough to grow
+    /// multiple index levels must still build byte-identical roots across
+    /// insertion orders, and incremental deletes must land on the fresh
+    /// build of the survivors — every per-level decision is a pure function
+    /// of the separator set.
+    #[dialog_common::test]
+    async fn it_converges_across_orders_at_index_levels() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(2, 1);
+
+        let sorted: Vec<VarKey> = (0..600u32)
+            .map(|n| VarKey(format!("k{n:04}").into_bytes()))
+            .collect();
+        let reversed: Vec<VarKey> = sorted.iter().rev().cloned().collect();
+        let hashed = {
+            let mut keys = sorted.clone();
+            keys.sort_by_key(|key| *Blake3Hash::hash(&key.0).as_bytes());
+            keys
+        };
+
+        let a = build_incremental(&sorted, manifest, &mut storage).await?;
+        let b = build_incremental(&reversed, manifest, &mut storage).await?;
+        let c = build_incremental(&hashed, manifest, &mut storage).await?;
+        assert_eq!(a.root(), b.root(), "index-paced orders must converge");
+        assert_eq!(a.root(), c.root(), "index-paced orders must converge");
+
+        let doomed: Vec<VarKey> = sorted.iter().step_by(7).cloned().collect();
+        let survivors: Vec<VarKey> = sorted
+            .iter()
+            .filter(|key| !doomed.contains(key))
+            .cloned()
+            .collect();
+        let pruned = delete_incremental(a, &doomed, &mut storage).await?;
+        let rebuilt = build_incremental(&survivors, manifest, &mut storage).await?;
+        assert_eq!(
+            pruned.root(),
+            rebuilt.root(),
+            "incremental deletes must converge on the rebuild at index levels"
+        );
+
+        Ok(())
+    }
+
+    /// Byte-pacing reaches every level: the same fixture grows at least two
+    /// index levels (the paced ladder subdivides once a level's links
+    /// outweigh the target, where the geometric ladder at the default
+    /// fanout would sit on one flat root), and no index node at any level
+    /// outweighs the ceiling plus one link — the flatness fix's structural
+    /// guarantee.
+    #[dialog_common::test]
+    async fn it_bounds_index_nodes_at_every_level() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(2, 1);
+
+        let sorted: Vec<VarKey> = (0..600u32)
+            .map(|n| VarKey(format!("k{n:04}").into_bytes()))
+            .collect();
+        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+
+        let stats = index_nodes(tree.root(), &storage).await?;
+        let depths: HashSet<usize> = stats.iter().map(|(depth, _, _)| *depth).collect();
+        assert!(
+            depths.len() >= 2,
+            "the paced ladder must grow a second index level, got depths {depths:?}"
+        );
+
+        let ceiling = manifest.frame_ceiling();
+        for (depth, weight, children) in stats {
+            // One link of slack mirrors the leaf bound: the recursion stops
+            // splitting once every piece is at or under the ceiling.
+            assert!(
+                weight <= ceiling + distribution::cap::link_weight(&[0u8; 32]) + 512,
+                "index node at depth {depth} carries {weight} weighted link bytes \
+                 across {children} children, over the {ceiling} ceiling"
             );
         }
 
