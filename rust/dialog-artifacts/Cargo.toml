@@ -19,6 +19,7 @@ integration-tests = ["dialog-common/integration-tests"]
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
+tracing = { workspace = true }
 dialog-common = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-effects = { workspace = true }

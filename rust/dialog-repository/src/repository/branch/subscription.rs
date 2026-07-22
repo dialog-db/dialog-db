@@ -112,6 +112,13 @@ pub struct Demand {
 /// sorted list of disjoint intervals, so it cannot grow beyond the
 /// number of genuinely distinct demanded regions no matter how many
 /// (nested, repeated) selectors record into it.
+/// The default key format, used where a demand range must be built without a
+/// storage handle to read the tree's real manifest. See [`Demand::record`] for
+/// why that is sound today and what it costs later.
+fn default_manifest() -> dialog_search_tree::Manifest {
+    dialog_search_tree::Manifest::default()
+}
+
 fn record_range(ranges: &Mutex<Vec<RangeInclusive<Key>>>, range: RangeInclusive<Key>) {
     let mut ranges = ranges.lock().expect("demand lock");
     let (mut start, mut end) = range.into_inner();
@@ -139,13 +146,25 @@ impl Demand {
     /// Record a fact scan's demanded range. The range covers
     /// everything the selector's scan would touch — including where
     /// no entries exist, so misses are demanded too.
+    ///
+    /// The range is built under the DEFAULT format [`Manifest`] rather than the
+    /// branch tree's own. `Demand` is built by the synchronous
+    /// [`Branch::subscribe`](crate::Branch::subscribe), which has no storage
+    /// handle and so cannot read a manifest. This is sound only while every
+    /// tree carries the default manifest, which is the case today (nothing
+    /// constructs another). Making manifests configurable requires the
+    /// subscription to carry its branch's manifest instead: a demand range
+    /// built under the wrong `inline_n` or `spill_prefix` brackets the wrong
+    /// keys for a value-constrained selector, so a write inside the real
+    /// scanned range would fail to invalidate the reader.
     pub(crate) fn record(&self, selector: &ArtifactSelector<Constrained>) {
-        record_range(&self.facts, selector_range(selector));
+        record_range(&self.facts, selector_range(selector, &default_manifest()));
     }
 
     /// Record a rule-discovery scan's demanded range.
+    /// Carries the same default-manifest caveat as [`Demand::record`].
     pub(crate) fn record_rules(&self, selector: &ArtifactSelector<Constrained>) {
-        record_range(&self.rules, selector_range(selector));
+        record_range(&self.rules, selector_range(selector, &default_manifest()));
     }
 
     /// Whether the key falls inside any recorded range.

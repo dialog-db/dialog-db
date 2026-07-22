@@ -18,8 +18,8 @@ use rkyv::{
 
 use crate::{
     Accessor, Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Differential,
-    Distribution, Entry, Geometric, Key, SearchOptions, SearchResult, TreeDifference, TreeWalker,
-    Value, into_owned,
+    Distribution, Entry, Geometric, Key, Manifest, PersistentNode, SearchOptions, SearchResult,
+    TreeDifference, TreeWalker, Value, into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -105,6 +105,14 @@ where
         &self.root
     }
 
+    /// Returns a handle to this tree's node cache, shared by reference count.
+    ///
+    /// Used to open a [`HitchhikerTree`](crate::HitchhikerTree) over this tree
+    /// that shares its warm cache.
+    pub fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
+        self.node_cache.clone()
+    }
+
     /// Creates a new empty [`PersistentTree`] with no entries.
     ///
     /// The empty tree has a null root hash and an empty node cache.
@@ -168,6 +176,16 @@ where
         // (each layer is an Arc-backed node plus a child index), so the read
         // pays nothing for the siblings an update would later decode.
         if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
+            // A write lands in an ancestor's buffer and only reaches the leaf
+            // when that buffer overflows, so a buffered op on the path is more
+            // recent than whatever the leaf holds: an assert shadows the stored
+            // value, a retract hides it.
+            if let Some(op) = crate::pending_for_key(&result.path, key.as_ref())? {
+                return Ok(match op {
+                    crate::NoveltyOp::Assert(value) => Some(value),
+                    crate::NoveltyOp::Retract => None,
+                });
+            }
             let segment = result.leaf.as_segment()?;
             if let Some(at) = segment.find::<Key>(key.as_ref())? {
                 into_owned(segment.value_at(at)?).map(Some)
@@ -299,7 +317,33 @@ where
         }
     }
 
-    /// Opens a batch of in-place edits over this tree.
+    /// Reads this tree's format [`Manifest`] out of its root node.
+    ///
+    /// The manifest is data, not code: it is inlined into every node, so the
+    /// tree's real format constants are recovered by loading the root and
+    /// reading its header. An empty tree (a null root) has no node to read
+    /// from and therefore no format of its own yet, so it reports
+    /// [`Manifest::default`]: the format a first write would stamp into it.
+    /// This mirrors the fallback the stitch path uses when no source piece has
+    /// a manifest to inherit.
+    pub async fn manifest<Backend>(
+        &self,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Manifest, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        if &self.root == NULL_BLAKE3_HASH {
+            return Ok(Manifest::default());
+        }
+        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let node: PersistentNode<Key, Value> = accessor.get_node(&self.root).await?;
+        node.manifest()
+    }
+
+    /// Opens a batch of in-place edits over this tree, adopting the tree's own
+    /// format [`Manifest`].
     ///
     /// The returned [`TransientTree`] holds the tree's spine in transient form;
     /// apply [`insert`](TransientTree::insert) / [`delete`](TransientTree::delete)
@@ -307,9 +351,41 @@ where
     /// back into a [`PersistentTree`]. A single batch and the equivalent sequence
     /// of one-operation batches each persisted in turn converge on the same root.
     ///
+    /// This reads the root node to recover the tree's manifest (see
+    /// [`manifest`](Self::manifest)), so an edit of a tree built under
+    /// non-default format constants preserves that format instead of silently
+    /// rewriting it under the defaults. Prefer this over the synchronous
+    /// [`edit`](Self::edit) wherever an `await` is available.
+    pub async fn edit_with_manifest<Backend>(
+        &self,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<TransientTree<Key, Value, D>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        let manifest = self.manifest(storage).await?;
+        Ok(TransientTree::with_manifest(
+            self.root.clone(),
+            self.node_cache.clone(),
+            manifest,
+        ))
+    }
+
+    /// Opens a batch of in-place edits over this tree under the *default*
+    /// format [`Manifest`].
+    ///
     /// Opening is synchronous and touches no storage: the root is loaded lazily
     /// by the first edit that descends into it. Equivalent to
     /// [`TransientTree::from`].
+    ///
+    /// Because recovering a tree's real manifest means loading its root node,
+    /// which is async, this entry cannot do it and assumes the defaults. It is
+    /// therefore only sound for a tree whose manifest IS [`Manifest::default`]
+    /// (which today is every tree, since nothing constructs another). Editing a
+    /// non-default tree through this entry rewrites the touched path under the
+    /// default format. Use [`edit_with_manifest`](Self::edit_with_manifest)
+    /// whenever the caller can await.
     pub fn edit(&self) -> TransientTree<Key, Value, D> {
         TransientTree::new(self.root.clone(), self.node_cache.clone())
     }
@@ -491,6 +567,20 @@ mod tests {
                     out.push(&self.0[at..at + width]);
                     at += width;
                 }
+            }
+
+            fn components_of<'a>(
+                bytes: &'a [u8],
+                layout: u8,
+                out: &mut Vec<&'a [u8]>,
+            ) -> Result<(), DialogSearchTreeError> {
+                let widths: [usize; 3] = if layout == 0 { [1, 2, 1] } else { [1, 1, 2] };
+                let mut at = 0;
+                for width in widths {
+                    out.push(&bytes[at..at + width]);
+                    at += width;
+                }
+                Ok(())
             }
         }
     }

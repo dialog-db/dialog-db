@@ -20,7 +20,9 @@ mod store;
 pub use store::*;
 
 mod update;
-pub use update::{Change, ChangeStream, Changes, SortKey, Statement, Update, sort_key};
+pub use update::{
+    Change, ChangeStream, Changes, SortKey, Statement, Update, default_sort_key, sort_key,
+};
 
 mod attribute;
 pub use attribute::*;
@@ -730,8 +732,17 @@ mod tests {
 
         let text = std::fs::read_to_string(&csv_path)?;
         let mut artifacts_in = Vec::new();
+        let mut reserved_skipped = 0usize;
         for record in parse_csv(&text).into_iter().skip(1) {
             if record.len() < 4 {
+                continue;
+            }
+            // The `dialog.` namespace is reserved for version-control
+            // records on this branch, so real-world facts under it cannot be
+            // asserted through the public API. Skip them and report the count,
+            // so the footprint is over the facts actually imported.
+            if record[0].starts_with("dialog.") {
+                reserved_skipped += 1;
                 continue;
             }
             let Ok(the) = Attribute::from_str(&record[0]) else {
@@ -876,7 +887,7 @@ mod tests {
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         eprintln!(
-            "REALDATA facts={fact_count} \
+            "REALDATA facts={fact_count} reserved_skipped={reserved_skipped} \
              on_disk={on_disk_bytes}B ({on_disk_files} files, {:.1} B/fact, {:.1} B/entry) \
              write_bytes={write_bytes} writes={writes} \
              commit={commit_elapsed:?}",
@@ -2966,6 +2977,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_errors_when_a_spilled_block_is_missing() -> Result<()> {
         use crate::EntityKey;
+        use crate::key::default_manifest;
         use crate::tree::fetch_spilled;
         let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
         let value = Value::String("m".repeat(n));
@@ -2975,7 +2987,7 @@ mod tests {
             is: value.clone(),
             cause: None,
         };
-        let key = EntityKey::from(&artifact).into_key();
+        let key = EntityKey::from_artifact(&artifact, &default_manifest()).into_key();
         // A store that never had the block written.
         let empty = MemoryStorageBackend::<dialog_storage::Blake3Hash, Vec<u8>>::default();
         let result = fetch_spilled(&empty, &key).await;

@@ -69,38 +69,32 @@ pub enum ColumnData {
     },
 }
 
-/// Splits `entries` (each a full component-slice list, in schema order) into
-/// one [`ColumnData`] per component, per the schema's column classes.
-///
-/// `rows[i]` is entry `i`'s components; every row has `schema.len()` slices.
-/// Encoding is a pure function of `rows`.
-pub fn encode_columns(
+/// Encodes already column-major component slices: `values[c]` holds every
+/// entry's component `c`, in entry order. The allocation-frugal entry the
+/// production encoders use: a caller that splits keys straight into these
+/// per-column vecs never materializes a per-row slice list. Encoding is a
+/// pure function of `values`.
+pub fn encode_column_values(
     schema: &Schema,
-    rows: &[Vec<&[u8]>],
+    values: &[Vec<&[u8]>],
 ) -> Result<Vec<ColumnData>, DialogSearchTreeError> {
     let components = schema.components();
-    let mut columns = Vec::with_capacity(components.len());
-
-    for (index, component) in components.iter().enumerate() {
-        let column_values: Vec<&[u8]> = rows
-            .iter()
-            .map(|row| {
-                row.get(index)
-                    .copied()
-                    .ok_or_else(|| malformed("Key produced fewer components than its schema"))
-            })
-            .collect::<Result<_, _>>()?;
-
-        columns.push(match component.column {
-            Column::Arena => {
-                let (prefix, stream) = encode_keys(&column_values);
-                ColumnData::Arena { prefix, stream }
-            }
-            Column::Dictionary => encode_dictionary(&column_values),
-        });
+    if values.len() != components.len() {
+        return Err(malformed("Column count does not match the key schema"));
     }
-
-    Ok(columns)
+    components
+        .iter()
+        .zip(values)
+        .map(|(component, column_values)| {
+            Ok(match component.column {
+                Column::Arena => {
+                    let (prefix, stream) = encode_keys(column_values);
+                    ColumnData::Arena { prefix, stream }
+                }
+                Column::Dictionary => encode_dictionary(column_values),
+            })
+        })
+        .collect()
 }
 
 /// Builds a dictionary column: the sorted distinct values and per-entry
@@ -183,6 +177,24 @@ pub enum ColumnSlices<'a> {
         /// The per-entry index into the table, varint-packed.
         indices: &'a [u8],
     },
+}
+
+/// Borrows the byte slices of an owned column for streaming decode, so the
+/// same [`StreamingLeaf`] machinery reads an owned [`ColumnData`] (a sealed
+/// transient buffer) and an [`ArchivedColumnData`] alike.
+pub fn column_slices(column: &ColumnData) -> ColumnSlices<'_> {
+    match column {
+        ColumnData::Arena { prefix, stream } => ColumnSlices::Arena { prefix, stream },
+        ColumnData::Dictionary {
+            table,
+            table_ends,
+            indices,
+        } => ColumnSlices::Dictionary {
+            table,
+            table_ends,
+            indices,
+        },
+    }
 }
 
 /// Borrows the byte slices of an archived column for streaming decode.
@@ -346,27 +358,31 @@ mod tests {
 
     use anyhow::Result;
 
-    use super::{ColumnData, ColumnSlices, StreamingLeaf, encode_columns, encode_dictionary};
-    use crate::{Component, Schema};
+    use super::{
+        ColumnData, ColumnSlices, StreamingLeaf, column_slices, encode_column_values,
+        encode_dictionary,
+    };
+    use crate::{Component, DialogSearchTreeError, Schema};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    /// Borrows an owned test column as the slices the streaming decoder
-    /// consumes.
-    fn column_slices(column: &ColumnData) -> ColumnSlices<'_> {
-        match column {
-            ColumnData::Arena { prefix, stream } => ColumnSlices::Arena { prefix, stream },
-            ColumnData::Dictionary {
-                table,
-                table_ends,
-                indices,
-            } => ColumnSlices::Dictionary {
-                table,
-                table_ends,
-                indices,
-            },
+    /// Encodes row-major component slices (entry `i`'s components in
+    /// `rows[i]`), transposing into the column-major shape
+    /// [`encode_column_values`] consumes. Row-major is the natural shape for
+    /// small test fixtures; production encoders build columns directly.
+    fn encode_columns(
+        schema: &Schema,
+        rows: &[Vec<&[u8]>],
+    ) -> Result<Vec<ColumnData>, DialogSearchTreeError> {
+        let mut values: Vec<Vec<&[u8]>> = schema.components().iter().map(|_| Vec::new()).collect();
+        for row in rows {
+            assert_eq!(row.len(), values.len(), "test rows must match the schema");
+            for (column, slice) in values.iter_mut().zip(row) {
+                column.push(slice);
+            }
         }
+        encode_column_values(schema, &values)
     }
 
     /// Materializes every key of an encoded leaf through the streaming

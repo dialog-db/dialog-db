@@ -87,6 +87,19 @@ impl TreeKey for EavKey {
             at += width;
         }
     }
+
+    fn components_of<'a>(
+        bytes: &'a [u8],
+        _layout: u8,
+        out: &mut Vec<&'a [u8]>,
+    ) -> Result<(), DialogSearchTreeError> {
+        let mut at = 0;
+        for width in [TAG, ENTITY, ATTRIBUTE, VALUE_TYPE, VALUE_REF] {
+            out.push(&bytes[at..at + width]);
+            at += width;
+        }
+        Ok(())
+    }
 }
 
 type Backend = JournaledStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;

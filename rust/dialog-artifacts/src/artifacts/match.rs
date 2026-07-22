@@ -18,10 +18,10 @@ use crate::{
     ArtifactSelector, Value, ValueDataType,
     artifacts::selector::Constrained,
     decode_bytes_cow, decode_value,
-    key::inline_threshold,
     key::value_payload,
     key::varkey::{KeyRef, ValuePayload, ValueRef},
 };
+use dialog_search_tree::Manifest;
 
 /// The verdict of matching one scanned key against a selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,9 +72,17 @@ fn truncated_order(stored: &[u8], probe: &[u8]) -> TruncatedOrder {
 ///
 /// Entity and attribute are stored losslessly, so every comparison (exact and
 /// prefix) is exact against the key bytes.
+///
+/// `manifest` is the format of the tree the scanned keys were WRITTEN under.
+/// A value constraint is decided by re-encoding the selector's value through
+/// the same inline-vs-spill decision (`inline_n`) and the same spilled-prefix
+/// width (`spill_prefix`) the key was built with, so reading under a different
+/// manifest would make an equality match on a boundary-sized value silently
+/// fail.
 pub fn match_selector_and_key_ref(
     selector: &ArtifactSelector<Constrained>,
     key: &KeyRef<'_>,
+    manifest: &Manifest,
 ) -> SelectorMatch {
     let mut verdict = SelectorMatch::Matches;
 
@@ -97,9 +105,9 @@ pub fn match_selector_and_key_ref(
         // Compare by the same encoding the key was built with. Equality never
         // needs the block: the reader holds the candidate value, so it can
         // recompute the spilled prefix and whole-value hash and compare pure
-        // bytes. The inline/spilled shape must agree too — the same logical
+        // bytes. The inline/spilled shape must agree too: the same logical
         // value always keys the same way, so a shape mismatch is a non-match.
-        let expected = value_payload(value, inline_threshold());
+        let expected = value_payload(value, manifest);
         let equal = match (&expected, &key.value) {
             (ValuePayload::Inline(a), ValueRef::Inline(b)) => a.as_slice() == *b,
             (

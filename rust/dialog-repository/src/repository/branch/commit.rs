@@ -21,6 +21,7 @@ pub struct Commit<'a, Changes> {
     branch: &'a Branch,
     changes: Changes,
     allow_empty: bool,
+    canonicalize: bool,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -29,7 +30,46 @@ impl<'a, Changes> Commit<'a, Changes> {
             branch,
             changes,
             allow_empty: false,
+            canonicalize: false,
         }
+    }
+
+    /// Flush the write buffers to the leaves before publishing, so the
+    /// revision names the *canonical* tree for its fact set.
+    ///
+    /// A commit buffers by default: writes land in bounded per-node buffers
+    /// instead of reshaping the tree, which is what keeps an interactive commit
+    /// cheap. The published root still identifies its content exactly (a node's
+    /// hash covers its buffers as well as its links), so a buffered head reads,
+    /// diffs, pushes, and verifies like any other.
+    ///
+    /// What buffering gives up is *canonicality*: two replicas holding the same
+    /// facts hash differently if they buffered and flushed at different points.
+    /// Nothing breaks, but they no longer recognize each other as equal by root
+    /// comparison, so a fast-forward check finds work where there is none.
+    ///
+    /// Canonicalize when that matters:
+    ///
+    /// - importing a dataset, so the result is history-independent and two
+    ///   importers of the same data converge on the same root;
+    /// - at a checkpoint two replicas are expected to agree on bit for bit;
+    /// - before a long quiet period, so the stored form is the compact one.
+    ///
+    /// ```no_run
+    /// # use dialog_repository::Branch;
+    /// # use dialog_artifacts::Instruction;
+    /// # use futures_util::stream;
+    /// # async fn example<Env>(branch: &Branch, env: &Env, changes: Vec<Instruction>)
+    /// # -> anyhow::Result<()>
+    /// # where Env: dialog_capability::Provider<dialog_effects::memory::Resolve> {
+    /// # let _ = (branch, env, changes);
+    /// // branch.commit(stream::iter(changes)).canonicalize().perform(env).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn canonicalize(mut self) -> Self {
+        self.canonicalize = true;
+        self
     }
 
     /// Mint a revision even when the change stream leaves the indexes
@@ -63,6 +103,7 @@ where
     /// stream to the three (entity / attribute / value) indexes, then
     /// publish a new [`Revision`] to the branch's revision cell with the
     /// updated logical clock.
+    #[tracing::instrument(skip_all, name = "commit")]
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<Get>
@@ -138,16 +179,26 @@ where
         // superseded — all live in the shared instruction semantics so the
         // key layout stays uniform. Data and history land in the same tree:
         // one root covers both.
+        // Writes go through the node buffers: a commit appends its ops instead
+        // of rebuilding and re-hashing the leaves they belong in, and the
+        // reshape happens later, amortized, when a buffer overflows. The
+        // published root still identifies its content exactly (a node's hash
+        // covers its buffers), so the head, pull, and push paths are unchanged.
         //
         // Nothing is persisted yet: the batch stays open so the revision
         // record minted below (which needs the batch's outcome and signs over
         // its content, so it cannot ride the instruction stream) is appended
-        // to the SAME open edit, and one seal below covers data and record
-        // together. A no-op batch is simply dropped, leaving the delta
+        // to the SAME buffered tree, and one seal below covers data and
+        // record together. A no-op batch is simply dropped, leaving the delta
         // untouched and the tree root unchanged.
+        //
+        // `canonicalize()` on the builder flushes to the leaves at seal time,
+        // for callers that want the history-independent form (see
+        // `Commit::canonicalize`).
         let mut delta = Delta::zero();
         let batch =
-            dialog_artifacts::EditBatch::apply(&tree, &mut store, Some(version), changes).await?;
+            dialog_artifacts::BufferedBatch::apply(&tree, &mut store, Some(version), changes)
+                .await?;
         let changed = batch.changed();
 
         // A batch that left the indexes untouched (e.g. a transaction
@@ -246,15 +297,24 @@ where
         let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
         debug_assert_eq!(record.version(), version);
-        // The entries are appended to the batch's still open edit: they ride
-        // the same transient batch as the data, so the record costs an
-        // in-batch insert instead of a second spine-to-leaf edit and persist.
-        let entries = record.entries()?;
+        // The record's key carries its value through the tree's own
+        // inline-vs-spill threshold, so build its entries under the manifest
+        // the batch captured from the tree rather than assuming the default.
+        // The entries are appended to the batch's still open buffered tree:
+        // they ride the same buffered write as the data, so the record costs
+        // a buffer append instead of a second canonical spine-to-leaf edit.
+        let entries = record.entries(batch.manifest())?;
         let batch = batch.record(&store, entries).await?;
+        // Seed the verified-record memo with what we just minted. The next
+        // commit's skip-table walk starts at this very record, so without this
+        // it is read back out of the tree and its signature re-verified on the
+        // immediately following commit.
+        branch.records().insert(version, record.clone());
 
         // ONE seal covers the data writes and the record entries, into the
-        // batch delta.
-        tree = batch.seal(&mut delta)?;
+        // batch delta (flushing buffers to the leaves first when the caller
+        // asked to canonicalize).
+        tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
 
         // Persist the tree's pending nodes before referencing the root in
         // a revision; a revision must only point at durable blocks. The
@@ -712,6 +772,38 @@ mod history_tests {
             .await?
             .expect("the empty revision's record is retrievable");
         assert!(record.parents.contains(&first.version()));
+
+        Ok(())
+    }
+
+    /// A commit whose only instructions retract facts that were never
+    /// asserted is a no-op end to end: retract-of-absent changes no index,
+    /// so the branch keeps its revision and mints no new edition.
+    #[dialog_common::test]
+    async fn it_keeps_the_revision_when_a_commit_only_retracts_absent_facts() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let first = branch
+            .commit(stream::iter(vec![Instruction::Assert(title(
+                "post:1", "Hej",
+            ))]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let unchanged = branch
+            .commit(stream::iter(vec![Instruction::Retract(title(
+                "post:9", "Never",
+            ))]))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            unchanged, first,
+            "a commit that only retracts absent facts mints no revision"
+        );
+        assert_eq!(branch.revision(), Some(first.clone()));
 
         Ok(())
     }

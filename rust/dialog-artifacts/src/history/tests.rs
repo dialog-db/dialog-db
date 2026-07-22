@@ -7,6 +7,7 @@ use anyhow::Result;
 use dialog_storage::MemoryStorageBackend;
 use ed25519_dalek::SigningKey;
 
+use crate::key::default_manifest;
 use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
 use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value, encode_bytes};
 
@@ -1423,9 +1424,9 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     let mut delta = Delta::zero();
-    tree.record(&mut store, &mut delta, signed.entries()?)
+    tree.record(&mut store, &mut delta, signed.entries(&default_manifest())?)
         .await?;
-    tree.record(&mut store, &mut delta, forged.entries()?)
+    tree.record(&mut store, &mut delta, forged.entries(&default_manifest())?)
         .await?;
     for (digest, buffer) in delta.flush() {
         store.set(*digest.as_bytes(), buffer.into_vec()).await?;

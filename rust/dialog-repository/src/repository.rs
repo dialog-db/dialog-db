@@ -1946,7 +1946,7 @@ mod tests {
             use dialog_artifacts::selector::Constrained;
             use dialog_artifacts::{
                 ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey,
-                Update as _, Value, sort_key,
+                Update as _, Value, default_sort_key,
             };
             use dialog_capability::Provider;
             use futures_util::StreamExt as _;
@@ -2041,7 +2041,7 @@ mod tests {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>, DialogArtifactsError>>()?;
-                Ok(items.iter().map(sort_key).collect())
+                Ok(items.iter().map(default_sort_key).collect())
             }
 
             let scan_modes: &[(&str, ArtifactSelector<Constrained>)] = &[

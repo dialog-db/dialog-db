@@ -16,8 +16,9 @@
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
     DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Manifest, Node,
-    PersistentNode, PersistentTree, Rank, TransientIndex, TransientNode, TransientSegment,
-    TreeWalker, Value, regroup_children, regroup_entries,
+    Novelty, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Rank, TransientIndex,
+    TransientNode, TransientSegment, TreeWalker, Value, link_bounds, regroup_children,
+    regroup_entries,
 };
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
@@ -52,6 +53,17 @@ enum TransientRoot<Key, Value> {
     Loaded(TransientNode<Key, Value>),
 }
 
+/// The unwrapped root of a [`TransientTree`], exposed to the crate so the
+/// hitchhiker tree can take ownership of a finished batch's live spine without
+/// serializing it.
+pub(crate) enum TransientRootParts<Key, Value> {
+    /// The durable root hash (an unedited or emptied batch). `NULL_BLAKE3_HASH`
+    /// is an empty tree.
+    Unloaded(Blake3Hash),
+    /// The live transient node the batch edited.
+    Loaded(TransientNode<Key, Value>),
+}
+
 /// A batch of in-place edits over a tree's [`Node`] spine.
 ///
 /// The edit holds no storage handle: like [`PersistentTree`], every method that
@@ -74,12 +86,12 @@ where
     /// The tree's format header, stamped into every node this batch persists
     /// and read by the boundary coin during reshaping. Every node in a tree
     /// carries the same manifest.
-    // TODO: when editing an existing NON-default tree, adopt the manifest from
-    // the loaded root node (via `PersistentNode::manifest`) so an edit
-    // preserves the tree's format. That read is async (it loads the root),
-    // which the synchronous `edit()`/`new` entry cannot do; today every tree
-    // uses `Manifest::default()`, so this is correct until non-default trees
-    // exist. See `PersistentTree::edit`.
+    ///
+    /// [`PersistentTree::edit_with_manifest`] recovers the edited tree's own
+    /// manifest from its root node and passes it to
+    /// [`with_manifest`](Self::with_manifest), so an edit preserves the tree's
+    /// format. The synchronous [`new`](Self::new) cannot perform that (async)
+    /// root read and defaults it; see its documentation for when that is sound.
     manifest: Manifest,
     distribution: PhantomData<D>,
 }
@@ -100,17 +112,70 @@ where
     D: Distribution,
 {
     /// Creates an edit batch over the tree rooted at `root`, deferring the root
-    /// load.
+    /// load, under the *default* format [`Manifest`].
     ///
     /// The root is held as its (possibly null) hash and loaded lazily by the
     /// first edit that descends into it, so this is synchronous and touches no
-    /// storage.
+    /// storage. Recovering the edited tree's real manifest would mean loading
+    /// its root, which is async, so this entry cannot and defaults it: it is
+    /// sound only when the tree's manifest IS [`Manifest::default`]. Use
+    /// [`with_manifest`](Self::with_manifest), or the
+    /// [`PersistentTree::edit_with_manifest`] that feeds it, to preserve a
+    /// non-default tree's format.
     pub fn new(root: Blake3Hash, cache: Cache<Blake3Hash, Buffer>) -> Self {
+        Self::with_manifest(root, cache, Manifest::default())
+    }
+
+    /// Creates an edit batch over the tree rooted at `root` under an explicit
+    /// format `manifest`, deferring the root load.
+    ///
+    /// The manifest must be the one the tree's existing nodes carry, or the
+    /// batch will re-shape and re-stamp the touched path under a format the
+    /// untouched siblings do not share. [`PersistentTree::edit_with_manifest`]
+    /// reads it from the root for exactly this reason.
+    pub fn with_manifest(
+        root: Blake3Hash,
+        cache: Cache<Blake3Hash, Buffer>,
+        manifest: Manifest,
+    ) -> Self {
         Self {
             root: TransientRoot::Unloaded(root),
             cache,
-            manifest: Manifest::default(),
+            manifest,
             distribution: PhantomData,
+        }
+    }
+
+    /// Creates an edit batch over an already-loaded transient `node`, sharing
+    /// `cache`. Used by the hitchhiker tree to replay leaf-bound ops directly on
+    /// its live spine, with no serialization round-trip.
+    ///
+    /// The caller hands over a live transient node, not a hash, so there is no
+    /// persisted root to read a format header back from here: `manifest` must
+    /// be the one the spine's nodes carry, which the hitchhiker captures when
+    /// it first loads the tree's root (see
+    /// [`HitchhikerTree::persist`](crate::HitchhikerTree::persist)). A tree
+    /// born empty has no stored header and passes the default.
+    pub(crate) fn from_loaded(
+        node: TransientNode<Key, Value>,
+        cache: Cache<Blake3Hash, Buffer>,
+        manifest: Manifest,
+    ) -> Self {
+        Self {
+            root: TransientRoot::Loaded(node),
+            cache,
+            manifest,
+            distribution: PhantomData,
+        }
+    }
+
+    /// Unwraps the batch into its root: the live transient node when one was
+    /// loaded (the common case after edits), or the durable root hash when the
+    /// batch was never edited or left the tree empty.
+    pub(crate) fn into_root(self) -> TransientRootParts<Key, Value> {
+        match self.root {
+            TransientRoot::Loaded(node) => TransientRootParts::Loaded(node),
+            TransientRoot::Unloaded(hash) => TransientRootParts::Unloaded(hash),
         }
     }
 
@@ -186,6 +251,7 @@ where
                         entries: vec![entry],
                         separator,
                     }))],
+                    novelty: Novelty::new(),
                 })
             }
             Some(root) => Edit::Upsert(entry)
@@ -253,7 +319,20 @@ where
         loop {
             match node {
                 TransientNode::Index(index) => {
+                    // Ops buffered here are newer than anything below: a write
+                    // lands in a node's buffer and only reaches a leaf when that
+                    // buffer overflows. Resolving them on the way down is what
+                    // makes a read of a lifted node agree with a read of the
+                    // same node in its stored form. Ops ride the link that
+                    // routes them, so the descended link's buffer is the only
+                    // one that can cover the key.
                     let at = child_for::<Key, Value>(&index.children, key)?;
+                    if let Some(op) = index.novelty.resolve::<Key>(at, key.as_ref())? {
+                        return Ok(match op {
+                            NoveltyOp::Assert(value) => Some(value),
+                            NoveltyOp::Retract => None,
+                        });
+                    }
                     match &index.children[at] {
                         Node::Persistent(link) => {
                             return self.persistent_get(&link.node, key, storage).await;
@@ -543,7 +622,10 @@ where
                     if !entries.is_empty() {
                         let run = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
                         parts.push((
-                            TransientNode::Index(TransientIndex { children: run }),
+                            TransientNode::Index(TransientIndex {
+                                children: run,
+                                novelty: Novelty::new(),
+                            }),
                             1,
                             None,
                         ));
@@ -558,12 +640,7 @@ where
         // the stitched tree must run under the format its nodes were
         // written with.
         if let [(_, _, Some(root))] = parts.as_slice() {
-            return Ok(TransientTree {
-                root: TransientRoot::Unloaded(root.clone()),
-                cache,
-                manifest,
-                distribution: PhantomData,
-            });
+            return Ok(TransientTree::with_manifest(root.clone(), cache, manifest));
         }
 
         // A canonical tree opens its leftmost seam at the empty separator
@@ -597,35 +674,80 @@ where
                     let mut right = raise(node, height, target);
                     lift_boundary_spine(&mut left, false, &accessor).await?;
                     lift_boundary_spine(&mut right, true, &accessor).await?;
-                    let mut run = concat_levels::<Key, Value, D>(left, right, target, &manifest)?;
+                    let (mut run, seam_novelty) =
+                        concat_levels::<Key, Value, D>(left, right, target, &manifest)?;
                     if run.len() == 1 {
                         // Keep the accumulator's nominal height tight so later
                         // joins pad as little as possible.
-                        (
-                            run.pop().expect("run has one node").into_transient()?,
-                            target,
-                        )
+                        let mut node = run.pop().expect("run has one node").into_transient()?;
+                        // Ops the join lifted off the seam are pending against
+                        // this run; re-attach them to the node that covers it,
+                        // each op routed to its link.
+                        if !seam_novelty.is_empty() {
+                            match &mut node {
+                                TransientNode::Index(index) => {
+                                    let bounds = link_bounds(&index.children)?;
+                                    index.novelty.route::<Key>(&bounds, seam_novelty)?;
+                                }
+                                // A segment cannot hold a buffer, so wrap it in
+                                // an index that can; a single link takes every
+                                // op.
+                                TransientNode::Segment(_) => {
+                                    let mut novelty = Novelty::new();
+                                    novelty.route::<Key>(&[], seam_novelty)?;
+                                    node = TransientNode::Index(TransientIndex {
+                                        children: vec![node.into()],
+                                        novelty,
+                                    });
+                                }
+                            }
+                        }
+                        (node, target)
                     } else {
-                        (
-                            TransientNode::Index(TransientIndex { children: run }),
-                            target + 1,
-                        )
+                        let mut index = TransientIndex {
+                            children: run,
+                            novelty: Novelty::new(),
+                        };
+                        let bounds = link_bounds(&index.children)?;
+                        index.novelty.route::<Key>(&bounds, seam_novelty)?;
+                        (TransientNode::Index(index), target + 1)
                     }
                 }
             });
         }
 
         let root = match merged {
-            None => return Ok(TransientTree::new(NULL_BLAKE3_HASH.clone(), cache)),
+            None => {
+                return Ok(TransientTree::with_manifest(
+                    NULL_BLAKE3_HASH.clone(),
+                    cache,
+                    manifest,
+                ));
+            }
             // A lone segment can only arise from degenerate single-leaf
             // sources; hand it to the leveling loop as a height-0 run so it
             // gains its canonical index root.
             Some((node @ TransientNode::Segment(_), _)) => {
                 seal_root::<Key, Value, D, _>(vec![node.into()], 0, &manifest, &accessor).await?
             }
-            Some((TransientNode::Index(index), height)) => {
-                seal_root::<Key, Value, D, _>(index.children, height - 1, &manifest, &accessor)
-                    .await?
+            Some((TransientNode::Index(mut index), height)) => {
+                // `seal_root` reshapes the children into a canonical root and
+                // strips single-child chains, so the node holding this buffer
+                // may not survive. Carry the ops onto whatever root it returns:
+                // they are pending against this whole subtree, and the root is
+                // the one node guaranteed to cover it.
+                let novelty = index.novelty.take_all::<Key>()?;
+                let sealed =
+                    seal_root::<Key, Value, D, _>(index.children, height - 1, &manifest, &accessor)
+                        .await?;
+                match sealed {
+                    Some(TransientNode::Index(mut root)) if !novelty.is_empty() => {
+                        let bounds = link_bounds(&root.children)?;
+                        root.novelty.route::<Key>(&bounds, novelty)?;
+                        Some(TransientNode::Index(root))
+                    }
+                    other => other,
+                }
             }
         };
 
@@ -751,7 +873,17 @@ where
             let node = follow(&mut root, &path)?;
             match node {
                 TransientNode::Index(index) => {
+                    // This edit is newer than anything buffered for the same key
+                    // on the way down, and it is about to write the key's value
+                    // into the leaf. A stale op left in an ancestor's buffer
+                    // would keep shadowing that leaf on every read (buffered ops
+                    // win over stored entries), so the write would be invisible.
+                    // Drop it: the edit supersedes it, and after this descent the
+                    // leaf is the only place the key lives. Ops ride the link
+                    // that routes them, so only the descended link's buffer can
+                    // hold one.
                     let at = child_for::<Key, Value>(&index.children, key)?;
+                    index.novelty.remove_key::<Key>(at, key.as_ref())?;
                     lift(&mut index.children[at], accessor).await?;
                     path.push(at);
                 }
@@ -878,6 +1010,16 @@ where
                 // when the minimum did not change.
                 if let Some(first) = segment.entries.first() {
                     segment.separator = D::reseparate(first.key.as_ref(), &segment.separator);
+                }
+                // A moved separator moves a link boundary in the deepest
+                // ancestor where this leaf is not on the leftmost edge, and
+                // buffered ops are grouped BY those boundaries: re-home the
+                // ops the move re-ranged, or the grouping goes stale and a
+                // read or flush of the wrong link misses them. The re-shape
+                // paths re-route buffers wholesale, so only this in-place
+                // fast path needs it.
+                if min_move.is_some() {
+                    reroute_moved_seam::<Key, Value>(&mut root, &path)?;
                 }
                 return Ok(Some(root));
             }
@@ -1031,6 +1173,42 @@ where
     let old_rank = D::seam_rank(old_separator, manifest);
     let new_rank = D::seam_rank(new_separator, manifest);
     new_rank > BOTTOM_RANK + 1 && new_rank > old_rank
+}
+
+/// Re-homes buffered ops after a fast-path min-move edit changed the
+/// separator of the leaf at `path`.
+///
+/// A leaf's separator is the separator of every ancestor it is the leftmost
+/// leaf of, so the moved seam surfaces as a link boundary exactly once: in
+/// the deepest ancestor where the remaining path leaves the leftmost edge.
+/// Per-link buffers are grouped by those boundaries, so the ops around the
+/// moved bound must be re-checked against it ([`Novelty`]'s reroute). A path
+/// on the tree's global leftmost edge moved no interior boundary and needs
+/// nothing.
+fn reroute_moved_seam<Key, Value>(
+    root: &mut TransientNode<Key, Value>,
+    path: &[usize],
+) -> Result<(), DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+{
+    // The deepest depth whose position leaves the leftmost edge: below it the
+    // path is all zeros, so the leaf's separator IS the boundary at this
+    // ancestor's descended link.
+    let mut depth = path.len();
+    while depth > 0 && path[depth - 1] == 0 {
+        depth -= 1;
+    }
+    if depth == 0 {
+        return Ok(());
+    }
+    let at = path[depth - 1];
+    let ancestor = follow(root, &path[..depth - 1])?.as_index_mut()?;
+    // The descended child's separator is the leaf's new separator, threaded
+    // up through leftmost-first-child derivation.
+    let bound = ancestor.children[at].separator()?.to_vec();
+    ancestor.novelty.reroute_boundary::<Key>(at, &bound)
 }
 
 /// Walks `root` down the recorded child indices in `path`, lifting the node at
@@ -1284,24 +1462,114 @@ where
                 left_fuse.and_then(|depth| depth.checked_sub(1)),
                 manifest,
             )?;
+            // Regrouping replaces `node` with a run of new nodes, so the ops
+            // buffered here have nowhere to live unless they are carried over:
+            // they are pending against this subtree, and the run covers exactly
+            // that subtree.
+            let carried = node.as_index_mut()?.novelty.take_all::<Key>()?;
             let children = &mut node.as_index_mut()?.children;
-            if left_fuse == Some(0) {
+            let (run, mut lifted) = if left_fuse == Some(0) {
                 // The replacement's left-edge seam rank dropped: its head
                 // must merge into the left sibling. The edited child is
                 // consumed by its replacement either way.
                 children.remove(at);
-                fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)
+                fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)?
             } else {
-                splice_and_regroup::<Key, Value, D>(
-                    children,
-                    at..at + 1,
-                    replacement,
-                    height,
-                    manifest,
+                (
+                    splice_and_regroup::<Key, Value, D>(
+                        children,
+                        at..at + 1,
+                        replacement,
+                        height,
+                        manifest,
+                    )?,
+                    Vec::new(),
                 )
+            };
+            // Ops lifted off fused child-level nodes are deeper (older) than
+            // this node's own buffer, so they precede it; `carry_novelty`'s
+            // stable re-sort then keeps the newest op for a key last.
+            lifted.extend(carried);
+            carry_novelty::<Key, Value>(run, lifted)
+        }
+    }
+}
+
+/// Re-attaches ops to a run of nodes that replaced the node holding them.
+///
+/// A node's `novelty` is pending against the subtree it roots, so when a
+/// reshape dismantles that node the ops must land on nodes still covering their
+/// keys. The run covers exactly the range the dismantled node did, so each op
+/// goes to the node whose range contains it.
+///
+/// Separators are lower bounds, so the owning node is the last one whose
+/// separator is at or below the key; a key below every separator belongs to the
+/// leftmost node, matching how routing clamps. Within the chosen node the op is
+/// then routed to its link, keeping the per-link grouping fresh.
+///
+/// A run of segments cannot hold ops at all, so those are wrapped in an index
+/// that can. Dropping them instead would lose pending writes.
+fn carry_novelty<Key, Value>(
+    mut run: Vec<Node<Key, Value>>,
+    novelty: Vec<NoveltyEntry<Value>>,
+) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    if novelty.is_empty() || run.is_empty() {
+        return Ok(run);
+    }
+
+    // Partition the ops across the run first (preserving their order, which
+    // carries the precedence: older ops arrive before newer ones and the
+    // stable per-link sort keeps the newest op for a key last), then attach
+    // each bucket with one routed merge.
+    let mut buckets: Vec<Vec<NoveltyEntry<Value>>> = run.iter().map(|_| Vec::new()).collect();
+    for entry in novelty {
+        // The node covering this key, by the same lower-bound rule routing
+        // uses: the last node whose separator is at or below the key.
+        let mut at = 0usize;
+        while at + 1 < run.len() {
+            match run[at + 1].separator() {
+                Ok(separator) if separator <= entry.key.as_slice() => at += 1,
+                _ => break,
+            }
+        }
+        buckets[at].push(entry);
+    }
+
+    for (at, bucket) in buckets.into_iter().enumerate() {
+        if bucket.is_empty() {
+            continue;
+        }
+        match &mut run[at] {
+            Node::Transient(TransientNode::Index(index)) => {
+                let bounds = link_bounds(&index.children)?;
+                index.novelty.route::<Key>(&bounds, bucket)?;
+            }
+            // Leaves and persistent links cannot carry a buffer, so wrap the
+            // node in an index that can. The wrapper keeps the same key range,
+            // so routing is unchanged; its single link takes every op.
+            other => {
+                let placeholder = Node::Transient(TransientNode::Segment(TransientSegment {
+                    entries: Vec::new(),
+                    separator: Vec::new(),
+                }));
+                let wrapped = std::mem::replace(other, placeholder);
+                let mut novelty = Novelty::new();
+                novelty.route::<Key>(&[], bucket)?;
+                *other = Node::Transient(TransientNode::Index(TransientIndex {
+                    children: vec![wrapped],
+                    novelty,
+                }));
             }
         }
     }
+    Ok(run)
 }
 
 /// Splices `run` into `children` at `insert_at` after fusing the run's first
@@ -1314,13 +1582,17 @@ where
 /// new rank still punches some levels, the regroup simply recreates those
 /// cuts, so an over-wide window is safe. An empty run degenerates to a plain
 /// re-cut.
+///
+/// Returns the spliced run together with the buffered ops the fusion lifted
+/// off the dismantled nodes (see [`fuse_subtrees`]); the caller must
+/// re-attach them to a node covering the run.
 fn fuse_left_run<Key, Value, D>(
     children: &mut Vec<Node<Key, Value>>,
     insert_at: usize,
     mut run: Vec<Node<Key, Value>>,
     height: Rank,
     manifest: &Manifest,
-) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+) -> Result<JoinedRun<Key, Value>, DialogSearchTreeError>
 where
     Key: self::Key,
     Value: self::Value,
@@ -1335,27 +1607,33 @@ where
         ));
     }
     if run.is_empty() {
-        return splice_and_regroup::<Key, Value, D>(
-            children,
-            insert_at..insert_at,
-            run,
-            height,
-            manifest,
-        );
+        return Ok((
+            splice_and_regroup::<Key, Value, D>(
+                children,
+                insert_at..insert_at,
+                run,
+                height,
+                manifest,
+            )?,
+            Vec::new(),
+        ));
     }
 
     let left_sibling = take_transient(children, insert_at - 1)?;
     let first = run.remove(0).into_transient()?;
-    let mut fused =
+    let (mut fused, lifted) =
         fuse_subtrees::<Key, Value, D>(left_sibling, first, None, height - 1, manifest)?;
     fused.extend(run);
-    splice_and_regroup::<Key, Value, D>(
-        children,
-        (insert_at - 1)..(insert_at - 1),
-        fused,
-        height,
-        manifest,
-    )
+    Ok((
+        splice_and_regroup::<Key, Value, D>(
+            children,
+            (insert_at - 1)..(insert_at - 1),
+            fused,
+            height,
+            manifest,
+        )?,
+        lifted,
+    ))
 }
 
 /// Re-shapes the shared prefix of a boundary delete down to the lowest common
@@ -1400,16 +1678,29 @@ where
     if lca_depth == 0 {
         // We have reached the LCA: fuse the main child subtree (at `at`) with the
         // neighbour child subtree (at `at + 1`).
+        // Regrouping below replaces this node, so its buffer is carried onto
+        // the run that takes its place (see `carry_novelty`), together with
+        // the buffers the fusion lifts off the two dismantled children.
+        let carried = node.as_index_mut()?.novelty.take_all::<Key>()?;
         let children = &mut node.as_index_mut()?.children;
         let main = take_transient(children, at)?;
         // After removing the main child the neighbour shifted left into `at`.
         let neighbor = take_transient(children, at)?;
-        let fused = fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1, manifest)?;
-        return if left_fuse == Some(0) {
-            fuse_left_run::<Key, Value, D>(children, at, fused, height, manifest)
+        let (fused, mut lifted) =
+            fuse_subtrees::<Key, Value, D>(main, neighbor, key, height - 1, manifest)?;
+        let run = if left_fuse == Some(0) {
+            let (run, more) =
+                fuse_left_run::<Key, Value, D>(children, at, fused, height, manifest)?;
+            lifted.extend(more);
+            run
         } else {
-            splice_and_regroup::<Key, Value, D>(children, at..at, fused, height, manifest)
+            splice_and_regroup::<Key, Value, D>(children, at..at, fused, height, manifest)?
         };
+        // The lifted ops came from child level or below, so they are older
+        // than this node's own buffer and precede it; `carry_novelty`'s
+        // stable re-sort keeps the newest op for a key last.
+        lifted.extend(carried);
+        return carry_novelty::<Key, Value>(run, lifted);
     }
 
     // Above the LCA: recurse through the shared prefix, then splice and re-cut.
@@ -1424,13 +1715,27 @@ where
         left_fuse.and_then(|depth| depth.checked_sub(1)),
         manifest,
     )?;
+    let carried = node.as_index_mut()?.novelty.take_all::<Key>()?;
     let children = &mut node.as_index_mut()?.children;
-    if left_fuse == Some(0) {
+    let (run, mut lifted) = if left_fuse == Some(0) {
         children.remove(at);
-        fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)
+        fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)?
     } else {
-        splice_and_regroup::<Key, Value, D>(children, at..at + 1, replacement, height, manifest)
-    }
+        (
+            splice_and_regroup::<Key, Value, D>(
+                children,
+                at..at + 1,
+                replacement,
+                height,
+                manifest,
+            )?,
+            Vec::new(),
+        )
+    };
+    // Lifted ops are deeper (older) than this node's own buffer; see the
+    // ordering note in `reshape_path`.
+    lifted.extend(carried);
+    carry_novelty::<Key, Value>(run, lifted)
 }
 
 /// Fuses the main subtree (whose rightmost leaf lost its boundary) with the
@@ -1447,13 +1752,21 @@ where
 /// run, and the neighbour spine's right siblings into one run re-cut at that
 /// level. Mirrors the level-by-level fold in the shaper's
 /// `let_right_neighbor_adopt_orphans`.
+///
+/// Returns the fused run together with the buffered ops lifted off the index
+/// nodes the fusion dismantled, the same contract as [`concat_levels`]: those
+/// ops are pending writes with no home until the caller re-attaches them to a
+/// node covering the run, and dropping them loses data. The lifted list is
+/// ordered deepest first (a seam level's ops precede the two fused nodes'
+/// own), so the append-then-stable-sort re-attachment in [`carry_novelty`]
+/// keeps the newest op for a key last.
 fn fuse_subtrees<Key, Value, D>(
     main: TransientNode<Key, Value>,
     neighbor: TransientNode<Key, Value>,
     key: Option<&Key>,
     height: Rank,
     manifest: &Manifest,
-) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+) -> Result<JoinedRun<Key, Value>, DialogSearchTreeError>
 where
     Key: self::Key,
     Value: self::Value,
@@ -1469,7 +1782,8 @@ where
             // entries and re-cut into segments. The main segment's separator
             // is the floor for the fused run: the run's left seam is the main
             // segment's left seam (the neighbour's own seam dissolves and is
-            // re-derived fresh if regrouping recreates it).
+            // re-derived fresh if regrouping recreates it). Leaves buffer
+            // nothing, so there is nothing to lift here.
             let floor = std::mem::take(&mut main.separator);
             if let Some(key) = key
                 && main.entries.last().map(|e| &e.key == key).unwrap_or(false)
@@ -1478,7 +1792,10 @@ where
             }
             let mut entries = main.entries;
             entries.extend(neighbor.entries);
-            Ok(regroup_entries::<Key, Value, D>(entries, floor, manifest))
+            Ok((
+                regroup_entries::<Key, Value, D>(entries, floor, manifest),
+                Vec::new(),
+            ))
         }
         (TransientNode::Index(mut main), TransientNode::Index(mut neighbor)) => {
             // The main spine descends through the last child; the neighbour
@@ -1492,7 +1809,7 @@ where
             let neighbor_first = remove_first(&mut neighbor.children)?;
             let neighbor_first = neighbor_first.into_transient()?;
 
-            let fused = fuse_subtrees::<Key, Value, D>(
+            let (fused, seam_novelty) = fuse_subtrees::<Key, Value, D>(
                 main_last,
                 neighbor_first,
                 key,
@@ -1500,10 +1817,24 @@ where
                 manifest,
             )?;
 
+            // Both destructured nodes' buffers are pending against the run
+            // being built, and the regroup discards the nodes that held them.
+            // Lift them out for the caller, deepest first: the seam ops come
+            // from one level further down and are older than this level's own.
+            // The two fused nodes cover disjoint ranges, so their relative
+            // order carries no precedence.
+            let mut novelty = seam_novelty;
+            novelty.extend(main.novelty.take_all::<Key>()?);
+            novelty.extend(neighbor.novelty.take_all::<Key>()?);
+
             let mut combined = main.children;
             combined.extend(fused);
             combined.extend(neighbor.children);
-            regroup_children::<Key, Value, D>(combined, height, manifest)
+
+            Ok((
+                regroup_children::<Key, Value, D>(combined, height, manifest)?,
+                novelty,
+            ))
         }
         _ => Err(DialogSearchTreeError::Node(
             "Fused subtrees had mismatched heights".into(),
@@ -1598,6 +1929,7 @@ where
         Some(Node::Persistent(link)) => {
             return Ok(Some(TransientNode::Index(TransientIndex {
                 children: vec![Node::Persistent(link)],
+                novelty: Novelty::new(),
             })));
         }
         None => return Ok(None),
@@ -1618,10 +1950,23 @@ where
         }
         match &index.children[0] {
             Node::Transient(TransientNode::Index(_)) => {
+                let novelty = index.novelty.take_all::<Key>()?;
                 let child = index.children.pop().expect("single child present");
-                let Node::Transient(child) = child else {
+                let Node::Transient(mut child) = child else {
                     unreachable!("matched transient index above");
                 };
+                // The stripped wrapper's buffer is pending against exactly
+                // the subtree the surviving child roots (they cover the same
+                // range), so it moves onto the child, each op routed to its
+                // link. The wrapper sat one level shallower, so its ops are
+                // the newer: the routed merge appends them after the child's
+                // own for equal keys, keeping the newest op for a key last,
+                // the position last-op-wins resolution reads.
+                if !novelty.is_empty() {
+                    let child_index = child.as_index_mut()?;
+                    let bounds = link_bounds(&child_index.children)?;
+                    child_index.novelty.route::<Key>(&bounds, novelty)?;
+                }
                 root = child;
             }
             _ => break,
@@ -1767,8 +2112,27 @@ where
             })
         }
         TransientNode::Index(index) => {
+            // A node's buffer is part of its content, so a trim has to cut it to
+            // the range the way it cuts a segment's entries. Ops outside the
+            // range belong to the pieces being carved away; ops inside must
+            // survive, or the carved piece silently loses every write still
+            // pending against it. The per-link grouping is positional against
+            // the child list this trim is about to shorten, so take the ops
+            // flat first and route the survivors back over whatever children
+            // remain at the end.
+            let buffered = index.novelty.take_all::<Key>()?;
+            let buffered_before = buffered.len();
+            let buffered: Vec<NoveltyEntry<Value>> = buffered
+                .into_iter()
+                .filter(|entry| {
+                    (!trim_start || entry.key.as_slice() >= range.start().as_ref())
+                        && (!trim_end || entry.key.as_slice() <= range.end().as_ref())
+                })
+                .collect();
+            let buffered_trimmed = buffered.len() != buffered_before;
+
             let children = &mut index.children;
-            let mut changed = false;
+            let mut changed = buffered_trimmed;
 
             // Index children carry separators, not full keys: under the
             // lower-bound convention `children[i].separator()` is the smallest
@@ -1845,6 +2209,14 @@ where
             if children.is_empty() {
                 return Ok(Trim::Empty);
             }
+
+            // Route the surviving ops over the trimmed child list. Every
+            // surviving key is within the range, and the surviving children
+            // cover the whole range (below-all keys clamp into the new
+            // leftmost child, the new last child runs open-ended), so no op
+            // is stranded.
+            let bounds = link_bounds(children)?;
+            index.novelty.route::<Key>(&bounds, buffered)?;
 
             Ok(if changed {
                 Trim::Trimmed
@@ -1957,6 +2329,7 @@ fn raise<Key, Value>(
     (from..to).fold(node, |node, _| {
         TransientNode::Index(TransientIndex {
             children: vec![node.into()],
+            novelty: Novelty::new(),
         })
     })
 }
@@ -1972,12 +2345,22 @@ fn raise<Key, Value>(
 /// Children off the seam pass through untouched, persistent links included,
 /// because a canonical cut depends only on each child's own upper-bound rank:
 /// cuts away from the seam cannot move.
+///
+/// Returns the joined run together with the buffered ops lifted off the nodes
+/// the join dismantled. Regrouping discards the index nodes that held those
+/// buffers, so the caller must re-attach them to a node covering the run; they
+/// are pending writes, and dropping them loses data.
+/// A joined run of nodes together with the buffered ops lifted off the nodes
+/// the join dismantled. The ops are pending writes with no home until the
+/// caller re-attaches them to a node covering the run.
+type JoinedRun<Key, Value> = (Vec<Node<Key, Value>>, Vec<NoveltyEntry<Value>>);
+
 fn concat_levels<Key, Value, D>(
     left: TransientNode<Key, Value>,
     right: TransientNode<Key, Value>,
     height: Rank,
     manifest: &Manifest,
-) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+) -> Result<JoinedRun<Key, Value>, DialogSearchTreeError>
 where
     Key: self::Key,
     Value: self::Value,
@@ -1988,12 +2371,12 @@ where
 {
     match (left, right) {
         (TransientNode::Segment(mut left), TransientNode::Segment(right)) => {
+            // Leaves buffer nothing.
             let floor = left.separator.clone();
             left.entries.extend(right.entries);
-            Ok(regroup_entries::<Key, Value, D>(
-                left.entries,
-                floor,
-                manifest,
+            Ok((
+                regroup_entries::<Key, Value, D>(left.entries, floor, manifest),
+                Vec::new(),
             ))
         }
         (TransientNode::Index(mut left), TransientNode::Index(mut right)) => {
@@ -2006,13 +2389,31 @@ where
                 .into_transient()?;
             let right_first = remove_first(&mut right.children)?.into_transient()?;
 
-            let seam =
+            let (seam, seam_novelty) =
                 concat_levels::<Key, Value, D>(left_last, right_first, height - 1, manifest)?;
+
+            // Both joined nodes' buffers are pending against the run being
+            // built, and regrouping discards the nodes that held them. Hand
+            // them back so the caller re-attaches them to a node that covers
+            // the run; dropping them here loses every write still buffered at
+            // a seam. Deepest first, as in `fuse_subtrees`: the seam ops come
+            // from one level further down and are older than the two joined
+            // nodes' own, so the stable sort here and at every re-attachment
+            // keeps the newest op for a key last. The two joined nodes cover
+            // disjoint ranges, so their relative order carries no precedence.
+            let mut novelty = seam_novelty;
+            novelty.extend(left.novelty.take_all::<Key>()?);
+            novelty.extend(right.novelty.take_all::<Key>()?);
+            novelty.sort_by(|a, b| a.key.cmp(&b.key));
 
             let mut combined = left.children;
             combined.extend(seam);
             combined.extend(right.children);
-            regroup_children::<Key, Value, D>(combined, height, manifest)
+
+            Ok((
+                regroup_children::<Key, Value, D>(combined, height, manifest)?,
+                novelty,
+            ))
         }
         _ => Err(DialogSearchTreeError::Node(
             "Stitched subtrees had mismatched heights".into(),
@@ -2138,7 +2539,7 @@ enum StreamStep<Key, Value> {
 /// routing, so a subtree entirely below the range start or at/above the range
 /// end contributes nothing and costs neither a clone (transient) nor a root
 /// fetch and descent (persistent). A sibling whose separator cannot be read
-/// is treated as unbounded — pruning degrades, correctness does not.
+/// is treated as unbounded: pruning degrades, correctness does not.
 fn collect_stream_plan<Key, Value>(
     node: &TransientNode<Key, Value>,
     bounds: &(Bound<Key>, Bound<Key>),
@@ -2199,12 +2600,12 @@ mod tests {
 
     use crate::{Distribution, Geometric, Manifest};
     use anyhow::Result;
-    use dialog_common::Blake3Hash;
+    use dialog_common::{Blake3Hash, NULL_BLAKE3_HASH};
     use dialog_storage::MemoryStorageBackend;
 
     use crate::{
-        Buffer, ContentAddressedStorage, Delta, Entry, PersistentTree, Piece, Rank, TransientTree,
-        distribution,
+        Buffer, Cache, ContentAddressedStorage, Delta, Entry, PersistentTree, Piece, Rank,
+        TransientTree, distribution,
     };
 
     type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
@@ -3613,6 +4014,105 @@ mod tests {
         Ok(())
     }
 
+    /// A tree built under a NON-default manifest keeps that manifest across an
+    /// edit opened with [`PersistentTree::edit_with_manifest`], and the format
+    /// constants a reader recovers are the tree's own, not the defaults. The
+    /// synchronous [`PersistentTree::edit`] is shown to lose them, which is
+    /// exactly the boundary its documentation draws.
+    #[dialog_common::test]
+    async fn it_preserves_a_non_default_manifest_across_an_edit() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        // Non-default in every field: a smaller branching parameter, a
+        // separator bound low enough that the keys below straddle it, and a
+        // spill threshold between the default and the sizes used here.
+        let manifest = Manifest {
+            fanout_n: 4,
+            max_separator: 16,
+            inline_n: 64,
+            ..Manifest::default()
+        };
+        assert_ne!(manifest, Manifest::default());
+
+        let key_at = |n: u32| {
+            let mut bytes = format!("key-{n:03}").into_bytes();
+            // Straddle the tree's 16-byte separator bound so shaping under it
+            // differs from shaping under the default 512.
+            bytes.resize(8 + (n as usize % 24), b'p');
+            VarKey(bytes)
+        };
+
+        let mut delta = Delta::zero();
+        let first = key_at(0);
+        let mut tree: VarTree =
+            TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Cache::new(), manifest)
+                .insert(first.clone(), first.0.clone(), &storage)
+                .await?
+                .persist(&mut delta)?;
+        for (hash, buffer) in delta.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        assert_eq!(
+            tree.manifest(&storage).await?,
+            manifest,
+            "the first persist must stamp the tree's own manifest"
+        );
+
+        for n in 1..64u32 {
+            let key = key_at(n);
+            tree = tree
+                .edit_with_manifest(&storage)
+                .await?
+                .insert(key.clone(), key.0.clone(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (hash, buffer) in delta.flush() {
+                storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            }
+        }
+
+        let after = tree.manifest(&storage).await?;
+        assert_eq!(
+            after, manifest,
+            "an edit opened with the tree's manifest must not reformat it"
+        );
+        // Spelled out per field: `inline_n` is the value-spill threshold the
+        // artifact key builders read off the tree, and it is the tree's 64,
+        // not the default 4096.
+        assert_eq!(after.inline_n, 64);
+        assert_eq!(after.max_separator, 16);
+        assert_eq!(after.fanout_n, 4);
+
+        // Every entry still reads back, so preserving the format did not
+        // corrupt the structure those constants shape.
+        for n in 0..64u32 {
+            let key = key_at(n);
+            assert_eq!(tree.get(&key, &storage).await?, Some(key.0.clone()));
+        }
+
+        // The synchronous entry cannot read the root, so it runs under the
+        // default manifest. Against a non-default tree that disagreement is
+        // now REFUSED at load rather than silently re-coining the touched path
+        // under the wrong format: the failure is loud and the tree is left
+        // intact. Pinned here rather than left implicit.
+        let last = key_at(64);
+        let reformatted = tree
+            .edit()
+            .insert(last.clone(), last.0.clone(), &storage)
+            .await;
+        assert!(
+            reformatted.is_err(),
+            "the synchronous edit must refuse a non-default-manifest tree"
+        );
+        assert_eq!(
+            tree.manifest(&storage).await?,
+            manifest,
+            "the refused edit must leave the tree's format untouched"
+        );
+
+        Ok(())
+    }
+
     /// Regression: inserting a NEW MINIMUM variable-length key into a
     /// single-entry tree must not drop the existing entry. Mirrors the
     /// artifact two-commit bug where a second entity whose key sorts before
@@ -4059,6 +4559,1338 @@ mod tests {
                 "splitting at {split} and stitching back must reproduce the source root"
             );
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod buffer_edit_interaction_tests {
+    #![allow(unexpected_cfgs)]
+
+    use anyhow::Result;
+    use dialog_common::Blake3Hash;
+    use dialog_storage::MemoryStorageBackend;
+
+    use crate::helpers::{
+        DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
+    };
+    use crate::{
+        ArchivedNodeBody, Buffer, Change, ContentAddressedStorage, Delta, Entry, HitchhikerTree,
+        NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, Piece, TransientTree, tree_spec,
+    };
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    type Store = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+    type Tree = PersistentTree<[u8; 4], Vec<u8>>;
+
+    async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Buffering a retract of a BOUNDARY key must produce the same tree as
+    /// retracting it canonically.
+    ///
+    /// A boundary key terminates its leaf, so removing it forces that leaf to
+    /// fuse with the right-adjacent one. The canonical delete path detects this
+    /// and re-shapes; a buffered retract defers the delete, so the fuse has to
+    /// happen when the op finally reaches the leaf. If it does not, the tree
+    /// keeps a shape no canonical build would produce, and two replicas holding
+    /// the same facts disagree on their roots.
+    #[dialog_common::test]
+    async fn it_fuses_leaves_when_a_buffered_retract_removes_a_boundary() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // Build a tree and find a real boundary key: one that terminates a leaf.
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in 0..600u32 {
+            base = base
+                .edit()
+                .insert(i.to_be_bytes(), vec![i as u8], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+
+        // Discover a boundary: walk the root's links; each link's upper_bound is
+        // the last key of that child, i.e. a boundary key.
+        let boundary = {
+            use crate::{ArchivedNodeBody, PersistentNode};
+            let bytes = dialog_storage::StorageBackend::get(storage.backend(), base.root())
+                .await?
+                .unwrap();
+            let node: PersistentNode<[u8; 4], Vec<u8>> =
+                PersistentNode::new(crate::Buffer::from(bytes));
+            match node.body()? {
+                ArchivedNodeBody::Index(index) => {
+                    // Separators are lower bounds, so the second child's
+                    // separator IS the boundary key that ends the first child.
+                    let separator = index.separator(1)?;
+                    <[u8; 4]>::try_from(separator.as_slice())
+                        .expect("separator is a whole four-byte key")
+                }
+                ArchivedNodeBody::Segment(_) => panic!("expected an index root"),
+            }
+        };
+
+        // Canonical: delete the boundary through the edit path.
+        let mut delta = Delta::zero();
+        let canonical = base
+            .edit()
+            .delete(&boundary, &storage)
+            .await?
+            .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+
+        // Buffered: retract the same boundary, then canonicalize so the op
+        // reaches the leaf and any fuse must happen.
+        let buffered = HitchhikerTree::open(&base)
+            .with_op_buf_size(1_000_000)
+            .delete(boundary, &storage)
+            .await?;
+        let mut delta = Delta::zero();
+        let flushed = buffered.canonicalize(&storage, &mut delta).await?;
+        settle(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            flushed.root(),
+            canonical.root(),
+            "a buffered boundary retract must fuse leaves like the canonical delete"
+        );
+        Ok(())
+    }
+
+    /// The same boundary fuse, but reached by OVERFLOW rather than an explicit
+    /// canonicalize: a small buffer makes the retract cascade to the leaf as a
+    /// side effect of later writes. The resulting tree must still match a
+    /// canonical build of the surviving fact set.
+    #[dialog_common::test]
+    async fn it_fuses_leaves_when_an_overflowing_retract_removes_a_boundary() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in 0..600u32 {
+            base = base
+                .edit()
+                .insert(i.to_be_bytes(), vec![i as u8], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+
+        let boundary = {
+            use crate::{ArchivedNodeBody, PersistentNode};
+            let bytes = dialog_storage::StorageBackend::get(storage.backend(), base.root())
+                .await?
+                .unwrap();
+            let node: PersistentNode<[u8; 4], Vec<u8>> =
+                PersistentNode::new(crate::Buffer::from(bytes));
+            match node.body()? {
+                ArchivedNodeBody::Index(index) => {
+                    // Separators are lower bounds, so the second child's
+                    // separator IS the boundary key that ends the first child.
+                    let separator = index.separator(1)?;
+                    <[u8; 4]>::try_from(separator.as_slice())
+                        .expect("separator is a whole four-byte key")
+                }
+                ArchivedNodeBody::Segment(_) => panic!("expected an index root"),
+            }
+        };
+
+        // Reference: the same fact set built canonically (boundary deleted, plus
+        // the extra keys the buffered run writes).
+        let extras: Vec<u32> = (700..716).collect();
+        let mut canonical = base.clone();
+        let mut delta = Delta::zero();
+        canonical = canonical
+            .edit()
+            .delete(&boundary, &storage)
+            .await?
+            .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+        for key in &extras {
+            canonical = canonical
+                .edit()
+                .insert(key.to_be_bytes(), vec![9], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+
+        // Buffered: tiny buffer, so the retract cascades on overflow.
+        let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(4);
+        buffered = buffered.delete(boundary, &storage).await?;
+        for key in &extras {
+            buffered = buffered
+                .insert(key.to_be_bytes(), vec![9], &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let flushed = buffered.canonicalize(&storage, &mut delta).await?;
+        settle(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            flushed.root(),
+            canonical.root(),
+            "an overflow-cascaded boundary retract must fuse leaves like the canonical delete"
+        );
+        Ok(())
+    }
+
+    /// Buffered inserts that create new boundaries must split leaves exactly as
+    /// canonical inserts do.
+    ///
+    /// A key's rank decides whether it terminates a leaf, so an insert can split
+    /// a node. Deferring that insert through a buffer must not defer the split
+    /// away: once the op reaches the leaf, the shape must match a canonical
+    /// build, or two replicas with the same facts hold different roots.
+    ///
+    /// Sweeps seeds so the random keys actually hit boundary ranks.
+    #[dialog_common::test]
+    async fn it_splits_leaves_like_canonical_for_buffered_inserts() -> Result<()> {
+        for seed in 0..25u64 {
+            let mut rng = 0x9E3779B97F4A7C15u64 ^ seed;
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+
+            let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+            let base_keys: Vec<u32> = (0..400).map(|_| next() % 100_000).collect();
+            let mut base = Tree::empty();
+            let mut delta = Delta::zero();
+            for key in &base_keys {
+                base = base
+                    .edit()
+                    .insert(key.to_be_bytes(), vec![1], &storage)
+                    .await?
+                    .persist(&mut delta)?;
+                settle(&mut delta, &mut storage).await?;
+            }
+
+            // A mix of inserts and retracts, including keys already present, so
+            // both splits and fuses are exercised.
+            let ops: Vec<(bool, u32)> = (0..40)
+                .map(|_| {
+                    let insert = !next().is_multiple_of(3);
+                    let key = if next().is_multiple_of(2) {
+                        base_keys[(next() as usize) % base_keys.len()]
+                    } else {
+                        next() % 100_000
+                    };
+                    (insert, key)
+                })
+                .collect();
+
+            let mut canonical = base.clone();
+            let mut delta = Delta::zero();
+            for (insert, key) in &ops {
+                canonical = if *insert {
+                    canonical
+                        .edit()
+                        .insert(key.to_be_bytes(), vec![2], &storage)
+                        .await?
+                        .persist(&mut delta)?
+                } else {
+                    canonical
+                        .edit()
+                        .delete(&key.to_be_bytes(), &storage)
+                        .await?
+                        .persist(&mut delta)?
+                };
+                settle(&mut delta, &mut storage).await?;
+            }
+
+            // Same ops through buffers, at two cascade depths.
+            for op_buf in [4usize, 1_000_000] {
+                let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(op_buf);
+                for (insert, key) in &ops {
+                    buffered = if *insert {
+                        buffered
+                            .insert(key.to_be_bytes(), vec![2], &storage)
+                            .await?
+                    } else {
+                        buffered.delete(key.to_be_bytes(), &storage).await?
+                    };
+                }
+                let mut delta = Delta::zero();
+                let flushed = buffered.canonicalize(&storage, &mut delta).await?;
+                settle(&mut delta, &mut storage).await?;
+
+                assert_eq!(
+                    flushed.root(),
+                    canonical.root(),
+                    "seed {seed}, op_buf {op_buf}: buffered writes must reshape like canonical ones"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Stitching pieces of buffered trees must preserve their buffered ops.
+    ///
+    /// `stitch` assembles a tree from whole subtree ranges, which is how the
+    /// graft merge adopts a side's content without walking it. Those subtrees
+    /// can carry buffered ops, and dropping them loses writes: the graft path
+    /// reports the adopted bulk as missing.
+    #[dialog_common::test]
+    async fn it_preserves_buffered_ops_through_stitch() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in 0..400u32 {
+            base = base
+                .edit()
+                .insert(i.to_be_bytes(), vec![i as u8], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+
+        // A buffered write held at the root, plus one flushed for contrast.
+        let buffered_key = 900u32.to_be_bytes();
+        let buffered_tree = {
+            let tree = HitchhikerTree::open(&base)
+                .with_op_buf_size(1_000_000)
+                .insert(buffered_key, vec![42], &storage)
+                .await?;
+            let mut delta = Delta::zero();
+            let root = tree.persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+            Tree::from_hash_with_cache(root, Default::default())
+        };
+        assert_eq!(
+            buffered_tree.get(&buffered_key, &storage).await?,
+            Some(vec![42]),
+            "precondition: the buffered write reads back before stitching"
+        );
+
+        // Stitch the whole tree as a single range piece: the result must hold
+        // exactly what the source held.
+        let mut delta = Delta::zero();
+        let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
+            vec![Piece::Range {
+                source: &buffered_tree,
+                range: [0u8; 4]..=[0xFFu8; 4],
+            }],
+            &storage,
+        )
+        .await?
+        .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            stitched.get(&buffered_key, &storage).await?,
+            Some(vec![42]),
+            "a stitched piece must keep the buffered ops its source held"
+        );
+        Ok(())
+    }
+
+    /// The case the graft merge actually exercises: stitching PARTIAL ranges,
+    /// which go through `carve` and rebuild the trimmed spine. A whole-range
+    /// piece short-circuits to the source root, so only partial ranges test
+    /// whether carving preserves buffered ops.
+    #[dialog_common::test]
+    async fn it_preserves_buffered_ops_through_partial_stitch() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in 0..400u32 {
+            base = base
+                .edit()
+                .insert(i.to_be_bytes(), vec![i as u8], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+
+        // Buffered writes inside the range that will be carved.
+        let low = 100u32;
+        let high = 300u32;
+        let buffered_keys = [150u32, 200, 250];
+        let buffered_tree = {
+            let mut tree = HitchhikerTree::open(&base).with_op_buf_size(1_000_000);
+            for key in buffered_keys {
+                tree = tree.insert(key.to_be_bytes(), vec![42], &storage).await?;
+            }
+            let mut delta = Delta::zero();
+            let root = tree.persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+            Tree::from_hash_with_cache(root, Default::default())
+        };
+
+        // Carve the middle out: a partial range, so the spine is rebuilt.
+        let mut delta = Delta::zero();
+        let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
+            vec![Piece::Range {
+                source: &buffered_tree,
+                range: low.to_be_bytes()..=high.to_be_bytes(),
+            }],
+            &storage,
+        )
+        .await?
+        .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+
+        for key in buffered_keys {
+            assert_eq!(
+                stitched.get(&key.to_be_bytes(), &storage).await?,
+                Some(vec![42]),
+                "a carved piece must keep the buffered op at {key}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A carve must keep buffered ops for keys ABOVE the stored upper bound of
+    /// the subtree holding them.
+    ///
+    /// `upper_bound` describes stored content only, but `child_for` clamps: a
+    /// buffered write for a key past the last child's bound lands in that
+    /// child's buffer. If the trim decides which children to drop from stored
+    /// bounds alone, it discards children whose buffers hold in-range keys, and
+    /// the carved piece silently loses those writes.
+    #[dialog_common::test]
+    async fn it_preserves_buffered_ops_above_the_stored_bound_through_carve() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in 0..400u32 {
+            base = base
+                .edit()
+                .insert(i.to_be_bytes(), vec![i as u8], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+
+        // Buffered writes for keys past everything the tree stores.
+        let buffered_keys = [10_000u32, 20_000, 30_000];
+        let buffered_tree = {
+            let mut tree = HitchhikerTree::open(&base).with_op_buf_size(1_000_000);
+            for key in buffered_keys {
+                tree = tree.insert(key.to_be_bytes(), vec![42], &storage).await?;
+            }
+            let mut delta = Delta::zero();
+            let root = tree.persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+            Tree::from_hash_with_cache(root, Default::default())
+        };
+        for key in buffered_keys {
+            assert_eq!(
+                buffered_tree.get(&key.to_be_bytes(), &storage).await?,
+                Some(vec![42]),
+                "precondition: the buffered write at {key} reads back before carving"
+            );
+        }
+
+        // Carve a partial range whose start is inside the stored content and
+        // whose end reaches past it, so the buffered keys are in range.
+        let mut delta = Delta::zero();
+        let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
+            vec![Piece::Range {
+                source: &buffered_tree,
+                range: 200u32.to_be_bytes()..=[0xFFu8; 4],
+            }],
+            &storage,
+        )
+        .await?
+        .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+
+        for key in buffered_keys {
+            assert_eq!(
+                stitched.get(&key.to_be_bytes(), &storage).await?,
+                Some(vec![42]),
+                "a carve must keep the buffered op at {key}, above the stored bound"
+            );
+        }
+        Ok(())
+    }
+
+    /// Stitching pieces from buffered sources must preserve every op in range,
+    /// across many key layouts and both cascade depths.
+    ///
+    /// The graft merge assembles a tree from several `Piece::Range`s taken from
+    /// two buffered sides, so ops can sit at any level of any piece. Single
+    /// hand-written cases miss layout-dependent losses; this sweeps seeds and
+    /// compares the stitched result against the same content built canonically.
+    #[dialog_common::test]
+    async fn it_preserves_buffered_ops_across_stitched_pieces() -> Result<()> {
+        for seed in 0..30u64 {
+            let mut rng = 0x9E3779B97F4A7C15u64 ^ seed;
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+
+            let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+            let base_keys: Vec<u32> = (0..500).map(|_| next() % 50_000).collect();
+            let mut base = Tree::empty();
+            let mut delta = Delta::zero();
+            for key in &base_keys {
+                base = base
+                    .edit()
+                    .insert(key.to_be_bytes(), vec![1], &storage)
+                    .await?
+                    .persist(&mut delta)?;
+                settle(&mut delta, &mut storage).await?;
+            }
+
+            for op_buf in [4usize, 1_000_000] {
+                // Buffered writes scattered across the key space.
+                let writes: Vec<u32> = (0..24).map(|_| next() % 50_000).collect();
+                let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(op_buf);
+                for key in &writes {
+                    buffered = buffered
+                        .insert(key.to_be_bytes(), vec![9], &storage)
+                        .await?;
+                }
+                let mut delta = Delta::zero();
+                let root = buffered.persist(&mut delta)?;
+                settle(&mut delta, &mut storage).await?;
+                let source = Tree::from_hash_with_cache(root, Default::default());
+
+                // Split the key space into three adjacent pieces and stitch them
+                // back together: the result must equal the source exactly.
+                let cut_a = (16_000u32).to_be_bytes();
+                let cut_b = (33_000u32).to_be_bytes();
+                let mut delta = Delta::zero();
+                let stitched = TransientTree::<[u8; 4], Vec<u8>>::stitch(
+                    vec![
+                        Piece::Range {
+                            source: &source,
+                            range: [0u8; 4]..=cut_a,
+                        },
+                        Piece::Range {
+                            source: &source,
+                            range: next_key(cut_a)..=cut_b,
+                        },
+                        Piece::Range {
+                            source: &source,
+                            range: next_key(cut_b)..=[0xFFu8; 4],
+                        },
+                    ],
+                    &storage,
+                )
+                .await?
+                .persist(&mut delta)?;
+                settle(&mut delta, &mut storage).await?;
+
+                // Every buffered write must read back through the stitched tree.
+                for key in &writes {
+                    assert_eq!(
+                        stitched.get(&key.to_be_bytes(), &storage).await?,
+                        Some(vec![9]),
+                        "seed {seed}, op_buf {op_buf}: stitched pieces lost the write at {key}"
+                    );
+                }
+                // And every base key not overwritten must survive.
+                for key in &base_keys {
+                    if writes.contains(key) {
+                        continue;
+                    }
+                    assert_eq!(
+                        stitched.get(&key.to_be_bytes(), &storage).await?,
+                        Some(vec![1]),
+                        "seed {seed}, op_buf {op_buf}: stitched pieces lost base key {key}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The immediate successor of a fixed-width key, for building adjacent
+    /// half-open ranges out of inclusive ones.
+    fn next_key(mut key: [u8; 4]) -> [u8; 4] {
+        for byte in key.iter_mut().rev() {
+            if *byte == 0xFF {
+                *byte = 0;
+            } else {
+                *byte += 1;
+                break;
+            }
+        }
+        key
+    }
+
+    /// Integrating a differential into a buffered tree must land the same
+    /// content as integrating into its canonical form.
+    ///
+    /// `integrate` is how a merge applies screened changes, and it resolves
+    /// each change against the batch's own in-flight state (via `get`). With
+    /// buffering that state includes ops at any level, so a mis-resolution
+    /// silently drops or resurrects facts during a pull.
+    #[dialog_common::test]
+    async fn it_integrates_into_buffered_like_canonical() -> Result<()> {
+        for seed in 0..30u64 {
+            let mut rng = 0x9E3779B97F4A7C15u64 ^ seed;
+            let mut next = || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+
+            let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+            let base_keys: Vec<u32> = (0..400).map(|_| next() % 40_000).collect();
+            let mut base = Tree::empty();
+            let mut delta = Delta::zero();
+            for key in &base_keys {
+                base = base
+                    .edit()
+                    .insert(key.to_be_bytes(), vec![1], &storage)
+                    .await?
+                    .persist(&mut delta)?;
+                settle(&mut delta, &mut storage).await?;
+            }
+
+            // Buffered writes, then a differential integrated on top.
+            let writes: Vec<u32> = (0..20).map(|_| next() % 40_000).collect();
+            let changes: Vec<u32> = (0..20).map(|_| next() % 40_000).collect();
+
+            for op_buf in [4usize, 1_000_000] {
+                let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(op_buf);
+                for key in &writes {
+                    buffered = buffered
+                        .insert(key.to_be_bytes(), vec![9], &storage)
+                        .await?;
+                }
+                let mut delta = Delta::zero();
+                let root = buffered.persist(&mut delta)?;
+                settle(&mut delta, &mut storage).await?;
+                let buffered_tree = Tree::from_hash_with_cache(root, Default::default());
+
+                // The canonical counterpart of the same content.
+                let mut flushed = HitchhikerTree::open(&base).with_op_buf_size(op_buf);
+                for key in &writes {
+                    flushed = flushed.insert(key.to_be_bytes(), vec![9], &storage).await?;
+                }
+                let mut delta = Delta::zero();
+                let canonical_tree = flushed.canonicalize(&storage, &mut delta).await?;
+                settle(&mut delta, &mut storage).await?;
+
+                // Integrate the same change stream into both.
+                let stream = || {
+                    futures_util::stream::iter(changes.iter().map(|key| {
+                        Ok(Change::Add(Entry {
+                            key: key.to_be_bytes(),
+                            value: vec![7],
+                        }))
+                    }))
+                };
+
+                let mut delta = Delta::zero();
+                let into_buffered = buffered_tree
+                    .edit()
+                    .integrate(stream(), &storage)
+                    .await?
+                    .persist(&mut delta)?;
+                settle(&mut delta, &mut storage).await?;
+
+                let mut delta = Delta::zero();
+                let into_canonical = canonical_tree
+                    .edit()
+                    .integrate(stream(), &storage)
+                    .await?
+                    .persist(&mut delta)?;
+                settle(&mut delta, &mut storage).await?;
+
+                // Compare content key by key over everything touched.
+                let mut probes: Vec<u32> = base_keys.clone();
+                probes.extend(writes.iter().copied());
+                probes.extend(changes.iter().copied());
+                probes.sort_unstable();
+                probes.dedup();
+                for key in probes {
+                    let left = into_buffered.get(&key.to_be_bytes(), &storage).await?;
+                    let right = into_canonical.get(&key.to_be_bytes(), &storage).await?;
+                    assert_eq!(
+                        left, right,
+                        "seed {seed}, op_buf {op_buf}: integrate disagreed at key {key}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Editing one key must not disturb ops buffered for OTHER keys.
+    ///
+    /// An edit descends and reshapes (splitting or regrouping nodes), and the
+    /// nodes it dismantles may hold buffered ops for unrelated keys. Those ops
+    /// must survive: only the edited key's own pending op is superseded.
+    #[dialog_common::test]
+    async fn it_keeps_sibling_buffered_ops_across_an_edit() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in 0..400u32 {
+            base = base
+                .edit()
+                .insert(i.to_be_bytes(), vec![1], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+
+        // Several buffered writes to keys absent from the base.
+        let buffered_keys: Vec<u32> = vec![10_001, 10_002, 10_003, 10_004];
+        let tree = {
+            let mut t = HitchhikerTree::open(&base).with_op_buf_size(1_000_000);
+            for key in &buffered_keys {
+                t = t.insert(key.to_be_bytes(), vec![9], &storage).await?;
+            }
+            let mut delta = Delta::zero();
+            let root = t.persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+            Tree::from_hash_with_cache(root, Default::default())
+        };
+
+        // Edit ONE unrelated key through the canonical path.
+        let mut delta = Delta::zero();
+        let edited = tree
+            .edit()
+            .insert(50_000u32.to_be_bytes(), vec![5], &storage)
+            .await?
+            .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+
+        for key in &buffered_keys {
+            assert_eq!(
+                edited.get(&key.to_be_bytes(), &storage).await?,
+                Some(vec![9]),
+                "an edit to another key must not drop the buffered op at {key}"
+            );
+        }
+        Ok(())
+    }
+
+    /// An edit that RESHAPES THE ROOT must not discard the root's own buffer.
+    ///
+    /// A reshaping edit rebuilds the root from its regrouped children via
+    /// `seal_root`. The children carry their own buffers along as nodes, but the
+    /// old root node is replaced, so ops buffered AT the root are dropped unless
+    /// they are carried across explicitly. The commit path buffers at the root,
+    /// so a single reshaping commit silently wipes every write still pending
+    /// there.
+    #[dialog_common::test]
+    async fn it_keeps_the_root_buffer_when_an_edit_reshapes_the_root() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // A base big enough that inserts reshape the upper levels.
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in 0..600u32 {
+            base = base
+                .edit()
+                .insert(i.to_be_bytes(), vec![1], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+
+        // Buffer a batch of writes at the root (a large buffer keeps them there).
+        let buffered_keys: Vec<u32> = (0..32).map(|i| 700_000 + i * 37).collect();
+        let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(1_000_000);
+        for &key in &buffered_keys {
+            buffered = buffered
+                .insert(key.to_be_bytes(), vec![7], &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let root = buffered.persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+        let tree = Tree::from_hash_with_cache(root, Default::default());
+
+        for &key in &buffered_keys {
+            assert_eq!(
+                tree.get(&key.to_be_bytes(), &storage).await?,
+                Some(vec![7]),
+                "precondition: the root-buffered write at {key} reads back"
+            );
+        }
+
+        // Now drive canonical edits until one reshapes the root. Every
+        // root-buffered write must still be readable afterwards.
+        let mut edited = tree;
+        for i in 0..64u32 {
+            let mut delta = Delta::zero();
+            edited = edited
+                .edit()
+                .insert((900_000 + i).to_be_bytes(), vec![8], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+
+            for &key in &buffered_keys {
+                assert_eq!(
+                    edited.get(&key.to_be_bytes(), &storage).await?,
+                    Some(vec![7]),
+                    "after edit {i}, the root-buffered write at {key} must survive"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Counts the leaf segments in a tree, so a test can assert that a
+    /// structural split or join actually happened rather than trusting that
+    /// equal roots imply it did.
+    async fn segment_count(tree: &Tree, storage: &Store) -> Result<usize> {
+        use crate::{ArchivedNodeBody, PersistentNode};
+        let mut frontier = vec![tree.root().clone()];
+        let mut segments = 0usize;
+        while let Some(hash) = frontier.pop() {
+            if &hash == dialog_common::NULL_BLAKE3_HASH {
+                continue;
+            }
+            let bytes = dialog_storage::StorageBackend::get(storage.backend(), &hash)
+                .await?
+                .expect("node present");
+            let node: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::new(Buffer::from(bytes));
+            match node.body()? {
+                ArchivedNodeBody::Index(index) => {
+                    for at in 0..index.len() {
+                        frontier.push(index.hash_at(at)?.clone());
+                    }
+                }
+                ArchivedNodeBody::Segment(_) => segments += 1,
+            }
+        }
+        Ok(segments)
+    }
+
+    /// A key whose rank makes it a segment boundary: inserting it splits the
+    /// leaf that would hold it, and removing it forces that leaf to fuse with
+    /// its right neighbour.
+    fn boundary_key(from: u32, avoid: &[u32]) -> u32 {
+        (from..from + 200_000)
+            .find(|candidate| {
+                !avoid.contains(candidate)
+                    && <crate::Geometric as crate::Distribution>::rank(
+                        &candidate.to_be_bytes(),
+                        &crate::Manifest::default(),
+                    ) > crate::BOTTOM_RANK
+            })
+            .expect("a boundary-ranked key exists in range")
+    }
+
+    /// A fact that arrives via novelty and, when flushed all the way to the
+    /// leaves, SPLITS the segment it lands in.
+    ///
+    /// The split is what makes this worth pinning separately from ordinary
+    /// buffered inserts: the flush has to re-cut the leaf, and a buffer that
+    /// merely delivered its op without reshaping would leave a tree no
+    /// canonical build produces.
+    #[dialog_common::test]
+    async fn it_splits_a_segment_when_buffered_novelty_is_flushed() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // A base of non-boundary keys, so the leaf the split lands in is a plain
+        // open run.
+        let base_keys: Vec<u32> = (0..400u32)
+            .filter(|k| {
+                <crate::Geometric as crate::Distribution>::rank(
+                    &k.to_be_bytes(),
+                    &crate::Manifest::default(),
+                ) <= crate::BOTTOM_RANK
+            })
+            .collect();
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for key in &base_keys {
+            base = base
+                .edit()
+                .insert(key.to_be_bytes(), vec![1], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+        let before = segment_count(&base, &storage).await?;
+
+        // A boundary-ranked key inside the base range: inserting it must split.
+        let splitter = boundary_key(1, &base_keys);
+        assert!(
+            splitter < 400,
+            "the splitter must land inside the base range, got {splitter}"
+        );
+
+        // Canonical reference.
+        let mut delta = Delta::zero();
+        let canonical = base
+            .edit()
+            .insert(splitter.to_be_bytes(), vec![9], &storage)
+            .await?
+            .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+        let after_canonical = segment_count(&canonical, &storage).await?;
+        assert!(
+            after_canonical > before,
+            "precondition: the key must split a segment canonically ({before} -> {after_canonical})"
+        );
+
+        // Same write through the buffer, flushed all the way.
+        let buffered = HitchhikerTree::open(&base)
+            .with_op_buf_size(1_000_000)
+            .insert(splitter.to_be_bytes(), vec![9], &storage)
+            .await?;
+        let mut delta = Delta::zero();
+        let flushed = buffered.canonicalize(&storage, &mut delta).await?;
+        settle(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            segment_count(&flushed, &storage).await?,
+            after_canonical,
+            "a flushed buffered insert must split the segment like the canonical one"
+        );
+        assert_eq!(
+            flushed.root(),
+            canonical.root(),
+            "and land on the identical canonical tree"
+        );
+        Ok(())
+    }
+
+    /// A retraction that arrives via novelty and, when flushed all the way,
+    /// JOINS two segments.
+    ///
+    /// Removing a boundary key leaves its leaf without a terminator, so the
+    /// orphaned entries must fuse with the right-adjacent leaf. A buffered
+    /// retract defers that, so the fuse has to happen when the op finally lands.
+    #[dialog_common::test]
+    async fn it_joins_segments_when_a_buffered_retraction_is_flushed() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let base_keys: Vec<u32> = (0..400u32).collect();
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for key in &base_keys {
+            base = base
+                .edit()
+                .insert(key.to_be_bytes(), vec![1], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+        let before = segment_count(&base, &storage).await?;
+
+        // A boundary key that is actually present, and not the last one (so it
+        // has a right neighbour to fuse with).
+        let boundary = base_keys
+            .iter()
+            .copied()
+            .find(|k| {
+                *k < 399
+                    && <crate::Geometric as crate::Distribution>::rank(
+                        &k.to_be_bytes(),
+                        &crate::Manifest::default(),
+                    ) > crate::BOTTOM_RANK
+            })
+            .expect("the base contains a non-final boundary key");
+
+        // Canonical reference.
+        let mut delta = Delta::zero();
+        let canonical = base
+            .edit()
+            .delete(&boundary.to_be_bytes(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+        let after_canonical = segment_count(&canonical, &storage).await?;
+        assert!(
+            after_canonical < before,
+            "precondition: removing the boundary must join segments ({before} -> {after_canonical})"
+        );
+
+        // Same retraction through the buffer, flushed all the way.
+        let buffered = HitchhikerTree::open(&base)
+            .with_op_buf_size(1_000_000)
+            .delete(boundary.to_be_bytes(), &storage)
+            .await?;
+        let mut delta = Delta::zero();
+        let flushed = buffered.canonicalize(&storage, &mut delta).await?;
+        settle(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            segment_count(&flushed, &storage).await?,
+            after_canonical,
+            "a flushed buffered retract must join the segments like the canonical delete"
+        );
+        assert_eq!(
+            flushed.root(),
+            canonical.root(),
+            "and land on the identical canonical tree"
+        );
+        Ok(())
+    }
+
+    /// A canonical edit to a key that is currently shadowed by a buffered op
+    /// must win: the edit is the newer write.
+    ///
+    /// An edit descends to the leaf a key belongs in and writes there, but the
+    /// key's live value may sit in an ancestor's buffer. If the edit does not
+    /// displace that op, the stale buffered value keeps shadowing the write on
+    /// every read, and the edit is silently invisible.
+    #[dialog_common::test]
+    async fn it_lets_an_edit_override_a_buffered_op() -> Result<()> {
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in 0..500u32 {
+            base = base
+                .edit()
+                .insert(i.to_be_bytes(), vec![i as u8], &storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+        }
+
+        // Buffer a write high in the tree (big buffer: it stays at the root).
+        let key = 42u32.to_be_bytes();
+        let buffered = HitchhikerTree::open(&base)
+            .with_op_buf_size(1_000_000)
+            .insert(key, vec![111], &storage)
+            .await?;
+        let mut delta = Delta::zero();
+        let root = buffered.persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+        let tree = Tree::from_hash_with_cache(root, Default::default());
+
+        assert_eq!(
+            tree.get(&key, &storage).await?,
+            Some(vec![111]),
+            "buffered write reads back"
+        );
+
+        // Now edit the SAME key through the canonical path, as a merge does.
+        let mut delta = Delta::zero();
+        let edited = tree
+            .edit()
+            .insert(key, vec![222], &storage)
+            .await?
+            .persist(&mut delta)?;
+        settle(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            edited.get(&key, &storage).await?,
+            Some(vec![222]),
+            "a canonical edit must override the buffered op it shadows"
+        );
+        Ok(())
+    }
+
+    type SpecTree = PersistentTree<SpecKey, Vec<u8>, DistributionSimulator>;
+
+    async fn flush_spec(
+        delta: &mut Delta<Blake3Hash, Buffer>,
+        storage: &mut SpecStorage,
+    ) -> Result<()> {
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn load_spec_node(
+        storage: &SpecStorage,
+        hash: &Blake3Hash,
+    ) -> Result<PersistentNode<SpecKey, Vec<u8>>> {
+        let bytes = storage
+            .retrieve(hash)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
+        Ok(PersistentNode::new(Buffer::from(bytes)))
+    }
+
+    /// The buffered ops sealed into a stored node, owned.
+    fn sealed_novelty(
+        node: &PersistentNode<SpecKey, Vec<u8>>,
+    ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
+        Ok(match node.body()? {
+            ArchivedNodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
+            ArchivedNodeBody::Segment(_) => Vec::new(),
+        })
+    }
+
+    /// Buffered ops parked on the two index subtrees flanking a leaf boundary
+    /// must survive the boundary delete that fuses those subtrees at their
+    /// LCA: `fuse_subtrees` dismantles both index spines, and the buffers they
+    /// carry are pending writes, not shape. (The existing fuse tests fuse
+    /// SEGMENTS, which hold no buffers, so they cannot see this.)
+    #[dialog_common::test]
+    async fn it_keeps_buffered_ops_through_an_lca_fusion() -> Result<()> {
+        let spec = tree_spec![
+            [                   ..p]
+            [        ..h,       ..p]
+            [..d, ..h, ..l, ..p]
+        ]
+        .build(test_storage())
+        .await
+        .expect("the fixture spec is valid");
+        let mut storage = spec.storage().clone();
+        let base = SpecTree::from_hash(spec.tree().root().clone());
+
+        let left_parked = encode_key(b"bb", 1, 1);
+        let right_parked = encode_key(b"mm", 1, 1);
+        let boundary = encode_key(b"h", 2, 1);
+
+        // Park one op on each mid-level index flanking the `h` boundary: the
+        // first write buffers at the root, the second overflows the one-op
+        // buffer and cascades each op into the mid-level node covering it.
+        let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(1);
+        buffered = buffered.insert(left_parked, vec![1], &storage).await?;
+        buffered = buffered.insert(right_parked, vec![2], &storage).await?;
+        let mut delta = Delta::zero();
+        let root = buffered.persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        // The fixture must actually park both ops BELOW the root.
+        let root_node = load_spec_node(&storage, &root).await?;
+        assert!(
+            sealed_novelty(&root_node)?.is_empty(),
+            "fixture: the root buffer must be empty after the cascade"
+        );
+        let mut parked_count = 0;
+        for link in root_node.as_index()?.links()? {
+            let child = load_spec_node(&storage, &link.node).await?;
+            parked_count += sealed_novelty(&child)?.len();
+        }
+        assert_eq!(
+            parked_count, 2,
+            "fixture: both ops must sit in mid-level index buffers"
+        );
+
+        let parked: SpecTree = PersistentTree::from_hash(root);
+        assert_eq!(
+            parked.get(&left_parked, &storage).await?,
+            Some(vec![1]),
+            "control: the parked op reads back before the fusion"
+        );
+
+        // Deleting the boundary key fuses the two mid-level subtrees at the
+        // root, their LCA.
+        let mut delta = Delta::zero();
+        let fused = parked
+            .edit()
+            .delete(&boundary, &storage)
+            .await?
+            .persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            fused.get(&left_parked, &storage).await?,
+            Some(vec![1]),
+            "the left fused subtree's buffered op must survive the fusion"
+        );
+        assert_eq!(
+            fused.get(&right_parked, &storage).await?,
+            Some(vec![2]),
+            "the right fused subtree's buffered op must survive the fusion"
+        );
+        assert_eq!(fused.get(&boundary, &storage).await?, None);
+
+        // And survive the full flush.
+        let mut delta = Delta::zero();
+        let canonical = HitchhikerTree::open(&fused)
+            .canonicalize(&storage, &mut delta)
+            .await?;
+        flush_spec(&mut delta, &mut storage).await?;
+        assert_eq!(
+            canonical.get(&left_parked, &storage).await?,
+            Some(vec![1]),
+            "the left parked op must survive canonicalize"
+        );
+        assert_eq!(
+            canonical.get(&right_parked, &storage).await?,
+            Some(vec![2]),
+            "the right parked op must survive canonicalize"
+        );
+        assert_eq!(canonical.get(&boundary, &storage).await?, None);
+        Ok(())
+    }
+
+    /// A delete that strips a single-child root wrapper must carry the
+    /// wrapper's buffer onto the surviving root instead of dropping it.
+    /// Shaped like
+    /// `it_strips_a_persistent_single_child_root_after_rightmost_delete`,
+    /// but with an op parked in the root buffer before the delete.
+    #[dialog_common::test]
+    async fn it_keeps_the_root_buffer_when_a_delete_strips_the_root() -> Result<()> {
+        let mut storage = test_storage();
+        let a = encode_key(b"a", 2, 1); // leaf boundary, quiet seam
+        let b = encode_key(b"b", 1, 3); // interior, seam punches level 1
+
+        let mut delta = Delta::zero();
+        let mut tree = SpecTree::empty();
+        for key in [a, b] {
+            tree = tree
+                .edit()
+                .insert(key, key.to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            flush_spec(&mut delta, &mut storage).await?;
+        }
+
+        // Park an op in the ROOT buffer (the default buffer is big enough
+        // that nothing cascades).
+        let parked = encode_key(b"aa", 1, 1);
+        let buffered = HitchhikerTree::open(&tree)
+            .insert(parked, vec![7], &storage)
+            .await?;
+        let mut delta = Delta::zero();
+        let root = buffered.persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        let root_node = load_spec_node(&storage, &root).await?;
+        assert_eq!(
+            sealed_novelty(&root_node)?.len(),
+            1,
+            "fixture: the op must sit in the root buffer"
+        );
+
+        // Deleting `b` empties the rightmost subtree, leaving a single-child
+        // index-over-index root that `seal_root` strips.
+        let reopened: SpecTree = PersistentTree::from_hash(root);
+        let mut delta = Delta::zero();
+        let stripped = reopened
+            .edit()
+            .delete(&b, &storage)
+            .await?
+            .persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            stripped.get(&parked, &storage).await?,
+            Some(vec![7]),
+            "the stripped wrapper's buffered op must move onto the surviving root"
+        );
+        assert_eq!(stripped.get(&a, &storage).await?, Some(a.to_vec()));
+
+        let mut delta = Delta::zero();
+        let canonical = HitchhikerTree::open(&stripped)
+            .canonicalize(&storage, &mut delta)
+            .await?;
+        flush_spec(&mut delta, &mut storage).await?;
+        assert_eq!(
+            canonical.get(&parked, &storage).await?,
+            Some(vec![7]),
+            "the parked op must survive canonicalize"
+        );
+        assert_eq!(canonical.get(&a, &storage).await?, Some(a.to_vec()));
+        Ok(())
+    }
+
+    /// For a key buffered at two depths of a stitch source the SHALLOWEST op
+    /// is the newest: writes land in the root buffer and a flush only moves
+    /// ops downward, so deeper always means older. `concat_levels` lifts the
+    /// buffers off the nodes it dismantles at the seam, and the ops lifted by
+    /// its recursion come from one level further down than the two joined
+    /// nodes' own buffers. Re-attaching them after the joined nodes' own ops
+    /// lets the stable re-sort leave the deeper, older op to win a same-key
+    /// collision, resurrecting a superseded value in the stitched tree.
+    #[dialog_common::test]
+    async fn it_resolves_the_shallowest_op_across_a_stitch_seam() -> Result<()> {
+        let spec = tree_spec![
+            [                   ..p]
+            [        ..h,       ..p]
+            [..d, ..h, ..l, ..p]
+        ]
+        .build(test_storage())
+        .await
+        .expect("the fixture spec is valid");
+        let mut storage = spec.storage().clone();
+        let base = SpecTree::from_hash(spec.tree().root().clone());
+
+        // The probe lives under the RIGHTMOST mid-level index, the spine the
+        // stitch seam below dismantles. The far key lives under the other
+        // mid-level index and exists only to overflow the one-op root buffer,
+        // cascading the probe's first op down into the mid node covering it.
+        let probe = encode_key(b"k", 1, 1);
+        let far = encode_key(b"b", 1, 1);
+
+        let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(1);
+        buffered = buffered.insert(probe, vec![1], &storage).await?;
+        buffered = buffered.insert(far, vec![9], &storage).await?;
+        buffered = buffered.insert(probe, vec![2], &storage).await?;
+        let mut delta = Delta::zero();
+        let root = buffered.persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        // The fixture must genuinely hold the probe's ops at two levels: the
+        // newer op in the root buffer, the older one sealed into the rightmost
+        // mid-level index. A fixture with both ops at one depth pins nothing.
+        let root_node = load_spec_node(&storage, &root).await?;
+        assert!(
+            sealed_novelty(&root_node)?
+                .iter()
+                .any(|entry| entry.key == probe.to_vec() && entry.op == NoveltyOp::Assert(vec![2])),
+            "fixture: the newer op must sit in the root buffer"
+        );
+        let links = root_node.as_index()?.links()?;
+        let seam_child = links.last().expect("the fixture root has children");
+        let seam_node = load_spec_node(&storage, &seam_child.node).await?;
+        assert!(
+            sealed_novelty(&seam_node)?
+                .iter()
+                .any(|entry| entry.key == probe.to_vec() && entry.op == NoveltyOp::Assert(vec![1])),
+            "fixture: the older op must sit in the rightmost mid-level buffer"
+        );
+
+        // Stitch the whole buffered source next to a run of entries past its
+        // last key: the join runs down the source's rightmost spine, lifting
+        // both the root's buffer and the mid node's seam buffer.
+        let source: SpecTree = PersistentTree::from_hash(root);
+        let after = encode_key(b"t", 1, 1);
+        let stitched = TransientTree::stitch(
+            vec![
+                Piece::Range {
+                    source: &source,
+                    range: [0u8; 8]..=[0xffu8; 8],
+                },
+                Piece::Entries(vec![Entry {
+                    key: after,
+                    value: vec![7],
+                }]),
+            ],
+            &storage,
+        )
+        .await?;
+        let mut delta = Delta::zero();
+        let stitched = stitched.persist(&mut delta)?;
+        flush_spec(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            stitched.get(&probe, &storage).await?,
+            Some(vec![2]),
+            "the stitch must resolve the shallower (newer) op at the seam"
+        );
+        assert_eq!(stitched.get(&far, &storage).await?, Some(vec![9]));
+        assert_eq!(stitched.get(&after, &storage).await?, Some(vec![7]));
         Ok(())
     }
 }

@@ -18,7 +18,7 @@
 
 use std::collections::HashSet;
 
-use dialog_artifacts::{Artifact, ArtifactStream, Cause, Changes, SortKey, sort_key};
+use dialog_artifacts::{Artifact, ArtifactStream, Cause, Changes, SortKey, default_sort_key};
 use futures_util::{StreamExt, stream};
 
 /// The canonical group key for artifacts traveling through a query stream.
@@ -106,7 +106,7 @@ pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStr
                         break;
                     }
                     Some(Ok(head)) => {
-                        let sk = sort_key(head);
+                        let sk = default_sort_key(head);
                         if min_sort.as_ref().is_none_or(|cur| &sk < cur) {
                             min_sort = Some(sk);
                             min_idx = Some(i);
@@ -151,7 +151,7 @@ pub(crate) fn tombstones_from(changes: &Changes) -> HashSet<SortKey> {
                 is: value.clone(),
                 cause: None,
             };
-            tombstones.insert(sort_key(&artifact));
+            tombstones.insert(default_sort_key(&artifact));
         }
     }
     tombstones
@@ -174,7 +174,7 @@ pub(crate) fn filter_tombstones<'a>(
                     None => return None,
                     Some(Err(e)) => return Some((Err::<Artifact, _>(e), (inner, tombstones))),
                     Some(Ok(artifact)) => {
-                        if tombstones.contains(&sort_key(&artifact)) {
+                        if tombstones.contains(&default_sort_key(&artifact)) {
                             continue;
                         }
                         return Some((Ok(artifact), (inner, tombstones)));
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(tombstones.len(), 1, "only the retract contributes");
         // The lone tombstone matches the retracted artifact.
         let retracted = artifact("id:bob", "test/name", "Bob");
-        assert!(tombstones.contains(&sort_key(&retracted)));
+        assert!(tombstones.contains(&default_sort_key(&retracted)));
         Ok(())
     }
 
@@ -276,7 +276,7 @@ mod tests {
         let keep = artifact("id:a", "test/name", "Keep");
         let drop = artifact("id:b", "test/name", "Drop");
         let mut tombstones = HashSet::new();
-        tombstones.insert(sort_key(&drop));
+        tombstones.insert(default_sort_key(&drop));
 
         let filtered = filter_tombstones(stream_of(vec![keep.clone(), drop]), tombstones);
         let items = collect(filtered).await?;

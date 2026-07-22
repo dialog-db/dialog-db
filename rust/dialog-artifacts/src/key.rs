@@ -8,7 +8,7 @@ use std::ops::{Deref, DerefMut};
 
 use dialog_common::ConditionalSync;
 use dialog_search_tree::{
-    Component as TreeComponent, DialogSearchTreeError, Key as TreeKey, Schema,
+    Component as TreeComponent, DialogSearchTreeError, Key as TreeKey, Manifest, Schema,
 };
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
@@ -86,21 +86,27 @@ pub(crate) const ATTRIBUTE_LENGTH: usize = 64;
 pub(crate) const VALUE_DATA_TYPE_LENGTH: usize = 1;
 
 /// Decides how a [`Value`] is carried in a key: a small value is encoded inline
-/// in its order-preserving form; a value whose encoded form exceeds `inline_n`
-/// spills — its value slot carries the order-preserving encoding of the first
-/// [`spill_prefix`] RAW bytes (a byte-prefix of the full inline encoding, since
-/// escaping is per-byte, so spilled values sort INTO their type band next to
-/// inline ones) and the key gains a trailing 32-byte whole-value hash, which
-/// keeps distinct large values distinct (cardinality-many) and addresses the
-/// archive block. This is the single place the inline-vs-spill decision is
-/// made, so the fact-building path and the selector path agree.
-pub(crate) fn value_payload(value: &Value, inline_n: usize) -> ValuePayload {
+/// in its order-preserving form; a value whose encoded form exceeds
+/// `manifest.inline_n` spills. Its value slot carries the order-preserving
+/// encoding of the first `manifest.spill_prefix` RAW bytes (a byte-prefix of
+/// the full inline encoding, since escaping is per-byte, so spilled values sort
+/// INTO their type band next to inline ones) and the key gains a trailing
+/// 32-byte whole-value hash, which keeps distinct large values distinct
+/// (cardinality-many) and addresses the archive block. This is the single place
+/// the inline-vs-spill decision is made, so the fact-building path and the
+/// selector path agree.
+///
+/// Both constants come from the `manifest` of the tree the key belongs to,
+/// never from a process-wide default: they are properties of the tree being
+/// written, and a reader that used different ones would encode its probe
+/// differently from the stored fact and miss it.
+pub(crate) fn value_payload(value: &Value, manifest: &Manifest) -> ValuePayload {
     let encoded = encode_value_owned(value);
-    if encoded.len() <= inline_n {
+    if encoded.len() <= manifest.inline_n as usize {
         ValuePayload::Inline(encoded)
     } else {
         let raw = value.to_bytes();
-        let take = spill_prefix().min(raw.len());
+        let take = (manifest.spill_prefix as usize).min(raw.len());
         let mut prefix = Vec::new();
         crate::encode_bytes(&raw[..take], &mut prefix);
         ValuePayload::Spilled {
@@ -110,35 +116,24 @@ pub(crate) fn value_payload(value: &Value, inline_n: usize) -> ValuePayload {
     }
 }
 
-/// The inline-vs-spill threshold for value payloads in keys.
+/// The default key format: the [`Manifest`] a tree with no manifest of its own
+/// (an empty tree) would be created under.
 ///
-// TODO(m3.2c): the manifest is now persisted into every node's bytes, and the
-// search tree's coin reads the value-spill threshold FROM the tree's own
-// manifest at edit time (see `dialog_search_tree`'s node envelope and the
-// transient reshape path). This fact-build spill decision, however, still reads
-// `Manifest::default()`, because the artifact key builders decide inline-vs-spill
-// before the tree edit and do not have the tree/manifest in scope. Wiring this to
-// the tree's manifest needs the manifest threaded to the key builders (the
-// commit/key-build path), which is deferred; a non-default tree manifest and this
-// default would then disagree on the spill boundary.
-pub(crate) fn inline_threshold() -> usize {
-    dialog_search_tree::Manifest::default().inline_n as usize
+/// This is a *fallback*, not the answer. The format that governs a given tree
+/// is the manifest of that tree, recovered with
+/// [`PersistentTree::manifest`](dialog_search_tree::PersistentTree::manifest)
+/// and threaded to the key builders. Reach for this default only where no tree
+/// can be in scope, and say why at the call site.
+pub(crate) fn default_manifest() -> Manifest {
+    Manifest::default()
 }
 
-/// How many leading RAW value bytes a spilled value's key carries as its
-/// order-preserving prefix. Prefix and range predicates decide from the key
-/// whenever the answer lies within this many bytes; beyond it, the scan loads
-/// the block and post-filters. Reads the default manifest for the same
-/// reason (and with the same deferral) as [`inline_threshold`].
-pub(crate) fn spill_prefix() -> usize {
-    dialog_search_tree::Manifest::default().spill_prefix as usize
-}
-
-/// Whether `value` spills (its encoded form exceeds the inline threshold, so
-/// the key carries a reference and the payload must carry the raw bytes).
-/// The single source of truth the payload builder and the key builder share.
-pub(crate) fn value_spills(value: &Value) -> bool {
-    value_payload(value, inline_threshold()).is_reference()
+/// Whether `value` spills under `manifest` (its encoded form exceeds
+/// `inline_n`, so the key carries a prefix plus the whole-value hash and the
+/// value's raw bytes must be archived as a block). The single source of truth
+/// the payload builder and the key builder share.
+pub(crate) fn value_spills(value: &Value, manifest: &Manifest) -> bool {
+    value_payload(value, manifest).is_reference()
 }
 
 /// Builds all three index keys — `(EAV, AEV, VAE)` — for an artifact from a
@@ -150,13 +145,16 @@ pub(crate) fn value_spills(value: &Value) -> bool {
 /// other two orderings through `FromKey` (each accessor re-splitting the key)
 /// costs ~ten key walks per instruction; this costs three plain
 /// serializations of the same parts.
-pub(crate) fn artifact_index_keys(artifact: &crate::Artifact) -> (Key, Key, Key) {
+pub(crate) fn artifact_index_keys(
+    artifact: &crate::Artifact,
+    manifest: &Manifest,
+) -> (Key, Key, Key) {
     let mut parts = varkey::KeyParts {
         tag: ENTITY_KEY_TAG,
         entity: artifact.of.as_str().as_bytes().to_vec(),
         attribute: artifact.the.as_str().as_bytes().to_vec(),
         value_type: artifact.is.data_type(),
-        value: value_payload(&artifact.is, inline_threshold()),
+        value: value_payload(&artifact.is, manifest),
         // The fact orderings carry no version; only history/coverage keys do.
         version: None,
     };
@@ -188,15 +186,16 @@ pub(crate) fn reproject_index_keys(
     Ok((eav, aev, vae))
 }
 
-/// The exact value-tail bytes a key carries for `value`: the value-type byte
-/// followed by the value slot (inline order-preserving encoding, or a spilled
-/// value's encoded prefix) and, for a spilled value, the whole-value hash.
+/// The exact value-tail bytes a key carries for `value` under `manifest`: the
+/// value-type byte followed by the value slot (inline order-preserving
+/// encoding, or a spilled value's encoded prefix) and, for a spilled value, the
+/// whole-value hash.
 ///
 /// This is what makes a [`SortKey`](crate::SortKey) reproduce the tree's byte
 /// order: same-`(the, of, type)` facts sort by this tail exactly as the
 /// EAV/AEV/VAE keys do.
-pub(crate) fn value_tail_bytes(value: &Value) -> Vec<u8> {
-    let payload = value_payload(value, inline_threshold());
+pub(crate) fn value_tail_bytes(value: &Value, manifest: &Manifest) -> Vec<u8> {
+    let payload = value_payload(value, manifest);
     let mut tail = Vec::with_capacity(1 + payload.slot_bytes().len());
     tail.push(value.data_type().into());
     tail.extend_from_slice(payload.slot_bytes());
@@ -350,6 +349,13 @@ impl TreeKey for Key {
         self.0.first().copied().unwrap_or(u8::MIN)
     }
 
+    /// The layout is the leading tag byte, readable from the stored bytes
+    /// without reconstructing the key; the novelty encoder classifies whole
+    /// buffers this way before deciding whether a typed parse is needed.
+    fn layout_of(bytes: &[u8]) -> Result<u8, DialogSearchTreeError> {
+        Ok(bytes.first().copied().unwrap_or(u8::MIN))
+    }
+
     fn schema(layout: u8) -> Schema {
         match layout {
             ENTITY_KEY_TAG => Schema::new(EAV_SCHEMA),
@@ -371,6 +377,22 @@ impl TreeKey for Key {
             Some(slices) => out.extend(slices),
             None => out.push(&self.0),
         }
+    }
+
+    fn components_of<'a>(
+        bytes: &'a [u8],
+        _layout: u8,
+        out: &mut Vec<&'a [u8]>,
+    ) -> Result<(), DialogSearchTreeError> {
+        // The same split as `components`, straight from the stored bytes: a
+        // typed key wraps exactly these bytes, so the two agree by
+        // construction, and the encoders can split without reconstructing
+        // (copying) the key first.
+        match varkey::split_components(bytes) {
+            Some(slices) => out.extend(slices),
+            None => out.push(bytes),
+        }
+        Ok(())
     }
 }
 
@@ -410,8 +432,14 @@ pub trait KeyViewMut: KeyView {
     fn set_value(self, value_type: ValueDataType, value: ValuePayload) -> Self;
 
     /// Sets the constrained parts of the given [`ArtifactSelector`] to the associated
-    /// components of this [`KeyView`]
-    fn apply_selector(self, selector: &ArtifactSelector<Constrained>) -> Self {
+    /// components of this [`KeyView`].
+    ///
+    /// `manifest` is the target tree's format. It must be the manifest the
+    /// stored facts were WRITTEN under, or a value-constrained bound is built
+    /// with the wrong payload shape (a different `inline_n` changes whether the
+    /// bound spills, and a different `spill_prefix` changes how much of it the
+    /// key carries) and the range brackets the wrong keys.
+    fn apply_selector(self, selector: &ArtifactSelector<Constrained>, manifest: &Manifest) -> Self {
         let mut key = self;
 
         if let Some(entity) = selector.entity() {
@@ -427,7 +455,7 @@ pub trait KeyViewMut: KeyView {
         // the fact-building path uses, so a value range narrows to the exact
         // value. The type and payload (with its spill flag) are set together.
         if let Some(value) = selector.value() {
-            key = key.set_value(value.data_type(), value_payload(value, inline_threshold()));
+            key = key.set_value(value.data_type(), value_payload(value, manifest));
         }
 
         key
@@ -469,9 +497,10 @@ pub trait KeyView: Sized + Clone {
 /// This trait enables the creation of key views that match the constraints
 /// specified in an artifact selector, used during query range construction.
 pub trait FromSelector: KeyViewConstruct {
-    /// Creates a key view from an artifact selector's constraints.
-    fn from_selector(selector: &ArtifactSelector<Constrained>) -> Self {
-        Self::default().apply_selector(selector)
+    /// Creates a key view from an artifact selector's constraints, under the
+    /// target tree's format `manifest`.
+    fn from_selector(selector: &ArtifactSelector<Constrained>, manifest: &Manifest) -> Self {
+        Self::default().apply_selector(selector, manifest)
     }
 }
 
@@ -542,7 +571,8 @@ mod tests {
     use std::str::FromStr;
 
     use super::{
-        AttributeKey, EntityKey, FromKey, KeyView, ValueKey, inline_threshold, value_payload,
+        AttributeKey, EntityKey, FromKey, KeyView, Manifest, ValueKey, default_manifest,
+        value_payload,
     };
     use crate::{Artifact, Attribute, Entity, Value, decode_value, key::varkey::ValuePayload};
 
@@ -589,9 +619,9 @@ mod tests {
         for value in values {
             let fact = fact(value.clone());
             let keys = [
-                EntityKey::from(&fact).into_key(),
-                AttributeKey::from(&fact).into_key(),
-                ValueKey::from(&fact).into_key(),
+                EntityKey::from_artifact(&fact, &default_manifest()).into_key(),
+                AttributeKey::from_artifact(&fact, &default_manifest()).into_key(),
+                ValueKey::from_artifact(&fact, &default_manifest()).into_key(),
             ];
             for key in keys {
                 assert!(
@@ -622,14 +652,21 @@ mod tests {
     /// (cardinality-many must not collapse).
     #[dialog_common::test]
     async fn it_sorts_spilled_values_into_their_type_band() -> anyhow::Result<()> {
-        let big = "z".repeat(inline_threshold() + 1);
-        let spilled_key = EntityKey::from(&fact(Value::String(big.clone()))).into_key();
+        let big = "z".repeat(default_manifest().inline_n as usize + 1);
+        let spilled_key =
+            EntityKey::from_artifact(&fact(Value::String(big.clone())), &default_manifest())
+                .into_key();
 
         // In-band neighbors: ordered by leading value bytes, not banished
         // above the type band.
-        let below = EntityKey::from(&fact(Value::String("y-below".into()))).into_key();
-        let shorter = EntityKey::from(&fact(Value::String("zz".into()))).into_key();
-        let next_band = EntityKey::from(&fact(Value::UnsignedInt(1))).into_key();
+        let below =
+            EntityKey::from_artifact(&fact(Value::String("y-below".into())), &default_manifest())
+                .into_key();
+        let shorter =
+            EntityKey::from_artifact(&fact(Value::String("zz".into())), &default_manifest())
+                .into_key();
+        let next_band =
+            EntityKey::from_artifact(&fact(Value::UnsignedInt(1)), &default_manifest()).into_key();
         assert!(
             below < spilled_key,
             "sorts by leading bytes within the band"
@@ -645,8 +682,9 @@ mod tests {
 
         // Cardinality-many: two large values sharing their entire key-prefix
         // differ only in the trailing hash — distinct keys, both spilled.
-        let sibling = format!("{}A", "z".repeat(inline_threshold() + 1));
-        let sibling_key = EntityKey::from(&fact(Value::String(sibling))).into_key();
+        let sibling = format!("{}A", "z".repeat(default_manifest().inline_n as usize + 1));
+        let sibling_key =
+            EntityKey::from_artifact(&fact(Value::String(sibling)), &default_manifest()).into_key();
         assert_ne!(
             spilled_key, sibling_key,
             "same-prefix large values stay distinct via the trailing hash"
@@ -673,7 +711,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_round_trips_a_small_value_inline() -> anyhow::Result<()> {
         let value = Value::String("Alice".into());
-        let key = EntityKey::from(&fact(value.clone()));
+        let key = EntityKey::from_artifact(&fact(value.clone()), &default_manifest());
 
         assert!(!key.value_is_spilled(), "a small value stays inline");
         assert_eq!(key.value_type(), value.data_type());
@@ -692,9 +730,9 @@ mod tests {
         let value = Value::UnsignedInt(1234);
         let fact = fact(value.clone());
 
-        let eav = EntityKey::from(&fact);
-        let aev = AttributeKey::from(&fact);
-        let vae = ValueKey::from(&fact);
+        let eav = EntityKey::from_artifact(&fact, &default_manifest());
+        let aev = AttributeKey::from_artifact(&fact, &default_manifest());
+        let vae = ValueKey::from_artifact(&fact, &default_manifest());
 
         assert_eq!(eav.value_payload(), aev.value_payload());
         assert_eq!(eav.value_payload(), vae.value_payload());
@@ -716,7 +754,12 @@ mod tests {
     async fn it_spills_above_the_inline_threshold() -> anyhow::Result<()> {
         // A tiny threshold forces even a short string to spill.
         let value = Value::String("this-string-exceeds-a-tiny-threshold".into());
-        let spilled = value_payload(&value, 4);
+        // A tiny inline_n forces even a short string to spill.
+        let tiny = Manifest {
+            inline_n: 4,
+            ..Manifest::default()
+        };
+        let spilled = value_payload(&value, &tiny);
         assert!(spilled.is_reference(), "oversized value spills");
         let ValuePayload::Spilled { prefix, hash } = &spilled else {
             panic!("expected a spilled payload");
@@ -724,14 +767,21 @@ mod tests {
         assert_eq!(hash.as_slice(), value.to_reference().as_slice());
         let raw = value.to_bytes();
         let mut expected = Vec::new();
-        crate::encode_bytes(&raw[..raw.len().min(super::spill_prefix())], &mut expected);
+        crate::encode_bytes(
+            &raw[..raw.len().min(default_manifest().spill_prefix as usize)],
+            &mut expected,
+        );
         assert_eq!(
             prefix, &expected,
             "the slot keeps the encoded leading raw bytes"
         );
 
         // Under a generous threshold the same value stays inline.
-        let inline = value_payload(&value, 4096);
+        let generous = Manifest {
+            inline_n: 4096,
+            ..Manifest::default()
+        };
+        let inline = value_payload(&value, &generous);
         assert!(matches!(inline, ValuePayload::Inline(_)), "fits inline");
         Ok(())
     }
@@ -741,8 +791,9 @@ mod tests {
     /// trailing 32 bytes are the whole-value hash.
     #[dialog_common::test]
     async fn it_builds_a_spilled_key_with_prefix_and_trailing_hash() -> anyhow::Result<()> {
-        let value = Value::String("x".repeat(inline_threshold() + 1));
-        let key = EntityKey::from(&fact(value.clone()));
+        let manifest = default_manifest();
+        let value = Value::String("x".repeat(manifest.inline_n as usize + 1));
+        let key = EntityKey::from_artifact(&fact(value.clone()), &manifest);
 
         assert!(key.value_is_spilled(), "an oversized value spills the key");
         assert_eq!(
@@ -752,7 +803,7 @@ mod tests {
         );
         let raw = value.to_bytes();
         let mut expected = Vec::new();
-        crate::encode_bytes(&raw[..super::spill_prefix()], &mut expected);
+        crate::encode_bytes(&raw[..manifest.spill_prefix as usize], &mut expected);
         assert_eq!(
             key.value_payload(),
             expected.as_slice(),

@@ -29,7 +29,13 @@
 use rkyv::{Archive, Deserialize, Serialize};
 
 /// The current format version. Bump when any format constant's meaning or a
-/// node encoding changes.
+/// node encoding changes AFTER data in the prior format has shipped; format
+/// evolution before the first ship stays at version 1, since there is no
+/// stored data anywhere for a bump to protect.
+///
+/// Version 1 includes: per-child-link novelty grouping with each link's
+/// buffer encoded via the segment codec (schema-split columns, per-buffer
+/// dictionaries, front-coded arenas, op polarity as a column).
 pub const FORMAT_VERSION: u8 = 1;
 
 /// The branching parameter as `n`, where the geometric split factor (expected

@@ -555,8 +555,12 @@ impl<'a> Pull<'a> {
                     Vec::new(),
                 );
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
+                // The record's key carries its value through the tree's own
+                // inline-vs-spill threshold, so read it off the tree rather
+                // than assuming the default.
+                let manifest = merged.format_manifest(store.clone(), &delta).await?;
                 merged
-                    .record(&mut store, &mut delta, record.entries()?)
+                    .record(&mut store, &mut delta, record.entries(&manifest)?)
                     .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 let mut context = local_context.clone();
@@ -708,8 +712,12 @@ impl<'a> Pull<'a> {
                     Vec::new(),
                 );
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
+                // The record's key carries its value through the tree's own
+                // inline-vs-spill threshold, so read it off the tree rather
+                // than assuming the default.
+                let manifest = merged.format_manifest(store.clone(), &delta).await?;
                 merged
-                    .record(&mut store, &mut delta, record.entries()?)
+                    .record(&mut store, &mut delta, record.entries(&manifest)?)
                     .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 let mut context = local_context.clone();
@@ -854,8 +862,12 @@ impl<'a> Pull<'a> {
                     Vec::new(),
                 );
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
+                // The record's key carries its value through the tree's own
+                // inline-vs-spill threshold, so read it off the tree rather
+                // than assuming the default.
+                let manifest = merged.format_manifest(store.clone(), &delta).await?;
                 merged
-                    .record(&mut store, &mut delta, record.entries()?)
+                    .record(&mut store, &mut delta, record.entries(&manifest)?)
                     .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 // The minted head publishes its watermark: the merged

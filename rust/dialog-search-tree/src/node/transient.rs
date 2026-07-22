@@ -8,10 +8,13 @@ use rkyv::{
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
+use std::collections::BTreeMap;
+use std::ops::Bound;
 
 use crate::{
-    ArchivedNodeBody, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Key, Link,
-    Manifest, Node, PersistentNode, PersistentNodeBody, Rank, Value, into_owned,
+    ArchivedIndex, ArchivedNodeBody, Buffer, Delta, DialogSearchTreeError, Distribution, Entry,
+    Key, Link, Manifest, Node, NoveltyBuffer, NoveltyEntry, NoveltyOp, PersistentNode,
+    PersistentNodeBody, Rank, Value, into_owned, resolve_pending,
 };
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
@@ -34,7 +37,7 @@ pub enum TransientNode<Key, Value> {
     Segment(TransientSegment<Key, Value>),
 }
 
-/// An index node holding live child nodes.
+/// An index node holding live child nodes and a novelty buffer.
 ///
 /// An index carries no separator of its own: its separator is by definition
 /// its first child's separator (the seam at any node's left edge is the seam
@@ -44,6 +47,638 @@ pub enum TransientNode<Key, Value> {
 pub struct TransientIndex<Key, Value> {
     /// The child nodes, each persistent or transient.
     pub children: Vec<Node<Key, Value>>,
+    /// Ops pending against this subtree, grouped per child link (the node's
+    /// novelty), mirroring the stored form.
+    ///
+    /// A canonical edit (insert/delete) never introduces novelty, so on that
+    /// path this is always empty and flows through reshape untouched. It
+    /// becomes non-empty only on the hitchhiker write/flush path, where every
+    /// op routes to its link when it is enqueued (the same lower-bound rule
+    /// stored routing uses), so a flush hands each child its link's buffer
+    /// verbatim and no later partition step exists.
+    ///
+    /// Any structural change to `children` (a splice, a regroup, a fusion)
+    /// must first take the buffered ops out via
+    /// [`Novelty::take_all`] and re-route them onto whatever nodes replace
+    /// this one; the reshape paths do exactly that through `carry_novelty`.
+    pub novelty: Novelty<Value>,
+}
+
+/// One child link's buffered ops in transient form.
+///
+/// The two variants are the cache discipline made structural: a link is
+/// either **sealed**, carrying exactly the stored columnar encoding it was
+/// opened with and untouched by any write since, or **open**, lifted to
+/// decoded entries because a write reached it. A sealed buffer is embedded
+/// into the next persist verbatim (no decode at open, no re-encode at
+/// persist); only an open buffer pays a fresh encode. There is no separate
+/// dirty flag to forget: mutating requires lifting, and lifting discards the
+/// sealed encoding.
+#[derive(Debug)]
+enum LinkNovelty<Value> {
+    /// The stored encoding, exactly as persisted, untouched since open.
+    Sealed(NoveltyBuffer<Value>),
+    /// Decoded ops, sorted by key with the newest op for a key last.
+    Open(Vec<NoveltyEntry<Value>>),
+}
+
+impl<Value> LinkNovelty<Value>
+where
+    Value: self::Value,
+{
+    /// The number of ops buffered at this link.
+    fn len(&self) -> usize {
+        match self {
+            LinkNovelty::Sealed(buffer) => buffer.count as usize,
+            LinkNovelty::Open(entries) => entries.len(),
+        }
+    }
+
+    /// Lifts this link to its decoded entries for mutation, decoding a sealed
+    /// buffer. The sealed encoding is discarded: from here on this link's
+    /// buffer is re-encoded at persist, which is exactly the invalidation the
+    /// cache needs.
+    fn lift<K>(&mut self) -> Result<&mut Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        if let LinkNovelty::Sealed(buffer) = self {
+            *self = LinkNovelty::Open(buffer.entries::<K>()?);
+        }
+        match self {
+            LinkNovelty::Open(entries) => Ok(entries),
+            LinkNovelty::Sealed(_) => unreachable!("sealed buffer was lifted above"),
+        }
+    }
+
+    /// Takes this link's ops, leaving it empty.
+    fn take<K>(&mut self) -> Result<Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        match std::mem::replace(self, LinkNovelty::Open(Vec::new())) {
+            LinkNovelty::Sealed(buffer) => buffer.entries::<K>(),
+            LinkNovelty::Open(entries) => Ok(entries),
+        }
+    }
+
+    /// Whether this link buffers an op for `key`.
+    #[cfg(debug_assertions)]
+    fn contains<K>(&self, key: &[u8]) -> Result<bool, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        match self {
+            LinkNovelty::Sealed(buffer) => Ok(buffer.resolve::<K>(key)?.is_some()),
+            LinkNovelty::Open(entries) => Ok(resolve_pending(entries, key).is_some()),
+        }
+    }
+}
+
+/// A transient index node's buffered ops, grouped per child link.
+///
+/// Grouping happens when an op is enqueued (one binary search over the
+/// children's separators, the same rule [`ArchivedIndex::route`] applies to
+/// stored nodes), and each link's buffer is held as a [`LinkNovelty`]:
+/// sealed while untouched, lifted to decoded entries by the first write that
+/// reaches it. Links are indexed positionally against the node's children; a
+/// missing tail entry is an empty buffer.
+///
+/// Within one buffer the entries are sorted by key and the newest op for a
+/// key is last; across links the concatenation in child order is the flat
+/// sorted op list, since links partition the key space in order.
+#[derive(Debug)]
+pub struct Novelty<Value> {
+    /// One buffer per child link, positionally aligned with the node's
+    /// children; the vec may be shorter than the child list (absent tail
+    /// buffers are empty).
+    links: Vec<LinkNovelty<Value>>,
+    /// Total buffered ops across every link, so capacity triggers read a
+    /// number instead of scanning.
+    total: usize,
+}
+
+impl<Value> Default for Novelty<Value> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<Value> Novelty<Value> {
+    /// An empty novelty set.
+    pub fn new() -> Self {
+        Self {
+            links: Vec::new(),
+            total: 0,
+        }
+    }
+
+    /// Total buffered ops across every link.
+    pub fn len(&self) -> usize {
+        self.total
+    }
+
+    /// Whether no link buffers anything.
+    pub fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+}
+
+impl<Value> Novelty<Value>
+where
+    Value: self::Value,
+{
+    /// The largest number of ops buffered at any single link: the quantity
+    /// the `PerChild` flush trigger thresholds on, read from per-link lengths
+    /// rather than re-routing every op.
+    pub(crate) fn peak(&self) -> usize {
+        self.links.iter().map(LinkNovelty::len).max().unwrap_or(0)
+    }
+
+    /// How many links still carry their sealed stored encoding.
+    #[cfg(test)]
+    pub(crate) fn sealed_links(&self) -> usize {
+        self.links
+            .iter()
+            .filter(|link| matches!(link, LinkNovelty::Sealed(_)))
+            .count()
+    }
+
+    /// Lifts every sealed link to decoded entries, discarding all cached
+    /// encodings, so a persist after this re-encodes every buffer from
+    /// scratch. Exists for the byte-identity pin: the cached path and the
+    /// fresh path must produce the same node bytes.
+    #[cfg(test)]
+    pub(crate) fn lift_all<K>(&mut self) -> Result<(), DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        for link in &mut self.links {
+            link.lift::<K>()?;
+        }
+        Ok(())
+    }
+
+    /// The link buffer at `at`, growing the positional vec with empty
+    /// buffers as needed.
+    fn link_mut(&mut self, at: usize) -> &mut LinkNovelty<Value> {
+        if self.links.len() <= at {
+            self.links
+                .resize_with(at + 1, || LinkNovelty::Open(Vec::new()));
+        }
+        &mut self.links[at]
+    }
+
+    /// Routes `incoming` ops into their link buffers by the children's
+    /// bounds (see [`link_bounds`]): one binary search per op, the same
+    /// lower-bound rule stored routing uses, with a key below every bound
+    /// clamping into link 0. Only the touched links are lifted and re-sorted;
+    /// the stable sort keeps existing ops before incoming ones for equal
+    /// keys, so the newest op for a key stays last.
+    pub(crate) fn route<K>(
+        &mut self,
+        bounds: &[&[u8]],
+        incoming: Vec<NoveltyEntry<Value>>,
+    ) -> Result<(), DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        if incoming.is_empty() {
+            return Ok(());
+        }
+        let mut buckets: BTreeMap<usize, Vec<NoveltyEntry<Value>>> = BTreeMap::new();
+        for entry in incoming {
+            let at = bounds.partition_point(|separator| *separator <= entry.key.as_slice());
+            buckets.entry(at).or_default().push(entry);
+        }
+        for (at, bucket) in buckets {
+            self.total += bucket.len();
+            let entries = self.link_mut(at).lift::<K>()?;
+            entries.extend(bucket);
+            entries.sort_by(|left, right| left.key.cmp(&right.key));
+        }
+        Ok(())
+    }
+
+    /// The winning buffered op for `key` at link `at` (the link that routes
+    /// the key), or `None` when the key is not buffered there. A sealed link
+    /// resolves against its encoded columns without lifting anything.
+    pub(crate) fn resolve<K>(
+        &self,
+        at: usize,
+        key: &[u8],
+    ) -> Result<Option<NoveltyOp<Value>>, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        match self.links.get(at) {
+            None => Ok(None),
+            Some(LinkNovelty::Sealed(buffer)) => buffer.resolve::<K>(key),
+            Some(LinkNovelty::Open(entries)) => Ok(resolve_pending(entries, key).cloned()),
+        }
+    }
+
+    /// Takes link `at`'s ops, leaving that buffer empty: what a flush hands
+    /// the child at `at`, verbatim: the grouping already happened at
+    /// enqueue, so there is no partition step here.
+    pub(crate) fn take_link<K>(
+        &mut self,
+        at: usize,
+    ) -> Result<Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        match self.links.get_mut(at) {
+            None => Ok(Vec::new()),
+            Some(link) => {
+                let taken = link.take::<K>()?;
+                self.total -= taken.len();
+                Ok(taken)
+            }
+        }
+    }
+
+    /// Takes every buffered op, concatenated in link order (the flat sorted
+    /// op list, since links partition the key space in order and each buffer
+    /// is sorted), leaving the set empty. The form the reshape paths carry
+    /// and re-route, and the drain a canonicalize replays.
+    pub(crate) fn take_all<K>(&mut self) -> Result<Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        let mut out = Vec::with_capacity(self.total);
+        for link in &mut self.links {
+            out.extend(link.take::<K>()?);
+        }
+        self.links.clear();
+        self.total = 0;
+        Ok(out)
+    }
+
+    /// Drops every op buffered for `key` at link `at` (the link that routes
+    /// the key). A canonical edit descending past this node supersedes any op
+    /// it buffers for the same key; a link that does not buffer the key is
+    /// left untouched (sealed stays sealed).
+    pub(crate) fn remove_key<K>(
+        &mut self,
+        at: usize,
+        key: &[u8],
+    ) -> Result<(), DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        #[cfg(debug_assertions)]
+        for (other, link) in self.links.iter().enumerate() {
+            if other != at {
+                debug_assert!(
+                    !link.contains::<K>(key).unwrap_or(false),
+                    "an op for a key may live only at the link that routes it"
+                );
+            }
+        }
+        let Some(link) = self.links.get_mut(at) else {
+            return Ok(());
+        };
+        let present = match link {
+            LinkNovelty::Sealed(buffer) => buffer.resolve::<K>(key)?.is_some(),
+            LinkNovelty::Open(entries) => resolve_pending(entries, key).is_some(),
+        };
+        if !present {
+            return Ok(());
+        }
+        let entries = link.lift::<K>()?;
+        let before = entries.len();
+        entries.retain(|entry| entry.key.as_slice() != key);
+        self.total -= before - entries.len();
+        Ok(())
+    }
+
+    /// Re-homes ops after the separator at link `at`'s left edge moved to
+    /// `bound` (a min-move edit in the subtree below). A rise strands ops in
+    /// link `at` whose keys now sort below the bound: they belong to link
+    /// `at - 1`, and every such key sorts after everything already buffered
+    /// there (those keys sat below the OLD separator), so appending keeps
+    /// that buffer sorted. A drop (possible under distributions whose floor
+    /// rule is not monotone, like the test spec's) strands ops in link
+    /// `at - 1` whose keys now sort at or above the bound: they belong to
+    /// link `at` and sort before everything already buffered there, so they
+    /// prepend. The two moved ranges are disjoint from their destinations'
+    /// keys, so no precedence question arises, and links with nothing to
+    /// move stay sealed.
+    pub(crate) fn reroute_boundary<K>(
+        &mut self,
+        at: usize,
+        bound: &[u8],
+    ) -> Result<(), DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        if at == 0 {
+            return Ok(());
+        }
+
+        // A risen bound: the leading ops of link `at` fall below it now.
+        let strays_below = match self.links.get(at) {
+            None => false,
+            Some(LinkNovelty::Open(entries)) => entries
+                .first()
+                .is_some_and(|entry| entry.key.as_slice() < bound),
+            Some(LinkNovelty::Sealed(buffer)) => match buffer.keys::<K>()?.next_key()? {
+                Some((_, key)) => key < bound,
+                None => false,
+            },
+        };
+        if strays_below {
+            let entries = self.links[at].lift::<K>()?;
+            let split = entries.partition_point(|entry| entry.key.as_slice() < bound);
+            let moved: Vec<NoveltyEntry<Value>> = entries.drain(..split).collect();
+            let left = self.link_mut(at - 1).lift::<K>()?;
+            left.extend(moved);
+            debug_assert!(
+                left.windows(2).all(|pair| pair[0].key <= pair[1].key),
+                "re-homed ops must keep the left buffer sorted"
+            );
+            return Ok(());
+        }
+
+        // A dropped bound: the trailing ops of link `at - 1` reach it now.
+        let strays_above = match self.links.get(at - 1) {
+            None => false,
+            Some(LinkNovelty::Open(entries)) => entries
+                .last()
+                .is_some_and(|entry| entry.key.as_slice() >= bound),
+            Some(LinkNovelty::Sealed(buffer)) => {
+                let mut keys = buffer.keys::<K>()?;
+                let mut last = None;
+                while let Some((_, key)) = keys.next_key()? {
+                    last = Some(key.to_vec());
+                }
+                last.is_some_and(|key| key.as_slice() >= bound)
+            }
+        };
+        if strays_above {
+            let entries = self.links[at - 1].lift::<K>()?;
+            let split = entries.partition_point(|entry| entry.key.as_slice() < bound);
+            let moved: Vec<NoveltyEntry<Value>> = entries.drain(split..).collect();
+            let right = self.link_mut(at).lift::<K>()?;
+            right.splice(0..0, moved);
+            debug_assert!(
+                right.windows(2).all(|pair| pair[0].key <= pair[1].key),
+                "re-homed ops must keep the right buffer sorted"
+            );
+        }
+        Ok(())
+    }
+
+    /// Appends the winning op per key whose key falls within the bounds, per
+    /// link in link order (ascending key order). Within one buffer the last
+    /// op for a key wins; a sealed link streams its keys and decodes only the
+    /// winners' values.
+    pub(crate) fn collect_winners_in_range<K>(
+        &self,
+        start: Bound<&[u8]>,
+        end: Bound<&[u8]>,
+        out: &mut Vec<NoveltyEntry<Value>>,
+    ) -> Result<(), DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        for link in &self.links {
+            match link {
+                LinkNovelty::Open(entries) => {
+                    // Buffers are sorted by key, so the in-range ops are a
+                    // contiguous run: seek to its start rather than walking
+                    // the whole buffer.
+                    let from = match start {
+                        Bound::Included(bound) => {
+                            entries.partition_point(|entry| entry.key.as_slice() < bound)
+                        }
+                        Bound::Excluded(bound) => {
+                            entries.partition_point(|entry| entry.key.as_slice() <= bound)
+                        }
+                        Bound::Unbounded => 0,
+                    };
+                    let mut at = from;
+                    while at < entries.len() {
+                        match end {
+                            Bound::Included(bound) if entries[at].key.as_slice() > bound => break,
+                            Bound::Excluded(bound) if entries[at].key.as_slice() >= bound => break,
+                            _ => {}
+                        }
+                        let mut last = at;
+                        while last + 1 < entries.len() && entries[last + 1].key == entries[at].key {
+                            last += 1;
+                        }
+                        out.push(entries[last].clone());
+                        at = last + 1;
+                    }
+                }
+                LinkNovelty::Sealed(buffer) => {
+                    let mut keys = buffer.keys::<K>()?;
+                    // The pending winner: the last-seen index for the current
+                    // key, flushed when the key changes or the scan ends.
+                    let mut winner: Option<(usize, Vec<u8>)> = None;
+                    while let Some((at, key)) = keys.next_key()? {
+                        let after_start = match start {
+                            Bound::Included(bound) => key >= bound,
+                            Bound::Excluded(bound) => key > bound,
+                            Bound::Unbounded => true,
+                        };
+                        if !after_start {
+                            continue;
+                        }
+                        let in_range = match end {
+                            Bound::Included(bound) => key <= bound,
+                            Bound::Excluded(bound) => key < bound,
+                            Bound::Unbounded => true,
+                        };
+                        if !in_range {
+                            break;
+                        }
+                        match &mut winner {
+                            Some((winning, current)) if current.as_slice() == key => *winning = at,
+                            _ => {
+                                if let Some((winning, current)) = winner.take() {
+                                    out.push(NoveltyEntry {
+                                        key: current,
+                                        op: buffer.op_at(winning)?,
+                                    });
+                                }
+                                winner = Some((at, key.to_vec()));
+                            }
+                        }
+                    }
+                    if let Some((winning, current)) = winner {
+                        out.push(NoveltyEntry {
+                            key: current,
+                            op: buffer.op_at(winning)?,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Converts the set into the stored per-link buffers for persist, in
+    /// ascending child order: a sealed buffer is reused verbatim (only its
+    /// child index is restamped, since siblings may have shifted it) and only
+    /// an open buffer pays a fresh encode. Ops buffered beyond the node's
+    /// links mark a broken grouping invariant and error rather than dropping
+    /// writes.
+    pub(crate) fn into_buffers<K>(
+        self,
+        links: &[Link],
+    ) -> Result<Vec<NoveltyBuffer<Value>>, DialogSearchTreeError>
+    where
+        K: self::Key,
+        Value: for<'a> Serialize<
+            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+        >,
+    {
+        let mut buffers = Vec::new();
+        for (at, link) in self.links.into_iter().enumerate() {
+            if at >= links.len() {
+                if link.len() == 0 {
+                    continue;
+                }
+                return Err(DialogSearchTreeError::Node(
+                    "Novelty was buffered beyond the node's links".into(),
+                ));
+            }
+            let buffer = match link {
+                LinkNovelty::Open(entries) => {
+                    if entries.is_empty() {
+                        continue;
+                    }
+                    NoveltyBuffer::from_entries::<K>(at as u32, entries)?
+                }
+                LinkNovelty::Sealed(mut sealed) => {
+                    sealed.child = at as u32;
+                    // The cache's whole contract: the sealed bytes must be
+                    // exactly what a fresh encode of the same ops produces.
+                    // Verified on every debug persist, pinned by test in
+                    // release.
+                    #[cfg(debug_assertions)]
+                    {
+                        let fresh =
+                            NoveltyBuffer::from_entries::<K>(sealed.child, sealed.entries::<K>()?)?;
+                        let sealed_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&sealed)
+                            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+                        let fresh_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fresh)
+                            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+                        debug_assert_eq!(
+                            sealed_bytes.as_slice(),
+                            fresh_bytes.as_slice(),
+                            "a sealed buffer must persist byte-identical to a fresh encode"
+                        );
+                    }
+                    sealed
+                }
+            };
+            #[cfg(debug_assertions)]
+            debug_assert_grouped::<K, Value>(&buffer, at, links)?;
+            buffers.push(buffer);
+        }
+        Ok(buffers)
+    }
+}
+
+impl<Value> Novelty<Value>
+where
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+{
+    /// Opens a stored index node's novelty into the transient grouped form.
+    ///
+    /// Each stored buffer stays SEALED: its encoded columns and values are
+    /// carried over as one bulk copy, with no columnar decode, no key
+    /// reconstruction, and no per-entry allocation. A buffer is decoded only
+    /// if and when a write touches its link; an untouched buffer flows back
+    /// into the next persist byte-identical, never re-encoded.
+    pub(crate) fn open(index: &ArchivedIndex<Value>) -> Result<Self, DialogSearchTreeError> {
+        let mut links: Vec<LinkNovelty<Value>> = Vec::new();
+        let mut total = 0usize;
+        let mut previous: Option<usize> = None;
+        for buffer in index.novelty.iter() {
+            let child = buffer.child.to_native() as usize;
+            // Strictly ascending child order and in-range children, the same
+            // validation the flat decode performed; a violation marks the
+            // node corrupt.
+            if previous.is_some_and(|previous| child <= previous) || child >= index.len() {
+                return Err(DialogSearchTreeError::Encoding(
+                    "Novelty buffers are not in ascending child order".into(),
+                ));
+            }
+            previous = Some(child);
+            total += buffer.checked_count()?;
+            let sealed: NoveltyBuffer<Value> = rkyv::deserialize::<_, rkyv::rancor::Error>(buffer)
+                .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+            if links.len() <= child {
+                links.resize_with(child + 1, || LinkNovelty::Open(Vec::new()));
+            }
+            links[child] = LinkNovelty::Sealed(sealed);
+        }
+        Ok(Self { links, total })
+    }
+}
+
+/// Verifies (debug only) that a persisted buffer's keys lie within its
+/// link's range `[sep(at), sep(at + 1))`: the grouping invariant enqueue-time
+/// routing maintains and every reader relies on.
+#[cfg(debug_assertions)]
+fn debug_assert_grouped<K, Value>(
+    buffer: &NoveltyBuffer<Value>,
+    at: usize,
+    links: &[Link],
+) -> Result<(), DialogSearchTreeError>
+where
+    K: self::Key,
+    Value: self::Value,
+{
+    let mut keys = buffer.keys::<K>()?;
+    let mut first: Option<Vec<u8>> = None;
+    let mut last: Option<Vec<u8>> = None;
+    while let Some((_, key)) = keys.next_key()? {
+        if first.is_none() {
+            first = Some(key.to_vec());
+        }
+        last = Some(key.to_vec());
+    }
+    if at > 0
+        && let Some(first) = &first
+    {
+        debug_assert!(
+            first.as_slice() >= links[at].separator.as_slice(),
+            "a link buffer's keys must not sort below the link's separator"
+        );
+    }
+    if at + 1 < links.len()
+        && let Some(last) = &last
+    {
+        debug_assert!(
+            last.as_slice() < links[at + 1].separator.as_slice(),
+            "a link buffer's keys must sort below the next link's separator"
+        );
+    }
+    Ok(())
+}
+
+/// The routing bounds of an index's children: the separators of every child
+/// after the first, in child order. Child `at` covers `[sep(at), sep(at + 1))`
+/// under the lower-bound convention, so the number of bounds at or below a key
+/// is the child covering it, with a key below every bound clamping into child
+/// 0, the same rule [`ArchivedIndex::route`] applies to stored nodes.
+pub(crate) fn link_bounds<Key, Value>(
+    children: &[Node<Key, Value>],
+) -> Result<Vec<&[u8]>, DialogSearchTreeError> {
+    children
+        .iter()
+        .skip(1)
+        .map(|child| child.separator())
+        .collect()
 }
 
 /// A leaf segment holding live key-value entries.
@@ -65,6 +700,11 @@ impl<Key, Value> TransientNode<Key, Value> {
     /// seam at a node's left edge is its leftmost leaf's seam, so the same
     /// string propagates upward unchanged). Errors on an empty index, which
     /// violates the node invariant.
+    ///
+    /// Stored content only: a node's novelty is deliberately excluded, since
+    /// a separator is both a routing key and a rank input, so letting a
+    /// pending op move it would reshape the tree as a side effect of
+    /// buffering.
     pub fn separator(&self) -> Result<&[u8], DialogSearchTreeError> {
         match self {
             TransientNode::Segment(segment) => Ok(segment.separator.as_slice()),
@@ -153,8 +793,8 @@ where
     Key: self::Key,
     Value: self::Value,
     Value::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
 {
     /// Opens an index [`PersistentNode`] one level into a [`TransientIndex`].
     ///
@@ -166,13 +806,20 @@ where
     pub fn open_index(
         node: &PersistentNode<Key, Value>,
     ) -> Result<TransientIndex<Key, Value>, DialogSearchTreeError> {
-        let children = node
-            .as_index()?
+        let index = node.as_index()?;
+        let children = index
             .links()?
             .into_iter()
             .map(Node::Persistent)
             .collect::<Vec<Node<Key, Value>>>();
-        Ok(TransientIndex { children })
+        // Carry the node's novelty across to the transient form so a flush or
+        // canonicalize can act on it. The stored form is already grouped per
+        // child link, and the grouping survives verbatim: every buffer stays
+        // sealed (its encoded bytes bulk-copied, nothing decoded) until a
+        // write touches its link, so an untouched buffer costs no decode here
+        // and no re-encode at the next persist.
+        let novelty = Novelty::open(index)?;
+        Ok(TransientIndex { children, novelty })
     }
 }
 
@@ -238,8 +885,11 @@ where
     /// For a segment, the entries are encoded directly. For an index, each
     /// child is resolved to a [`Link`] first (a [`Node::Transient`] child
     /// recurses and serializes; a [`Node::Persistent`] child already is a
-    /// link), so the index's body holds only links. This makes no shape
-    /// decisions: the children and entries are encoded exactly as the edits
+    /// link), and the node's novelty, already grouped per child link at
+    /// enqueue time, is embedded buffer by buffer: a sealed buffer's stored
+    /// encoding is reused verbatim, and only the links a write touched are
+    /// freshly encoded with the segment codec. This makes no shape decisions:
+    /// the children, novelty, and entries are encoded exactly as the edits
     /// left them.
     pub fn persist(
         self,
@@ -250,13 +900,13 @@ where
             TransientNode::Segment(segment) => {
                 PersistentNodeBody::segment_from_entries(segment.entries, *manifest)?
             }
-            TransientNode::Index(index) => {
-                let links = index
-                    .children
+            TransientNode::Index(TransientIndex { children, novelty }) => {
+                let links = children
                     .into_iter()
                     .map(|child| child.into_link(delta, manifest))
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
-                PersistentNodeBody::index_from_links(links, *manifest)?
+                let buffers = novelty.into_buffers::<Key>(&links)?;
+                PersistentNodeBody::index_from_buffers(links, buffers, *manifest)?
             }
         };
 
@@ -310,12 +960,16 @@ where
     let mut groups: Vec<Node<Key, Value>> = vec![];
     let mut pending: Vec<Node<Key, Value>> = vec![];
 
+    // Reshaping produces canonical index nodes: novelty lives on the nodes
+    // the write path buffered it at, and a regrouped node is a fresh one, so
+    // it starts empty. A flush is what moves buffered ops downward.
     for child in children {
         let rank = D::seam_rank(child.separator()?, manifest);
         if rank > threshold && !pending.is_empty() {
             groups.push(
                 TransientNode::Index(TransientIndex {
                     children: std::mem::take(&mut pending),
+                    novelty: Novelty::new(),
                 })
                 .into(),
             );
@@ -324,7 +978,13 @@ where
     }
 
     if !pending.is_empty() {
-        groups.push(TransientNode::Index(TransientIndex { children: pending }).into());
+        groups.push(
+            TransientNode::Index(TransientIndex {
+                children: pending,
+                novelty: Novelty::new(),
+            })
+            .into(),
+        );
     }
 
     Ok(groups)

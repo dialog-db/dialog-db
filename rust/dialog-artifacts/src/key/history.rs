@@ -46,12 +46,13 @@
 //! tree would drop the trim-and-hash and carry the raw key through — the
 //! head layout here is exactly that future key's prefix.
 
+use dialog_search_tree::Manifest;
 use std::iter::repeat_n;
 
 use crate::artifacts::encode_bytes;
 use crate::history::{EDITION_LENGTH, ORIGIN_LENGTH, VERSION_LENGTH, Version};
+use crate::key::value_payload;
 use crate::key::varkey::{KeyParts, ValuePayload, build_key};
-use crate::key::{inline_threshold, value_payload};
 use crate::{Attribute, Entity, Key, ValueDataType};
 
 /// The leading tag byte of history region keys
@@ -79,9 +80,20 @@ const VERSION_OFFSET: usize = 1;
 
 /// The key at which the record of a claim on `(of, the)` with the given
 /// value type and reference, produced by the revision identified by
-/// `version`, is stored
-pub fn history_key(version: &Version, of: &Entity, the: &Attribute, value: &crate::Value) -> Key {
-    tagged_key(HISTORY_KEY_TAG, version, of, the, value)
+/// `version`, is stored.
+///
+/// `manifest` is the target tree's format. A history record reconstructs its
+/// claim from its key, so this must be the tree's own manifest: under a
+/// different `inline_n` or `spill_prefix` the same claim lands at a different
+/// key and the record is unreachable.
+pub fn history_key(
+    version: &Version,
+    of: &Entity,
+    the: &Attribute,
+    value: &crate::Value,
+    manifest: &Manifest,
+) -> Key {
+    tagged_key(HISTORY_KEY_TAG, version, of, the, value, manifest)
 }
 
 /// The key at which the coverage entry mirroring a covering record is
@@ -161,13 +173,14 @@ fn tagged_key(
     of: &Entity,
     the: &Attribute,
     value: &crate::Value,
+    manifest: &Manifest,
 ) -> Key {
     // The value rides the key inline exactly as it does in the fact
     // orderings, through the same inline-vs-spill decision, so a record
     // reconstructs its claim from its key. Storing a bare reference here
     // would make the value unrecoverable: unlike a spilled fact (whose bytes
     // live in the archive under that reference), nothing else carries it.
-    let payload = value_payload(value, inline_threshold());
+    let payload = value_payload(value, manifest);
     let parts = tagged_parts(tag, version, of, the, value.data_type(), payload);
     Key::from(build_key(&parts))
 }
@@ -230,6 +243,7 @@ pub fn history_key_version(key: &Key) -> Result<Version, crate::DialogArtifactsE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key::default_manifest;
     use crate::key::varkey::parse_key;
     use std::str::FromStr;
     use std::str::from_utf8;
@@ -300,7 +314,13 @@ mod tests {
         let of = Entity::from_str("test:entity")?;
         let the = Attribute::from_str("test/attribute")?;
         let high = Version::new(Origin::from([0xFF; 32]), Edition::new(1));
-        let key = history_key(&high, &of, &the, &crate::Value::String("value".into()));
+        let key = history_key(
+            &high,
+            &of,
+            &the,
+            &crate::Value::String("value".into()),
+            &Manifest::default(),
+        );
         let (min, max) = history_region_range();
         assert!(key >= min, "high-origin key sorts above the region minimum");
         assert!(key <= max, "high-origin key sorts below the region maximum");
@@ -318,7 +338,7 @@ mod tests {
         // truncated to its 57-byte raw head.
         let the = Attribute::from_str(&format!("{}/{}", "n".repeat(31), "p".repeat(32)))?;
         let value = crate::Value::String("value".into());
-        let key = history_key(&version(1, 7), &of, &the, &value);
+        let key = history_key(&version(1, 7), &of, &the, &value, &default_manifest());
 
         let parts =
             parse_key(key.as_ref()).ok_or_else(|| anyhow::anyhow!("history key did not parse"))?;
@@ -339,8 +359,8 @@ mod tests {
         let value = crate::Value::String("value".into());
         let at = version(1, 7);
 
-        let left_key = history_key(&at, &left, &the, &value);
-        let right_key = history_key(&at, &right, &the, &value);
+        let left_key = history_key(&at, &left, &the, &value, &default_manifest());
+        let right_key = history_key(&at, &right, &the, &value, &default_manifest());
         assert_ne!(left_key, right_key);
         Ok(())
     }
@@ -354,8 +374,8 @@ mod tests {
         // One writer's records order by edition within its span.
         let early = version(1, 7);
         let late = version(2, 7);
-        let early_key = history_key(&early, &of, &the, &value);
-        let late_key = history_key(&late, &of, &the, &value);
+        let early_key = history_key(&early, &of, &the, &value, &default_manifest());
+        let late_key = history_key(&late, &of, &the, &value, &default_manifest());
         assert_eq!(history_key_version(&early_key.clone())?, early);
         assert!(
             early_key < late_key,
@@ -367,7 +387,7 @@ mod tests {
         // earlier one. This per-writer contiguity is what a graft merge
         // adopts logs by.
         let low_origin_late = version(9, 5);
-        let clustered = history_key(&low_origin_late, &of, &the, &value);
+        let clustered = history_key(&low_origin_late, &of, &the, &value, &default_manifest());
         assert!(
             clustered < early_key,
             "origins cluster before editions order"
@@ -385,8 +405,8 @@ mod tests {
         let left = Entity::from_str(&format!("{shared}left"))?;
         let right = Entity::from_str(&format!("{shared}right"))?;
         let the = Attribute::from_str("test/attribute")?;
-        let left_key = history_key(&version, &left, &the, &value);
-        let right_key = history_key(&version, &right, &the, &value);
+        let left_key = history_key(&version, &left, &the, &value, &default_manifest());
+        let right_key = history_key(&version, &right, &the, &value, &default_manifest());
         assert_ne!(left_key, right_key);
 
         // Two attributes sharing the raw head
@@ -396,16 +416,16 @@ mod tests {
         let of = Entity::from_str("test:entity")?;
         let first = Attribute::from_str(&format!("{head}x"))?;
         let second = Attribute::from_str(&format!("{head}y"))?;
-        let first_key = history_key(&version, &of, &first, &value);
-        let second_key = history_key(&version, &of, &second, &value);
+        let first_key = history_key(&version, &of, &first, &value, &default_manifest());
+        let second_key = history_key(&version, &of, &second, &value, &default_manifest());
         assert_ne!(first_key, second_key);
 
         // Same value bytes under a different value type
         let string = crate::Value::String("a".into());
         let bytes = crate::Value::Bytes(vec![b'a']);
         assert_eq!(string.to_reference(), bytes.to_reference());
-        let string_key = history_key(&version, &of, &the, &string);
-        let bytes_key = history_key(&version, &of, &the, &bytes);
+        let string_key = history_key(&version, &of, &the, &string, &default_manifest());
+        let bytes_key = history_key(&version, &of, &the, &bytes, &default_manifest());
         assert_ne!(string_key, bytes_key);
 
         // Each claim's range now contains exactly its own records. Under the

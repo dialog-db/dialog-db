@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::history::VersionExt as _;
 use crate::{
-    Artifact, Attribute, AttributeKey, Datum, DialogArtifactsError, Entity, EntityKey,
-    FromKey as _, Key, State, Value,
+    Artifact, Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value,
+    key::artifact_index_keys,
 };
+use dialog_search_tree::Manifest;
 
 use super::{Edition, Origin, REVISION_ATTRIBUTE, Version, verify_issuer_signature};
 
@@ -166,19 +167,24 @@ impl RevisionRecord {
     /// large-leaf rebuilds to two. (Collapsing to one ordering needs
     /// the query planner to learn per-attribute index availability;
     /// until then both query shapes must be served.)
-    pub fn entries(&self) -> Result<Vec<(Key, State<Datum>)>, DialogArtifactsError> {
+    ///
+    /// `manifest` is the target tree's format: the record's value rides its key
+    /// through the inline-vs-spill decision, so a read must use the same
+    /// manifest to find it.
+    pub fn entries(
+        &self,
+        manifest: &Manifest,
+    ) -> Result<Vec<(Key, State<Datum>)>, DialogArtifactsError> {
         let version = self.version();
         let artifact = self.to_artifact(&version)?;
 
-        let entity_key = EntityKey::from(&artifact);
-        let attribute_key = AttributeKey::from_key(&entity_key);
+        // Only the EAV and AEV orderings are written (see above), so the VAE
+        // key this builds is dropped.
+        let (entity_key, attribute_key, _) = artifact_index_keys(&artifact, manifest);
         let mut datum = Datum::for_artifact(&artifact);
         datum.version = Some(version);
         let added = State::Added(datum);
 
-        Ok(vec![
-            (entity_key.into_key(), added.clone()),
-            (attribute_key.into_key(), added),
-        ])
+        Ok(vec![(entity_key, added.clone()), (attribute_key, added)])
     }
 }

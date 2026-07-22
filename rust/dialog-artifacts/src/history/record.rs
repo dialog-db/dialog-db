@@ -8,6 +8,7 @@ use crate::key::varkey::{self, ValuePayload};
 use crate::{
     Attribute, Datum, DialogArtifactsError, Entity, Key, State, coverage_key, history_key,
 };
+use dialog_search_tree::Manifest;
 
 use super::{Cause, Claim, Version};
 
@@ -43,12 +44,16 @@ impl Record {
     /// artifact tree: the [`history_key`] for the claim at `version`, and
     /// the claim in [`Datum`] form with the supersedes/retraction fields
     /// carrying what [`Claim::cause`] and the record polarity express.
-    pub fn into_entry(self, version: &Version) -> (Key, State<Datum>) {
+    ///
+    /// `manifest` is the target tree's format; the
+    /// key carries the claim's value through that decision (see
+    /// [`history_key`]), so it must be the tree's own.
+    pub fn into_entry(self, version: &Version, manifest: &Manifest) -> (Key, State<Datum>) {
         let retraction = !self.is_assertion();
         let claim = match self {
             Record::Assert(claim) | Record::Retract(claim) => claim,
         };
-        let key = history_key(version, &claim.of, &claim.the, &claim.is);
+        let key = history_key(version, &claim.of, &claim.the, &claim.is, manifest);
         let datum = Datum {
             cause: None,
             blob: None,

@@ -14,10 +14,13 @@
 //! key writes and range scans. Mutations accumulate in the tree's delta;
 //! callers must flush and persist the buffers when they mint a revision.
 //!
-//! The tree stores raw fixed-size key bytes and rkyv-native values:
-//! [`Key`] is a transparent newtype over [`KeyBytes`] and passes through
-//! unchanged, while [`State<Datum>`] is the tree's value type directly,
-//! serialized into node buffers by the tree itself.
+//! The tree stores raw key bytes and rkyv-native values: [`Key`] is a
+//! newtype over the lossless, variable-length order-preserving key encoding
+//! (see [`key::varkey`](crate::key::varkey)) and passes through unchanged,
+//! while [`State<Datum>`] is the tree's value type directly, serialized into
+//! node buffers by the tree itself. Because the fact's value is encoded into
+//! the key, a scan reconstructs each [`Artifact`] from its key rather than
+//! from the payload.
 //!
 //! `ArtifactTree` is a type alias for a `dialog_search_tree::PersistentTree`, so the
 //! orphan rule rules out inherent methods — the operations are exposed as
@@ -27,7 +30,7 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, PersistentTree, TransientTree, Value as TreeValue,
+    Buffer, ContentAddressedStorage, Delta, Manifest, PersistentTree, Value as TreeValue,
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::{Stream, StreamExt};
@@ -38,13 +41,12 @@ use std::sync::{Arc, Mutex};
 
 use crate::history::{Cause as HistoryCause, Claim, Record, Version};
 use crate::{
-    Artifact, ArtifactSelector, AttributeKey, AttributeKeyPart, Datum, DialogArtifactsError,
-    EntityKey, EntityKeyPart, Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut,
-    SelectorMatch, State, Value, ValueDataType, ValueKey, encode_bytes, encode_value_owned,
+    Artifact, ArtifactSelector, ArtifactWriter, AttributeKey, AttributeKeyPart, Datum,
+    DialogArtifactsError, EntityKey, EntityKeyPart, Instruction, Key, KeyView, KeyViewConstruct,
+    KeyViewMut, SelectorMatch, State, Value, ValueDataType, ValueKey, encode_bytes,
+    encode_value_owned,
     key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
-    key::{
-        artifact_index_keys, inline_threshold, reproject_index_keys, spill_prefix, value_spills,
-    },
+    key::{artifact_index_keys, reproject_index_keys, value_spills},
     match_selector_and_key_ref,
     selector::Constrained,
     value_predicates_admit,
@@ -52,7 +54,7 @@ use crate::{
 
 /// The concrete search-tree type the artifact indexes use.
 ///
-/// Keys are the raw fixed-size bytes of [`Key`]; values are [`State`]
+/// Keys are the raw variable-length bytes of [`Key`]; values are [`State`]
 /// payloads stored in the tree's native (rkyv) encoding.
 pub type ArtifactTree = PersistentTree<Key, State<Datum>>;
 
@@ -118,11 +120,12 @@ where
 async fn store_spilled_value<S>(
     store: &mut S,
     artifact: &Artifact,
+    manifest: &Manifest,
 ) -> Result<(), DialogArtifactsError>
 where
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
 {
-    if value_spills(&artifact.is) {
+    if value_spills(&artifact.is, manifest) {
         let reference = artifact.is.to_reference();
         store.set(reference, artifact.is.to_bytes()).await?;
     }
@@ -348,7 +351,7 @@ fn prefix_upper(prefix: &[u8]) -> Vec<u8> {
 ///   `spill_prefix` bytes carries only those bytes in its key and so sorts
 ///   BELOW the full bound bytes.
 /// - A zero float widens across the `-0.0`/`+0.0` encoding cluster.
-fn value_lower_edge(value: &Value) -> Vec<u8> {
+fn value_lower_edge(value: &Value, manifest: &Manifest) -> Vec<u8> {
     if let Value::Float(float) = value
         && *float == 0.0
     {
@@ -356,9 +359,10 @@ fn value_lower_edge(value: &Value) -> Vec<u8> {
     }
     if numeric_width(value.data_type()) == 0 {
         let raw = value.to_bytes();
-        if raw.len() > spill_prefix() {
+        let prefix = manifest.spill_prefix as usize;
+        if raw.len() > prefix {
             let mut out = Vec::new();
-            encode_bytes(&raw[..spill_prefix()], &mut out);
+            encode_bytes(&raw[..prefix], &mut out);
             return out;
         }
     }
@@ -419,6 +423,7 @@ fn apply_prefix_bounds<K: KeyViewMut>(
     start: K,
     end: K,
     selector: &ArtifactSelector<Constrained>,
+    manifest: &Manifest,
 ) -> (K, K) {
     let mut start = start;
     let mut end = end;
@@ -465,7 +470,7 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         // keys terminate before the probe's next byte) and the per-entry
         // check re-establishes exactness.
         let bytes = prefix.as_bytes();
-        let lo = prefix_lower(&bytes[..bytes.len().min(spill_prefix())]);
+        let lo = prefix_lower(&bytes[..bytes.len().min(manifest.spill_prefix as usize)]);
         let hi = prefix_upper(bytes);
         start = start.set_value(ValueDataType::String, ValuePayload::Inline(lo));
         end = end.set_value(ValueDataType::String, ValuePayload::Inline(hi));
@@ -485,7 +490,7 @@ fn apply_prefix_bounds<K: KeyViewMut>(
             .map(|bound| bound.value.data_type())
             .unwrap_or_else(ValueDataType::min);
         let lo = match selector.value_lower() {
-            Some(bound) => value_lower_edge(&bound.value),
+            Some(bound) => value_lower_edge(&bound.value, manifest),
             None => value_band_min(band),
         };
         let hi = match selector.value_upper() {
@@ -493,7 +498,7 @@ fn apply_prefix_bounds<K: KeyViewMut>(
                 Value::Float(float) if *float == 0.0 => encode_value_owned(&Value::Float(0.0)),
                 value => encode_value_owned(value),
             },
-            None => value_band_max(band),
+            None => value_band_max(band, manifest),
         };
         start = start.set_value(band, ValuePayload::Inline(lo));
         end = end.set_value(band, ValuePayload::Inline(hi));
@@ -520,9 +525,9 @@ fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
 /// terminator (`0x00`) sorts below `0xFF`, so this sits above the whole
 /// band. Used only as a raw range edge; it deliberately does not parse (it
 /// is the last field set on the bound).
-fn value_band_max(value_type: ValueDataType) -> Vec<u8> {
+fn value_band_max(value_type: ValueDataType, manifest: &Manifest) -> Vec<u8> {
     match numeric_width(value_type) {
-        0 => vec![0xFF; inline_threshold() + 2],
+        0 => vec![0xFF; manifest.inline_n as usize + 2],
         width => vec![0xFF; width],
     }
 }
@@ -538,410 +543,6 @@ fn numeric_width(value_type: ValueDataType) -> usize {
         ValueDataType::Float => 8,
         ValueDataType::Boolean => 1,
         _ => 0,
-    }
-}
-
-/// An open transient edit batch over an [`ArtifactTree`], not yet persisted.
-///
-/// The commit path's three-step surface:
-///
-/// 1. [`EditBatch::apply`] drains the instruction stream into one open
-///    transient edit and reports whether it changed the indexes, persisting
-///    NOTHING;
-/// 2. the caller decides: dropping the batch is a complete no-op (the delta is
-///    untouched and the base tree root unchanged), which is how an unchanged
-///    commit declines to mint a revision;
-/// 3. otherwise the caller appends its revision-record entries with
-///    [`record`](Self::record) and seals everything, data and records
-///    together, with the ONE persist in [`seal`](Self::seal).
-///
-/// This exists so the revision record rides the same edit as the batch's
-/// data. Records need the batch's outcome (a no-op commit mints nothing, and
-/// the record signs over its content), so they cannot be part of the
-/// instruction stream; but routing them through a second edit after the batch
-/// persisted cost a second full spine-to-leaf persist per commit, whose leaf
-/// re-encode cost grows as the database's leaves fill. Appending them to the
-/// still open transient makes them ordinary in-batch inserts covered by the
-/// same persist.
-pub struct EditBatch {
-    transient: TransientTree<Key, State<Datum>>,
-    changed: bool,
-}
-
-impl EditBatch {
-    /// Applies `instructions` to a transient edit opened over `tree`, without
-    /// persisting anything.
-    ///
-    /// Runs the shared instruction semantics of a branch commit or
-    /// `Artifacts::commit` (EAV/AEV/VAE writes, cardinality-one supersession,
-    /// retraction, and, for version-tagged batches, each instruction's
-    /// history record), so the key layout stays uniform. Data and history
-    /// land in the same tree: one root covers both.
-    ///
-    /// `tree` itself is untouched; the batch lives in memory until
-    /// [`seal`](Self::seal).
-    pub async fn apply<S, I>(
-        tree: &ArtifactTree,
-        store: &mut S,
-        version: Option<Version>,
-        instructions: I,
-    ) -> Result<Self, DialogArtifactsError>
-    where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
-        I: Stream<Item = Instruction> + ConditionalSend,
-    {
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-
-        // Open one transient edit batch over this tree's spine and apply every
-        // instruction's writes to it in flight, so the whole instruction stream
-        // costs a single persist instead of one full tree rebuild per key.
-        let mut transient = tree.edit();
-
-        // History records are buffered and only written if the batch changed
-        // the indexes: a batch of pure no-ops must leave the tree untouched,
-        // history region included. Buffering is per history key, folding
-        // collisions: two instructions on the same (entity, attribute, value)
-        // in one batch land at ONE history key, and last-write-wins would
-        // silently drop the earlier record's lineage — a retract-then-re-assert
-        // of one value lost the retract's cause from the log (while its
-        // coverage mirror survived), so the screened merge path never retired
-        // a stale peer's copy while the graft path did. The fold keeps the
-        // later record's polarity and unions the superseded versions: a
-        // re-assert citing what it overrode.
-        let mut history_records: BTreeMap<Key, Record> = BTreeMap::new();
-        let mut changed = false;
-        let buffer_record =
-            |records: &mut BTreeMap<Key, Record>, record: Record, version: &Version| {
-                let (key, _) = record.clone().into_entry(version);
-                match records.remove(&key) {
-                    None => {
-                        records.insert(key, record);
-                    }
-                    Some(earlier) => {
-                        let mut versions = earlier.claim().cause.versions().to_vec();
-                        versions.extend_from_slice(record.claim().cause.versions());
-                        let claim = Claim {
-                            cause: HistoryCause::new(versions),
-                            ..record.claim().clone()
-                        };
-                        let folded = if record.is_assertion() {
-                            Record::Assert(claim)
-                        } else {
-                            Record::Retract(claim)
-                        };
-                        records.insert(key, folded);
-                    }
-                }
-            };
-
-        tokio::pin!(instructions);
-        while let Some(instruction) = instructions.next().await {
-            // The `dialog.` namespace is reserved for version-control
-            // machinery (revision records — see
-            // `history::RevisionRecord`), which writes through
-            // [`ArtifactTreeExt::record`] or [`EditBatch::record`] rather
-            // than instructions. At the library level lineage therefore
-            // cannot be corrupted through the ordinary write path.
-            {
-                let (Instruction::Assert(artifact)
-                | Instruction::Replace(artifact)
-                | Instruction::Retract(artifact)) = &instruction;
-                if artifact.the.as_str().starts_with("dialog.") {
-                    return Err(DialogArtifactsError::ReservedAttribute(
-                        artifact.the.to_string(),
-                    ));
-                }
-            }
-            match instruction {
-                Instruction::Assert(artifact) => {
-                    changed = true;
-                    let (entity_key, attribute_key, value_key) = artifact_index_keys(&artifact);
-
-                    // Persist a spilling value's bytes as a content-addressed
-                    // block before recording the fact; the key holds only the
-                    // 32-byte reference to it.
-                    store_spilled_value(store, &artifact).await?;
-
-                    // A version-tagged assertion records its history: an
-                    // assertion is purely additive, so it supersedes nothing.
-                    if let Some(version) = &version {
-                        let record = Record::Assert(Claim {
-                            the: artifact.the.clone(),
-                            of: artifact.of.clone(),
-                            is: artifact.is.clone(),
-                            cause: HistoryCause::genesis(),
-                        });
-                        buffer_record(&mut history_records, record, version);
-                    }
-
-                    let mut datum = Datum::for_artifact(&artifact);
-                    datum.version = version;
-                    // The fact orderings address a claim by (entity,
-                    // attribute, value), so asserting a value that already
-                    // stands re-asserts the SAME key: the standing claims
-                    // collapse into the new datum rather than being
-                    // overwritten. A later retraction covers the whole set —
-                    // an insert-overwrite here silently orphaned the earlier
-                    // claim, which could then resurrect the fact through a
-                    // merge. Versioned writes only; the probe rides the same
-                    // spine the insert below loads anyway.
-                    if version.is_some()
-                        && let Some(State::Added(standing)) =
-                            transient.get(&entity_key, &storage).await?
-                    {
-                        datum.absorb_versions(standing.versions());
-                    }
-                    let added = State::Added(datum);
-                    transient = transient
-                        .insert(entity_key, added.clone(), &storage)
-                        .await?;
-                    transient = transient
-                        .insert(attribute_key, added.clone(), &storage)
-                        .await?;
-                    transient = transient.insert(value_key, added, &storage).await?;
-                }
-                Instruction::Replace(artifact) => {
-                    let entity_key = EntityKey::from(&artifact);
-
-                    // Scan priors at this (entity, attribute) against the
-                    // in-flight transient tree, so writes from earlier
-                    // instructions in this batch are visible. Same-valued priors
-                    // already represent the desired state; only different-valued
-                    // ones need superseding. The scan borrows
-                    // `transient` immutably, so collect into owned vectors in a
-                    // scope that ends before the subsequent mutating
-                    // reassignments.
-                    let mut superseded_keys: Vec<Key> = Vec::new();
-                    let mut superseded_versions: Vec<Version> = Vec::new();
-                    let mut found_same_value = false;
-                    {
-                        let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
-                            .set_entity(entity_key.entity())
-                            .set_attribute(entity_key.attribute())
-                            .into_key();
-                        let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
-                            .set_entity(entity_key.entity())
-                            .set_attribute(entity_key.attribute())
-                            .into_key();
-                        let search_stream =
-                            transient.stream_range(search_start..=search_end, &storage);
-                        tokio::pin!(search_stream);
-                        while let Some(candidate) = search_stream.next().await {
-                            let candidate = candidate?;
-                            if let State::Added(current_element) = &candidate.value {
-                                // A prior with a spilled value carries only a
-                                // reference in its key; fetch the block so the
-                                // value comparison below sees the real value.
-                                let spilled = fetch_spilled(store, &candidate.key).await?;
-                                let current = Artifact::from_key_datum_with_value(
-                                    &candidate.key,
-                                    current_element,
-                                    spilled,
-                                )?;
-                                // Supersession is scoped to this exact
-                                // (entity, attribute). The range should already
-                                // guarantee that, but deleting is destructive
-                                // and unconditional across all three indexes,
-                                // so verify rather than trust the bounds: a
-                                // range-construction bug once widened this
-                                // scan to unrelated entities and erased their
-                                // facts.
-                                if current.of != artifact.of || current.the != artifact.the {
-                                    continue;
-                                }
-                                if current.is == artifact.is {
-                                    found_same_value = true;
-                                } else {
-                                    // The superseded claims' versions feed the
-                                    // replacement record's cause, so a reader
-                                    // can order the two without reading values.
-                                    // ALL of the entry's claims: same-value
-                                    // asserts collapse into one datum, and a
-                                    // replacement its author issued having
-                                    // observed the fact supersedes every claim
-                                    // standing behind it.
-                                    superseded_versions.extend(current_element.versions());
-                                    superseded_keys.push(candidate.key);
-                                }
-                            }
-                        }
-                    }
-
-                    // Cardinality-one no-op: the identical claim already
-                    // stands, at its original version, and there is nothing
-                    // to supersede. Nothing changes in the indexes and no
-                    // history is recorded — a fresh record would fork the
-                    // claim's lineage away from the version the standing
-                    // datum carries.
-                    if found_same_value && superseded_keys.is_empty() {
-                        continue;
-                    }
-                    changed = true;
-
-                    for key in superseded_keys {
-                        let (entity_key, attribute_key, value_key) = reproject_index_keys(&key)?;
-
-                        transient = transient.delete(&entity_key, &storage).await?;
-                        transient = transient.delete(&value_key, &storage).await?;
-                        transient = transient.delete(&attribute_key, &storage).await?;
-                    }
-
-                    // A version-tagged replacement records its history: its
-                    // cause lists the versions of the claims it superseded —
-                    // exactly the data removed from the indexes above. The
-                    // record is written even when the insert below is skipped
-                    // because a same-valued prior survives; the supersession
-                    // of the different-valued claims still happened and must
-                    // be attributable.
-                    if let Some(version) = &version {
-                        let record = Record::Assert(Claim {
-                            the: artifact.the.clone(),
-                            of: artifact.of.clone(),
-                            is: artifact.is.clone(),
-                            cause: HistoryCause::new(superseded_versions),
-                        });
-                        buffer_record(&mut history_records, record, version);
-                    }
-
-                    if found_same_value {
-                        continue;
-                    }
-
-                    let (entity_key, attribute_key, value_key) = artifact_index_keys(&artifact);
-
-                    // Persist a spilling value's bytes as a content-addressed
-                    // block before recording the fact.
-                    store_spilled_value(store, &artifact).await?;
-
-                    let mut datum = Datum::for_artifact(&artifact);
-                    datum.version = version;
-                    let added = State::Added(datum);
-                    transient = transient
-                        .insert(entity_key, added.clone(), &storage)
-                        .await?;
-                    transient = transient
-                        .insert(attribute_key, added.clone(), &storage)
-                        .await?;
-                    transient = transient.insert(value_key, added, &storage).await?;
-                }
-                Instruction::Retract(artifact) => {
-                    let (entity_key, attribute_key, value_key) = artifact_index_keys(&artifact);
-
-                    // The standing datum decides everything below: whether
-                    // the retract changes anything at all, and which version
-                    // it withdraws. Retracting a fact that is not there is a
-                    // no-op, spec'd as such: no index change, no record, no
-                    // minted revision. (A same-batch assert of the same fact
-                    // IS visible here — the transient carries it — so
-                    // assert+retract still cancels through the deletes
-                    // below, and the record fold nets their lineage.)
-                    let Some(State::Added(standing)) = transient.get(&entity_key, &storage).await?
-                    else {
-                        continue;
-                    };
-                    changed = true;
-
-                    // A version-tagged retraction records its history: its
-                    // cause is EVERY claim the standing entry collapses —
-                    // same-value asserts from different writers share one
-                    // key, and the retraction's author observed all of them
-                    // (spec D3: a retraction covers exactly what its author
-                    // had seen). An assertion made earlier in this same
-                    // batch carries this batch's own version; a record must
-                    // not claim itself as its cause, so that one is dropped
-                    // (alone, it degenerates to a genesis retraction).
-                    if let Some(version) = &version {
-                        let withdrawn: Vec<Version> = standing
-                            .versions()
-                            .filter(|withdrawn| *withdrawn != version)
-                            .copied()
-                            .collect();
-                        let record = Record::Retract(Claim {
-                            the: artifact.the.clone(),
-                            of: artifact.of.clone(),
-                            is: artifact.is.clone(),
-                            cause: HistoryCause::new(withdrawn),
-                        });
-                        buffer_record(&mut history_records, record, version);
-                    }
-
-                    // Observed-remove semantics: retraction deletes the
-                    // fact's keys outright — no tombstone. The retract
-                    // record written above is the durable carrier of the
-                    // deletion (it replicates as history), and a replica's
-                    // causal context is what stops a stale peer's copy from
-                    // resurrecting the fact at merge time (see
-                    // `notes/version-control.md`).
-                    transient = transient.delete(&entity_key, &storage).await?;
-                    transient = transient.delete(&attribute_key, &storage).await?;
-                    transient = transient.delete(&value_key, &storage).await?;
-                }
-            }
-        }
-
-        // Write the folded records and their coverage mirrors. Emitting
-        // coverage from the FOLDED record (rather than per instruction)
-        // keeps the mirror consistent with the log when a batch touched
-        // one (entity, attribute, value) twice: the coverage entry's key
-        // collides exactly when the record key does, and both then carry
-        // the same folded lineage.
-        if let Some(version) = &version {
-            for record in history_records.into_values() {
-                if let Some((key, entry)) = record.coverage_entry(version) {
-                    transient = transient.insert(key, entry, &storage).await?;
-                }
-                let (key, entry) = record.into_entry(version);
-                transient = transient.insert(key, entry, &storage).await?;
-            }
-        }
-
-        Ok(Self { transient, changed })
-    }
-
-    /// Whether the applied instructions changed the indexes at all.
-    ///
-    /// A batch made entirely of no-ops (re-asserting values already in place,
-    /// retracting absent facts) leaves the tree untouched and records no
-    /// history; callers should mint no revision for it and drop the batch
-    /// unsealed.
-    pub fn changed(&self) -> bool {
-        self.changed
-    }
-
-    /// Appends pre-built record entries (revision lineage records, which enter
-    /// through this surface and never through instructions) to the open
-    /// transient edit.
-    ///
-    /// The entries become ordinary in-batch inserts: the single persist in
-    /// [`seal`](Self::seal) covers them together with the batch's data, so
-    /// the record costs an in-batch insert instead of a second spine-to-leaf
-    /// edit and persist.
-    pub async fn record<S>(
-        mut self,
-        store: &S,
-        entries: Vec<(Key, State<Datum>)>,
-    ) -> Result<Self, DialogArtifactsError>
-    where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
-    {
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-        for (key, entry) in entries {
-            self.transient = self.transient.insert(key, entry, &storage).await?;
-        }
-        Ok(self)
-    }
-
-    /// Seals the whole batch, data and record entries alike, into `delta`
-    /// with a single bottom-up persist, returning the resulting tree.
-    pub fn seal(
-        self,
-        delta: &mut Delta<NodeHash, Buffer>,
-    ) -> Result<ArtifactTree, DialogArtifactsError> {
-        Ok(self.transient.persist(delta)?)
     }
 }
 
@@ -1033,6 +634,26 @@ pub trait ArtifactTreeExt {
             + Clone
             + ConditionalSync;
 
+    /// This tree's format [`Manifest`], as carried by its root node.
+    ///
+    /// Every key built for this tree must go through this manifest, both on the
+    /// write path and when a reader builds a selector range, so that a
+    /// boundary-sized value lands at the same key on both. An empty tree has no
+    /// root to read and reports the default (the format a first write would
+    /// stamp into it).
+    ///
+    /// `delta` is read through, because the tree's root may live only in an
+    /// unflushed batch.
+    async fn format_manifest<S>(
+        &self,
+        store: S,
+        delta: &Delta<NodeHash, Buffer>,
+    ) -> Result<Manifest, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync;
+
     /// Write pre-built entries (e.g. revision lineage records — see
     /// [`Record::into_entry`](crate::history::Record::into_entry)) into the
     /// tree as one edit batch, accumulating new nodes in `delta`
@@ -1107,13 +728,36 @@ impl ArtifactTreeExt for ArtifactTree {
             + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
-        // The one-shot composition of [`EditBatch::apply`] and
-        // [`EditBatch::seal`], for callers with no record entries to
-        // interleave (the commit path has, and uses the three-step
-        // [`EditBatch`] surface directly).
-        let batch = EditBatch::apply(self, store, version, instructions).await?;
-        let changed = batch.changed();
-        *self = batch.seal(delta)?;
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+
+        // Every key this batch builds must use THIS tree's value-spill
+        // threshold, and the edit batch must keep this tree's format rather
+        // than restamping it with the defaults; both come from the manifest
+        // the tree's own root node carries.
+        //
+        // Read it THROUGH the delta: this tree's root may have been persisted
+        // by an earlier batch that the caller has not flushed to `store` yet,
+        // so it exists only in `delta`. Reading it off the bare store would
+        // fail to find the node.
+        let (manifest, transient) = {
+            let read_through = ContentAddressedStorage::new(DeltaReadThrough {
+                delta: &*delta,
+                store: store.clone(),
+            });
+            (
+                self.manifest(&read_through).await?,
+                self.edit_with_manifest(&read_through).await?,
+            )
+        };
+        // Open one transient edit batch over this tree's spine and apply every
+        // instruction's writes to it in flight, so the whole instruction stream
+        // costs a single persist instead of one full tree rebuild per key.
+        let (transient, changed) =
+            write_instructions(transient, store, &storage, version, &manifest, instructions)
+                .await?;
+        // Seal the whole batch with a single bottom-up persist into the
+        // caller's delta.
+        *self = transient.persist(delta)?;
         Ok(changed)
     }
 
@@ -1195,6 +839,23 @@ impl ArtifactTreeExt for ArtifactTree {
         Ok(records)
     }
 
+    async fn format_manifest<S>(
+        &self,
+        store: S,
+        delta: &Delta<NodeHash, Buffer>,
+    ) -> Result<Manifest, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        // Read through `delta`: this tree's root may have been persisted by an
+        // earlier batch that the caller has not flushed to `store` yet, so the
+        // node exists only there.
+        let storage = ContentAddressedStorage::new(DeltaReadThrough { delta, store });
+        Ok(self.manifest(&storage).await?)
+    }
+
     async fn record<S>(
         &mut self,
         store: &mut S,
@@ -1206,18 +867,23 @@ impl ArtifactTreeExt for ArtifactTree {
             + Clone
             + ConditionalSync,
     {
-        let mut transient = self.edit();
-        {
+        let transient = {
             // Read through the delta: this tree's latest nodes may only
             // exist there (persisted by an earlier batch, not yet flushed).
             let storage = ContentAddressedStorage::new(DeltaReadThrough {
                 delta: &*delta,
                 store: store.clone(),
             });
+            // Open the edit under the tree's OWN manifest (as
+            // `apply_versioned` does), not the default: an edit through the
+            // default restamps the touched path with the default format,
+            // silently rewriting a tree built under other constants.
+            let mut transient = self.edit_with_manifest(&storage).await?;
             for (key, entry) in entries {
                 transient = transient.insert(key, entry, &storage).await?;
             }
-        }
+            transient
+        };
         *self = transient.persist(delta)?;
         Ok(())
     }
@@ -1240,7 +906,12 @@ impl ArtifactTreeExt for ArtifactTree {
         let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         try_stream! {
-            let range = selector_range(&selector);
+            // Both the scan range and the per-entry match must be built under
+            // the manifest the stored facts were WRITTEN with, or a
+            // boundary-sized value encodes differently here than in the tree
+            // and the scan silently misses it.
+            let manifest = tree.manifest(&storage).await?;
+            let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range(range, &storage);
             tokio::pin!(stream);
@@ -1261,7 +932,7 @@ impl ArtifactTreeExt for ArtifactTree {
                         "scanned entry's key does not parse".to_string(),
                     )
                 })?;
-                let verdict = match_selector_and_key_ref(&selector, &parts);
+                let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
                 if verdict == SelectorMatch::Excluded {
                     continue;
                 }
@@ -1307,7 +978,16 @@ impl ArtifactTreeExt for ArtifactTree {
 /// it as the unit of a demand cover — a range that came back empty is
 /// still demanded (the emptiness was read), so a later write into it
 /// must invalidate the reader.
-pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusive<Key> {
+///
+/// `manifest` is the target tree's format. A value-constrained selector's
+/// bounds carry the value's payload through the same inline-vs-spill decision
+/// (`inline_n`) and spilled key-prefix width (`spill_prefix`) the facts were
+/// written under, so passing a different manifest brackets the wrong keys and
+/// an equality scan on a boundary-sized value silently returns nothing.
+pub fn selector_range(
+    selector: &ArtifactSelector<Constrained>,
+    manifest: &Manifest,
+) -> RangeInclusive<Key> {
     if selector.entity().is_some()
         || (selector.entity_prefix().is_some()
             && selector.value().is_none()
@@ -1315,9 +995,10 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
             && selector.attribute_prefix().is_none())
     {
         let (start, end) = apply_prefix_bounds(
-            <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
-            <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
+            <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
+            <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
             selector,
+            manifest,
         );
         start.into_key()..=end.into_key()
     } else if selector.value().is_some()
@@ -1326,22 +1007,376 @@ pub fn selector_range(selector: &ArtifactSelector<Constrained>) -> RangeInclusiv
         || selector.value_upper().is_some()
     {
         let (start, end) = apply_prefix_bounds(
-            <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
-            <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
+            <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
+            <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
             selector,
+            manifest,
         );
         start.into_key()..=end.into_key()
     } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
         let (start, end) = apply_prefix_bounds(
-            <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector),
-            <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector),
+            <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
+            <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
             selector,
+            manifest,
         );
         start.into_key()..=end.into_key()
     } else {
         // `Constrained` guarantees at least one field is set.
         unreachable!("ArtifactSelector will always have at least one field specified")
     }
+}
+
+/// Applies an instruction stream to any [`ArtifactWriter`], returning the
+/// written target and whether the batch changed the indexes.
+///
+/// This is the whole of the artifact write semantics: reserved-namespace
+/// enforcement, cardinality-one supersession, value spilling, coverage records,
+/// and the history entries each instruction contributes. It is generic over the
+/// write target so the canonical edit path and the buffered (hitchhiker) path
+/// run *identical* semantics; only where the writes land differs.
+///
+/// The supersession scans go through [`ArtifactWriter::scan`] and
+/// [`ArtifactWriter::read`], which see the batch's own pending writes on both
+/// targets. On the buffered target that means the node buffers are merged into
+/// the scan: a `Replace` blind to a buffered prior would leave it live at a
+/// cardinality-one slot, and a `Retract` blind to one would cite nothing and so
+/// cover nothing at merge time.
+///
+/// `store` is the raw archive backend, used directly (not through the tree node
+/// bridge) for the value blocks of spilling values: a value above the manifest's
+/// inline threshold lives as a content-addressed block, and its key carries only
+/// the 32-byte reference to it.
+///
+/// `manifest` carries that inline threshold (`inline_n`) and the spilled
+/// key-prefix width (`spill_prefix`), and it must be the TARGET TREE's own,
+/// read via
+/// [`PersistentTree::manifest`](dialog_search_tree::PersistentTree::manifest),
+/// not a process-wide default. Every key this function builds and every
+/// selector range a later read builds must agree on both: a boundary-sized
+/// value that inlines on one side and spills on the other lands at a different
+/// key, so the read misses the fact entirely.
+#[tracing::instrument(skip_all, name = "write_instructions")]
+#[allow(clippy::too_many_lines)]
+pub async fn write_instructions<W, S, I>(
+    mut transient: W,
+    store: &mut S,
+    storage: &ContentAddressedStorage<TreeStorageBridge<S>>,
+    version: Option<Version>,
+    manifest: &Manifest,
+    instructions: I,
+) -> Result<(W, bool), DialogArtifactsError>
+where
+    W: ArtifactWriter,
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + Clone
+        + ConditionalSync,
+    I: Stream<Item = Instruction> + ConditionalSend,
+{
+    // History records are buffered and only written if the batch changed
+    // the indexes: a batch of pure no-ops must leave the tree untouched,
+    // history region included. Buffering is per history key, folding
+    // collisions: two instructions on the same (entity, attribute, value)
+    // in one batch land at ONE history key, and last-write-wins would
+    // silently drop the earlier record's lineage — a retract-then-re-assert
+    // of one value lost the retract's cause from the log (while its
+    // coverage mirror survived), so the screened merge path never retired
+    // a stale peer's copy while the graft path did. The fold keeps the
+    // later record's polarity and unions the superseded versions: a
+    // re-assert citing what it overrode.
+    let mut history_records: BTreeMap<Key, Record> = BTreeMap::new();
+    let mut changed = false;
+    let buffer_record = |records: &mut BTreeMap<Key, Record>, record: Record, version: &Version| {
+        let (key, _) = record.clone().into_entry(version, manifest);
+        match records.remove(&key) {
+            None => {
+                records.insert(key, record);
+            }
+            Some(earlier) => {
+                let mut versions = earlier.claim().cause.versions().to_vec();
+                versions.extend_from_slice(record.claim().cause.versions());
+                let claim = Claim {
+                    cause: HistoryCause::new(versions),
+                    ..record.claim().clone()
+                };
+                let folded = if record.is_assertion() {
+                    Record::Assert(claim)
+                } else {
+                    Record::Retract(claim)
+                };
+                records.insert(key, folded);
+            }
+        }
+    };
+
+    tokio::pin!(instructions);
+    while let Some(instruction) = instructions.next().await {
+        // The `dialog.` namespace is reserved for version-control
+        // machinery (revision records — see
+        // `history::RevisionRecord`), which writes through
+        // [`ArtifactTreeExt::record`] rather than instructions. At the
+        // library level lineage therefore cannot be corrupted through
+        // the ordinary write path.
+        {
+            let (Instruction::Assert(artifact)
+            | Instruction::Replace(artifact)
+            | Instruction::Retract(artifact)) = &instruction;
+            if artifact.the.as_str().starts_with("dialog.") {
+                return Err(DialogArtifactsError::ReservedAttribute(
+                    artifact.the.to_string(),
+                ));
+            }
+        }
+        match instruction {
+            Instruction::Assert(artifact) => {
+                changed = true;
+                let (entity_key, attribute_key, value_key) =
+                    artifact_index_keys(&artifact, manifest);
+
+                // Persist a spilling value's bytes as a content-addressed
+                // block before recording the fact; the key holds only the
+                // 32-byte reference to it.
+                store_spilled_value(store, &artifact, manifest).await?;
+
+                // A version-tagged assertion records its history: an
+                // assertion is purely additive, so it supersedes nothing.
+                if let Some(version) = &version {
+                    let record = Record::Assert(Claim {
+                        the: artifact.the.clone(),
+                        of: artifact.of.clone(),
+                        is: artifact.is.clone(),
+                        cause: HistoryCause::genesis(),
+                    });
+                    buffer_record(&mut history_records, record, version);
+                }
+
+                let mut datum = Datum::for_artifact(&artifact);
+                datum.version = version;
+                // The fact orderings address a claim by (entity, attribute,
+                // value), so asserting a value that already stands re-asserts
+                // the SAME key: the standing claims collapse into the new
+                // datum rather than being overwritten. A later retraction
+                // covers the whole set — an insert-overwrite here silently
+                // orphaned the earlier claim, which could then resurrect the
+                // fact through a merge. Versioned writes only; the probe rides
+                // the same spine the insert below loads anyway.
+                if version.is_some()
+                    && let Some(State::Added(standing)) =
+                        transient.read(&entity_key, storage).await?
+                {
+                    datum.absorb_versions(standing.versions());
+                }
+                let added = State::Added(datum);
+                transient = transient
+                    .write(entity_key.clone(), added.clone(), storage)
+                    .await?;
+                transient = transient
+                    .write(attribute_key.clone(), added.clone(), storage)
+                    .await?;
+                transient = transient.write(value_key, added, storage).await?;
+            }
+            Instruction::Replace(artifact) => {
+                let entity_key = EntityKey::from_artifact(&artifact, manifest);
+
+                // Scan priors at this (entity, attribute) against the
+                // in-flight write target, so writes from earlier instructions
+                // in this batch are visible (on the buffered target that means
+                // the node buffers are merged into the scan). Same-valued
+                // priors already represent the desired state; only
+                // different-valued ones need superseding. The value lives in
+                // the key now, so each candidate's claim is reconstructed from
+                // its key rather than read out of the payload. The scan borrows
+                // `transient` immutably, so collect into owned vectors in a
+                // scope that ends before the subsequent mutating reassignments.
+                let mut superseded_keys: Vec<Key> = Vec::new();
+                let mut superseded_versions: Vec<Version> = Vec::new();
+                let mut found_same_value = false;
+                {
+                    let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
+                        .set_entity(entity_key.entity())
+                        .set_attribute(entity_key.attribute())
+                        .into_key();
+                    let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
+                        .set_entity(entity_key.entity())
+                        .set_attribute(entity_key.attribute())
+                        .into_key();
+                    let search_stream = transient.scan(search_start..=search_end, storage);
+                    tokio::pin!(search_stream);
+                    while let Some(candidate) = search_stream.next().await {
+                        let candidate = candidate?;
+                        if let State::Added(current_element) = &candidate.value {
+                            // A prior with a spilled value carries only a
+                            // reference in its key; fetch the block so the
+                            // value comparison below sees the real value.
+                            let spilled = fetch_spilled(store, &candidate.key).await?;
+                            let current = Artifact::from_key_datum_with_value(
+                                &candidate.key,
+                                current_element,
+                                spilled,
+                            )?;
+                            // Supersession is scoped to this exact
+                            // (entity, attribute). The range should already
+                            // guarantee that, but deleting is destructive
+                            // and unconditional across all three indexes,
+                            // so verify rather than trust the bounds: a
+                            // range-construction bug once widened this
+                            // scan to unrelated entities and erased their
+                            // facts.
+                            if current.of != artifact.of || current.the != artifact.the {
+                                continue;
+                            }
+                            if current.is == artifact.is {
+                                found_same_value = true;
+                            } else {
+                                // The superseded claims' versions feed the
+                                // replacement record's cause, so a reader
+                                // can order the two without reading values.
+                                // ALL of the entry's claims: same-value
+                                // asserts collapse into one datum, and a
+                                // replacement its author issued having
+                                // observed the fact supersedes every claim
+                                // standing behind it.
+                                superseded_versions.extend(current_element.versions());
+                                superseded_keys.push(candidate.key);
+                            }
+                        }
+                    }
+                }
+
+                // Cardinality-one no-op: the identical claim already
+                // stands, at its original version, and there is nothing
+                // to supersede. Nothing changes in the indexes and no
+                // history is recorded — a fresh record would fork the
+                // claim's lineage away from the version the standing
+                // datum carries.
+                if found_same_value && superseded_keys.is_empty() {
+                    continue;
+                }
+                changed = true;
+
+                for key in superseded_keys {
+                    let (entity_key, attribute_key, value_key) = reproject_index_keys(&key)?;
+
+                    transient = transient.erase(&entity_key, storage).await?;
+                    transient = transient.erase(&value_key, storage).await?;
+                    transient = transient.erase(&attribute_key, storage).await?;
+                }
+
+                // A version-tagged replacement records its history: its
+                // cause lists the versions of the claims it superseded —
+                // exactly the data removed from the indexes above. The
+                // record is written even when the insert below is skipped
+                // because a same-valued prior survives; the supersession
+                // of the different-valued claims still happened and must
+                // be attributable.
+                if let Some(version) = &version {
+                    let record = Record::Assert(Claim {
+                        the: artifact.the.clone(),
+                        of: artifact.of.clone(),
+                        is: artifact.is.clone(),
+                        cause: HistoryCause::new(superseded_versions),
+                    });
+                    buffer_record(&mut history_records, record, version);
+                }
+
+                if found_same_value {
+                    continue;
+                }
+
+                let (entity_key, attribute_key, value_key) =
+                    artifact_index_keys(&artifact, manifest);
+
+                // Persist a spilling value's bytes as a content-addressed
+                // block before recording the fact.
+                store_spilled_value(store, &artifact, manifest).await?;
+
+                let mut datum = Datum::for_artifact(&artifact);
+                datum.version = version;
+                let added = State::Added(datum);
+                transient = transient
+                    .write(entity_key.clone(), added.clone(), storage)
+                    .await?;
+                transient = transient
+                    .write(attribute_key.clone(), added.clone(), storage)
+                    .await?;
+                transient = transient.write(value_key, added, storage).await?;
+            }
+            Instruction::Retract(artifact) => {
+                let (entity_key, attribute_key, value_key) =
+                    artifact_index_keys(&artifact, manifest);
+
+                // The standing datum decides everything below: whether
+                // the retract changes anything at all, and which versions
+                // it withdraws. Retracting a fact that is not there is a
+                // no-op, spec'd as such: no index change, no record, no
+                // minted revision. (A same-batch assert of the same fact
+                // IS visible here — the write target carries it — so
+                // assert+retract still cancels through the erases below,
+                // and the record fold nets their lineage.)
+                let Some(State::Added(standing)) = transient.read(&entity_key, storage).await?
+                else {
+                    continue;
+                };
+                changed = true;
+
+                // A version-tagged retraction records its history: its
+                // cause is EVERY claim the standing entry collapses —
+                // same-value asserts from different writers share one
+                // key, and the retraction's author observed all of them
+                // (spec D3: a retraction covers exactly what its author
+                // had seen). An assertion made earlier in this same
+                // batch carries this batch's own version; a record must
+                // not claim itself as its cause, so that one is dropped
+                // (alone, it degenerates to a genesis retraction).
+                if let Some(version) = &version {
+                    let withdrawn: Vec<Version> = standing
+                        .versions()
+                        .filter(|withdrawn| *withdrawn != version)
+                        .copied()
+                        .collect();
+                    let record = Record::Retract(Claim {
+                        the: artifact.the.clone(),
+                        of: artifact.of.clone(),
+                        is: artifact.is.clone(),
+                        cause: HistoryCause::new(withdrawn),
+                    });
+                    buffer_record(&mut history_records, record, version);
+                }
+
+                // Observed-remove semantics: retraction deletes the
+                // fact's keys outright — no tombstone. The retract
+                // record written above is the durable carrier of the
+                // deletion (it replicates as history), and a replica's
+                // causal context is what stops a stale peer's copy from
+                // resurrecting the fact at merge time (see
+                // `notes/version-control.md`). Deleting an absent
+                // key is a no-op, so a same-batch assert+retract cancels
+                // to nothing and a retract of a fact that never existed
+                // changes nothing in the indexes.
+                transient = transient.erase(&entity_key, storage).await?;
+                transient = transient.erase(&attribute_key, storage).await?;
+                transient = transient.erase(&value_key, storage).await?;
+            }
+        }
+    }
+
+    // Write the folded records and their coverage mirrors. Emitting
+    // coverage from the FOLDED record (rather than per instruction)
+    // keeps the mirror consistent with the log when a batch touched
+    // one (entity, attribute, value) twice: the coverage entry's key
+    // collides exactly when the record key does, and both then carry
+    // the same folded lineage.
+    if let Some(version) = &version {
+        for record in history_records.into_values() {
+            if let Some((key, entry)) = record.coverage_entry(version) {
+                transient = transient.write(key, entry, storage).await?;
+            }
+            let (key, entry) = record.into_entry(version, manifest);
+            transient = transient.write(key, entry, storage).await?;
+        }
+    }
+
+    Ok((transient, changed))
 }
 
 #[cfg(test)]
@@ -1352,6 +1387,7 @@ mod spill_cache_tests {
     use super::{
         ArtifactTree, ArtifactTreeExt, SpillCache, fetch_spilled, fetch_spilled_cached, spill_cache,
     };
+    use crate::key::default_manifest;
     use crate::{Artifact, EntityKey, Instruction, KeyView, Value};
     use dialog_search_tree::Delta;
     use dialog_storage::{Blake3Hash, MeasuredStorage, MemoryStorageBackend, StorageBackend};
@@ -1414,7 +1450,7 @@ mod spill_cache_tests {
                 .await
                 .unwrap();
         }
-        let key = EntityKey::from(&artifact).into_key();
+        let key = EntityKey::from_artifact(&artifact, &default_manifest()).into_key();
         assert!(EntityKey(&key).value_is_spilled(), "value must spill");
         (store, key, value)
     }
@@ -1473,171 +1509,10 @@ mod spill_cache_tests {
             stream::iter(vec![Instruction::Assert(artifact.clone())]),
         )
         .await?;
-        let key = EntityKey::from(&artifact).into_key();
+        let key = EntityKey::from_artifact(&artifact, &default_manifest()).into_key();
         let cache = spill_cache();
         assert_eq!(fetch_spilled_cached(&store, &cache, &key).await?, None);
         assert_eq!(fetch_spilled(&store, &key).await?, None);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod batch_tests {
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
-
-    use anyhow::Result;
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage, StorageBackend as _};
-    use futures_util::stream;
-
-    use super::{ArtifactTree, ArtifactTreeExt as _, EditBatch};
-    use crate::history::{Edition, Origin, Version};
-    use crate::{
-        Artifact, AttributeKey, Datum, EntityKey, FromKey as _, Instruction, Key, State, Value,
-    };
-
-    fn store() -> Storage<CborEncoder, MemoryStorageBackend<[u8; 32], Vec<u8>>> {
-        Storage {
-            encoder: CborEncoder,
-            backend: MemoryStorageBackend::default(),
-        }
-    }
-
-    fn assert_of(entity: &str, value: &str) -> Instruction {
-        Instruction::Assert(Artifact {
-            the: "test/field".parse().unwrap(),
-            of: entity.parse().unwrap(),
-            is: Value::String(value.to_string()),
-            cause: None,
-        })
-    }
-
-    fn replace_of(entity: &str, value: &str) -> Instruction {
-        Instruction::Replace(Artifact {
-            the: "test/field".parse().unwrap(),
-            of: entity.parse().unwrap(),
-            is: Value::String(value.to_string()),
-            cause: None,
-        })
-    }
-
-    fn version() -> Version {
-        Version::new(Origin::from([7u8; 32]), Edition::new(1))
-    }
-
-    fn data() -> Vec<Instruction> {
-        vec![assert_of("user:1", "resident"), assert_of("user:2", "b")]
-    }
-
-    fn entries() -> Vec<(Key, State<Datum>)> {
-        let artifact = Artifact {
-            the: "test/record".parse().unwrap(),
-            of: "rev:1".parse().unwrap(),
-            is: Value::String("record".to_string()),
-            cause: None,
-        };
-        let entity_key = EntityKey::from(&artifact);
-        let attribute_key = AttributeKey::from_key(&entity_key);
-        let added = State::Added(Datum::for_artifact(&artifact));
-        vec![
-            (entity_key.into_key(), added.clone()),
-            (attribute_key.into_key(), added),
-        ]
-    }
-
-    /// Record entries appended through [`EditBatch::record`] are ordinary
-    /// in-batch inserts covered by the batch's single persist.
-    ///
-    /// Three pins: sealing the batch lands on the identical root the two-step
-    /// path (`apply_versioned` + `record`) produces for the same data and
-    /// entries, so the record's placement is not path-dependent; `apply`
-    /// itself leaves the base tree untouched, which is what makes dropping an
-    /// unsealed no-op batch free; and the sealed root serves the record and
-    /// the data through the ordinary read paths.
-    #[dialog_common::test]
-    async fn it_seals_record_entries_with_the_batch_onto_the_canonical_root() -> Result<()> {
-        // The reference: data through the one-shot edit path, then the record
-        // through the `record` surface (a second edit and persist).
-        let mut direct_store = store();
-        let mut direct = ArtifactTree::empty();
-        let mut direct_delta = Delta::zero();
-        direct
-            .apply_versioned(
-                &mut direct_store,
-                &mut direct_delta,
-                Some(version()),
-                stream::iter(data()),
-            )
-            .await?;
-        direct
-            .record(&mut direct_store, &mut direct_delta, entries())
-            .await?;
-
-        // The batch surface: the same fact set must land on the
-        // byte-identical root with ONE persist.
-        let mut batch_store = store();
-        let base = ArtifactTree::empty();
-        let mut delta = Delta::zero();
-        let batch = EditBatch::apply(
-            &base,
-            &mut batch_store,
-            Some(version()),
-            stream::iter(data()),
-        )
-        .await?;
-        assert!(batch.changed(), "the data writes change the indexes");
-        let batch = batch.record(&batch_store, entries()).await?;
-        let sealed = batch.seal(&mut delta)?;
-        assert_eq!(
-            sealed.root(),
-            direct.root(),
-            "the batch-carried record must land on the canonical root"
-        );
-        assert_eq!(
-            base.root(),
-            ArtifactTree::empty().root(),
-            "applying a batch must not touch the base tree"
-        );
-
-        // The sealed root serves the record and the data through the
-        // ordinary read paths once the delta is flushed.
-        for (hash, buffer) in delta.flush() {
-            batch_store
-                .set(*hash.as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-        }
-        let records = sealed
-            .select_record(
-                batch_store.clone(),
-                &"rev:1".parse()?,
-                &"test/record".parse()?,
-            )
-            .await?;
-        assert_eq!(records.len(), 1, "the record reads back from the tree");
-        assert_eq!(records[0].is, Value::String("record".to_string()));
-        assert!(
-            !sealed
-                .select_data(
-                    batch_store.clone(),
-                    &"user:1".parse()?,
-                    &"test/field".parse()?
-                )
-                .await?
-                .is_empty(),
-            "the batch's data survives alongside the record"
-        );
-
-        // A pure no-op batch (re-replacing a value already in place) reports
-        // unchanged; the caller drops it whole and nothing is minted.
-        let noop = EditBatch::apply(
-            &sealed,
-            &mut batch_store,
-            Some(Version::new(Origin::from([7u8; 32]), Edition::new(2))),
-            stream::iter(vec![replace_of("user:1", "resident")]),
-        )
-        .await?;
-        assert!(!noop.changed(), "a same-value replace is a no-op batch");
         Ok(())
     }
 }

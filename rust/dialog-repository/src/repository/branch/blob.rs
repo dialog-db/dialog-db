@@ -466,7 +466,11 @@ where
         };
         let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
-        tree.record(&mut store, &mut delta, record.entries()?)
+        // The record's key carries its value through the tree's own
+        // inline-vs-spill threshold, so read it off the tree rather than
+        // assuming the default.
+        let manifest = tree.format_manifest(store.clone(), &delta).await?;
+        tree.record(&mut store, &mut delta, record.entries(&manifest)?)
             .await?;
 
         // Persist the tree's pending nodes before referencing the root in a

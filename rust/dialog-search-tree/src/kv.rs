@@ -62,6 +62,19 @@ pub trait Key:
         0
     }
 
+    /// The layout id of a key given only its stored bytes, without
+    /// reconstructing the typed key. Must agree with
+    /// `Self::try_from_bytes(bytes)?.layout()`.
+    ///
+    /// The default reconstructs the key and asks it. A key type whose layout
+    /// is derived from a leading tag byte should override this to read the
+    /// tag straight from the bytes: the novelty encoder classifies a whole
+    /// buffer by layout first and skips the typed parse entirely when the
+    /// buffer straddles layouts (the opaque fallback needs no components).
+    fn layout_of(bytes: &[u8]) -> Result<u8, DialogSearchTreeError> {
+        Ok(Self::try_from_bytes(bytes)?.layout())
+    }
+
     /// The component layout for a given layout id, describing how each
     /// component is stored in a columnar leaf. Defaults to a single whole-key
     /// arena component (no finer structure) for the only id `0`, so key types
@@ -80,6 +93,31 @@ pub trait Key:
     /// single component, matching [`Schema::opaque`](crate::Schema::opaque).
     fn components<'a>(&'a self, out: &mut Vec<&'a [u8]>) {
         out.push(self.as_ref());
+    }
+
+    /// Splits a key's raw stored bytes into its component slices for `layout`,
+    /// borrowing from `bytes`, without reconstructing the typed key.
+    ///
+    /// Must agree with [`components`](Key::components) on every valid key:
+    /// `components_of(key.as_ref(), key.layout(), out)` pushes exactly the
+    /// slices `key.components(out)` pushes. The column encoders split from
+    /// raw bytes through this (a buffered op stores raw key bytes, and even a
+    /// typed key's slices borrow from the same bytes), so no key is copied or
+    /// parsed into typed form just to be taken apart again.
+    ///
+    /// The default pushes the whole key as the single opaque component,
+    /// matching the default [`schema`](Key::schema); a key type that
+    /// overrides `schema`/`components` must override this to match. A
+    /// mismatch cannot pass silently: the encoders check the slice count and
+    /// coverage against the schema and refuse to encode.
+    fn components_of<'a>(
+        bytes: &'a [u8],
+        layout: u8,
+        out: &mut Vec<&'a [u8]>,
+    ) -> Result<(), DialogSearchTreeError> {
+        let _ = layout;
+        out.push(bytes);
+        Ok(())
     }
 }
 
