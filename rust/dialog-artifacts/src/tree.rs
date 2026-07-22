@@ -73,6 +73,25 @@ pub type ArtifactTree = PersistentTree<Key, State<Datum>>;
 // loser version could otherwise resurrect the fact through a peer that
 // still holds it (spec D3 on identical values).
 impl TreeValue for State<Datum> {
+    /// Calibrated to measured rkyv footprints (the weight-proxy audit put
+    /// the mean serialized payload at ~129 bytes for a typical
+    /// cause-plus-version datum): base costs cover the enum and option
+    /// tags, alignment, and rkyv's relative-pointer overhead, and each
+    /// version-sized component adds its 40 bytes plus bookkeeping. An
+    /// estimate, not an exact encoding size — pacing needs a pure,
+    /// deterministic proxy that tracks reality, not byte equality.
+    fn payload_weight(&self) -> usize {
+        match self {
+            State::Removed => 16,
+            State::Added(datum) => {
+                40 + datum.cause.as_ref().map_or(0, |_| 40)
+                    + datum.version.as_ref().map_or(0, |_| 48)
+                    + 48 * (datum.collapsed.len() + datum.supersedes.len())
+                    + datum.blob.as_ref().map_or(0, |blob| 16 + blob.len())
+            }
+        }
+    }
+
     fn fuse(winner: Self, loser: &Self) -> Self {
         match (winner, loser) {
             (State::Added(mut winner), State::Added(loser)) => {

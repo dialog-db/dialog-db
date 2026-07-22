@@ -16,6 +16,8 @@ use std::env;
 
 use dialog_search_tree::{Buffer, PersistentNode, PersistentNodeBody};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use rkyv::rancor::Error as RkyvError;
+use rkyv::{deserialize, to_bytes};
 
 use crate::{Datum, DialogArtifactsError, EMPTY_TREE_HASH, Key, State};
 
@@ -127,6 +129,43 @@ where
                 }
             } else {
                 let segment = node.as_segment()?;
+                // Weight-proxy audit (DIALOG_DIST_WEIGHT=1): per leaf, the
+                // proxy weight (raw key bytes + 32 per entry), the raw key
+                // bytes alone, and the summed canonical (rkyv) size of the
+                // value payloads, so encoded-bytes-vs-weight ratios and the
+                // payload-vs-encoding split can be computed offline. The
+                // value pass deserializes every entry, so it stays gated.
+                if env::var("DIALOG_DIST_WEIGHT").is_ok() {
+                    let slots = segment.len();
+                    let mut key_raw = 0usize;
+                    let mut keys = segment.keys::<Key>()?;
+                    while let Some((_, key)) = keys.next_key()? {
+                        key_raw += key.len();
+                    }
+                    let mut value_bytes = 0usize;
+                    for at in 0..slots {
+                        let value: State<Datum> = deserialize::<State<Datum>, RkyvError>(
+                            segment.value_at(at)?,
+                        )
+                        .map_err(|error| {
+                            DialogArtifactsError::Tree(format!(
+                                "value deserialize failed during weight audit: {error}"
+                            ))
+                        })?;
+                        value_bytes += to_bytes::<RkyvError>(&value)
+                            .map_err(|error| {
+                                DialogArtifactsError::Tree(format!(
+                                    "value re-serialize failed during weight audit: {error}"
+                                ))
+                            })?
+                            .len();
+                    }
+                    eprintln!(
+                        "TREEWEIGHT bytes={size} slots={slots} weight={} key_raw={key_raw} \
+                         value_bytes={value_bytes}",
+                        key_raw + 32 * slots,
+                    );
+                }
                 NodeStat {
                     kind: NodeKind::Segment,
                     height: 0,

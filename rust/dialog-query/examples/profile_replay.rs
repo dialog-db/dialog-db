@@ -47,11 +47,31 @@ fn main() {
         .expect("usage: profile_replay <log.csv> [limit]");
     let limit: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(2048);
 
+    let curve = std::env::var("CURVE").is_ok();
+    let mem = std::env::var("DIALOG_TXN_MEM").is_ok();
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let env = BenchEnv::temp().await.unwrap();
         let start = std::time::Instant::now();
-        let entities = env.import_transaction_log(&path, limit).await.unwrap();
+        let entities = if mem {
+            let env = BenchEnv::volatile().await.unwrap();
+            if curve {
+                env.replay_transaction_log_with_curve(&path, limit)
+                    .await
+                    .unwrap()
+            } else {
+                env.import_transaction_log(&path, limit).await.unwrap()
+            }
+        } else {
+            let env = BenchEnv::temp().await.unwrap();
+            if curve {
+                env.replay_transaction_log_with_curve(&path, limit)
+                    .await
+                    .unwrap()
+            } else {
+                env.import_transaction_log(&path, limit).await.unwrap()
+            }
+        };
         let elapsed = start.elapsed();
         eprintln!(
             "replayed limit={limit} entities={} in {elapsed:?}",

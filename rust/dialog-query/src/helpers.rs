@@ -43,6 +43,9 @@ use dialog_operator::{Operator, Profile};
 use dialog_repository::{Branch, NetworkedIndex, RemoteSite, Repository, RepositoryExt as _};
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::{Blake3Hash, DialogStorageError, JournaledStorage, StorageBackend};
+use dialog_search_tree::audit as tree_audit;
+use dialog_storage::{DUPLICATE_SETS, TOTAL_SETS, dup_audit};
+use std::sync::atomic::Ordering;
 // The platform temp filesystem (and the on-disk `BenchEnv::temp` variant
 // built on it) only exists off wasm — there is no native temp directory in
 // the browser, so the whole on-disk path is gated to non-wasm targets.
@@ -882,6 +885,12 @@ where
         let reuse = env::var("DIALOG_REUSE_BRANCH").is_ok();
         let mut held: Option<Branch> = None;
 
+        // Per-band accumulation for the depth curve: mean commit cost over
+        // all commits since the previous power of two, not one noisy sample
+        // at the boundary. Measurement plumbing, uncommitted.
+        let mut band_us: u128 = 0;
+        let mut band_commits: u128 = 0;
+
         for row in rows {
             let width = [txn_at, the_at, of_at, as_at, is_at]
                 .into_iter()
@@ -900,16 +909,23 @@ where
                         .await?;
                     let commit_micros = commit_start.elapsed().as_micros();
                     committed += 1;
+                    band_us += commit_micros;
+                    band_commits += 1;
 
                     if curve && committed.is_power_of_two() && committed >= 8 {
                         let run = self.run_query("se.post/title").await?;
                         eprintln!(
                             "TXNCURVE depth={committed:<7} commit_us={commit_micros:<7} \
+                             band_mean_us={:<7} band_commits={:<5} \
                              query_reads={:<5} query_unique={:<5} query_results={}",
+                            band_us / band_commits.max(1),
+                            band_commits,
                             run.reads,
                             run.unique_reads,
                             run.results.len(),
                         );
+                        band_us = 0;
+                        band_commits = 0;
                     }
 
                     if limit != 0 && committed >= limit {
@@ -1571,6 +1587,15 @@ mod test {
         };
         let elapsed = start.elapsed();
 
+        if env::var("DIALOG_TXN_AUDIT").is_ok() {
+            eprintln!(
+                "TXNAUDIT {} dup_sets={} total_sets={}{}",
+                tree_audit::report(),
+                DUPLICATE_SETS.swap(0, Ordering::Relaxed),
+                TOTAL_SETS.swap(0, Ordering::Relaxed),
+                dup_audit::report(),
+            );
+        }
         eprintln!(
             "TXNLOG replayed limit={limit} entities={} in {elapsed:?}",
             entities.len()
