@@ -79,6 +79,9 @@ pub mod term;
 
 mod sort_order;
 pub use sort_order::*;
+
+mod merge_join;
+pub use merge_join::*;
 /// Unified schema-layer type system (`Type`, `Primitive`,
 /// `Refinement`, set-operations).
 pub mod type_system;

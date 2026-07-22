@@ -257,6 +257,49 @@ impl Match {
         }
     }
 
+    /// Merge every binding and claim from `other` into this match,
+    /// returning `None` if the two disagree on any shared variable.
+    ///
+    /// This is the row-combining step of a set-at-a-time join: two rows
+    /// produced independently (rather than one fed into the other) are
+    /// joined by unifying their bindings. A shared variable bound to the
+    /// same `Present` value in both, or `Absent` in both, unifies; a
+    /// `Present`/`Absent` clash or two different `Present` values is a
+    /// non-match, which yields `None` rather than an error, since a
+    /// failed unification is ordinary data-dependent filtering, not a
+    /// contract violation.
+    ///
+    /// Bindings only in `other` are added; bindings only in `self` are
+    /// kept. Claims from `other` fill in only where `self` has none, so a
+    /// row's own provenance is never overwritten by the row it joins with.
+    pub fn combine(mut self, other: &Match) -> Option<Match> {
+        for (name, binding) in &other.bindings {
+            match self.bindings.get(name) {
+                None => {
+                    self.bindings.insert(name.clone(), binding.clone());
+                }
+                Some(existing) if existing == binding => {}
+                Some(_) => return None,
+            }
+        }
+        for (name, claim) in &other.claims {
+            self.claims
+                .entry(name.clone())
+                .or_insert_with(|| claim.clone());
+        }
+        Some(self)
+    }
+
+    /// The `Present` value bound to `name`, if any. Used by the merge
+    /// join to read the join key out of a row without going through a
+    /// [`Term`].
+    pub fn value_of(&self, name: &str) -> Option<&Value> {
+        match self.bindings.get(name) {
+            Some(Binding::Present(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Returns `true` iff the term is bound (Present *or* Absent)
     /// in this match. Use [`Self::is_present`] to check for
     /// `Present`-only.
