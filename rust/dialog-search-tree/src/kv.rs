@@ -105,6 +105,45 @@ impl<const N: usize> Key for [u8; N] {
 /// Trait for types that can be used as values in a search tree.
 ///
 /// Values must be cloneable and serializable.
-pub trait Value: Clone + Debug + Sized + Archive + ConditionalSend {}
+pub trait Value: Clone + Debug + Sized + Archive + ConditionalSend {
+    /// Domain-specific conflict resolution for
+    /// [`integrate`](crate::TransientTree::integrate): when two
+    /// *different* values contend for the same key, return `Some(true)`
+    /// if `self` (the incoming value) must replace `existing`,
+    /// `Some(false)` if `existing` must be kept, or `None` to fall back
+    /// to the default last-write-wins hash race.
+    ///
+    /// Implementations must be deterministic and antisymmetric
+    /// (`a.prevails_over(b) == Some(true)` iff
+    /// `b.prevails_over(a) == Some(false)`), so that two replicas
+    /// integrating the same contended pair in opposite directions
+    /// converge on the same winner. The default (`None`, hash race) has
+    /// this property; overrides exist to encode semantics the raw bytes
+    /// cannot — e.g. a deletion tombstone that must beat any concurrent
+    /// assertion regardless of how their encodings happen to hash.
+    fn prevails_over(&self, existing: &Self) -> Option<bool> {
+        let _ = existing;
+        None
+    }
+
+    /// Domain-specific fusion for [`integrate`](crate::TransientTree::integrate)
+    /// contests: after the winner of a same-key contest is chosen, fold
+    /// whatever the LOSING value carries that must survive the contest into
+    /// the winner. The default keeps the winner untouched (pure
+    /// last-write-wins). An override exists for values that aggregate — the
+    /// dialog artifact datum collapses same-fact claim versions from both
+    /// sides into one entry, so a contest unions the two sets instead of
+    /// silently orphaning the loser's.
+    ///
+    /// Implementations must be deterministic and winner-directional: both
+    /// replicas resolve the contest with the same `(winner, loser)` roles
+    /// (the winner choice is antisymmetric), so `fuse(winner, &loser)`
+    /// computing the same bytes on both sides is what keeps them
+    /// convergent.
+    fn fuse(winner: Self, loser: &Self) -> Self {
+        let _ = loser;
+        winner
+    }
+}
 
 impl Value for Vec<u8> {}

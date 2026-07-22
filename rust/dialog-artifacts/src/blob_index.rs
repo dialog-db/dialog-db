@@ -63,6 +63,10 @@ impl BlobRecord {
         State::Added(Datum {
             cause: None,
             blob: Some(value),
+            version: None,
+            collapsed: Vec::new(),
+            supersedes: Vec::new(),
+            retraction: false,
         })
     }
 

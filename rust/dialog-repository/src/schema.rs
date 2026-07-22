@@ -1,8 +1,8 @@
 //! Typed schema for the facts a dialog-db repository writes about itself.
 //!
 //! Each branch carries a small, fixed set of facts describing its own
-//! structure — the [`Origin`] (this device's view of the repository),
-//! the [`Branch`] (name + origin), and the current [`BranchRevision`]
+//! structure — the [`Replica`] (this device's view of the repository),
+//! the [`Branch`] (name + replica), and the current [`BranchRevision`]
 //! when one exists. These facts are **synthesized at query time** from
 //! the branch handle plus the operator's identity (via
 //! [`Identify`](dialog_effects::authority::Identify)); they never live
@@ -19,7 +19,7 @@
 //!   use [`DidExt::this`].
 //!
 //! - **Content-derived** — for entities defined by their inputs (an
-//!   origin is `(profile, subject)`, a branch is `(origin, name)`). The
+//!   replica is `(profile, subject)`, a branch is `(replica, name)`). The
 //!   entity URI is `did:key:z6Mk<base58(blake3(dag-cbor(inputs)))>`;
 //!   use [`EntityExt::of`]. Two parties independently describing the
 //!   same logical entity converge on the same URI.
@@ -28,9 +28,9 @@
 //!
 //! Per-concept attribute namespaces — [`branch`] holds the
 //! `dialog.branch/*` attributes for [`Branch`] + [`BranchRevision`];
-//! [`origin`] holds the `dialog.origin/*` attributes for [`Origin`].
+//! [`replica`] holds the `dialog.replica/*` attributes for [`Replica`].
 //! Separating them keeps a `Branch:` query from cross-matching an
-//! `Origin:` entity even though both could carry similar attribute
+//! `Replica:` entity even though both could carry similar attribute
 //! names.
 
 use base58::ToBase58;
@@ -117,12 +117,12 @@ pub mod branch {
         pub String,
     );
 
-    /// `dialog.branch/origin` — points at the
-    /// [`Origin`](super::Origin) entity this branch lives on.
+    /// `dialog.branch/replica` — points at the
+    /// [`Replica`](super::Replica) entity this branch lives on.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
-    pub struct Origin(
-        /// The origin entity URI.
+    pub struct Replica(
+        /// The replica entity URI.
         pub Entity,
     );
 
@@ -136,47 +136,123 @@ pub mod branch {
         pub String,
     );
 
-    /// `dialog.branch/period` — logical-clock period of the current
-    /// revision.
+    /// `dialog.branch/edition` — causal depth of the current revision.
+    ///
+    /// A Lamport timestamp derived from the revision DAG:
+    /// `max(cause editions) + 1`, or zero for the first revision.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
-    pub struct Period(
-        /// Period component of the revision's logical clock.
+    pub struct Edition(
+        /// Edition of the revision's logical clock.
         pub u128,
     );
 
-    /// `dialog.branch/moment` — logical-clock moment of the current
-    /// revision.
+    /// `dialog.branch/revision` — the content-derived entity of the
+    /// current revision: the join key from "where is this branch now?"
+    /// to everything recorded about that revision (see
+    /// [`RevisionRecord`](dialog_artifacts::history::RevisionRecord)).
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
-    pub struct Moment(
-        /// Moment component of the revision's logical clock.
-        pub u128,
+    pub struct Revision(
+        /// The revision entity URI.
+        pub Entity,
     );
 }
 
-/// Attribute newtypes for [`Origin`] entities.
+/// Attribute newtypes for [`Replica`] entities.
 ///
-/// All attributes here live under the `dialog.origin` domain.
-/// No `Name` field — dialog's `Origin` is identity-only. Downstream
-/// code that wants a display name can additionally assert
-/// `dialog.meta/name` on the same `Origin.this`.
-pub mod origin {
+/// All attributes here live under the `dialog.replica` domain.
+/// No `Name` field — dialog's `Replica` is identity-only. Downstream
+/// code that wants a display name can additionally assert a name
+/// attribute of its own (e.g. `app.meta/name`) on the same
+/// `Replica.this`; the `dialog.` namespace itself is reserved and
+/// user instructions cannot write into it.
+pub mod replica {
     use super::{Attribute, Entity};
 
-    /// `dialog.origin/subject` — the repository this origin views.
+    /// `dialog.replica/subject` — the repository this replica views.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    #[domain("dialog.origin")]
+    #[domain("dialog.replica")]
     pub struct Subject(
         /// The repository subject entity (its DID as Entity).
         pub Entity,
     );
 
-    /// `dialog.origin/profile` — the profile that owns this origin.
+    /// `dialog.replica/profile` — the profile that owns this replica.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-    #[domain("dialog.origin")]
+    #[domain("dialog.replica")]
     pub struct Profile(
         /// The profile entity (its DID as Entity).
+        pub Entity,
+    );
+}
+
+/// Attribute newtypes for the [`Revision`] / [`RevisionParent`]
+/// concepts.
+///
+/// All attributes here live under the `dialog.revision` domain — and
+/// none of them is ever stored. A revision describes itself with one
+/// atomic `dialog.db/revision` record fact; these attributes are the
+/// *conclusion shape* of the built-in rules (see
+/// [`rules::revision_rule`](crate::rules)) that project the record's
+/// fields at query time, verification included.
+pub mod revision {
+    use super::{Attribute, Entity};
+
+    /// `dialog.revision/branch` — the branch entity the revision was
+    /// minted on (a [`Branch`](super::Branch) entity).
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Branch(
+        /// The branch entity.
+        pub Entity,
+    );
+
+    /// `dialog.revision/issuer` — the operator DID (as entity) that
+    /// minted the revision.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Issuer(
+        /// The issuer entity (the operator's DID).
+        pub Entity,
+    );
+
+    /// `dialog.revision/authority` — the profile DID (as entity) that
+    /// authorized the revision.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Authority(
+        /// The authority entity (the profile's DID).
+        pub Entity,
+    );
+
+    /// `dialog.revision/edition` — the revision's causal depth
+    /// (a Lamport timestamp), derived from its parents.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Edition(
+        /// The revision's edition.
+        pub u64,
+    );
+
+    /// `dialog.revision/parent` — a parent revision's entity; one per
+    /// parent (two for a merge), so cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    #[cardinality(many)]
+    pub struct Parent(
+        /// A parent revision's entity.
+        pub Entity,
+    );
+
+    /// `dialog.revision/ancestor` — a revision reachable from this one
+    /// through any chain of `parent` edges; one per reachable revision,
+    /// so cardinality-many.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    #[cardinality(many)]
+    pub struct Ancestor(
+        /// An ancestor revision's entity.
         pub Entity,
     );
 }
@@ -217,126 +293,127 @@ pub mod session {
     #[cardinality(many)]
     pub struct Branch(
         /// The branch entity (the `Branch.this` for that branch under
-        /// the session's current origin).
+        /// the session's current replica).
         pub Entity,
     );
 }
 
-/// Hash input for [`Origin::this`].
+/// Hash input for [`Replica::this`].
 ///
 /// The single-variant enum shape tags the CBOR encoding with the
 /// concept name: two inputs with the same data but different
 /// concepts produce distinct hashes.
 #[derive(Debug, Clone, Serialize)]
-enum OriginHash<'a> {
-    Origin { subject: &'a Did, profile: &'a Did },
+enum ReplicaHash<'a> {
+    Replica { subject: &'a Did, profile: &'a Did },
 }
 
 /// Hash input for [`Branch::this`].
 ///
-/// `Branch` identity is `(origin, name)`. The concept-tag variant
-/// keeps a branch and an origin with the same field shapes from
+/// `Branch` identity is `(replica, name)`. The concept-tag variant
+/// keeps a branch and an replica with the same field shapes from
 /// hashing to the same entity.
 #[derive(Serialize)]
 enum BranchHash<'a> {
-    Branch { origin: &'a Entity, name: &'a str },
+    Branch { replica: &'a Entity, name: &'a str },
 }
 
 /// This device's view of a specific repository.
 ///
 /// `this` is content-derived from `(profile, subject)` (see
-/// [`OriginHash`]), so:
+/// [`ReplicaHash`]), so:
 ///
 /// - two devices holding the same profile converge on the same
-///   origin entity for a given repository, and
-/// - different profiles produce different origin entities even when
+///   replica entity for a given repository, and
+/// - different profiles produce different replica entities even when
 ///   pointing at the same repository.
 ///
 /// # Redundant by design
 ///
-/// [`origin::Subject`] and [`origin::Profile`] carry the same two
+/// [`replica::Subject`] and [`replica::Profile`] carry the same two
 /// DIDs that went into the hash. The hash is one-way, so without
 /// these attributes it would be impossible to answer "find the
-/// origin this profile has for subject X" without re-hashing every
+/// replica this profile has for subject X" without re-hashing every
 /// candidate. The attributes make the relationships discoverable
 /// through normal queries.
 ///
 /// # No name field
 ///
-/// Dialog's `Origin` carries identity (`subject`, `profile`) only.
-/// Downstream that wants a display name can assert `dialog.meta/name`
-/// on the same `Origin.this`; that attribute composes at query time
+/// Dialog's `Replica` carries identity (`subject`, `profile`) only.
+/// Downstream that wants a display name can assert a name attribute of
+/// its own (e.g. `app.meta/name` — the `dialog.` namespace is reserved)
+/// on the same `Replica.this`; that attribute composes at query time
 /// without affecting identity.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Origin {
-    /// The origin's entity. Derived from `(profile, subject)`.
+pub struct Replica {
+    /// The replica's entity. Derived from `(profile, subject)`.
     pub this: Entity,
-    /// Reference to the repository this origin is a view of.
-    pub subject: origin::Subject,
-    /// Reference to the profile that owns this origin.
-    pub profile: origin::Profile,
+    /// Reference to the repository this replica is a view of.
+    pub subject: replica::Subject,
+    /// Reference to the profile that owns this replica.
+    pub profile: replica::Profile,
 }
 
-impl Origin {
-    /// Build an origin concept from a profile DID and a subject DID.
+impl Replica {
+    /// Build an replica concept from a profile DID and a subject DID.
     pub fn new(profile: Did, subject: Did) -> Self {
         Self {
-            this: Entity::of(&OriginHash::Origin {
+            this: Entity::of(&ReplicaHash::Replica {
                 subject: &subject,
                 profile: &profile,
             }),
-            subject: origin::Subject(subject.this()),
-            profile: origin::Profile(profile.this()),
+            subject: replica::Subject(subject.this()),
+            profile: replica::Profile(profile.this()),
         }
     }
 }
 
-impl AsRef<Entity> for Origin {
+impl AsRef<Entity> for Replica {
     fn as_ref(&self) -> &Entity {
         &self.this
     }
 }
 
-/// A branch within an origin.
+/// A branch within an replica.
 ///
-/// `this` is content-derived from `(origin, name)`. Devices sharing
-/// a profile converge on the same `Origin.this`, and therefore the
+/// `this` is content-derived from `(replica, name)`. Devices sharing
+/// a profile converge on the same `Replica.this`, and therefore the
 /// same `Branch.this` — so the schema concept naturally describes
 /// "the same branch" across devices.
 ///
 /// # Coexistence with `crate::Branch`
 ///
 /// Coexists with [`crate::Branch`] (the persistent handle). Both
-/// describe "the branch named X on this origin" but the schema
+/// describe "the branch named X on this replica" but the schema
 /// concept is a *fact set* synthesized at query time, while the
 /// handle is the imperative API. Always disambiguate via
 /// `crate::schema::Branch` in code that uses both.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Branch {
-    /// The branch's entity. Derived from `(origin, name)`.
+    /// The branch's entity. Derived from `(replica, name)`.
     pub this: Entity,
-    /// The branch's name on this origin.
+    /// The branch's name on this replica.
     pub name: branch::Name,
-    /// The origin this branch lives on.
-    pub origin: branch::Origin,
+    /// The replica this branch lives on.
+    pub replica: branch::Replica,
 }
 
 impl Branch {
     /// Build a branch concept from an owning entity and a name.
     ///
-    /// `origin` is anything that views as an [`Entity`] — typically
-    /// an [`Origin`] via its `AsRef<Entity>` impl. Derives `this`
-    /// from `(origin, name)` and stores `origin` as an attribute so
+    /// `replica` is anything that views as an [`Entity`] — typically
+    /// an [`Replica`] via its `AsRef<Entity>` impl. Derives `this`
+    /// from `(replica, name)` and stores `replica` as an attribute so
     /// every field is consistent with the entity hash.
-    pub fn new(origin: impl AsRef<Entity>, name: impl Into<branch::Name>) -> Self {
-        let origin = origin.as_ref();
+    pub fn new(replica: impl AsRef<Entity>, name: impl Into<branch::Name>) -> Self {
+        let replica = replica.as_ref();
         let name = name.into();
         Self {
             this: Entity::of(&BranchHash::Branch {
-                origin,
+                replica,
                 name: &name.0,
             }),
-            origin: branch::Origin::from(origin.clone()),
+            replica: branch::Replica::from(replica.clone()),
             name,
         }
     }
@@ -363,10 +440,72 @@ pub struct BranchRevision {
     pub this: Entity,
     /// Tree hash of the current revision, base58-encoded.
     pub tree: branch::Tree,
-    /// Logical-clock period component.
-    pub period: branch::Period,
-    /// Logical-clock moment component.
-    pub moment: branch::Moment,
+    /// Causal depth of the revision (Lamport timestamp).
+    pub edition: branch::Edition,
+    /// The revision entity — the join key to the revision's recorded
+    /// metadata.
+    pub revision: branch::Revision,
+}
+
+/// What a revision states about itself, projected from its signed
+/// record.
+///
+/// `this` is the content-derived revision entity (the same entity the
+/// overlay's [`BranchRevision::revision`] points at). The fields are
+/// never stored as facts: built-in rules derive them at query time
+/// from the branch's `dialog.db/revision` record fact via the
+/// `dialog/revision` formula, which refuses records that don't carry
+/// a valid issuer signature — forged attribution never surfaces in a
+/// query result. The DAG edge (one row per parent) is the separate
+/// cardinality-many [`RevisionParent`].
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Revision {
+    /// The revision entity, derivable by any replica from the version.
+    pub this: Entity,
+    /// The branch the revision was minted on.
+    pub branch: revision::Branch,
+    /// The operator DID (as entity) that minted the revision.
+    pub issuer: revision::Issuer,
+    /// The profile DID (as entity) that authorized it.
+    pub authority: revision::Authority,
+    /// The revision's causal depth.
+    pub edition: revision::Edition,
+}
+
+/// One edge of the revision DAG: `this` revision was minted on top of
+/// `parent`. Cardinality-many — a merge revision yields two rows; a
+/// genesis revision yields none. Derived at query time from the same
+/// signed record as [`Revision`].
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RevisionParent {
+    /// The revision entity.
+    pub this: Entity,
+    /// A parent revision's entity.
+    pub parent: revision::Parent,
+}
+
+/// The transitive closure of [`RevisionParent`]: `ancestor` is
+/// reachable from `this` through one or more `parent` edges. One row
+/// per reachable revision — a merge's ancestry unions both parents'
+/// histories, with converging paths collapsed to a single row.
+///
+/// Derived by a built-in recursive rule (see
+/// [`rules::builtin`](crate::rules)), so it inherits
+/// [`RevisionParent`]'s trust boundary: every edge the closure walks
+/// comes from a signature-verified revision record. Ancestry only
+/// reaches as far as the replicated records — an unreplicated parent
+/// simply contributes no rows, it does not error.
+///
+/// Answers "is X an ancestor of Y?" (bind both), "everything
+/// reachable from Y" (bind `this`), or "everything that leads to X"
+/// (bind `ancestor`). For an ordered walk with editions, use
+/// [`Branch::log`](crate::Branch::log) instead.
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RevisionAncestor {
+    /// The descendant revision entity.
+    pub this: Entity,
+    /// An ancestor revision's entity.
+    pub ancestor: revision::Ancestor,
 }
 
 /// What this query session is reading from.
@@ -382,10 +521,10 @@ pub struct BranchRevision {
 /// attribute, queried separately when you need it.
 ///
 /// Across multiple branches in one session you can still have only
-/// one profile and one operator, so those go in the concept. Origin
+/// one profile and one operator, so those go in the concept. Replica
 /// is per-branch (different branches may live on different repos), so
 /// it doesn't belong here — query the per-branch
-/// [`Branch.origin`](Branch) instead.
+/// [`Branch.replica`](Branch) instead.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Session {
     /// The fixed session entity: `db:session`.
@@ -456,38 +595,38 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_derives_same_origin_for_same_profile_and_subject() {
-        let a = Origin::new(did!("test:p"), did!("test:r"));
-        let b = Origin::new(did!("test:p"), did!("test:r"));
+    fn it_derives_same_replica_for_same_profile_and_subject() {
+        let a = Replica::new(did!("test:p"), did!("test:r"));
+        let b = Replica::new(did!("test:p"), did!("test:r"));
         assert_eq!(a.this, b.this);
     }
 
     #[dialog_common::test]
-    fn it_derives_different_origins_for_different_profiles() {
-        let a = Origin::new(did!("test:p1"), did!("test:r"));
-        let b = Origin::new(did!("test:p2"), did!("test:r"));
+    fn it_derives_different_replicas_for_different_profiles() {
+        let a = Replica::new(did!("test:p1"), did!("test:r"));
+        let b = Replica::new(did!("test:p2"), did!("test:r"));
         assert_ne!(a.this, b.this);
     }
 
     #[dialog_common::test]
-    fn it_derives_different_origins_for_different_subjects() {
-        let a = Origin::new(did!("test:p"), did!("test:r1"));
-        let b = Origin::new(did!("test:p"), did!("test:r2"));
+    fn it_derives_different_replicas_for_different_subjects() {
+        let a = Replica::new(did!("test:p"), did!("test:r1"));
+        let b = Replica::new(did!("test:p"), did!("test:r2"));
         assert_ne!(a.this, b.this);
     }
 
     #[dialog_common::test]
-    fn it_reflects_subject_and_profile_on_origin_attributes() {
+    fn it_reflects_subject_and_profile_on_replica_attributes() {
         let profile = did!("test:profile-x");
         let subject = did!("test:repo-y");
-        let origin = Origin::new(profile.clone(), subject.clone());
-        assert_eq!(origin.profile.0.to_string(), profile.as_str());
-        assert_eq!(origin.subject.0.to_string(), subject.as_str());
+        let replica = Replica::new(profile.clone(), subject.clone());
+        assert_eq!(replica.profile.0.to_string(), profile.as_str());
+        assert_eq!(replica.subject.0.to_string(), subject.as_str());
     }
 
     #[dialog_common::test]
-    fn it_derives_same_branch_for_same_origin_and_name() {
-        let o = Origin::new(did!("test:p"), did!("test:r"));
+    fn it_derives_same_branch_for_same_replica_and_name() {
+        let o = Replica::new(did!("test:p"), did!("test:r"));
         let a = Branch::new(&o, "main");
         let b = Branch::new(&o, "main");
         assert_eq!(a.this, b.this);
@@ -495,7 +634,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_derives_different_branches_for_different_names() {
-        let o = Origin::new(did!("test:p"), did!("test:r"));
+        let o = Replica::new(did!("test:p"), did!("test:r"));
         let a = Branch::new(&o, "main");
         let b = Branch::new(&o, "meta");
         assert_ne!(a.this, b.this);
@@ -503,8 +642,8 @@ mod tests {
 
     #[dialog_common::test]
     fn it_derives_different_branches_for_different_origins() {
-        let o1 = Origin::new(did!("test:p1"), did!("test:r"));
-        let o2 = Origin::new(did!("test:p2"), did!("test:r"));
+        let o1 = Replica::new(did!("test:p1"), did!("test:r"));
+        let o2 = Replica::new(did!("test:p2"), did!("test:r"));
         let a = Branch::new(&o1, "main");
         let b = Branch::new(&o2, "main");
         assert_ne!(a.this, b.this);
@@ -512,29 +651,29 @@ mod tests {
 
     #[dialog_common::test]
     fn it_derives_different_branches_for_different_repos() {
-        let o1 = Origin::new(did!("test:p"), did!("test:r1"));
-        let o2 = Origin::new(did!("test:p"), did!("test:r2"));
+        let o1 = Replica::new(did!("test:p"), did!("test:r1"));
+        let o2 = Replica::new(did!("test:p"), did!("test:r2"));
         let a = Branch::new(&o1, "main");
         let b = Branch::new(&o2, "main");
         assert_ne!(a.this, b.this);
     }
 
     #[dialog_common::test]
-    fn it_reflects_origin_on_branch_attribute() {
-        let o = Origin::new(did!("test:p"), did!("test:r"));
+    fn it_reflects_replica_on_branch_attribute() {
+        let o = Replica::new(did!("test:p"), did!("test:r"));
         let b = Branch::new(&o, "main");
-        assert_eq!(b.origin.0, o.this);
+        assert_eq!(b.replica.0, o.this);
     }
 
     #[dialog_common::test]
     fn it_attaches_branch_revision_to_branch_entity() {
-        let o = Origin::new(did!("test:p"), did!("test:r"));
+        let o = Replica::new(did!("test:p"), did!("test:r"));
         let b = Branch::new(&o, "main");
         let rev = BranchRevision {
             this: b.this.clone(),
             tree: branch::Tree("zSomeHash".into()),
-            period: branch::Period(1),
-            moment: branch::Moment(42),
+            edition: branch::Edition(42),
+            revision: branch::Revision("test:revision".parse().expect("valid entity")),
         };
         assert_eq!(rev.this, b.this);
     }

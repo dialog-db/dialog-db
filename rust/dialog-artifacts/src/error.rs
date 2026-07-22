@@ -49,6 +49,11 @@ pub enum DialogArtifactsError {
     #[error("Invalid attribute: {0}")]
     InvalidAttribute(String),
 
+    /// The attribute belongs to the reserved `dialog.` namespace, which
+    /// only version-control machinery may write
+    #[error("Reserved attribute (the dialog. namespace is reserved): {0}")]
+    ReservedAttribute(String),
+
     /// Raw bytes could not be interpreted as an entity
     #[error("Could not convert bytes into entity: {0}")]
     InvalidEntity(String),
@@ -60,6 +65,15 @@ pub enum DialogArtifactsError {
     /// Attempted to query with an unconstrained [`ArtifactSelector`]
     #[error("An artifact selector must specify at least one field")]
     EmptySelector,
+
+    /// A revision signature or structural integrity check failed
+    #[error("Invalid revision signature: {0}")]
+    InvalidSignature(String),
+
+    /// Causal ordering could not be determined because claims for the given
+    /// version have not been replicated yet
+    #[error("Incomplete history: missing claims for version {0}")]
+    IncompleteHistory(String),
 }
 
 impl From<DialogStorageError> for DialogArtifactsError {

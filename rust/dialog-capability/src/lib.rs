@@ -182,8 +182,7 @@ pub use selector::*;
 mod settings;
 pub use settings::*;
 
-mod revision;
-pub use revision::*;
+pub mod history;
 
 mod ability;
 pub use ability::*;

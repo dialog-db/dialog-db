@@ -40,15 +40,17 @@ pub use value::*;
 mod blob;
 pub use blob::*;
 
+mod history;
+pub use history::*;
+
 mod part;
 pub use part::*;
 
 pub(crate) mod varkey;
 
-/// Tag byte reserved for the history index (the fourth index ordering).
-///
-/// Allocated so the blob index lands at tag `4`; the history index itself is
-/// not yet implemented, so no key view is built on this tag.
+/// Tag byte of the history index (the fourth index ordering): the region of
+/// the artifact tree holding per-instruction claim-lineage records (see
+/// [`history`]). Allocated below the blob index's tag `4`.
 pub const HISTORY_KEY_TAG: u8 = 3;
 
 use crate::{
@@ -155,6 +157,8 @@ pub(crate) fn artifact_index_keys(artifact: &crate::Artifact) -> (Key, Key, Key)
         attribute: artifact.the.as_str().as_bytes().to_vec(),
         value_type: artifact.is.data_type(),
         value: value_payload(&artifact.is, inline_threshold()),
+        // The fact orderings carry no version; only history/coverage keys do.
+        version: None,
     };
     let eav = Key::from(varkey::build_key(&parts));
     parts.tag = ATTRIBUTE_KEY_TAG;

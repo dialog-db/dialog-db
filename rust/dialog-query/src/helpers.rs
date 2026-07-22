@@ -34,7 +34,7 @@ use dialog_artifacts::{
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::Identify;
+use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_network::Network;
@@ -403,6 +403,7 @@ where
         + Provider<Resolve>
         + Provider<Publish>
         + Provider<Identify>
+        + Provider<Attest>
         + Provider<SpaceLoad>
         + Provider<SpaceCreate>
         + Provider<Fork<RemoteSite, Get>>

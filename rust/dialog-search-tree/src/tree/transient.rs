@@ -35,7 +35,7 @@ use rkyv::{
 };
 use std::{
     marker::PhantomData,
-    ops::{Bound, RangeBounds},
+    ops::{Bound, RangeBounds, RangeInclusive},
 };
 
 /// The root of a [`TransientTree`].
@@ -413,10 +413,33 @@ where
                     }
                     Some(existing) => {
                         if existing != entry.value {
-                            let existing_hash = value_identity(&existing)?;
-                            let new_hash = value_identity(&entry.value)?;
-                            if new_hash.as_bytes() > existing_hash.as_bytes() {
-                                self = self.insert(entry.key, entry.value, storage).await?;
+                            // Two different values contending for one key:
+                            // ask the value type first (it can encode
+                            // semantics the bytes cannot — a tombstone
+                            // beating any concurrent assertion), and fall
+                            // back to the deterministic last-write-wins
+                            // hash race. Both paths are antisymmetric, so
+                            // replicas integrating in opposite directions
+                            // pick the same winner and converge — and the
+                            // loser is FUSED into the winner rather than
+                            // dropped, so value types that aggregate
+                            // (collapsed claim versions) survive the
+                            // contest on both sides identically.
+                            let replaces = match entry.value.prevails_over(&existing) {
+                                Some(verdict) => verdict,
+                                None => {
+                                    let existing_hash = value_identity(&existing)?;
+                                    let new_hash = value_identity(&entry.value)?;
+                                    new_hash.as_bytes() > existing_hash.as_bytes()
+                                }
+                            };
+                            let fused = if replaces {
+                                Value::fuse(entry.value, &existing)
+                            } else {
+                                Value::fuse(existing.clone(), &entry.value)
+                            };
+                            if fused != existing {
+                                self = self.insert(entry.key, fused, storage).await?;
                             }
                         }
                     }
@@ -432,6 +455,216 @@ where
         }
         Ok(self)
     }
+
+    /// Builds a tree whose content is the concatenation of `pieces`, reusing
+    /// the interior of every [`Piece::Range`] structurally.
+    ///
+    /// Pieces must be given in ascending, non-overlapping key order: every key
+    /// a piece contributes must sort strictly after every key of the pieces
+    /// before it. The result is canonical: [`persist`](Self::persist)ing it
+    /// yields the same root, byte for byte, as building a tree from scratch
+    /// over the union of the pieces' entries.
+    ///
+    /// Reads are bounded by the piece seams. Carving a range loads only the
+    /// nodes on the two spines covering its bounds, and joining two adjacent
+    /// pieces loads only their facing edge spines. Interior nodes of a range
+    /// stay [`Node::Persistent`] links, are never fetched, and are re-emitted
+    /// verbatim at persist time, so the persist delta scales with the seams,
+    /// not the entry count.
+    pub async fn stitch<Backend>(
+        pieces: Vec<Piece<'_, Key, Value, D>>,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        // One cache serves the whole stitch. Nodes are content-addressed, so
+        // sharing the first source's cache (when there is one) is always safe
+        // and keeps its warm entries; the stitched tree carries it forward.
+        let cache = pieces
+            .iter()
+            .find_map(|piece| match piece {
+                Piece::Range { source, .. } => Some(source.node_cache.clone()),
+                Piece::Entries(_) => None,
+            })
+            .unwrap_or_else(Cache::new);
+        let accessor = Accessor::new(cache.clone(), storage.clone());
+
+        // The stitched tree keeps its sources' format. A manifest lives in the
+        // nodes, so it is read from the source roots — and every source must
+        // AGREE: grafting subtrees written under one format into a tree
+        // stamped with another would mix headers and diverge silently from
+        // either side's canonical shape, so a mismatch fails loudly here,
+        // exactly as the edit path's `load` does. A stitch of nothing but
+        // loose entries has no source to inherit from and takes the default
+        // format.
+        let mut manifest: Option<Manifest> = None;
+        for piece in &pieces {
+            if let Piece::Range { source, .. } = piece {
+                let root = source.root().clone();
+                if &root != NULL_BLAKE3_HASH {
+                    let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
+                    let header = node.manifest()?;
+                    match &manifest {
+                        None => manifest = Some(header),
+                        Some(first) if *first == header => {}
+                        Some(first) => {
+                            return Err(DialogSearchTreeError::Node(format!(
+                                "Stitch manifest mismatch: one source was written under \
+                                 {first:?} and another under {header:?}"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        let manifest = manifest.unwrap_or_default();
+
+        // Carve every piece into a part: a subtree of known height whose
+        // interior children are still persistent links. A part also remembers
+        // its source root when carving left the source untouched, enabling the
+        // single-piece fast path below.
+        let mut parts: Vec<(TransientNode<Key, Value>, Rank, Option<Blake3Hash>)> = Vec::new();
+        for piece in pieces {
+            match piece {
+                Piece::Range { source, range } => {
+                    if let Some((node, height, trim)) =
+                        carve(source.root().clone(), &range, &accessor).await?
+                    {
+                        let whole = match trim {
+                            Trim::Unchanged => Some(source.root().clone()),
+                            _ => None,
+                        };
+                        parts.push((node, height, whole));
+                    }
+                }
+                Piece::Entries(entries) => {
+                    if !entries.is_empty() {
+                        let run = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
+                        parts.push((
+                            TransientNode::Index(TransientIndex { children: run }),
+                            1,
+                            None,
+                        ));
+                    }
+                }
+            }
+        }
+
+        // A single piece covering its whole source IS that source: hand its
+        // root back by hash so persisting writes nothing at all. The result
+        // carries the source's manifest, not the default — a later edit of
+        // the stitched tree must run under the format its nodes were
+        // written with.
+        if let [(_, _, Some(root))] = parts.as_slice() {
+            return Ok(TransientTree {
+                root: TransientRoot::Unloaded(root.clone()),
+                cache,
+                manifest,
+                distribution: PhantomData,
+            });
+        }
+
+        // A canonical tree opens its leftmost seam at the empty separator
+        // (negative infinity), and every index level derives its left edge
+        // from its leftmost segment. A start-trimmed carve leaves the
+        // surviving leftmost segment carrying the separator its parent link
+        // held in the SOURCE tree (derived from a left neighbor the trim
+        // dropped), and nothing downstream recomputes it — joins re-cut only
+        // right-hand seams — so the stale string would propagate into every
+        // leftmost link of the persisted result and break the byte-for-byte
+        // canonicality the stitch promises. Re-floor the first part's left
+        // edge; untouched whole-source parts are already canonical.
+        if let Some((node, _, whole)) = parts.first_mut()
+            && whole.is_none()
+        {
+            refloor_leftmost(node)?;
+        }
+
+        // Fold the parts left to right. Each join lifts the two facing edge
+        // spines (the only loads it performs), levels the shorter part with
+        // single-child wrappers that the join dismantles again, and re-cuts
+        // the seam level by level; everything off the seam is carried over
+        // untouched.
+        let mut merged: Option<(TransientNode<Key, Value>, Rank)> = None;
+        for (node, height, _) in parts {
+            merged = Some(match merged {
+                None => (node, height),
+                Some((left, left_height)) => {
+                    let target = left_height.max(height);
+                    let mut left = raise(left, left_height, target);
+                    let mut right = raise(node, height, target);
+                    lift_boundary_spine(&mut left, false, &accessor).await?;
+                    lift_boundary_spine(&mut right, true, &accessor).await?;
+                    let mut run = concat_levels::<Key, Value, D>(left, right, target, &manifest)?;
+                    if run.len() == 1 {
+                        // Keep the accumulator's nominal height tight so later
+                        // joins pad as little as possible.
+                        (
+                            run.pop().expect("run has one node").into_transient()?,
+                            target,
+                        )
+                    } else {
+                        (
+                            TransientNode::Index(TransientIndex { children: run }),
+                            target + 1,
+                        )
+                    }
+                }
+            });
+        }
+
+        let root = match merged {
+            None => return Ok(TransientTree::new(NULL_BLAKE3_HASH.clone(), cache)),
+            // A lone segment can only arise from degenerate single-leaf
+            // sources; hand it to the leveling loop as a height-0 run so it
+            // gains its canonical index root.
+            Some((node @ TransientNode::Segment(_), _)) => {
+                seal_root::<Key, Value, D, _>(vec![node.into()], 0, &manifest, &accessor).await?
+            }
+            Some((TransientNode::Index(index), height)) => {
+                seal_root::<Key, Value, D, _>(index.children, height - 1, &manifest, &accessor)
+                    .await?
+            }
+        };
+
+        Ok(TransientTree {
+            root: match root {
+                Some(node) => TransientRoot::Loaded(node),
+                None => TransientRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
+            },
+            cache,
+            manifest,
+            distribution: PhantomData,
+        })
+    }
+}
+
+/// One contiguous piece of a [`stitch`](TransientTree::stitch): a key range
+/// carved out of an existing tree, or a run of explicit entries.
+///
+/// Pieces are given to [`stitch`](TransientTree::stitch) in ascending,
+/// non-overlapping key order: every key a piece contributes must sort strictly
+/// after every key of the pieces before it.
+pub enum Piece<'a, Key, Value, D = Geometric>
+where
+    Key: self::Key,
+    Value: self::Value,
+    D: Distribution,
+{
+    /// The entries of `source` whose keys fall within `range`, both bounds
+    /// inclusive. A range that contains none of the source's keys contributes
+    /// nothing.
+    Range {
+        /// The tree the range is taken from. It must be flushed: its nodes are
+        /// read from the storage handed to [`stitch`](TransientTree::stitch).
+        source: &'a PersistentTree<Key, Value, D>,
+        /// The inclusive key range to take.
+        range: RangeInclusive<Key>,
+    },
+    /// Explicit entries, sorted ascending by key.
+    Entries(Vec<Entry<Key, Value>>),
 }
 
 /// Computes the identity hash used for last-write-wins conflict resolution: the
@@ -1424,6 +1657,369 @@ fn remove_first<Key, Value>(
     Ok(children.remove(0))
 }
 
+/// The outcome of trimming a carved subtree to its piece's range.
+enum Trim {
+    /// Nothing within the range remained; the subtree contributes no entries.
+    Empty,
+    /// Every entry already lay within the range; the subtree is byte-for-byte
+    /// the original.
+    Unchanged,
+    /// Entries outside the range were removed from the boundary spines.
+    Trimmed,
+}
+
+/// Carves out of the persisted tree rooted at `root` the subtree holding the
+/// entries within `range`, loading only the two boundary spines.
+///
+/// The carved subtree keeps the source's height and stays canonical without
+/// any re-cutting: the cut rule is per key, so removing a prefix or a suffix
+/// of a canonically cut node leaves every surviving cut in place, and the
+/// open-ended edge nodes it creates are exactly the leftmost/rightmost nodes
+/// of the piece where open runs are canonical. Children strictly inside the
+/// range remain [`Node::Persistent`] links and are never loaded. Returns the
+/// carved root, its height, and the trim outcome, or `None` when the tree is
+/// empty or no entry falls within the range.
+async fn carve<Key, Value, Backend>(
+    root: Blake3Hash,
+    range: &RangeInclusive<Key>,
+    accessor: &Accessor<Backend>,
+) -> Result<Option<(TransientNode<Key, Value>, Rank, Trim)>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+{
+    if &root == NULL_BLAKE3_HASH {
+        return Ok(None);
+    }
+    let node: PersistentNode<Key, Value> = accessor.get_node(&root).await?;
+    // The carved root stands at the source tree's left edge for the purposes
+    // of this carve, so it opens with the empty separator (negative infinity),
+    // exactly as `load` opens a tree root.
+    let mut root = TransientNode::open(&node, Vec::new())?;
+
+    // Lift the spine covering each range bound so the trim below can edit the
+    // boundary nodes in place. The two descents share a prefix until they
+    // diverge; every child off these spines stays a persistent link.
+    let mut height: Rank = 0;
+    for bound in [range.start(), range.end()] {
+        let mut path = Vec::new();
+        loop {
+            let node = follow(&mut root, &path)?;
+            match node {
+                TransientNode::Index(index) => {
+                    let at = child_for::<Key, Value>(&index.children, bound)?;
+                    lift(&mut index.children[at], accessor).await?;
+                    path.push(at);
+                }
+                TransientNode::Segment(_) => break,
+            }
+        }
+        height = path.len() as Rank;
+    }
+
+    match trim_to_range(&mut root, range, true, true)? {
+        Trim::Empty => Ok(None),
+        trim => Ok(Some((root, height, trim))),
+    }
+}
+
+/// Trims `node` in place to the entries within `range`, descending only the
+/// boundary spines that [`carve`] lifted.
+///
+/// `trim_start` and `trim_end` say which bounds can still cut into this
+/// subtree; they follow the start and end boundary spines respectively, and
+/// both hold only while the two spines coincide. Children wholly outside the
+/// range are dropped, children wholly inside are kept untouched (persistent
+/// links included), and the at most two straddling children are trimmed
+/// recursively. An emptied node reports [`Trim::Empty`] so its parent removes
+/// it in turn.
+fn trim_to_range<Key, Value>(
+    node: &mut TransientNode<Key, Value>,
+    range: &RangeInclusive<Key>,
+    trim_start: bool,
+    trim_end: bool,
+) -> Result<Trim, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    match node {
+        TransientNode::Segment(segment) => {
+            let before = segment.entries.len();
+            segment.entries.retain(|entry| {
+                (!trim_start || &entry.key >= range.start())
+                    && (!trim_end || &entry.key <= range.end())
+            });
+            Ok(if segment.entries.is_empty() {
+                Trim::Empty
+            } else if segment.entries.len() == before {
+                Trim::Unchanged
+            } else {
+                Trim::Trimmed
+            })
+        }
+        TransientNode::Index(index) => {
+            let children = &mut index.children;
+            let mut changed = false;
+
+            // Index children carry separators, not full keys: under the
+            // lower-bound convention `children[i].separator()` is the smallest
+            // key reachable in child `i`, so child `i` spans
+            // `[sep(i), sep(i+1))` and the last child runs to `+infinity`.
+            // Both bounds are therefore tested against separators, never
+            // against an upper bound (an index node has none to give).
+            if trim_end {
+                // Child `i` lies wholly beyond the range end iff its own
+                // lower bound already exceeds it. Keep every child before the
+                // first such one.
+                let end = range.end().as_ref();
+                let mut keep = children.len();
+                for (at, child) in children.iter().enumerate() {
+                    if child.separator()? > end {
+                        keep = at;
+                        break;
+                    }
+                }
+                // The first child always stays: its separator is the node's
+                // own left edge, which cannot exceed a range the node
+                // straddles.
+                let keep = keep.max(1);
+                if keep < children.len() {
+                    children.truncate(keep);
+                    changed = true;
+                }
+            }
+            if trim_start {
+                // Child `i` lies wholly before the range start iff the NEXT
+                // child's lower bound is still at or below it (so nothing in
+                // child `i` can reach the start). The last child has no
+                // successor and always stays.
+                let start = range.start().as_ref();
+                let mut below = 0;
+                while below + 1 < children.len() && children[below + 1].separator()? <= start {
+                    below += 1;
+                }
+                if below > 0 {
+                    children.drain(..below);
+                    changed = true;
+                }
+            }
+            if children.is_empty() {
+                return Ok(Trim::Empty);
+            }
+
+            // Recurse into the children that may straddle a bound: the last
+            // kept child for the end bound, the first for the start bound, or
+            // one child for both when a single child remains. These are
+            // exactly the children the carve descent lifted.
+            let both = trim_start && trim_end && children.len() == 1;
+            if trim_end {
+                let last = children.len() - 1;
+                match trim_to_range(lifted_child(&mut children[last])?, range, both, true)? {
+                    Trim::Empty => {
+                        children.remove(last);
+                        changed = true;
+                    }
+                    Trim::Trimmed => changed = true,
+                    Trim::Unchanged => {}
+                }
+            }
+            if trim_start && !both && !children.is_empty() {
+                match trim_to_range(lifted_child(&mut children[0])?, range, true, false)? {
+                    Trim::Empty => {
+                        children.remove(0);
+                        changed = true;
+                    }
+                    Trim::Trimmed => changed = true,
+                    Trim::Unchanged => {}
+                }
+            }
+            if children.is_empty() {
+                return Ok(Trim::Empty);
+            }
+
+            Ok(if changed {
+                Trim::Trimmed
+            } else {
+                Trim::Unchanged
+            })
+        }
+    }
+}
+
+/// Resets the leftmost seam of a stitch's FIRST part to the empty separator,
+/// walking first children down to the leftmost segment (index levels derive
+/// their left edge from it, so nothing else needs touching). The carve lifts
+/// the whole start-bound spine, so on a start-trimmed part the walk stays on
+/// transient nodes all the way down; a persistent leftmost child can only
+/// mean the part kept its source's own left edge, whose stored separators
+/// are already the canonical empty string, so the walk stops there.
+fn refloor_leftmost<Key, Value>(
+    part: &mut TransientNode<Key, Value>,
+) -> Result<(), DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+{
+    let mut node = part;
+    loop {
+        match node {
+            TransientNode::Segment(segment) => {
+                segment.separator = Vec::new();
+                return Ok(());
+            }
+            TransientNode::Index(index) => {
+                let first = index.children.first_mut().ok_or_else(|| {
+                    DialogSearchTreeError::Node("Index was unexpectedly empty".into())
+                })?;
+                match first {
+                    Node::Transient(child) => node = child,
+                    Node::Persistent(_) => return Ok(()),
+                }
+            }
+        }
+    }
+}
+
+/// Unwraps a child on a carve boundary spine to its lifted transient form.
+/// The carve descent lifted every child it routed through, so a persistent
+/// child here is an invariant violation, not a normal case.
+fn lifted_child<Key, Value>(
+    child: &mut Node<Key, Value>,
+) -> Result<&mut TransientNode<Key, Value>, DialogSearchTreeError> {
+    match child {
+        Node::Transient(node) => Ok(node),
+        Node::Persistent(_) => Err(DialogSearchTreeError::Node(
+            "Range trim descended into a child that was not lifted".into(),
+        )),
+    }
+}
+
+/// Lifts an edge spine of a stitched part to transient form: the leftmost
+/// spine when `leftmost`, otherwise the rightmost. A join re-cuts exactly
+/// these spines, so they are the only nodes it needs loaded; nodes that are
+/// already transient cost nothing.
+async fn lift_boundary_spine<Key, Value, Backend>(
+    root: &mut TransientNode<Key, Value>,
+    leftmost: bool,
+    accessor: &Accessor<Backend>,
+) -> Result<(), DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+{
+    let mut path = Vec::new();
+    loop {
+        let node = follow(root, &path)?;
+        match node {
+            TransientNode::Index(index) => {
+                if index.children.is_empty() {
+                    return Err(DialogSearchTreeError::Node(
+                        "Stitched index was unexpectedly empty".into(),
+                    ));
+                }
+                let at = if leftmost {
+                    0
+                } else {
+                    index.children.len() - 1
+                };
+                lift(&mut index.children[at], accessor).await?;
+                path.push(at);
+            }
+            TransientNode::Segment(_) => break,
+        }
+    }
+    Ok(())
+}
+
+/// Levels a stitched part up to height `to` by wrapping it in single-child
+/// index nodes. The wrappers exist purely to align two parts for a join: the
+/// join pops each one apart again at its level, so no wrapper node survives
+/// into the result.
+fn raise<Key, Value>(
+    node: TransientNode<Key, Value>,
+    from: Rank,
+    to: Rank,
+) -> TransientNode<Key, Value> {
+    (from..to).fold(node, |node, _| {
+        TransientNode::Index(TransientIndex {
+            children: vec![node.into()],
+        })
+    })
+}
+
+/// Joins two adjacent, equal-height subtrees (every key of `left` sorts
+/// before every key of `right`) into the canonical run of nodes covering
+/// both, re-cutting only the seam.
+///
+/// Mirrors [`fuse_subtrees`]: recurse down `left`'s rightmost spine and
+/// `right`'s leftmost spine in lock-step (both lifted by the caller), join the
+/// facing leaves by concatenating their entries, then on the way up splice
+/// each joined run between the remaining children and re-cut at that level.
+/// Children off the seam pass through untouched, persistent links included,
+/// because a canonical cut depends only on each child's own upper-bound rank:
+/// cuts away from the seam cannot move.
+fn concat_levels<Key, Value, D>(
+    left: TransientNode<Key, Value>,
+    right: TransientNode<Key, Value>,
+    height: Rank,
+    manifest: &Manifest,
+) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    D: Distribution,
+{
+    match (left, right) {
+        (TransientNode::Segment(mut left), TransientNode::Segment(right)) => {
+            let floor = left.separator.clone();
+            left.entries.extend(right.entries);
+            Ok(regroup_entries::<Key, Value, D>(
+                left.entries,
+                floor,
+                manifest,
+            ))
+        }
+        (TransientNode::Index(mut left), TransientNode::Index(mut right)) => {
+            let left_last = left
+                .children
+                .pop()
+                .ok_or_else(|| {
+                    DialogSearchTreeError::Node("Stitched left index had no children".into())
+                })?
+                .into_transient()?;
+            let right_first = remove_first(&mut right.children)?.into_transient()?;
+
+            let seam =
+                concat_levels::<Key, Value, D>(left_last, right_first, height - 1, manifest)?;
+
+            let mut combined = left.children;
+            combined.extend(seam);
+            combined.extend(right.children);
+            regroup_children::<Key, Value, D>(combined, height, manifest)
+        }
+        _ => Err(DialogSearchTreeError::Node(
+            "Stitched subtrees had mismatched heights".into(),
+        )),
+    }
+}
+
 /// Whether applying `edit` to this already-canonical segment would leave it
 /// canonical, decided without mutating or cloning.
 ///
@@ -1601,11 +2197,15 @@ fn collect_stream_plan<Key, Value>(
 mod tests {
     #![allow(unexpected_cfgs)]
 
+    use crate::{Distribution, Geometric, Manifest};
     use anyhow::Result;
     use dialog_common::Blake3Hash;
     use dialog_storage::MemoryStorageBackend;
 
-    use crate::{Buffer, ContentAddressedStorage, Delta, PersistentTree, Rank, distribution};
+    use crate::{
+        Buffer, ContentAddressedStorage, Delta, Entry, PersistentTree, Piece, Rank, TransientTree,
+        distribution,
+    };
 
     type TestTree = PersistentTree<[u8; 4], Vec<u8>>;
     type TestStorage = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
@@ -1885,16 +2485,18 @@ mod tests {
             }
 
             // Sequential reference through Tree.
-            let mut tree = TestTree::empty();
+            let mut sequential = TestTree::empty();
             let mut delta = Delta::zero();
             for &(is_insert, key) in &ops {
-                tree = if is_insert {
-                    tree.edit()
+                sequential = if is_insert {
+                    sequential
+                        .edit()
                         .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
                         .await?
                         .persist(&mut delta)?
                 } else {
-                    tree.edit()
+                    sequential
+                        .edit()
                         .delete(&key.to_le_bytes(), &storage)
                         .await?
                         .persist(&mut delta)?
@@ -1923,7 +2525,7 @@ mod tests {
 
             assert_eq!(
                 batched.root(),
-                tree.root(),
+                sequential.root(),
                 "seed {seed}: interleaved batched ops must match sequential"
             );
         }
@@ -2716,7 +3318,7 @@ mod tests {
         let boundaries = boundary_keys(0..2000);
         let mut byte_boundaries: Vec<(u32, [u8; 4])> =
             boundaries.iter().map(|&k| (k, k.to_le_bytes())).collect();
-        byte_boundaries.sort_by(|a, b| a.1.cmp(&b.1));
+        byte_boundaries.sort_by_key(|boundary| boundary.1);
         assert!(
             byte_boundaries.len() >= 2,
             "fixture must contain two boundaries"
@@ -2956,6 +3558,61 @@ mod tests {
         distribution::geometric::rank(&Blake3Hash::hash(key))
     }
 
+    /// Every key longer than `max_separator` is demoted to rank 0 (plan
+    /// 5.7a), so none of them can become a boundary. A whole run of such keys
+    /// therefore produces no split point among themselves: this pins that the
+    /// tree still round-trips every entry in that case, rather than degrading
+    /// into one unbounded segment that loses or misorders entries.
+    ///
+    /// This is the case the fixed-width key tests cannot reach, and the one
+    /// the history region is closest to: a history key carries a 40-byte
+    /// version prefix on top of entity + attribute + value, so it crosses the
+    /// separator bound sooner than the fact key for the same fact.
+    #[dialog_common::test]
+    async fn it_round_trips_keys_longer_than_the_separator_bound() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = Manifest::default();
+
+        // Keys comfortably above `max_separator`, so every one of them is
+        // rank 0 by the length guard.
+        let width = manifest.max_separator as usize + 64;
+        let mut keys: Vec<VarKey> = Vec::new();
+        for n in 0..64u32 {
+            let mut bytes = format!("{n:08}").into_bytes();
+            bytes.resize(width, b'x');
+            assert_eq!(
+                <Geometric as Distribution>::rank(&bytes, &manifest),
+                0,
+                "a key of {width} bytes must be demoted to rank 0"
+            );
+            keys.push(VarKey(bytes));
+        }
+
+        let mut tree = VarTree::empty();
+        let mut delta = Delta::zero();
+        for key in &keys {
+            tree = tree
+                .edit()
+                .insert(key.clone(), key.0.clone(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (hash, buffer) in delta.flush() {
+                storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            }
+            delta = Delta::zero();
+        }
+
+        for key in &keys {
+            let found = tree.get(key, &storage).await?;
+            assert_eq!(
+                found.as_deref(),
+                Some(key.0.as_slice()),
+                "every oversized key must still be readable"
+            );
+        }
+        Ok(())
+    }
+
     /// Regression: inserting a NEW MINIMUM variable-length key into a
     /// single-entry tree must not drop the existing entry. Mirrors the
     /// artifact two-commit bug where a second entity whose key sorts before
@@ -3008,7 +3665,400 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
 
+    /// Encodes a key big-endian so numeric order matches the byte-wise
+    /// lexicographic order the tree sorts by, letting the stitch tests express
+    /// range pieces as plain numeric bands.
+    fn bkey(k: u32) -> [u8; 4] {
+        k.to_be_bytes()
+    }
+
+    /// The geometric rank of a big-endian key, hashed the way the tree hashes
+    /// it. The stitch tests encode keys big-endian, so their boundary/interior
+    /// classification must too.
+    fn rank_of_be(key: u32) -> Rank {
+        distribution::geometric::rank(&Blake3Hash::hash(&key.to_be_bytes()))
+    }
+
+    /// Builds a tree over big-endian `keys` in one batch and flushes it to
+    /// storage, so a stitch can read its nodes back.
+    async fn stitch_source(keys: &[u32], storage: &mut TestStorage) -> Result<TestTree> {
+        let mut edit = TestTree::empty().edit();
+        for &k in keys {
+            edit = edit.insert(bkey(k), bkey(k).to_vec(), storage).await?;
+        }
+        let mut delta = Delta::zero();
+        let tree = edit.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        Ok(tree)
+    }
+
+    /// The from-scratch oracle for a stitch: the root of a tree built by
+    /// inserting the union of the pieces' entries directly.
+    async fn stitch_oracle(keys: &[u32], storage: &TestStorage) -> Result<Blake3Hash> {
+        let mut edit = TestTree::empty().edit();
+        for &k in keys {
+            edit = edit.insert(bkey(k), bkey(k).to_vec(), storage).await?;
+        }
+        let mut delta = Delta::zero();
+        Ok(edit.persist(&mut delta)?.root().clone())
+    }
+
+    /// Stitches `pieces`, persists the result, and returns its root hash along
+    /// with the number of nodes the persist wrote into the delta.
+    async fn stitched(
+        pieces: Vec<Piece<'_, [u8; 4], Vec<u8>>>,
+        storage: &TestStorage,
+    ) -> Result<(Blake3Hash, usize)> {
+        let tree = TransientTree::stitch(pieces, storage).await?;
+        let mut delta = Delta::zero();
+        let tree = tree.persist(&mut delta)?;
+        Ok((tree.root().clone(), delta.flush().count()))
+    }
+
+    /// Draws up to `count` distinct keys from the half-open `range`.
+    fn random_band(rng: &mut Rng, range: std::ops::Range<u32>, count: usize) -> Vec<u32> {
+        let width = range.end - range.start;
+        let mut keys: Vec<u32> = (0..count * 2)
+            .map(|_| range.start + rng.next_u32() % width)
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys.truncate(count);
+        keys
+    }
+
+    /// Stitches whole-range pieces over the trees built from `a_keys` and
+    /// `b_keys` (ascending, in disjoint bands) and asserts the result equals
+    /// the from-scratch build over their union.
+    async fn assert_disjoint_stitch(
+        a_keys: &[u32],
+        b_keys: &[u32],
+        storage: &mut TestStorage,
+        label: &str,
+    ) -> Result<()> {
+        let a = stitch_source(a_keys, storage).await?;
+        let b = stitch_source(b_keys, storage).await?;
+        let boundary = b_keys[0];
+        let pieces = vec![
+            Piece::Range {
+                source: &a,
+                range: bkey(0)..=bkey(boundary - 1),
+            },
+            Piece::Range {
+                source: &b,
+                range: bkey(boundary)..=bkey(u32::MAX),
+            },
+        ];
+        let (root, _) = stitched(pieces, storage).await?;
+        let union: Vec<u32> = a_keys.iter().chain(b_keys).copied().collect();
+        let expected = stitch_oracle(&union, storage).await?;
+        assert_eq!(
+            root, expected,
+            "{label}: stitching two disjoint trees must match the union build"
+        );
+        Ok(())
+    }
+
+    /// A stitch whose LEFTMOST piece start-trims its source must still be
+    /// canonical. The surviving leftmost segment carries the separator its
+    /// parent link held in the source (derived from a left neighbor the
+    /// trim dropped), and nothing downstream recomputes the left edge —
+    /// joins re-cut only right-hand seams — so without a re-floor the whole
+    /// leftmost spine of the persisted result differs byte-for-byte from a
+    /// from-scratch build over the same entries: replica divergence in the
+    /// convergent-merge use case the stitch exists for.
+    #[dialog_common::test]
+    async fn it_stitches_a_start_trimmed_leftmost_piece_canonically() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let source = stitch_source(&(0..500).collect::<Vec<u32>>(), &mut storage).await?;
+
+        // Single start-trimmed piece.
+        let (root, _) = stitched(
+            vec![Piece::Range {
+                source: &source,
+                range: bkey(300)..=bkey(u32::MAX),
+            }],
+            &storage,
+        )
+        .await?;
+        let expected = stitch_oracle(&(300..500).collect::<Vec<u32>>(), &storage).await?;
+        assert_eq!(
+            root, expected,
+            "a start-trimmed leftmost piece keeps the canonical left edge"
+        );
+
+        // The same left edge through the fold path (a second piece joins).
+        let tail = stitch_source(&(1000..1100).collect::<Vec<u32>>(), &mut storage).await?;
+        let (root, _) = stitched(
+            vec![
+                Piece::Range {
+                    source: &source,
+                    range: bkey(300)..=bkey(999),
+                },
+                Piece::Range {
+                    source: &tail,
+                    range: bkey(1000)..=bkey(u32::MAX),
+                },
+            ],
+            &storage,
+        )
+        .await?;
+        let union: Vec<u32> = (300..500).chain(1000..1100).collect();
+        let expected = stitch_oracle(&union, &storage).await?;
+        assert_eq!(
+            root, expected,
+            "the fold path keeps the canonical left edge too"
+        );
+        Ok(())
+    }
+
+    /// Stitching two disjoint trees, each taken whole, must produce exactly
+    /// the tree a from-scratch build over the union of their entries produces.
+    #[dialog_common::test]
+    async fn it_stitches_two_disjoint_trees_canonically() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // A fixed case first: evens in 0..600 next to the band 1000..1300.
+        let a_keys: Vec<u32> = (0..600).step_by(2).collect();
+        let b_keys: Vec<u32> = (1000..1300).collect();
+        assert_disjoint_stitch(&a_keys, &b_keys, &mut storage, "fixed").await?;
+
+        // Then random key sets in disjoint bands.
+        for seed in 0..50u64 {
+            let mut rng = Rng::new(seed);
+            let a_keys = random_band(&mut rng, 0..100_000, 150);
+            let b_keys = random_band(&mut rng, 1_000_000..1_100_000, 150);
+            assert_disjoint_stitch(&a_keys, &b_keys, &mut storage, &format!("seed {seed}")).await?;
+        }
+        Ok(())
+    }
+
+    /// A prefix range of a tree, a band of explicit entries, and a suffix
+    /// range of the same tree stitch into the canonical tree over the union;
+    /// the source's middle band is dropped and replaced by the entries.
+    #[dialog_common::test]
+    async fn it_stitches_ranges_of_one_tree_with_explicit_entries() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let source_keys: Vec<u32> = (0..500).collect();
+        let source = stitch_source(&source_keys, &mut storage).await?;
+
+        for seed in 0..30u64 {
+            let mut rng = Rng::new(seed);
+            let k = 50 + rng.next_u32() % 150;
+            let m = 300 + rng.next_u32() % 150;
+            let band = random_band(&mut rng, k + 1..m, 60);
+            let entries: Vec<Entry<[u8; 4], Vec<u8>>> = band
+                .iter()
+                .map(|&x| Entry {
+                    key: bkey(x),
+                    value: bkey(x).to_vec(),
+                })
+                .collect();
+            let pieces = vec![
+                Piece::Range {
+                    source: &source,
+                    range: bkey(0)..=bkey(k),
+                },
+                Piece::Entries(entries),
+                Piece::Range {
+                    source: &source,
+                    range: bkey(m)..=bkey(u32::MAX),
+                },
+            ];
+            let (root, _) = stitched(pieces, &storage).await?;
+
+            let union: Vec<u32> = source_keys
+                .iter()
+                .copied()
+                .filter(|&x| x <= k)
+                .chain(band.iter().copied())
+                .chain(source_keys.iter().copied().filter(|&x| x >= m))
+                .collect();
+            let expected = stitch_oracle(&union, &storage).await?;
+            assert_eq!(
+                root, expected,
+                "seed {seed}: prefix + entries + suffix stitch must match the union build"
+            );
+        }
+        Ok(())
+    }
+
+    /// Alternating range pieces from two trees over interleaved bands: every
+    /// piece boundary falls strictly inside both sources, so each seam trims
+    /// and re-joins mid-tree. This is the seam-churn case.
+    #[dialog_common::test]
+    async fn it_stitches_alternating_ranges_from_two_trees() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        for seed in 0..20u64 {
+            let mut rng = Rng::new(seed);
+            let width = 16 + (seed as u32 % 4) * 40;
+            let bands = 8u32;
+
+            // A owns the even bands, B the odd ones, each holding a random
+            // subset of its bands' keys.
+            let mut a_keys = Vec::new();
+            let mut b_keys = Vec::new();
+            for band in 0..bands {
+                let owner = if band % 2 == 0 {
+                    &mut a_keys
+                } else {
+                    &mut b_keys
+                };
+                for key in band * width..(band + 1) * width {
+                    if rng.next_u32() & 1 == 0 {
+                        owner.push(key);
+                    }
+                }
+            }
+            let a = stitch_source(&a_keys, &mut storage).await?;
+            let b = stitch_source(&b_keys, &mut storage).await?;
+
+            let pieces: Vec<Piece<'_, [u8; 4], Vec<u8>>> = (0..bands)
+                .map(|band| Piece::Range {
+                    source: if band % 2 == 0 { &a } else { &b },
+                    range: bkey(band * width)..=bkey((band + 1) * width - 1),
+                })
+                .collect();
+            let (root, _) = stitched(pieces, &storage).await?;
+
+            let mut union = a_keys.clone();
+            union.extend(&b_keys);
+            union.sort_unstable();
+            let expected = stitch_oracle(&union, &storage).await?;
+            assert_eq!(
+                root, expected,
+                "seed {seed} width {width}: alternating range stitch must match the union build"
+            );
+        }
+        Ok(())
+    }
+
+    /// Stitching two large disjoint trees writes only seam nodes: the persist
+    /// delta stays at spine scale, nowhere near the entry count, proving the
+    /// interiors were reused as persistent links rather than rebuilt.
+    #[dialog_common::test]
+    async fn it_reuses_interior_nodes_when_stitching() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        let a_keys: Vec<u32> = (0..1000).collect();
+        let b_keys: Vec<u32> = (1_000_000..1_001_000).collect();
+        let a = stitch_source(&a_keys, &mut storage).await?;
+        let b = stitch_source(&b_keys, &mut storage).await?;
+
+        let pieces = vec![
+            Piece::Range {
+                source: &a,
+                range: bkey(0)..=bkey(999_999),
+            },
+            Piece::Range {
+                source: &b,
+                range: bkey(1_000_000)..=bkey(u32::MAX),
+            },
+        ];
+        let (root, written) = stitched(pieces, &storage).await?;
+        assert!(
+            (1..=40).contains(&written),
+            "persist wrote {written} nodes; a stitch of 2000 entries must write \
+             only the seam, not the interior"
+        );
+
+        let union: Vec<u32> = a_keys.iter().chain(&b_keys).copied().collect();
+        let expected = stitch_oracle(&union, &storage).await?;
+        assert_eq!(root, expected, "the reused stitch must still be canonical");
+        Ok(())
+    }
+
+    /// A single piece covering its source's whole key range IS that source:
+    /// the stitch hands back the same root and persisting writes nothing.
+    #[dialog_common::test]
+    async fn it_stitches_a_single_full_range_piece_to_the_source_root() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let keys: Vec<u32> = (0..400).collect();
+        let source = stitch_source(&keys, &mut storage).await?;
+
+        let pieces = vec![Piece::Range {
+            source: &source,
+            range: bkey(0)..=bkey(u32::MAX),
+        }];
+        let (root, written) = stitched(pieces, &storage).await?;
+        assert_eq!(&root, source.root(), "a whole-source stitch is the source");
+        assert_eq!(written, 0, "a whole-source stitch must write no nodes");
+        Ok(())
+    }
+
+    /// Degenerate stitches: no pieces, an empty entries piece, and a range
+    /// that contains none of its source's keys all produce the empty tree.
+    #[dialog_common::test]
+    async fn it_stitches_empty_pieces_to_the_empty_tree() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let empty_root = TestTree::empty().root().clone();
+
+        let (root, written) = stitched(vec![], &storage).await?;
+        assert_eq!(root, empty_root, "no pieces stitch to the empty tree");
+        assert_eq!(written, 0);
+
+        let (root, _) = stitched(vec![Piece::Entries(Vec::new())], &storage).await?;
+        assert_eq!(
+            root, empty_root,
+            "an empty entries piece contributes nothing"
+        );
+
+        let source = stitch_source(&(0..100).collect::<Vec<u32>>(), &mut storage).await?;
+        let (root, _) = stitched(
+            vec![Piece::Range {
+                source: &source,
+                range: bkey(500)..=bkey(900),
+            }],
+            &storage,
+        )
+        .await?;
+        assert_eq!(
+            root, empty_root,
+            "a range holding no keys contributes nothing"
+        );
+        Ok(())
+    }
+
+    /// Splitting one source into two adjacent range pieces must stitch back to
+    /// the identical root, whether the split lands inside a leaf (an interior
+    /// key) or exactly on a segment boundary.
+    #[dialog_common::test]
+    async fn it_reassembles_a_source_split_at_any_key() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let keys: Vec<u32> = (0..500).collect();
+        let source = stitch_source(&keys, &mut storage).await?;
+
+        let interior = (200..300)
+            .find(|&k| rank_of_be(k) <= 1)
+            .expect("an interior key in 200..300");
+        let boundary = (100..400).find(|&k| rank_of_be(k) > 1);
+
+        for split in std::iter::once(interior).chain(boundary) {
+            let pieces = vec![
+                Piece::Range {
+                    source: &source,
+                    range: bkey(0)..=bkey(split),
+                },
+                Piece::Range {
+                    source: &source,
+                    range: bkey(split + 1)..=bkey(u32::MAX),
+                },
+            ];
+            let (root, _) = stitched(pieces, &storage).await?;
+            assert_eq!(
+                &root,
+                source.root(),
+                "splitting at {split} and stitching back must reproduce the source root"
+            );
+        }
         Ok(())
     }
 }

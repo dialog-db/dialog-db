@@ -242,9 +242,11 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
                     ))
                 },
             )?)),
-            // A record's byte representation is its raw bytes (`to_bytes`
-            // returns them verbatim), so reconstruction is the identity. This
-            // is the spilled-value read-back path: a record above the inline
+            // A record is opaque bytes at this layer; interpretation is the
+            // reader's concern (see e.g. `history::RevisionRecord`). Its byte
+            // representation is its raw bytes (`to_bytes` returns them
+            // verbatim), so reconstruction is the identity. This is also the
+            // spilled-value read-back path: a record above the inline
             // threshold must round-trip, not panic.
             ValueDataType::Record => Value::Record(value),
             ValueDataType::Symbol => match String::from_utf8(value) {

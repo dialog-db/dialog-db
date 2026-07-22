@@ -648,6 +648,41 @@ where
         }
     }
 
+    /// The conservative key spans this difference confines all changes to,
+    /// as `(inclusive lower bound, exclusive upper bound)` pairs: one per
+    /// remaining frontier node on either side, in frontier order per side.
+    /// The lower bound is the frontier node's own separator (the smallest
+    /// key it can hold, so INCLUSIVE — a changed key can equal it); the
+    /// upper bound is the next node's separator, which sorts strictly
+    /// above this node's maximum key (so EXCLUSIVE); a `None` upper bound
+    /// means the span runs open to the top of the key space.
+    ///
+    /// Conservative means superset: every changed key lies inside some
+    /// span, but a span may also cover unchanged keys (shared nodes
+    /// pruned between two divergent ones widen the reported spans, and a
+    /// node's true lower bound is unknowable after its left siblings were
+    /// pruned). Callers partitioning work by these spans over-include,
+    /// never miss. Costs no reads: bounds come from the frontier links.
+    pub fn divergent_bounds(&self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+        let mut bounds = Vec::new();
+        for tree in [&self.source, &self.target] {
+            // A frontier node's key span is `[its separator, the next node's
+            // separator)`: separators are LOWER bounds, and the separator
+            // invariant puts the next one strictly above this node's maximum
+            // key. The final node has no successor, so its span runs open to
+            // the top of the key space.
+            for (at, node) in tree.nodes.iter().enumerate() {
+                let lower = node.lower_bound().to_vec();
+                let upper = tree
+                    .nodes
+                    .get(at + 1)
+                    .map(|next| next.lower_bound().to_vec());
+                bounds.push((lower, upper));
+            }
+        }
+        bounds
+    }
+
     /// Returns a stream of entry-level changes that transform the source
     /// tree into the target tree.
     ///

@@ -6,12 +6,19 @@ use dialog_common::ConditionalSync;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
+use crate::{NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
+use dialog_artifacts::DialogArtifactsError;
+use dialog_artifacts::history::{
+    CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
+};
 use dialog_artifacts::tree::SpillCache;
 use dialog_artifacts::{Exporter, Importer};
+use dialog_capability::Fork;
 use dialog_capability::{Capability, Did, Subject};
 use dialog_common::Blake3Hash;
 use dialog_effects::archive::Archive;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_query::query::Application;
 use dialog_search_tree::{Buffer, Cache};
 
@@ -77,6 +84,9 @@ pub use upstream::*;
 #[cfg(all(test, feature = "integration-tests"))]
 mod integration_tests;
 
+#[cfg(all(test, feature = "integration-tests"))]
+mod read_amplification;
+
 /// Type alias for the search tree index.
 pub type Index = dialog_artifacts::Index;
 
@@ -88,7 +98,7 @@ pub type Index = dialog_artifacts::Index;
 pub struct Branch {
     reference: BranchReference,
     revision: Cell<Revision>,
-    upstream: Cell<Upstream>,
+    upstream: Cell<Upstreams>,
     /// Shared node cache for tree reads. Created once per opened branch and
     /// carried (as a shared handle) into every `Select`'s tree, so blocks read
     /// by one query stay warm for the next instead of being re-fetched from
@@ -115,6 +125,28 @@ pub struct Branch {
     /// plans an earlier query computed. Content-addressed keys make it
     /// safe across revisions, like `node_cache`.
     plan_cache: PlanCache,
+    /// Shared memo of causal verdicts — claim causality and common
+    /// ancestors — resolved against this branch's history. A verdict
+    /// between fixed claims or revisions is immutable (append-only
+    /// history can only extend the DAG above them), so entries never
+    /// invalidate and one DAG walk serves every later query,
+    /// transaction, or pull that asks the same question. See
+    /// [`CausalityCache`].
+    causality_cache: CausalityCache,
+    /// Shared memo of causal contexts, keyed by head version. The
+    /// context of a fixed head is immutable, like causal verdicts, so
+    /// entries never invalidate. Pull reads the local head's context
+    /// from here (falling back to the O(ancestry) walk once), and
+    /// commit/pull insert the successor head's context derived
+    /// incrementally — so steady-state sync never re-walks the DAG.
+    /// See [`ContextCache`].
+    context_cache: ContextCache,
+    /// Shared memo of verified revision records, keyed by version. A
+    /// version's record is immutable, so entries never invalidate; a
+    /// hit spares the tree read, the decode, and the Ed25519
+    /// verification that otherwise run on every ancestry step (skip
+    /// extension, context walks, causality).
+    record_cache: dialog_search_tree::Cache<Version, RevisionRecord>,
 }
 
 impl Branch {
@@ -129,9 +161,18 @@ impl Branch {
         self.revision.content()
     }
 
-    /// Returns the upstream state, or `None` if no upstream is configured.
+    /// Returns the default upstream — the target of a bare pull/push/fetch —
+    /// or `None` if no upstream is configured.
     pub fn upstream(&self) -> Option<Upstream> {
-        self.upstream.content()
+        self.upstreams().default_upstream().cloned()
+    }
+
+    /// Returns every configured upstream tracking entry, default first. A
+    /// branch can track several upstreams and pull from / push to any of
+    /// them — see [`Pull::from`](crate::Pull::from) and
+    /// [`Push::to`](crate::Push::to).
+    pub fn upstreams(&self) -> Upstreams {
+        self.upstream.content().unwrap_or_default()
     }
 
     /// Re-resolve this handle's head and upstream from storage, updating its
@@ -167,6 +208,55 @@ impl Branch {
     /// Archive capability for this branch's subject.
     pub fn archive(&self) -> Capability<Archive> {
         self.subject().archive()
+    }
+
+    /// The recorded claim lineage at this branch's current revision, which
+    /// powers claim-level conflict detection (see
+    /// [`dialog_artifacts::history::causality`]).
+    ///
+    /// History records live in the same tree as the data, so this reads the
+    /// history region of the current revision's tree. Reads that miss
+    /// locally are not fetched from a remote — traversal over unreplicated
+    /// history surfaces as `IncompleteHistory`.
+    pub fn history<'a, Env>(&self, env: &'a Env) -> TreeHistory<NetworkedIndex<'a, Env>>
+    where
+        Env: Provider<ArchiveGet>
+            + Provider<ArchivePut>
+            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + ConditionalSync
+            + 'static,
+    {
+        let store = NetworkedIndex::new(env, self.archive().index(), None);
+        let root = self
+            .revision()
+            .map(|revision| *revision.tree.hash())
+            .unwrap_or(crate::EMPTY_TREE_HASH);
+        TreeHistory::from_root_with_cache(&root, store, self.node_cache())
+            .with_record_cache(self.records())
+    }
+
+    /// The branch's committed history, newest first — at most `limit`
+    /// entries of `(version, record)`, every revision before any of its
+    /// ancestors (see [`dialog_artifacts::history::log`]). A branch with
+    /// no commits logs nothing; unreplicated ancestry truncates the walk
+    /// rather than failing it. Each record was verified on read, so the
+    /// attribution it reports is the issuer's own signed claim.
+    pub async fn log<Env>(
+        &self,
+        env: &Env,
+        limit: usize,
+    ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
+    where
+        Env: Provider<ArchiveGet>
+            + Provider<ArchivePut>
+            + Provider<Fork<RemoteSite, ArchiveGet>>
+            + ConditionalSync
+            + 'static,
+    {
+        let Some(head) = self.revision() else {
+            return Ok(Vec::new());
+        };
+        log(&head.version(), &self.history(env), limit).await
     }
 
     /// Export all artifacts from this branch to the given exporter.
@@ -205,5 +295,26 @@ impl Branch {
     /// A shared handle to this branch's deductive-rule plan cache.
     pub(crate) fn plan_cache(&self) -> PlanCache {
         self.plan_cache.clone()
+    }
+
+    /// A shared handle to this branch's causal-verdict memo. Resolve
+    /// conflicts through it — `branch.causality().causality(a, b,
+    /// &branch.history(env))` — and the DAG walk behind a verdict is
+    /// paid once per distinct question rather than once per caller.
+    pub fn causality(&self) -> CausalityCache {
+        self.causality_cache.clone()
+    }
+
+    /// A shared handle to this branch's causal-context memo. Pull reads
+    /// the local head's context through it (one O(ancestry) walk on the
+    /// first miss) and writes the successor head's context back, derived
+    /// incrementally — so steady-state sync never re-walks the DAG.
+    pub fn contexts(&self) -> ContextCache {
+        self.context_cache.clone()
+    }
+
+    /// A shared handle to this branch's verified-record memo.
+    pub(crate) fn records(&self) -> dialog_search_tree::Cache<Version, RevisionRecord> {
+        self.record_cache.clone()
     }
 }

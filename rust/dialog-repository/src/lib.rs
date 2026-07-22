@@ -43,6 +43,9 @@ pub(crate) mod layer;
 /// (origins, branches, branch revisions, sessions).
 pub mod schema;
 
+mod revision_ext;
+pub use revision_ext::*;
+
 /// Pluggable deductive-rule resolution seam for query sessions.
 pub(crate) mod rules;
 pub use rules::RuleCache;

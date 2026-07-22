@@ -13,7 +13,7 @@ use futures_util::TryStreamExt;
 
 use crate::{
     Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt, Upstream,
+    RepositoryMemoryExt,
 };
 
 /// Command struct for exporting all artifacts from a branch.
@@ -43,11 +43,16 @@ impl<E: Exporter> Export<'_, E> {
         let branch = self.branch;
         let mut exporter = self.exporter;
 
-        let remote = match branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => {
-                branch.subject().remote(name).load().perform(env).await.ok()
-            }
-            _ => None,
+        let upstreams = branch.upstreams();
+        let remote = match upstreams.remote_name() {
+            Some(name) => branch
+                .subject()
+                .remote(name.to_string())
+                .load()
+                .perform(env)
+                .await
+                .ok(),
+            None => None,
         };
 
         let catalog = branch.subject().archive().index();

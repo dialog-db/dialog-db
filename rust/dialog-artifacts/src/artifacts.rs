@@ -163,7 +163,7 @@ where
                         ))
                     })?;
 
-                    storage.read::<Revision>(&hash).await?
+                    storage.read::<IndexRoot>(&hash).await?
                 }
             } else {
                 None
@@ -270,7 +270,7 @@ where
         Ok(if root == NULL_BLAKE3_HASH {
             NULL_REVISION_HASH
         } else {
-            Revision::new(root.as_bytes()).as_reference().await?
+            IndexRoot::new(root.as_bytes()).as_reference().await?
         })
     }
 
@@ -322,7 +322,7 @@ where
                 // Otherwise we hydrate revision info from the store.
                 let revision = self
                     .storage
-                    .read::<Revision>(&required_hash)
+                    .read::<IndexRoot>(&required_hash)
                     .await?
                     .ok_or_else(|| {
                         DialogArtifactsError::InvalidRevision(format!(
@@ -354,6 +354,118 @@ where
         };
 
         Ok(())
+    }
+
+    /// Get the currently asserted [`Datum`]s recorded for the given entity
+    /// and attribute. Multiple data are possible for attributes with more
+    /// than one asserted value.
+    pub async fn select_data(
+        &self,
+        of: &Entity,
+        the: &Attribute,
+    ) -> Result<Vec<Datum>, DialogArtifactsError> {
+        let index = self.index.read().await;
+        index.select_data(self.storage.clone(), of, the).await
+    }
+
+    /// Stream every [`Artifact`] matching `selector`.
+    pub fn select(
+        &self,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        let index = self.index.clone();
+        let storage = self.storage.clone();
+        let cache = self.spill_cache.clone();
+
+        try_stream! {
+            // Clone the tree under the read lock to "pin" it at a
+            // version for the stream's lifetime, then hand off to the
+            // shared `ArtifactTreeExt::scan` for EAV/AEV/VAE dispatch.
+            let tree = index.read().await.clone();
+            let scanned = tree.scan(storage, cache, selector);
+            tokio::pin!(scanned);
+            for await artifact in scanned {
+                yield artifact?;
+            }
+        }
+    }
+
+    /// Commit the given instructions to the store's indexes.
+    ///
+    /// Data committed this way carries no [`Version`](crate::history::Version)
+    /// tag and records no history — version-controlled writes go through the
+    /// branch commit path in `dialog-repository` instead.
+    async fn commit_instructions<Instructions>(
+        &mut self,
+        instructions: Instructions,
+    ) -> Result<Blake3Hash, DialogArtifactsError>
+    where
+        Instructions: Stream<Item = Instruction> + ConditionalSend,
+    {
+        let base_revision = self.revision().await?;
+
+        let transaction_result = async {
+            let mut index = self.index.write().await;
+
+            // The per-instruction EAV/AEV/VAE key writes (and
+            // cardinality-one supersession) are the shared
+            // `ArtifactTreeExt::apply`. This method adds only
+            // the surrounding transaction bookkeeping — base-revision
+            // capture, revision persistence, pointer advance, and the
+            // rollback below.
+            let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
+            index
+                .apply(&mut self.storage, &mut delta, instructions)
+                .await?;
+
+            // Persist the tree's pending nodes before minting a revision;
+            // a revision must only reference durable blocks.
+            stream::iter(delta.flush().map(|(_, buffer)| buffer))
+                .map(|buffer| {
+                    let mut storage = self.storage.clone();
+                    async move {
+                        let digest = *buffer.blake3_hash().as_bytes();
+                        storage.set(digest, buffer.into_vec()).await
+                    }
+                })
+                .buffer_unordered(FLUSH_CONCURRENCY)
+                .try_collect::<()>()
+                .await?;
+
+            let root = index.root();
+            let next_revision = if root == NULL_BLAKE3_HASH {
+                None
+            } else {
+                Some(IndexRoot::new(root.as_bytes()))
+            };
+
+            let revision_hash = if let Some(revision) = &next_revision {
+                self.storage.write(&revision).await?;
+                revision.as_reference().await?
+            } else {
+                NULL_REVISION_HASH
+            };
+
+            // Advance the effective pointer to the latest version of this DB
+            self.storage
+                .set(
+                    make_reference(self.identifier.as_bytes()),
+                    revision_hash.to_vec(),
+                )
+                .await?;
+
+            Ok(revision_hash) as Result<Blake3Hash, DialogArtifactsError>
+        }
+        .await;
+
+        match transaction_result {
+            Ok(revision) => Ok(revision),
+            Err(error) => {
+                self.reset(Some(base_revision)).await?;
+                Err(error)
+            }
+        }
     }
 }
 
@@ -403,69 +515,7 @@ where
     where
         Instructions: Stream<Item = Instruction> + ConditionalSend,
     {
-        let base_revision = self.revision().await?;
-
-        let transaction_result = async {
-            let mut index = self.index.write().await;
-
-            // The per-instruction EAV/AEV/VAE key writes (and
-            // cardinality-one supersession) are the shared
-            // `ArtifactTreeExt::apply`. `commit` adds only the
-            // surrounding transaction bookkeeping — base-revision
-            // capture, revision persistence, pointer advance, and the
-            // rollback below.
-            let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
-            index
-                .apply(&mut self.storage, &mut delta, instructions)
-                .await?;
-
-            // Persist the tree's pending nodes before minting a revision;
-            // a revision must only reference durable blocks.
-            stream::iter(delta.flush().map(|(_, buffer)| buffer))
-                .map(|buffer| {
-                    let mut storage = self.storage.clone();
-                    async move {
-                        let digest = *buffer.blake3_hash().as_bytes();
-                        storage.set(digest, buffer.into_vec()).await
-                    }
-                })
-                .buffer_unordered(FLUSH_CONCURRENCY)
-                .try_collect::<()>()
-                .await?;
-
-            let root = index.root();
-            let next_revision = if root == NULL_BLAKE3_HASH {
-                None
-            } else {
-                Some(Revision::new(root.as_bytes()))
-            };
-
-            let revision_hash = if let Some(revision) = &next_revision {
-                self.storage.write(&revision).await?;
-                revision.as_reference().await?
-            } else {
-                NULL_REVISION_HASH
-            };
-
-            // Advance the effective pointer to the latest version of this DB
-            self.storage
-                .set(
-                    make_reference(self.identifier.as_bytes()),
-                    revision_hash.to_vec(),
-                )
-                .await?;
-
-            Ok(revision_hash) as Result<Blake3Hash, DialogArtifactsError>
-        }
-        .await;
-
-        match transaction_result {
-            Ok(revision) => Ok(revision),
-            Err(error) => {
-                self.reset(Some(base_revision)).await?;
-                Err(error)
-            }
-        }
+        self.commit_instructions(instructions).await
     }
 }
 
@@ -483,7 +533,7 @@ mod tests {
 
     use crate::helpers::generate_data;
     use crate::{
-        Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
+        Artifact, ArtifactSelector, ArtifactStoreMutExt, Artifacts, Attribute,
         DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
     };
 
@@ -1091,12 +1141,12 @@ mod tests {
         Ok(())
     }
 
-    /// Assert + retract of a fact whose value was **already committed** ends in
-    /// a retraction: a `Removed` tombstone replaces the live value, so the tree
-    /// changes (the removal must propagate on merge and beat a stale remote
-    /// assert) and the fact is no longer queryable.
+    /// Retracting a fact whose value was **already committed** deletes it
+    /// from the active indexes, with no tombstone (deletion now travels as a
+    /// history record; see `crate::merge`). The tree still changes, since
+    /// the fact's keys are gone, and the fact is no longer queryable.
     #[dialog_common::test]
-    async fn it_tombstones_when_retracting_a_fact_that_had_a_committed_value() -> Result<()> {
+    async fn it_deletes_from_the_indexes_when_retracting_a_committed_fact() -> Result<()> {
         let (storage_backend, _temp) = make_target_storage().await?;
         let mut facts = Artifacts::anonymous(storage_backend).await?;
 
@@ -1118,10 +1168,11 @@ mod tests {
             .commit(once(Instruction::Retract(alice.clone())))
             .await?;
 
-        // The retraction changed the tree (a tombstone replaced the value).
+        // The retraction changed the tree: the fact's keys were deleted
+        // (and a retract record was appended to the history region).
         assert_ne!(
             committed_root, after_root,
-            "retracting a committed fact must write a tombstone (tree changes)"
+            "retracting a committed fact removes it from the indexes (tree changes)"
         );
         // The fact is gone from queries.
         let hits: Vec<Artifact> = facts
@@ -1130,7 +1181,7 @@ mod tests {
             .await?;
         assert!(
             hits.is_empty(),
-            "the retracted fact must not be queryable after the tombstone"
+            "the retracted fact must not be queryable after deletion"
         );
         Ok(())
     }
@@ -2117,13 +2168,21 @@ mod tests {
              (3 indexes), {blocks_per_fact:.3} blocks/fact"
         );
 
-        // Regression guard against the pre-M3 flat baseline of ~172 B/entry
-        // (which duplicated the whole fact in the payload). After the value is
-        // in the key and the payload is just `State<Cause>`, an entry is well
-        // under that.
+        // Regression guard. Three measured points on this fixture:
+        //
+        //   pre-M3 (value-hash key, whole fact in payload)  ~172 B/entry
+        //   value-in-key alone (#393)                        118 B/entry
+        //   value-in-key + version control (this branch)     186 B/entry
+        //
+        // Version control adds a history record and a coverage entry per
+        // write, so it costs ~68 B/entry over #393 on this synthetic fixture
+        // (every fact is a distinct entity, which is the worst case for the
+        // history region: nothing shares a lineage). The guard tracks the
+        // combined figure — the number that matters is the one users pay.
         assert!(
-            bytes_per_entry < 172.0,
-            "per-entry size regressed to {bytes_per_entry:.1} bytes/entry (pre-M3 was ~172)"
+            bytes_per_entry < 200.0,
+            "per-entry size regressed to {bytes_per_entry:.1} bytes/entry \
+             (value-in-key alone is 118, with version control ~186)"
         );
 
         Ok(())

@@ -50,6 +50,7 @@ wasm-bindgen-futures = { workspace = true }
 
 
 [dev-dependencies]
+ed25519-dalek = { workspace = true }
 tokio-test = { workspace = true }
 dialog-artifacts = { workspace = true }
 dialog-operator = { workspace = true }

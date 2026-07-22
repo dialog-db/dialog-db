@@ -133,7 +133,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             let operator = Identify
                 .perform(env)
                 .await
-                .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
+                .map_err(|e| DialogArtifactsError::InvalidSignature(format!("identify: {e}")))?;
 
             // Route through the same QueryLayer overlay path
             // Branch::query() uses, so schema-injected metadata
@@ -174,6 +174,7 @@ mod tests {
     use dialog_query::{Concept, Query, Term, the};
 
     mod people {
+
         /// `test/name` attribute used by the Person concept tests.
         #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
         #[domain("test")]
@@ -190,6 +191,91 @@ mod tests {
         pub this: Entity,
         /// Their `test/name` attribute.
         pub name: people::Name,
+    }
+
+    /// `Transaction::integrate` replays an externally built [`Changes`]
+    /// batch as if its instructions had been issued on the transaction
+    /// directly: asserts surface, retracts tombstone, and the branch
+    /// itself stays untouched until commit. This is the only pin on the
+    /// integrate replay mapping (Assert/Replace -> associate, Retract ->
+    /// dissociate); it died with the old transaction_query module and is
+    /// ported back.
+    #[dialog_common::test]
+    async fn it_integrates_external_changes_into_branch_transaction() -> anyhow::Result<()> {
+        use dialog_artifacts::Changes;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+
+        // Seed the branch with Alice; Bob will be added via integrate.
+        branch
+            .transaction()
+            .assert(Person {
+                this: alice.clone(),
+                name: people::Name("Alice".into()),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // Build an external Changes that adds Bob and retracts Alice's
+        // name. This batch could have come from any source — a separate
+        // builder, a reactor accumulator, etc.
+        let mut external = Changes::new();
+        external.assert(Person {
+            this: bob.clone(),
+            name: people::Name("Bob".into()),
+        });
+        external.retract(the!("test/name").of(alice.clone()).is("Alice".to_string()));
+
+        // Integrate into a transaction and observe through tx.query().
+        let tx = branch.transaction().integrate(external);
+
+        let mut names: Vec<String> = tx
+            .query()
+            .select(Query::<Person> {
+                this: Term::var("this"),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|p| p.name.0)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["Bob".to_string()],
+            "integrated changes must surface Bob (assert) and tombstone \
+             Alice (retract); got {names:?}"
+        );
+
+        // The branch itself remains untouched until commit.
+        let mut committed: Vec<String> = branch
+            .query()
+            .select(Query::<Person> {
+                this: Term::var("this"),
+                name: Term::var("name"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|p| p.name.0)
+            .collect();
+        committed.sort();
+        assert_eq!(
+            committed,
+            vec!["Alice".to_string()],
+            "integrate must not mutate the branch before commit"
+        );
+
+        Ok(())
     }
 
     #[dialog_common::test]
@@ -412,7 +498,7 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
 
-        let origin = schema::Origin::new(profile.did(), main.of().clone());
+        let origin = schema::Replica::new(profile.did(), main.of().clone());
         let main_branch = schema::Branch::new(&origin, "main");
 
         let session_entity = schema::Session::entity();
@@ -432,6 +518,133 @@ mod tests {
             vec![main_branch.this],
             "Transaction::query() must see the SessionBranch row for every in-scope branch"
         );
+        Ok(())
+    }
+    /// The transaction view resolves the built-in derived concepts —
+    /// including the recursive ancestry closure — exactly like a
+    /// branch query, because both run on the same single-branch
+    /// [`QueryEnv`](crate::repository::branch::session::QueryEnv).
+    #[dialog_common::test]
+    async fn it_resolves_derived_revision_concepts_in_a_transaction() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut revisions = Vec::new();
+        for name in ["Alice", "Bob", "Carol"] {
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+            revisions.push(branch.revision().expect("branch has a revision"));
+        }
+        let [first, second, third] = &revisions[..] else {
+            unreachable!("three commits were made");
+        };
+
+        // An open, uncommitted transaction with its own pending write.
+        let tx = branch
+            .transaction()
+            .assert(the!("user/name").of(Entity::new()?).is("Dave".to_string()));
+
+        // The DAG edge projects from the tx view...
+        let edges: Vec<schema::RevisionParent> = tx
+            .query()
+            .select(Query::<schema::RevisionParent> {
+                this: third.entity().into(),
+                parent: Term::var("parent"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].parent.0, second.entity());
+
+        // ... and so does the recursive closure: the fixpoint runs
+        // through the transaction environment.
+        let mut reachable: Vec<Entity> = tx
+            .query()
+            .select(Query::<schema::RevisionAncestor> {
+                this: third.entity().into(),
+                ancestor: Term::var("ancestor"),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|row| row.ancestor.0)
+            .collect();
+        reachable.sort();
+        let mut expected = vec![first.entity(), second.entity()];
+        expected.sort();
+        assert_eq!(reachable, expected, "the head reaches both priors");
+
+        Ok(())
+    }
+
+    /// A rule whose `db.rule/*` facts are pending in the transaction
+    /// resolves as a transient overlay rule: the uncommitted view
+    /// derives through it without the rule (or the data) ever being
+    /// committed.
+    #[dialog_common::test]
+    async fn it_resolves_rules_pending_in_the_transaction() -> anyhow::Result<()> {
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        use dialog_query::{ConceptQuery, Parameters};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // employee(this, name) :- person-name(this, name)
+        let rule = {
+            let json = serde_json::json!({
+                "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+                "when": [{
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                }]
+            });
+            let descriptor: DeductiveRuleDescriptor =
+                serde_json::from_value(json).expect("descriptor parses");
+            descriptor.compile().expect("rule compiles")
+        };
+        let employee = rule.conclusion().clone();
+
+        let alice: Entity = "id:alice".parse()?;
+        let tx = branch
+            .transaction()
+            .assert(
+                the!("db.rule/conclusion")
+                    .of(rule.this())
+                    .is(employee.this()),
+            )
+            .assert(the!("db.rule/source").of(rule.this()).is(rule.encode()))
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            );
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let rows = tx
+            .query()
+            .select(ConceptQuery {
+                predicate: employee,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "the pending rule derives the pending fact");
+        assert_eq!(*rows[0].entity(), alice);
+
         Ok(())
     }
 }

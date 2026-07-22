@@ -5,36 +5,36 @@ use crate::DialogArtifactsError;
 
 use super::Blake3Hash;
 
-/// A hash representing a null [`Revision`] that represents an empty (perhaps
+/// A hash representing a null [`IndexRoot`] that represents an empty (perhaps
 /// newly created) [`Artifacts`].
 pub static NULL_REVISION_HASH: Blake3Hash = [0; 32];
 
-/// A [`Revision`] represents the root of [`Artifacts`] for a given set of data.
+/// A [`IndexRoot`] represents the root of [`Artifacts`] for a given set of data.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Revision {
+pub struct IndexRoot {
     /// The hash of the prolly tree index root for this revision
     index: Blake3Hash,
 }
 
-impl Revision {
+impl IndexRoot {
     /// Creates a new revision with the given index hash.
     pub fn new(index: &Blake3Hash) -> Self {
         Self {
             index: index.to_owned(),
         }
     }
-    /// The component of the [`Revision`] that corresponds to the [`Entity`] index
+    /// The component of the [`IndexRoot`] that corresponds to the [`Entity`] index
     pub fn index(&self) -> &Blake3Hash {
         &self.index
     }
 
-    /// Encodes the [`Revision`] as IPLD-compatible CBOR and returns the raw
+    /// Encodes the [`IndexRoot`] as IPLD-compatible CBOR and returns the raw
     /// bytes
     pub async fn as_cbor(&self) -> Result<Vec<u8>, DialogArtifactsError> {
         Ok(CborEncoder.encode(self).await?.1)
     }
 
-    /// Encodes the [`Revision`] as IPLD-compatible CBOR and returns the hash
+    /// Encodes the [`IndexRoot`] as IPLD-compatible CBOR and returns the hash
     /// reference to the bytes
     pub async fn as_reference(&self) -> Result<Blake3Hash, DialogArtifactsError> {
         Ok(CborEncoder.encode(self).await?.0)
