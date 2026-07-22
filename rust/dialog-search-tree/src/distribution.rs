@@ -575,6 +575,19 @@ pub mod cap {
     /// the separator hash's tail ([`anchor_order`]) under the same selector
     /// knob; the hybrid's semantic metric is the separator's own length
     /// (index separators are already shortest-form).
+    ///
+    /// Placement is EDIT-STABLE greedy, not recursive bisection: the frame is
+    /// swept left to right accumulating link weight, and whenever adding the
+    /// next child would carry the open window past the ceiling, a cut is
+    /// placed at the window's best anchor (by [`AnchorSelector`]) and the
+    /// window restarts from there. Because each window is decided only by the
+    /// keys inside it, an edit re-anchors only the window it lands in and the
+    /// windows after it — every window strictly before the edit is decided by
+    /// unchanged keys and keeps its byte-identical boundaries. That locality
+    /// is what lets an untouched index piece survive an edit elsewhere in the
+    /// frame and be passed through as its stored link (see `IndexPieceOrigin`).
+    /// Recursive bisection lacked it: an added byte could move the frame's
+    /// top-level split and cascade fresh boundaries through both halves.
     pub fn index_frame_cut_positions(
         separators: &[&[u8]],
         weights: &[usize],
@@ -584,57 +597,61 @@ pub mod cap {
         if separators.len() < 2 || weights.iter().sum::<usize>() <= ceiling {
             return Vec::new();
         }
-        let mut candidates: Vec<Anchor> = Vec::new();
-        // The index `at` is the anchor's identity (stored in `Anchor.at` and
-        // returned as a cut position), not just a way to reach the element.
-        #[allow(clippy::needless_range_loop)]
-        for at in 1..separators.len() {
-            // A long separator marks a forced LEAF seam: cutting an index
-            // frame there would scatter that leaf run's pieces across two
-            // parents and break the leaf widening's contiguity contract, so
-            // such seams are never index anchors.
-            if separators[at].len() as u32 > manifest.max_separator {
-                continue;
+        // Candidacy per seam: a long separator marks a forced LEAF seam, and
+        // cutting an index frame there would scatter that leaf run's pieces
+        // across two parents and break the leaf widening's contiguity
+        // contract, so such seams are never index anchors. `candidate[at]`
+        // holds `(separator length, separator hash)` for the seam before
+        // child `at` when it qualifies — the two keys the selector orders by.
+        let mut candidate: Vec<Option<(usize, Blake3Hash)>> = Vec::with_capacity(separators.len());
+        candidate.push(None); // seam 0 is the frame's left edge, never a cut.
+        for separator in &separators[1..] {
+            if separator.len() as u32 > manifest.max_separator {
+                candidate.push(None);
+            } else {
+                super::audit::election(separator.len());
+                candidate.push(Some((separator.len(), super::hash_memo::hash(separator))));
             }
-            super::audit::election(separators[at].len());
-            candidates.push(Anchor {
-                at,
-                separator_len: separators[at].len(),
-                hash: super::hash_memo::hash(separators[at]),
-            });
         }
-        // Prefix weights over the frame's links.
-        let mut prefix = Vec::with_capacity(weights.len() + 1);
-        prefix.push(0usize);
-        for weight in weights {
-            let last = *prefix.last().expect("prefix starts non-empty");
-            prefix.push(last + weight);
-        }
+
         let selector = AnchorSelector::from_manifest(manifest);
-        let mut cuts = Vec::new();
-        let mut pieces = vec![(0usize, separators.len())];
-        while let Some((lo, hi)) = pieces.pop() {
-            if prefix[hi] - prefix[lo] <= ceiling {
-                continue;
-            }
-            let best = candidates
-                .iter()
-                .filter(|anchor| anchor.at > lo && anchor.at < hi)
+        // The best (winning) anchor among candidates in `(lo, hi]`: the one
+        // the selector ranks smallest — shortest separator then hash tail for
+        // the hybrid, hash tail alone for pure rendezvous. `None` when the
+        // span holds no qualifying seam.
+        let best_in = |lo: usize, hi: usize| -> Option<usize> {
+            (lo + 1..=hi)
+                .filter_map(|at| candidate[at].as_ref().map(|entry| (at, entry)))
                 .min_by(|a, b| match selector {
-                    AnchorSelector::Rendezvous => anchor_order(&a.hash).cmp(anchor_order(&b.hash)),
-                    AnchorSelector::Hybrid => a
-                        .separator_len
-                        .cmp(&b.separator_len)
-                        .then_with(|| anchor_order(&a.hash).cmp(anchor_order(&b.hash))),
-                });
-            let Some(anchor) = best else {
-                continue;
-            };
-            cuts.push(anchor.at);
-            pieces.push((lo, anchor.at));
-            pieces.push((anchor.at, hi));
+                    AnchorSelector::Rendezvous => anchor_order(&a.1.1).cmp(anchor_order(&b.1.1)),
+                    AnchorSelector::Hybrid => {
+                        a.1.0
+                            .cmp(&b.1.0)
+                            .then_with(|| anchor_order(&a.1.1).cmp(anchor_order(&b.1.1)))
+                    }
+                })
+                .map(|(at, _)| at)
+        };
+
+        let mut cuts = Vec::new();
+        let mut window_start = 0usize;
+        let mut window_weight = weights[0];
+        for at in 1..separators.len() {
+            if window_weight + weights[at] > ceiling {
+                // Adding this child would carry the open window past the
+                // ceiling: close the window at its best anchor and restart it
+                // there. A window with no qualifying seam (a long-separator
+                // run whose seams are all forced leaf seams) cannot be cut, so
+                // it keeps growing until one appears — the same tolerance the
+                // recursive placement had for a piece with no candidate.
+                if let Some(cut) = best_in(window_start, at) {
+                    cuts.push(cut);
+                    window_start = cut;
+                    window_weight = weights[cut..at].iter().sum();
+                }
+            }
+            window_weight += weights[at];
         }
-        cuts.sort_unstable();
         cuts
     }
 
@@ -1255,6 +1272,166 @@ mod tests {
                 cap::anchor_order(&Blake3Hash::from(tail_flipped)),
                 "anchor order must read the hash tail"
             );
+        }
+        Ok(())
+    }
+
+    /// The greedy [`cap::index_frame_cut_positions`] is EDIT-STABLE from the
+    /// left: a window is decided entirely by the children inside it, so an
+    /// edit that changes only the tail of a frame leaves every window that
+    /// closed before it byte-identical. Growing the frame (appending a child)
+    /// or editing a child past the last cut therefore never moves an existing
+    /// cut — it only re-decides the open tail. This is the locality that lets
+    /// an untouched index piece survive an edit elsewhere in the frame and be
+    /// reused as its stored link; recursive bisection lacked it, because the
+    /// frame's top split moved when its total weight changed.
+    #[dialog_common::test]
+    async fn it_places_index_cuts_locally_under_edits() -> Result<()> {
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 3,
+            anchor_selector: 1,
+            ..Manifest::default()
+        };
+        let ceiling = manifest.frame_ceiling();
+        let mut rng = test_rng();
+
+        for _ in 0..300 {
+            // A frame of distinct short separators (all under max_separator, so
+            // every interior seam is a candidate), each with its own link
+            // weight.
+            let count = rng.gen_range(20..60usize);
+            let separators: Vec<Vec<u8>> = (0..count)
+                .map(|i| format!("s{i:05}").into_bytes())
+                .collect();
+            let weights: Vec<usize> = (0..count).map(|_| rng.gen_range(20..600usize)).collect();
+
+            let refs: Vec<&[u8]> = separators.iter().map(Vec::as_slice).collect();
+            let cuts = cap::index_frame_cut_positions(&refs, &weights, ceiling, &manifest);
+            if cuts.is_empty() {
+                continue;
+            }
+
+            // Edit strictly past the last cut: append one child at the tail.
+            // Every window closed before the last cut is untouched, so all
+            // existing cuts must reappear unchanged (the tail may gain a new
+            // cut, never lose an old one).
+            let mut sep2 = separators.clone();
+            let mut w2 = weights.clone();
+            sep2.push(format!("s{count:05}").into_bytes());
+            w2.push(rng.gen_range(20..600usize));
+            let refs2: Vec<&[u8]> = sep2.iter().map(Vec::as_slice).collect();
+            let cuts2 = cap::index_frame_cut_positions(&refs2, &w2, ceiling, &manifest);
+            for &cut in &cuts {
+                assert!(
+                    cuts2.contains(&cut),
+                    "appending a child moved an existing cut {cut}: \
+                     before {cuts:?} after {cuts2:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// An INTERIOR edit near the end of the frame leaves every window that
+    /// closed before it untouched: inserting a child at the last position
+    /// re-decides only the final window, so every original cut but the last
+    /// reappears unchanged. (The last cut's window can extend past it into the
+    /// tail, so only it may move — the same "the piece the edit lands in is
+    /// dirty" rule the leaf reuse follows.)
+    #[dialog_common::test]
+    async fn it_keeps_earlier_index_cuts_stable_under_a_tail_insert() -> Result<()> {
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 3,
+            anchor_selector: 1,
+            ..Manifest::default()
+        };
+        let ceiling = manifest.frame_ceiling();
+        let mut rng = test_rng();
+        let mut exercised = 0usize;
+
+        for _ in 0..400 {
+            let count = rng.gen_range(30..70usize);
+            let separators: Vec<Vec<u8>> = (0..count)
+                .map(|i| format!("s{i:05}").into_bytes())
+                .collect();
+            let weights: Vec<usize> = (0..count).map(|_| rng.gen_range(20..600usize)).collect();
+            let refs: Vec<&[u8]> = separators.iter().map(Vec::as_slice).collect();
+            let cuts = cap::index_frame_cut_positions(&refs, &weights, ceiling, &manifest);
+            if cuts.len() < 2 {
+                continue;
+            }
+            exercised += 1;
+
+            // Insert a child at the very last slot (before the final child).
+            // Every window except the frame's tail closed strictly earlier, so
+            // all cuts but the last must reappear unchanged.
+            let mut sep2 = separators.clone();
+            let mut w2 = weights.clone();
+            sep2.insert(count - 1, b"s99998tail".to_vec());
+            w2.insert(count - 1, rng.gen_range(20..600usize));
+            let refs2: Vec<&[u8]> = sep2.iter().map(Vec::as_slice).collect();
+            let cuts2 = cap::index_frame_cut_positions(&refs2, &w2, ceiling, &manifest);
+
+            for &cut in cuts.iter().rev().skip(1) {
+                assert!(
+                    cuts2.contains(&cut),
+                    "a tail insert moved the earlier cut {cut}: \
+                     before {cuts:?} after {cuts2:?}"
+                );
+            }
+        }
+        assert!(exercised > 0, "the fixture must exercise multi-cut frames");
+        Ok(())
+    }
+
+    /// [`cap::index_frame_cut_positions`] is a pure function of its inputs and
+    /// keeps every piece within the ceiling: the same frame always cuts the
+    /// same way, and no piece between consecutive cuts (nor the head or tail)
+    /// outweighs the ceiling once a qualifying seam exists.
+    #[dialog_common::test]
+    async fn it_bounds_index_pieces_within_the_ceiling() -> Result<()> {
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 3,
+            anchor_selector: 1,
+            ..Manifest::default()
+        };
+        let ceiling = manifest.frame_ceiling();
+        let mut rng = test_rng();
+
+        for _ in 0..200 {
+            let count = rng.gen_range(20..80usize);
+            let separators: Vec<Vec<u8>> = (0..count)
+                .map(|i| format!("s{i:05}").into_bytes())
+                .collect();
+            let weights: Vec<usize> = (0..count).map(|_| rng.gen_range(20..600usize)).collect();
+            let refs: Vec<&[u8]> = separators.iter().map(Vec::as_slice).collect();
+
+            let cuts = cap::index_frame_cut_positions(&refs, &weights, ceiling, &manifest);
+            assert_eq!(
+                cuts,
+                cap::index_frame_cut_positions(&refs, &weights, ceiling, &manifest),
+                "the placement must be a pure function of its inputs"
+            );
+
+            // Each piece between consecutive cuts (with a candidate seam
+            // available at its right edge) fits the ceiling plus one link of
+            // slack — the greedy closes a window before it overflows.
+            let bounds: Vec<usize> = std::iter::once(0)
+                .chain(cuts.iter().copied())
+                .chain(std::iter::once(count))
+                .collect();
+            let slack = weights.iter().copied().max().unwrap_or(0);
+            for pair in bounds.windows(2) {
+                let [lo, hi] = pair else { continue };
+                let weight: usize = weights[*lo..*hi].iter().sum();
+                assert!(
+                    weight <= ceiling + slack,
+                    "index piece [{lo},{hi}) weighs {weight}, over ceiling {ceiling} + {slack}"
+                );
+            }
         }
         Ok(())
     }
