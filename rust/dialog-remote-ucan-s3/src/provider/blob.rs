@@ -21,13 +21,19 @@ impl Provider<ForkInvocation<UcanSite, Read>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Read>,
     ) -> Result<BlobReader, BlobError> {
-        invocation
-            .authorization
-            .redeem(&invocation.address)
-            .await?
-            .invoke(invocation.capability)
-            .perform(&S3)
-            .await
+        let (permit, key) = crate::permit_cache::redeem_cached(
+            &invocation.authorization,
+            &invocation.address,
+            &invocation.capability,
+        )
+        .await?;
+        let result = permit.invoke(invocation.capability).perform(&S3).await;
+        if result.is_err() {
+            // A permit that failed downstream may be stale (revoked or
+            // expired server-side); drop it so the next attempt redeems.
+            crate::permit_cache::PermitCache::shared().invalidate(&key);
+        }
+        result
     }
 }
 
@@ -38,12 +44,18 @@ impl Provider<ForkInvocation<UcanSite, Import>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Import>,
     ) -> Result<BlobWriter, BlobError> {
-        invocation
-            .authorization
-            .redeem(&invocation.address)
-            .await?
-            .invoke(invocation.capability)
-            .perform(&S3)
-            .await
+        let (permit, key) = crate::permit_cache::redeem_cached(
+            &invocation.authorization,
+            &invocation.address,
+            &invocation.capability,
+        )
+        .await?;
+        let result = permit.invoke(invocation.capability).perform(&S3).await;
+        if result.is_err() {
+            // A permit that failed downstream may be stale (revoked or
+            // expired server-side); drop it so the next attempt redeems.
+            crate::permit_cache::PermitCache::shared().invalidate(&key);
+        }
+        result
     }
 }

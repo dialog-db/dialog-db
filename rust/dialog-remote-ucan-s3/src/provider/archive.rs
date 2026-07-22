@@ -15,13 +15,19 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Get>,
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
-        invocation
-            .authorization
-            .redeem(&invocation.address)
-            .await?
-            .invoke(invocation.capability)
-            .perform(&S3)
-            .await
+        let (permit, key) = crate::permit_cache::redeem_cached(
+            &invocation.authorization,
+            &invocation.address,
+            &invocation.capability,
+        )
+        .await?;
+        let result = permit.invoke(invocation.capability).perform(&S3).await;
+        if result.is_err() {
+            // A permit that failed downstream may be stale (revoked or
+            // expired server-side); drop it so the next attempt redeems.
+            crate::permit_cache::PermitCache::shared().invalidate(&key);
+        }
+        result
     }
 }
 
@@ -29,12 +35,18 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
     async fn execute(&self, invocation: ForkInvocation<UcanSite, Put>) -> Result<(), ArchiveError> {
-        invocation
-            .authorization
-            .redeem(&invocation.address)
-            .await?
-            .invoke(invocation.capability)
-            .perform(&S3)
-            .await
+        let (permit, key) = crate::permit_cache::redeem_cached(
+            &invocation.authorization,
+            &invocation.address,
+            &invocation.capability,
+        )
+        .await?;
+        let result = permit.invoke(invocation.capability).perform(&S3).await;
+        if result.is_err() {
+            // A permit that failed downstream may be stale (revoked or
+            // expired server-side); drop it so the next attempt redeems.
+            crate::permit_cache::PermitCache::shared().invalidate(&key);
+        }
+        result
     }
 }
