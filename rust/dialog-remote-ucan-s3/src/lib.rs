@@ -18,7 +18,6 @@ mod provider;
 pub mod site;
 
 pub use authorizer::UcanAuthorizer;
-pub use permit_cache::{PermitCache, PermitKey, redeem_cached};
 pub use site::{Ucan, UcanAddress, UcanAuthorization, UcanFork, UcanInvocation, UcanSite};
 
 // Re-export container types from dialog-ucan
