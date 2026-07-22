@@ -81,10 +81,10 @@ impl PermitCache {
     }
 }
 
-use dialog_capability::{Capability, Constraint, Effect};
-use dialog_remote_s3::S3Error;
+use dialog_capability::{Capability, Constraint, Effect, ForkInvocation, Provider};
+use dialog_remote_s3::{S3, S3Error, S3Invocation};
 
-use crate::site::{UcanAddress, UcanAuthorization};
+use crate::site::{UcanAddress, UcanAuthorization, UcanSite};
 
 /// Redeem `authorization` for a permit, reusing a cached GET permit for
 /// the same (endpoint, capability) when one is still fresh. Returns the
@@ -110,6 +110,38 @@ where
     let permit = authorization.redeem(address).await?;
     PermitCache::shared().store(key.clone(), &permit, now);
     Ok((permit, key))
+}
+
+/// Execute a UCAN fork invocation via the cached-redeem path shared by
+/// every effect provider in this crate: redeem (or reuse) a permit for
+/// the invocation's `(address, capability)`, then invoke it against S3.
+///
+/// A permit that fails downstream may be stale — revoked or expired
+/// server-side even though this process still thinks it has time left
+/// on the TTL — so a failed result invalidates the cache entry, forcing
+/// the next attempt to redeem afresh instead of retrying the same
+/// bad permit.
+pub async fn execute_cached<Fx, T, E>(invocation: ForkInvocation<UcanSite, Fx>) -> Result<T, E>
+where
+    Fx: Effect<Output = Result<T, E>>,
+    Fx::Of: Constraint,
+    Capability<Fx>: serde::Serialize,
+    S3: Provider<S3Invocation<Fx>>,
+    E: From<S3Error>,
+{
+    let (permit, key) = redeem_cached(
+        &invocation.authorization,
+        &invocation.address,
+        &invocation.capability,
+    )
+    .await?;
+    let result = permit.invoke(invocation.capability).perform(&S3).await;
+    if result.is_err() {
+        // A permit that failed downstream may be stale (revoked or
+        // expired server-side); drop it so the next attempt redeems.
+        PermitCache::shared().invalidate(&key);
+    }
+    result
 }
 
 #[cfg(test)]
