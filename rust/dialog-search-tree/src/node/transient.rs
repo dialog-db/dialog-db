@@ -971,6 +971,59 @@ where
     >,
     D: Distribution,
 {
+    regroup_children_reusing::<Key, Value, D>(children, level, manifest, &[])
+}
+
+/// The provenance of one untouched index piece inside a widened frame regroup:
+/// the child-index range it contributed to the merged frame and the stored
+/// link it came from. When the regroup reproduces exactly that range as a
+/// group (and derives the same separator), the piece's persistent link is
+/// passed through verbatim — no re-encode, no re-hash, no re-store of a
+/// byte-identical index block, and no delta entry.
+///
+/// This is the index-level twin of [`PieceOrigin`]: the frame ceiling force-
+/// splits an over-ceiling INDEX frame by re-grouping the whole widened frame,
+/// and the widening (`merge_forced_index_runs`) concatenates every piece's
+/// children before the regroup re-cuts them. Most pieces come back
+/// boundary-and-child-identical; without provenance each was rebuilt into a
+/// fresh transient index and re-stored as a byte-identical block. Provenance
+/// is the only sound signal here — store identity is not observable at persist
+/// time.
+///
+/// Only QUIET pieces (empty sealed novelty) are eligible: the widening drains
+/// every piece's buffer and re-routes it over the merged children, so a piece
+/// that carried ops no longer owns them and its original link would double-
+/// count. In the canonical edit path every lifted index node is quiet, so this
+/// covers the whole force-split frame; a buffered piece simply rebuilds as
+/// before.
+#[derive(Clone, Debug)]
+pub(crate) struct IndexPieceOrigin {
+    /// First child index (inclusive) this piece contributed to the merged frame.
+    pub start: usize,
+    /// One past the last child index this piece contributed.
+    pub end: usize,
+    /// The stored link the piece was opened from.
+    pub link: Link,
+}
+
+/// [`regroup_children`] with piece provenance: any produced group that exactly
+/// reproduces an untouched origin piece — same child range, same derived
+/// separator — is emitted as its original persistent link instead of a fresh
+/// transient index. See [`IndexPieceOrigin`].
+pub(crate) fn regroup_children_reusing<Key, Value, D>(
+    children: Vec<Node<Key, Value>>,
+    level: Rank,
+    manifest: &Manifest,
+    origins: &[IndexPieceOrigin],
+) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    D: Distribution,
+{
     let threshold = BOTTOM_RANK + level;
 
     // Coin pass: a child whose seam rank exceeds the level threshold starts
@@ -1027,23 +1080,28 @@ where
     let mut groups: Vec<Node<Key, Value>> = vec![];
     let mut pending: Vec<Node<Key, Value>> = vec![];
 
-    // Reshaping produces canonical index nodes: novelty lives on the nodes
-    // the write path buffered it at, and a regrouped node is a fresh one, so
-    // it starts empty. A flush is what moves buffered ops downward.
-    for (at, child) in children.into_iter().enumerate() {
-        if cut_before[at] && !pending.is_empty() {
-            groups.push(
-                TransientNode::Index(TransientIndex {
-                    children: std::mem::take(&mut pending),
-                    novelty: Novelty::new(),
-                })
-                .into(),
-            );
+    let origin_for = |start: usize, end: usize| -> Option<&Link> {
+        origins
+            .iter()
+            .find(|origin| origin.start == start && origin.end == end)
+            .map(|origin| &origin.link)
+    };
+    // A group that exactly reproduces an untouched origin piece — same child
+    // range and same derived separator (the first child's) — passes the
+    // original link straight through: `into_link` hands it on with no encode,
+    // no hash, and no delta entry. Otherwise a fresh canonical index node is
+    // built; its novelty starts empty (a regrouped node is fresh, and a flush
+    // is what moves buffered ops downward).
+    let mut seal = |start: usize, end: usize, pending: Vec<Node<Key, Value>>| {
+        if let Some(link) = origin_for(start, end)
+            && pending
+                .first()
+                .and_then(|child| child.separator().ok())
+                .is_some_and(|separator| separator == link.separator.as_slice())
+        {
+            groups.push(Node::Persistent(link.clone()));
+            return;
         }
-        pending.push(child);
-    }
-
-    if !pending.is_empty() {
         groups.push(
             TransientNode::Index(TransientIndex {
                 children: pending,
@@ -1051,6 +1109,20 @@ where
             })
             .into(),
         );
+    };
+
+    let mut group_start = 0usize;
+    for (at, child) in children.into_iter().enumerate() {
+        if cut_before[at] && !pending.is_empty() {
+            seal(group_start, at, std::mem::take(&mut pending));
+            group_start = at;
+        }
+        pending.push(child);
+    }
+
+    if !pending.is_empty() {
+        let end = group_start + pending.len();
+        seal(group_start, end, pending);
     }
 
     Ok(groups)

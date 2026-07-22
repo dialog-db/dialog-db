@@ -15,10 +15,11 @@
 
 use crate::{
     Accessor, BOTTOM_RANK, Buffer, Cache, Change, ContentAddressedStorage, Delta,
-    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, Link, Manifest, Node,
-    Novelty, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree, PieceOrigin, Rank,
-    TransientIndex, TransientNode, TransientSegment, TreeWalker, Value, link_bounds,
-    regroup_children, regroup_entries, regroup_entries_reusing,
+    DialogSearchTreeError, Differential, Distribution, Entry, Geometric, IndexPieceOrigin, Key,
+    Link, Manifest, Node, Novelty, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree,
+    PieceOrigin, Rank, TransientIndex, TransientNode, TransientSegment, TreeWalker, Value,
+    link_bounds, regroup_children, regroup_children_reusing, regroup_entries,
+    regroup_entries_reusing,
 };
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
@@ -941,13 +942,13 @@ where
         // fails the level threshold that grouped them (derived, no stored
         // mark); ordinary paths see two rank probes per level and merge
         // nothing.
-        let index_widened = if changes_membership && manifest.frame_ceiling() > 0 {
+        let (index_widened, index_origins) = if changes_membership && manifest.frame_ceiling() > 0 {
             merge_forced_index_runs::<Key, Value, D, Backend>(
                 &mut root, &mut path, accessor, &manifest,
             )
             .await?
         } else {
-            false
+            (false, Vec::new())
         };
 
         // The frame ceiling's fast-path gate: a membership-changing edit
@@ -1379,6 +1380,7 @@ where
                 left_fuse,
                 &manifest,
                 piece_origins.as_deref().unwrap_or(&[]),
+                &index_origins,
             )?,
         };
         seal_root::<Key, Value, D, _>(replacement, height, &manifest, accessor).await
@@ -1528,7 +1530,7 @@ async fn merge_forced_index_runs<Key, Value, D, Backend>(
     path: &mut [usize],
     accessor: &Accessor<Backend>,
     manifest: &Manifest,
-) -> Result<bool, DialogSearchTreeError>
+) -> Result<(bool, Vec<(usize, Vec<IndexPieceOrigin>)>), DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + ConditionalSync + 'static,
@@ -1540,6 +1542,7 @@ where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync,
 {
+    let mut origins_by_remaining: Vec<(usize, Vec<IndexPieceOrigin>)> = Vec::new();
     let mut merged_any = false;
     let depths = path.len();
     for d in 1..depths {
@@ -1573,6 +1576,20 @@ where
             continue;
         }
 
+        // Remember each unchanged piece's persistent link before lifting so
+        // the frame's regroup can pass it through when it reproduces the
+        // piece byte-for-byte (see [`IndexPieceOrigin`]). The edited piece is
+        // excluded — its subtree changed, so its link is stale.
+        let piece_links: Vec<Option<Link>> = {
+            let children = &follow(root, &parent_path)?.as_index()?.children;
+            (lo..=hi)
+                .map(|member| match &children[member] {
+                    Node::Persistent(link) if member != at => Some(link.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
         for member in lo..=hi {
             let parent = follow(root, &parent_path)?.as_index_mut()?;
             lift(&mut parent.children[member], accessor).await?;
@@ -1586,6 +1603,7 @@ where
             .collect();
         let mut merged_children: Vec<Node<Key, Value>> = Vec::new();
         let mut carried: Vec<NoveltyEntry<Value>> = Vec::new();
+        let mut origins: Vec<IndexPieceOrigin> = Vec::new();
         let mut lead = 0usize;
         for (offset, member) in members.into_iter().enumerate() {
             let TransientNode::Index(mut piece) = member.into_transient()? else {
@@ -1593,7 +1611,24 @@ where
                     "Forced index run member was not an index node".into(),
                 ));
             };
-            carried.extend(piece.novelty.take_all::<Key>()?);
+            let piece_novelty = piece.novelty.take_all::<Key>()?;
+            let start = merged_children.len();
+            // A piece with a stored link and no buffered ops of its own can be
+            // passed through if the regroup reproduces its exact child range:
+            // draining a quiet piece takes nothing, so its stored bytes still
+            // stand. A buffered piece is disqualified — its ops were just
+            // re-routed onto the merged layout, so its old link no longer
+            // describes it.
+            if piece_novelty.is_empty()
+                && let Some(link) = piece_links[offset].clone()
+            {
+                origins.push(IndexPieceOrigin {
+                    start,
+                    end: start + piece.children.len(),
+                    link,
+                });
+            }
+            carried.extend(piece_novelty);
             if offset < at - lo {
                 lead += piece.children.len();
             }
@@ -1618,8 +1653,16 @@ where
         path[d - 1] = lo;
         path[d] += lead;
         merged_any = true;
+        // `reshape_path` regroups the merged node's children when it is the
+        // recursion's current `node` — reached after consuming the `d` path
+        // entries down to and including the descent into it (`path[d - 1] =
+        // lo`), so `depths - d` entries remain. That is where its child-index
+        // origins must be consumed.
+        if !origins.is_empty() {
+            origins_by_remaining.push((depths - d, origins));
+        }
     }
-    Ok(merged_any)
+    Ok((merged_any, origins_by_remaining))
 }
 
 /// Widens an edit's window to the whole force-split run around the leaf at
@@ -1961,8 +2004,8 @@ where
 /// `left_fuse` names the depth (relative to `node`) of the ancestor at which
 /// the rebuilt run's head must fuse into its left sibling, when the edit
 /// dissolved the cut at the edited subtree's left edge; see [`fuse_left_run`].
-// The origin slice rides to the leaf arm only; grouping the arguments would
-// hide which levels consume which.
+// The leaf-origin slice rides to the leaf arm and the index-origin map to the
+// index arm; grouping the arguments would hide which levels consume which.
 #[allow(clippy::too_many_arguments)]
 fn reshape_path<Key, Value, D>(
     node: &mut TransientNode<Key, Value>,
@@ -1972,6 +2015,7 @@ fn reshape_path<Key, Value, D>(
     left_fuse: Option<usize>,
     manifest: &Manifest,
     origins: &[PieceOrigin],
+    index_origins: &[(usize, Vec<IndexPieceOrigin>)],
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -2057,6 +2101,7 @@ where
                 left_fuse.and_then(|depth| depth.checked_sub(1)),
                 manifest,
                 origins,
+                index_origins,
             )?;
             // Regrouping replaces `node` with a run of new nodes, so the ops
             // buffered here have nowhere to live unless they are carried over:
@@ -2071,14 +2116,34 @@ where
                 children.remove(at);
                 fuse_left_run::<Key, Value, D>(children, at, replacement, height, manifest)?
             } else {
+                // This node is a widened frame when the index widening left
+                // origins keyed by the path length that reaches it. The
+                // splice replaces the edited child (index `at`) with its
+                // `replacement` run, shifting every unchanged piece after it;
+                // the pass-through origins are adjusted to the post-splice
+                // child indices so the regroup can reuse them verbatim.
+                let reuse = index_origins
+                    .iter()
+                    .find(|(remaining, _)| *remaining == path.len())
+                    .map(|(_, origins)| adjust_index_origins(origins, at, replacement.len()));
                 (
-                    splice_and_regroup::<Key, Value, D>(
-                        children,
-                        at..at + 1,
-                        replacement,
-                        height,
-                        manifest,
-                    )?,
+                    match reuse {
+                        Some(reuse) => splice_and_regroup_reusing::<Key, Value, D>(
+                            children,
+                            at..at + 1,
+                            replacement,
+                            height,
+                            manifest,
+                            &reuse,
+                        )?,
+                        None => splice_and_regroup::<Key, Value, D>(
+                            children,
+                            at..at + 1,
+                            replacement,
+                            height,
+                            manifest,
+                        )?,
+                    },
                     Vec::new(),
                 )
             };
@@ -2462,6 +2527,72 @@ where
         return Ok(vec![]);
     }
     regroup_children::<Key, Value, D>(std::mem::take(children), height, manifest)
+}
+
+/// [`splice_and_regroup`] that also carries index-piece provenance, so a
+/// re-cut group reproducing an untouched frame piece is passed through as its
+/// original persistent link rather than rebuilt (see [`IndexPieceOrigin`]).
+fn splice_and_regroup_reusing<Key, Value, D>(
+    children: &mut Vec<Node<Key, Value>>,
+    range: std::ops::Range<usize>,
+    replacement: Vec<Node<Key, Value>>,
+    height: Rank,
+    manifest: &Manifest,
+    origins: &[IndexPieceOrigin],
+) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+    D: Distribution,
+{
+    children.splice(range, replacement);
+    if children.is_empty() {
+        return Ok(vec![]);
+    }
+    regroup_children_reusing::<Key, Value, D>(std::mem::take(children), height, manifest, origins)
+}
+
+/// Adjusts index-piece origins to the child indices they occupy after the
+/// edited child (at `at`) is replaced by a run of `replacement_len` nodes.
+///
+/// The frame widening excluded the edited piece, so no origin straddles `at`:
+/// origins entirely before it stand, and origins entirely after it shift by
+/// the splice's length delta. An origin whose start is at or past `at` (i.e.
+/// after the edited child) moves; one that ends at or before `at` is
+/// untouched.
+fn adjust_index_origins(
+    origins: &[IndexPieceOrigin],
+    at: usize,
+    replacement_len: usize,
+) -> Vec<IndexPieceOrigin> {
+    let shift = replacement_len as isize - 1;
+    origins
+        .iter()
+        .filter_map(|origin| {
+            // A pass-through piece never contains the edited child; drop any
+            // that (defensively) does rather than reuse a stale link.
+            if origin.start <= at && at < origin.end {
+                return None;
+            }
+            let moved = origin.start > at;
+            Some(IndexPieceOrigin {
+                start: if moved {
+                    (origin.start as isize + shift) as usize
+                } else {
+                    origin.start
+                },
+                end: if moved {
+                    (origin.end as isize + shift) as usize
+                } else {
+                    origin.end
+                },
+                link: origin.link.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Turns the root's replacement run (the nodes that stand for the old root after
@@ -5575,6 +5706,243 @@ mod tests {
             depth += 1;
         }
         Ok(stats)
+    }
+
+    /// Every node hash in the tree (index nodes and leaves alike), keyed by
+    /// depth, walking the whole spine from the root. The pass-through test
+    /// reads which index-node hashes an edit leaves untouched.
+    async fn node_hashes_by_depth(
+        root: &Blake3Hash,
+        storage: &ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    ) -> Result<Vec<HashSet<Blake3Hash>>> {
+        let mut levels: Vec<HashSet<Blake3Hash>> = Vec::new();
+        if root == NULL_BLAKE3_HASH {
+            return Ok(levels);
+        }
+        let accessor = Accessor::new(Cache::new(), storage.clone());
+        let mut frontier = vec![root.clone()];
+        while !frontier.is_empty() {
+            let mut next = Vec::new();
+            levels.push(frontier.iter().cloned().collect());
+            for hash in &frontier {
+                let node: PersistentNode<VarKey, Vec<u8>> = accessor.get_node(hash).await?;
+                if let Ok(index) = node.as_index() {
+                    for at in 0..index.len() {
+                        next.push(index.hash_at(at)?.clone());
+                    }
+                }
+            }
+            frontier = next;
+        }
+        Ok(levels)
+    }
+
+    /// An armed-ceiling regroup that force-splits a frame — re-cutting the
+    /// whole widened frame — must pass every boundary-and-child-identical
+    /// piece through as its original persistent link: those unchanged index
+    /// nodes stay out of the flushed delta, exactly as untouched leaves do
+    /// (2b(ii), the index twin of `regroup_entries_reusing`). Without the
+    /// pass-through each unchanged piece re-encoded, re-hashed, and re-stored
+    /// as a byte-identical block.
+    #[dialog_common::test]
+    async fn it_keeps_untouched_index_pieces_persistent_through_a_frame_split() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(2, 1);
+
+        // A tree deep enough to grow index levels the ceiling force-splits.
+        let sorted: Vec<VarKey> = (0..600u32)
+            .map(|n| VarKey(format!("k{n:04}").into_bytes()))
+            .collect();
+        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+
+        let stats = index_nodes(tree.root(), &storage).await?;
+        let depths: HashSet<usize> = stats.iter().map(|(depth, _, _)| *depth).collect();
+        assert!(
+            depths.len() >= 2,
+            "the fixture must grow index levels for a frame to force-split, got {depths:?}"
+        );
+
+        let before = node_hashes_by_depth(tree.root(), &storage).await?;
+        let interior_index_hashes: HashSet<Blake3Hash> = before
+            .iter()
+            .skip(1)
+            .flatten()
+            .filter(|hash| *hash != tree.root())
+            .cloned()
+            .collect();
+        assert!(
+            !interior_index_hashes.is_empty(),
+            "the fixture must have interior index nodes to reuse"
+        );
+
+        // One interior insert re-shapes the frame it lands in; every other
+        // frame's index pieces are untouched and must pass through.
+        let mut delta = Delta::zero();
+        let edited = tree
+            .edit_with_manifest(&storage)
+            .await?
+            .insert(VarKey(b"k0301x".to_vec()), b"k0301x".to_vec(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        let mut written: HashSet<Blake3Hash> = HashSet::new();
+        for (hash, buffer) in delta.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            written.insert(hash);
+        }
+
+        // The survivors: index nodes present both before and after the edit
+        // are structurally shared, so their known hashes must never re-enter
+        // the delta as byte-identical re-stores.
+        let after = node_hashes_by_depth(edited.root(), &storage).await?;
+        let survivors: HashSet<Blake3Hash> = after
+            .iter()
+            .flatten()
+            .filter(|hash| interior_index_hashes.contains(*hash))
+            .cloned()
+            .collect();
+        assert!(
+            !survivors.is_empty(),
+            "an interior edit must leave most index pieces untouched"
+        );
+        let restored: Vec<&Blake3Hash> = survivors.iter().filter(|h| written.contains(h)).collect();
+        assert!(
+            restored.is_empty(),
+            "unchanged index pieces re-entered the delta as byte-identical re-stores: {restored:?}"
+        );
+        assert!(
+            !written.is_empty(),
+            "the touched frame's rewrite must still reach the delta"
+        );
+
+        Ok(())
+    }
+
+    /// The negative control: an edit that genuinely changes an index piece —
+    /// its boundaries or children move — must REBUILD it, so its fresh hash
+    /// reaches the delta. The pass-through never suppresses a real write.
+    #[dialog_common::test]
+    async fn it_rebuilds_a_changed_index_piece_into_the_delta() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(2, 1);
+
+        let sorted: Vec<VarKey> = (0..600u32)
+            .map(|n| VarKey(format!("k{n:04}").into_bytes()))
+            .collect();
+        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+
+        let before_leaves = node_hashes_by_depth(tree.root(), &storage)
+            .await?
+            .pop()
+            .unwrap_or_default();
+
+        let mut delta = Delta::zero();
+        let edited = tree
+            .edit_with_manifest(&storage)
+            .await?
+            .insert(VarKey(b"k0300x".to_vec()), b"k0300x".to_vec(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        let mut written: HashSet<Blake3Hash> = HashSet::new();
+        for (hash, buffer) in delta.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            written.insert(hash);
+        }
+
+        // The edit landed inside one leaf, so that leaf's subtree changed:
+        // at least one brand-new node (not a survivor of the pre-edit tree)
+        // must be written. The reused pieces do not suppress the real write.
+        let after = node_hashes_by_depth(edited.root(), &storage).await?;
+        let fresh: HashSet<Blake3Hash> = after
+            .iter()
+            .flatten()
+            .filter(|hash| !before_leaves.contains(*hash))
+            .cloned()
+            .collect();
+        let reached: Vec<&Blake3Hash> = fresh.iter().filter(|h| written.contains(h)).collect();
+        assert!(
+            !reached.is_empty(),
+            "the changed piece's fresh nodes must reach the delta"
+        );
+        assert_eq!(
+            edited.get(&VarKey(b"k0300x".to_vec()), &storage).await?,
+            Some(b"k0300x".to_vec()),
+            "the inserted key must read back"
+        );
+
+        Ok(())
+    }
+
+    /// Convergence with the pass-through armed: an over-ceiling index frame
+    /// built and edited in different insertion orders — and incrementally
+    /// pruned versus rebuilt from the survivors — must still produce
+    /// byte-identical roots. Reusing a piece's link changes what is
+    /// re-stored, never what the tree IS.
+    #[dialog_common::test]
+    async fn it_converges_with_index_piece_reuse_over_the_ceiling() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(3, 1);
+
+        let base: Vec<VarKey> = (0..700u32)
+            .map(|n| VarKey(format!("k{n:04}").into_bytes()))
+            .collect();
+        let extra: Vec<VarKey> = (0..40u32)
+            .map(|n| VarKey(format!("k{n:04}x").into_bytes()))
+            .collect();
+
+        // Build the base, then edit-insert the extras in three different
+        // orders; each must converge, exercising the widened-frame regroup
+        // (and its pass-through) on the incremental path.
+        let build_then_edit = |order: Vec<VarKey>| {
+            let base = base.clone();
+            async move {
+                let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+                let mut tree = build_incremental(&base, manifest, &mut storage).await?;
+                let mut delta = Delta::zero();
+                for key in &order {
+                    tree = tree
+                        .edit_with_manifest(&storage)
+                        .await?
+                        .insert(key.clone(), key.0.clone(), &storage)
+                        .await?
+                        .persist(&mut delta)?;
+                    for (hash, buffer) in delta.flush() {
+                        storage.store(buffer.as_ref().to_vec(), &hash).await?;
+                    }
+                    delta = Delta::zero();
+                }
+                Ok::<Blake3Hash, anyhow::Error>(tree.root().clone())
+            }
+        };
+
+        let sorted_root = build_then_edit(extra.clone()).await?;
+        let reversed_root = build_then_edit(extra.iter().rev().cloned().collect()).await?;
+        let hashed_root = build_then_edit({
+            let mut keys = extra.clone();
+            keys.sort_by_key(|key| *Blake3Hash::hash(&key.0).as_bytes());
+            keys
+        })
+        .await?;
+        assert_eq!(
+            sorted_root, reversed_root,
+            "edit orders must converge with the pass-through armed"
+        );
+        assert_eq!(
+            sorted_root, hashed_root,
+            "hash-shuffled edit order must converge too"
+        );
+
+        // Incremental-vs-rebuild oracle over the whole set.
+        let mut all: Vec<VarKey> = base.clone();
+        all.extend(extra.clone());
+        all.sort();
+        let rebuilt = build_incremental(&all, manifest, &mut storage).await?;
+        assert_eq!(
+            sorted_root,
+            *rebuilt.root(),
+            "the incrementally edited tree must equal the fresh rebuild"
+        );
+
+        Ok(())
     }
 
     /// Index-level pacing convergence: with the paced seam ladder, index
