@@ -148,6 +148,11 @@ where
 mod tests {
     use super::*;
     use chrono::TimeDelta;
+    use dialog_capability::{Principal, Subject, did};
+    use dialog_credentials::Ed25519Signer;
+    use dialog_effects::archive::{Archive, Catalog, Get};
+    use dialog_ucan::UcanInvocation;
+    use dialog_ucan_core::{InvocationBuilder, InvocationChain};
     #[cfg(target_arch = "wasm32")]
     use wasm_bindgen_test::wasm_bindgen_test_configure;
     #[cfg(target_arch = "wasm32")]
@@ -231,5 +236,107 @@ mod tests {
         cache.store(k.clone(), &get_permit(), now);
         cache.invalidate(&k);
         assert!(cache.lookup(&k, now).is_none());
+    }
+
+    // -- invalidate-on-failure coverage --
+    //
+    // `execute_cached` invalidates a permit's cache entry when the S3
+    // request it guards returns `Err`. That branch isn't reachable
+    // through the primitives above (`store`/`lookup`/`invalidate`) --
+    // it only fires by driving a real `ForkInvocation` through
+    // `execute_cached`, which always executes against the real `S3`
+    // provider and the process-wide `PermitCache::shared()` (neither is
+    // injectable). So this test builds a real invocation and forces the
+    // downstream request to fail by pointing the permit at a loopback
+    // port nothing listens on -- deterministic and network-free (no
+    // live access service or S3 endpoint needed), rather than reaching
+    // for a mock HTTP layer.
+    //
+    // This is the only test in the crate that touches
+    // `PermitCache::shared()`; every other test uses `PermitCache::new()`,
+    // so there's nothing here to race or leak state into.
+
+    /// A self-signed (issuer == subject, no delegation) UCAN
+    /// authorization. Enough to satisfy `ForkInvocation`'s type, but
+    /// never actually redeemed here: the cache is pre-seeded so
+    /// `execute_cached` never reaches `authorization.redeem`.
+    async fn self_authorization(signer: &Ed25519Signer) -> UcanAuthorization {
+        let did = signer.did();
+        let invocation = InvocationBuilder::new()
+            .issuer(signer.clone())
+            .audience(&did)
+            .subject(&did)
+            .command(vec!["archive".to_string(), "get".to_string()])
+            .proofs(vec![])
+            .try_build()
+            .await
+            .expect("failed to build self-signed invocation");
+        let chain = InvocationChain::new(invocation, std::collections::HashMap::new());
+        UcanInvocation {
+            chain: Box::new(chain),
+            subject: did,
+            ability: "/archive/get".to_string(),
+        }
+        .into()
+    }
+
+    /// A permit pointing at a loopback port nothing listens on: the S3
+    /// request it guards fails fast with a connection error.
+    fn unreachable_permit() -> Permit {
+        Permit {
+            url: "http://127.0.0.1:1/unreachable".parse().expect("valid url"),
+            method: "GET".to_string(),
+            headers: vec![],
+        }
+    }
+
+    #[dialog_common::test]
+    async fn it_invalidates_the_cache_entry_after_a_failed_request() {
+        let signer = Ed25519Signer::import(&[9u8; 32]).await.unwrap();
+        let capability = Subject::from(did!("key:zPermitCacheFailureTest"))
+            .attenuate(Archive)
+            .attenuate(Catalog::new("blobs"))
+            .invoke(Get::new([0u8; 32]));
+        let capability_bytes = serde_ipld_dagcbor::to_vec(&capability).unwrap();
+
+        // Address is also unreachable, so a redeem attempted after
+        // invalidation fails the same deterministic way.
+        let address = UcanAddress::new("http://127.0.0.1:1/redeem");
+        let cache_key: PermitKey = (address.endpoint().to_string(), capability_bytes);
+        let now = chrono::Utc::now();
+
+        // Prime the entry `execute_cached` will look up, so it reuses
+        // this permit instead of redeeming.
+        PermitCache::shared().store(cache_key.clone(), &unreachable_permit(), now);
+        assert!(
+            PermitCache::shared().lookup(&cache_key, now).is_some(),
+            "precondition: cache should be primed before the call"
+        );
+
+        let authorization = self_authorization(&signer).await;
+        let invocation =
+            ForkInvocation::new(capability.clone(), address.clone(), authorization.clone());
+
+        let result: Result<Option<Vec<u8>>, dialog_effects::archive::ArchiveError> =
+            execute_cached(invocation).await;
+        assert!(
+            result.is_err(),
+            "a request against an unreachable permit should fail"
+        );
+        assert!(
+            PermitCache::shared().lookup(&cache_key, now).is_none(),
+            "a failed request should invalidate its cache entry"
+        );
+
+        // And the invalidation should matter: the next redeem attempt
+        // should hit the network (and fail against the same unreachable
+        // address) rather than silently serving the stale permit back
+        // out of the cache.
+        let redeem_result = redeem_cached(&authorization, &address, &capability).await;
+        assert!(
+            redeem_result.is_err(),
+            "after invalidation the next redeem should go to the network, \
+             not return the stale cache entry"
+        );
     }
 }
