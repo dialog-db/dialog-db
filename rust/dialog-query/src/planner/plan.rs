@@ -439,6 +439,48 @@ mod tests {
         );
     }
 
+    /// The same pipeline pushes a comparison's interval down to the
+    /// scan's value term: the typed variable narrows the NUMERIC bound
+    /// to one type and the constant side's interval rides along, so
+    /// the VAE range bound (`ArtifactSelector::is_at_least`) is driven
+    /// by the predicate.
+    #[dialog_common::test]
+    fn it_stamps_interval_refinements_onto_scan_values() {
+        let scan: Premise = AttributeQuery::new(
+            Term::from(the!("person/age")),
+            Term::<Entity>::var("e"),
+            Term::<u64>::var("age").into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+        .into();
+        let predicate = Term::<Any>::var("age").at_least(Term::constant(30u64));
+
+        let plan = Planner::from(vec![scan, predicate])
+            .plan(&crate::Environment::new())
+            .unwrap();
+
+        let stamped = plan.steps.iter().find_map(|step| match step.as_premise() {
+            Premise::Assert(Proposition::Attribute(boxed)) => boxed.is().kind(),
+            _ => None,
+        });
+        let kind = stamped.expect("the scan's value term carries a kind");
+        assert_eq!(
+            kind.primitive_part().required().as_singleton(),
+            Some(ValueType::UnsignedInt),
+            "the typed variable narrows the comparison's NUMERIC bound"
+        );
+        let interval = kind
+            .refinement()
+            .expect("refined")
+            .interval
+            .clone()
+            .expect("the proved interval reaches the scan boundary");
+        let lower = interval.lower.expect("lower bound");
+        assert!(lower.inclusive, ">= stays inclusive at the boundary");
+        assert!(interval.upper.is_none());
+    }
+
     /// A standalone `Maybe` premise cannot be planned at empty
     /// scope: set-widening needs a known entity ("absent for
     /// whom?"), so its schema hard-requires `?this` and the planner
