@@ -2375,7 +2375,8 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .insert(far_key(), vec![9], &storage)
             .await?
             .insert(probe(), vec![2], &storage)
@@ -2414,7 +2415,8 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .insert(far_key(), vec![9], &storage)
             .await?
             .delete(&probe(), &storage)
@@ -2687,7 +2689,8 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .insert(left, vec![1], &storage)
             .await?
             .insert(right, vec![9], &storage)
@@ -2844,9 +2847,30 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
         // A tree with buffered novelty across several links: build a broad
-        // base, then buffer scattered writes at the root and seal them.
+        // base, then buffer scattered writes at the root and seal them. Pin a
+        // small segment target so the base branches into several links (the
+        // shipped ~64 KiB default would pack these into one leaf, leaving no
+        // sealed sibling buffers to exercise). `HitchhikerTree::open` reads
+        // this manifest back from the base, so every path below stays
+        // consistent.
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
         let keys: Vec<u32> = (0..500).collect();
-        let base = sequential(&keys, &mut storage).await?;
+        let mut base = TestTree::empty();
+        {
+            let mut delta = Delta::zero();
+            for &k in &keys {
+                base =
+                    TransientTree::with_manifest(base.root().clone(), base.node_cache(), manifest)
+                        .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                        .await?
+                        .persist(&mut delta)?;
+                flush(&mut delta, &mut storage).await?;
+            }
+        }
         let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(100_000);
         for k in (500..560u32).step_by(3) {
             buffered = buffered

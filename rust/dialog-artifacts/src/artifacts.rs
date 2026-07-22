@@ -2268,9 +2268,10 @@ mod tests {
         // bounded descent, not a full-tree walk. Small values now inline in the
         // key as their order-preserving form rather than a fixed 32-byte
         // reference, which changes leaf boundaries and the tree's shape, so the
-        // scan's bounded descent touches a few more blocks than the reference
-        // layout did.
-        assert_eq!(net_reads, 5);
+        // scan's bounded descent touches a different set of blocks than the
+        // reference layout did. Byte-paced boundaries (the default max_segment)
+        // pack this fixture's leaves so the descent lands on one fewer block.
+        assert_eq!(net_reads, 4);
         assert_eq!(net_writes, 0);
 
         Ok(())

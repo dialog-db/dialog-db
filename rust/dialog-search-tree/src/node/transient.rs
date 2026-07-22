@@ -1441,7 +1441,15 @@ mod tests {
             })
             .collect();
 
-        regroup_entries::<[u8; 4], Vec<u8>, Geometric>(entries, Vec::new(), &Manifest::default())
+        // Byte pacing off: this pins the pure geometric coin's segment cuts,
+        // independent of the shipped `max_segment` default (which would pack
+        // these tiny entries into one segment and hide the boundaries).
+        let manifest = Manifest {
+            max_segment: 0,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
+        regroup_entries::<[u8; 4], Vec<u8>, Geometric>(entries, Vec::new(), &manifest)
             .into_iter()
             .map(|node| Ok(node.into_transient()?.as_segment()?.entries.clone()))
             .collect()

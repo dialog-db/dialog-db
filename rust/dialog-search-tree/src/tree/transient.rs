@@ -4793,7 +4793,15 @@ mod tests {
     #[dialog_common::test]
     async fn it_round_trips_keys_longer_than_the_separator_bound() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let manifest = Manifest::default();
+        // Byte pacing off: the pure geometric coin ranks a key by its hash
+        // alone, which is exactly what this test pins (the retired length
+        // guard). The shipped `max_segment` default swaps in the weight-paced
+        // rank, which is a different function and would not match `var_rank`.
+        let manifest = Manifest {
+            max_segment: 0,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
 
         // Keys comfortably above `max_separator`; each is ranked by its
         // hash alone, pinning that the length guard is gone.
@@ -4814,8 +4822,7 @@ mod tests {
         let mut tree = VarTree::empty();
         let mut delta = Delta::zero();
         for key in &keys {
-            tree = tree
-                .edit()
+            tree = TransientTree::with_manifest(tree.root().clone(), tree.node_cache(), manifest)
                 .insert(key.clone(), key.0.clone(), &storage)
                 .await?
                 .persist(&mut delta)?;
@@ -7177,6 +7184,39 @@ mod buffer_edit_interaction_tests {
         Ok(())
     }
 
+    /// A segment target small enough that a few hundred tiny entries branch
+    /// into several leaves under an index root. The buffer-fusion tests need a
+    /// real boundary key between leaves; the shipped ~64 KiB default packs
+    /// these key sets into a single leaf, leaving no boundary to fuse across.
+    /// Pinned into the base so every `HitchhikerTree::open` and
+    /// `edit_with_manifest` over it stays consistent, keeping the tests
+    /// default-agnostic (byte pacing off would recover the old geometric coin,
+    /// but a small non-zero target keeps the leaves small without the coin's
+    /// large-fanout variance).
+    fn paced_manifest() -> crate::Manifest {
+        crate::Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..crate::Manifest::default()
+        }
+    }
+
+    /// Builds a branching base by inserting `keys` (big-endian, one-byte
+    /// values) one at a time under [`paced_manifest`], flushing after each.
+    async fn paced_base(keys: std::ops::Range<u32>, storage: &mut Store) -> Result<Tree> {
+        let manifest = paced_manifest();
+        let mut base = Tree::empty();
+        let mut delta = Delta::zero();
+        for i in keys {
+            base = TransientTree::with_manifest(base.root().clone(), base.node_cache(), manifest)
+                .insert(i.to_be_bytes(), vec![i as u8], storage)
+                .await?
+                .persist(&mut delta)?;
+            settle(&mut delta, storage).await?;
+        }
+        Ok(base)
+    }
+
     /// Buffering a retract of a BOUNDARY key must produce the same tree as
     /// retracting it canonically.
     ///
@@ -7190,17 +7230,9 @@ mod buffer_edit_interaction_tests {
     async fn it_fuses_leaves_when_a_buffered_retract_removes_a_boundary() -> Result<()> {
         let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
-        // Build a tree and find a real boundary key: one that terminates a leaf.
-        let mut base = Tree::empty();
-        let mut delta = Delta::zero();
-        for i in 0..600u32 {
-            base = base
-                .edit()
-                .insert(i.to_be_bytes(), vec![i as u8], &storage)
-                .await?
-                .persist(&mut delta)?;
-            settle(&mut delta, &mut storage).await?;
-        }
+        // Build a branching tree and find a real boundary key: one that
+        // terminates a leaf.
+        let base = paced_base(0..600u32, &mut storage).await?;
 
         // Discover a boundary: walk the root's links; each link's upper_bound is
         // the last key of that child, i.e. a boundary key.
@@ -7226,7 +7258,8 @@ mod buffer_edit_interaction_tests {
         // Canonical: delete the boundary through the edit path.
         let mut delta = Delta::zero();
         let canonical = base
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .delete(&boundary, &storage)
             .await?
             .persist(&mut delta)?;
@@ -7258,16 +7291,7 @@ mod buffer_edit_interaction_tests {
     async fn it_fuses_leaves_when_an_overflowing_retract_removes_a_boundary() -> Result<()> {
         let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
-        let mut base = Tree::empty();
-        let mut delta = Delta::zero();
-        for i in 0..600u32 {
-            base = base
-                .edit()
-                .insert(i.to_be_bytes(), vec![i as u8], &storage)
-                .await?
-                .persist(&mut delta)?;
-            settle(&mut delta, &mut storage).await?;
-        }
+        let base = paced_base(0..600u32, &mut storage).await?;
 
         let boundary = {
             use crate::{ArchivedNodeBody, PersistentNode};
@@ -7294,14 +7318,16 @@ mod buffer_edit_interaction_tests {
         let mut canonical = base.clone();
         let mut delta = Delta::zero();
         canonical = canonical
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .delete(&boundary, &storage)
             .await?
             .persist(&mut delta)?;
         settle(&mut delta, &mut storage).await?;
         for key in &extras {
             canonical = canonical
-                .edit()
+                .edit_with_manifest(&storage)
+                .await?
                 .insert(key.to_be_bytes(), vec![9], &storage)
                 .await?
                 .persist(&mut delta)?;
@@ -7968,13 +7994,13 @@ mod buffer_edit_interaction_tests {
     /// A key whose rank makes it a segment boundary: inserting it splits the
     /// leaf that would hold it, and removing it forces that leaf to fuse with
     /// its right neighbour.
-    fn boundary_key(from: u32, avoid: &[u32]) -> u32 {
+    fn boundary_key(from: u32, avoid: &[u32], manifest: &crate::Manifest) -> u32 {
         (from..from + 200_000)
             .find(|candidate| {
                 !avoid.contains(candidate)
                     && <crate::Geometric as crate::Distribution>::rank(
                         &candidate.to_be_bytes(),
-                        &crate::Manifest::default(),
+                        manifest,
                     ) > crate::BOTTOM_RANK
             })
             .expect("a boundary-ranked key exists in range")
@@ -7992,20 +8018,19 @@ mod buffer_edit_interaction_tests {
         let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
         // A base of non-boundary keys, so the leaf the split lands in is a plain
-        // open run.
+        // open run. Paced small so it branches into several leaves under an
+        // index root (the shipped default would pack it into one leaf).
+        let manifest = paced_manifest();
         let base_keys: Vec<u32> = (0..400u32)
             .filter(|k| {
-                <crate::Geometric as crate::Distribution>::rank(
-                    &k.to_be_bytes(),
-                    &crate::Manifest::default(),
-                ) <= crate::BOTTOM_RANK
+                <crate::Geometric as crate::Distribution>::rank(&k.to_be_bytes(), &manifest)
+                    <= crate::BOTTOM_RANK
             })
             .collect();
         let mut base = Tree::empty();
         let mut delta = Delta::zero();
         for key in &base_keys {
-            base = base
-                .edit()
+            base = TransientTree::with_manifest(base.root().clone(), base.node_cache(), manifest)
                 .insert(key.to_be_bytes(), vec![1], &storage)
                 .await?
                 .persist(&mut delta)?;
@@ -8014,7 +8039,7 @@ mod buffer_edit_interaction_tests {
         let before = segment_count(&base, &storage).await?;
 
         // A boundary-ranked key inside the base range: inserting it must split.
-        let splitter = boundary_key(1, &base_keys);
+        let splitter = boundary_key(1, &base_keys, &manifest);
         assert!(
             splitter < 400,
             "the splitter must land inside the base range, got {splitter}"
@@ -8023,7 +8048,8 @@ mod buffer_edit_interaction_tests {
         // Canonical reference.
         let mut delta = Delta::zero();
         let canonical = base
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .insert(splitter.to_be_bytes(), vec![9], &storage)
             .await?
             .persist(&mut delta)?;
@@ -8067,16 +8093,7 @@ mod buffer_edit_interaction_tests {
         let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
         let base_keys: Vec<u32> = (0..400u32).collect();
-        let mut base = Tree::empty();
-        let mut delta = Delta::zero();
-        for key in &base_keys {
-            base = base
-                .edit()
-                .insert(key.to_be_bytes(), vec![1], &storage)
-                .await?
-                .persist(&mut delta)?;
-            settle(&mut delta, &mut storage).await?;
-        }
+        let base = paced_base(0..400u32, &mut storage).await?;
         let before = segment_count(&base, &storage).await?;
 
         // A boundary key that is actually present, and not the last one (so it
@@ -8088,7 +8105,7 @@ mod buffer_edit_interaction_tests {
                 *k < 399
                     && <crate::Geometric as crate::Distribution>::rank(
                         &k.to_be_bytes(),
-                        &crate::Manifest::default(),
+                        &paced_manifest(),
                     ) > crate::BOTTOM_RANK
             })
             .expect("the base contains a non-final boundary key");
@@ -8096,7 +8113,8 @@ mod buffer_edit_interaction_tests {
         // Canonical reference.
         let mut delta = Delta::zero();
         let canonical = base
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .delete(&boundary.to_be_bytes(), &storage)
             .await?
             .persist(&mut delta)?;
@@ -8279,7 +8297,8 @@ mod buffer_edit_interaction_tests {
         // root, their LCA.
         let mut delta = Delta::zero();
         let fused = parked
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .delete(&boundary, &storage)
             .await?
             .persist(&mut delta)?;

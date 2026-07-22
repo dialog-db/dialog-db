@@ -61,28 +61,33 @@ pub const DEFAULT_INLINE_N: u32 = 4096;
 /// bytes (beyond it, the scan loads the block and post-filters).
 pub const DEFAULT_SPILL_PREFIX: u16 = 64;
 
-/// Default segment weight cap: 0 disables the cap, the shipped baseline. When
-/// non-zero, a leaf run whose summed entry weight (see
-/// [`entry_weight`](crate::distribution::cap::entry_weight)) exceeds this is
+/// Default segment weight target, ~64 KiB: paces every node (leaf and, with
+/// the index-level machinery, index) toward this many weighted bytes between
+/// coin-decided cuts, and a leaf run whose summed entry weight (see
+/// [`entry_weight`](crate::distribution::cap::entry_weight)) exceeds it is
 /// force-split at deterministic positions (see
 /// [`forced_cut_positions`](crate::distribution::cap::forced_cut_positions)),
 /// bounding the unbounded leaves that runs of vetoed seams (near-duplicate
-/// keys) otherwise form.
-pub const DEFAULT_MAX_SEGMENT: u32 = 0;
+/// keys) otherwise form. 0 disables byte-pacing entirely, recovering the old
+/// per-key geometric coin byte-for-byte.
+pub const DEFAULT_MAX_SEGMENT: u32 = 65536;
 
-/// Default frame ceiling factor: 0 disables the hard ceiling. When non-zero,
-/// a frame (the run of entries between coin-decided cuts) whose summed entry
-/// weight exceeds `frame_ceiling_factor * max_segment` is force-split at the
-/// accepted seams [`frame_cut_positions`](crate::distribution::cap::frame_cut_positions)
-/// chooses, bounding the weight coin's natural exponential tail. A knob, not
-/// a chosen constant: the experiment measures candidate values.
-pub const DEFAULT_FRAME_CEILING_FACTOR: u32 = 0;
+/// Default frame ceiling factor: a frame (the run of entries between
+/// coin-decided cuts) over `frame_ceiling_factor * max_segment` is force-split
+/// at the accepted seams
+/// [`frame_cut_positions`](crate::distribution::cap::frame_cut_positions)
+/// chooses, bounding the weight coin's natural exponential tail. 3 caps the
+/// largest node near three times the target for a modest commit-CPU cost (the
+/// boundary-policy experiment measured 2 and 3; 3 is the default trade, 2 is
+/// available where tighter variance outweighs write CPU). 0 disables it.
+pub const DEFAULT_FRAME_CEILING_FACTOR: u32 = 3;
 
 /// Default forced-cut anchor selector (see
-/// [`AnchorSelector`](crate::distribution::cap::AnchorSelector)): 0 is pure
-/// rendezvous (hash-minimal candidate), 1 is the hybrid (shortest-separator
-/// class first, hash-minimum within it).
-pub const DEFAULT_ANCHOR_SELECTOR: u32 = 0;
+/// [`AnchorSelector`](crate::distribution::cap::AnchorSelector)): 1 is the
+/// hybrid (shortest-separator class first, hash-minimum within it), which the
+/// experiment showed anchors forced cuts at the most stable semantic breaks
+/// (inserts never move them) for no measurable cost over pure rendezvous (0).
+pub const DEFAULT_ANCHOR_SELECTOR: u32 = 1;
 
 /// The self-describing format constants of a tree, inlined into every node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
