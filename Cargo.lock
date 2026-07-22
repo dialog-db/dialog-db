@@ -1182,6 +1182,7 @@ dependencies = [
  "dialog-network",
  "dialog-operator",
  "dialog-repository",
+ "dialog-search-tree",
  "dialog-storage",
  "ed25519-dalek",
  "futures",

@@ -19,4 +19,13 @@ where
     pub fn key_hash(&self) -> Blake3Hash {
         Blake3Hash::hash(self.key.as_ref())
     }
+
+    /// The weight this entry contributes toward `Manifest::max_segment`:
+    /// its key bytes plus its value's payload weight
+    /// ([`Value::payload_weight`]). The charge every byte-pacing decision
+    /// (the leaf coin's bank, stretch and frame budgets, the edit path's
+    /// ceiling gates) meters an entry by.
+    pub fn weight(&self) -> usize {
+        self.key.as_ref().len() + self.value.payload_weight()
+    }
 }

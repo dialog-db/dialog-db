@@ -318,6 +318,8 @@ where
                 // it, and every replay and persist below must run under the
                 // tree's own format rather than the default.
                 self.manifest = Some(node.manifest()?);
+                // Measurement-only (uncommitted, env-gated) lift breadcrumb.
+                dialog_storage::dup_audit::note_lift(hash.as_bytes(), "root_open");
                 // The root's left edge is the tree's global leftmost seam,
                 // whose separator is the empty string (negative infinity).
                 Some(TransientNode::open(&node, Vec::new())?)
@@ -764,20 +766,22 @@ where
             return Ok(node);
         }
 
-        // Overflow: cascade one level into the children. Lift every child so
-        // the recursion can descend into editable nodes.
-        for child in &mut index.children {
-            lift_child(child, accessor).await?;
-        }
-
-        // Each child takes its own link's buffer verbatim: the grouping
-        // happened at enqueue, so there is no partition step to run here.
+        // Overflow: cascade one level into the children — lifting ON
+        // DEMAND, only where a non-empty buffer actually descends. A child
+        // with nothing to take stays `Node::Persistent`: at persist,
+        // `into_link` passes its link through with no decode, no re-encode,
+        // no re-hash, and no delta entry, where lifting every child up
+        // front turned each untouched sibling into a byte-identical
+        // re-store (the measured 24-26% duplicate-block share of sealed
+        // bytes; see bead dialog-db-59). Provenance is the cheap, exact
+        // signal here — store identity is not observable at persist time.
         let child_count = index.children.len();
         for at in 0..child_count {
             let took = index.novelty.take_link::<Key>(at)?;
             if took.is_empty() {
                 continue;
             }
+            lift_child(&mut index.children[at], accessor).await?;
 
             let child = std::mem::replace(
                 &mut index.children[at],
@@ -1118,6 +1122,8 @@ where
                     if !subtree_has_novelty::<Key, Value, Backend>(&link.node, accessor).await? {
                         continue;
                     }
+                    // Measurement-only (uncommitted, env-gated) lift breadcrumb.
+                    dialog_storage::dup_audit::note_lift(link.node.as_bytes(), "drain_novelty");
                     lift_child(child, accessor).await?;
                 }
                 if let Node::Transient(child) = child {
@@ -1212,6 +1218,68 @@ mod tests {
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
                 .await?;
         }
+        Ok(())
+    }
+
+    /// An overflow cascade that distributes buffered ops to a SUBSET of a
+    /// node's children must leave the untouched children as persistent
+    /// links: no decode, no re-encode, no re-hash, and — the observable
+    /// contract — no delta entry for their (unchanged) blocks at persist.
+    /// The retired lift-every-child loop turned each untouched sibling into
+    /// a byte-identical re-store, the measured 24-26% duplicate-block share
+    /// of sealed bytes (bead dialog-db-59).
+    #[dialog_common::test]
+    async fn it_keeps_untouched_children_persistent_through_a_cascade() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // A persisted canonical tree wide enough that one key's cascade
+        // reaches a strict subset of the root's children.
+        let keys: Vec<u32> = (0..2000).collect();
+        let tree = sequential(&keys, &mut storage).await?;
+        let root_hashes: Vec<Blake3Hash> = {
+            let accessor = crate::Accessor::new(crate::Cache::new(), storage.clone());
+            let node: crate::PersistentNode<[u8; 4], Vec<u8>> =
+                accessor.get_node(tree.root()).await?;
+            let index = node.as_index()?;
+            (0..index.len())
+                .map(|at| index.hash_at(at).cloned())
+                .collect::<Result<_, _>>()?
+        };
+        assert!(
+            root_hashes.len() >= 2,
+            "the fixture needs several children to distinguish touched from untouched"
+        );
+
+        // A zero-size buffer with the capacity trigger forces the recursive
+        // cascade on the first write; the written key routes into exactly
+        // one child's range.
+        let buffered = TestHitchhiker::open(&tree)
+            .with_op_buf_size(1)
+            .with_flush_policy(FlushPolicy::Recursive)
+            .with_flush_trigger(FlushTrigger::Capacity);
+        let buffered = buffered
+            .insert(7u32.to_le_bytes(), vec![0xAB], &storage)
+            .await?
+            .insert(8u32.to_le_bytes(), vec![0xCD], &storage)
+            .await?;
+        let mut delta = Delta::zero();
+        buffered.persist(&mut delta)?;
+        let written: std::collections::HashSet<Blake3Hash> =
+            delta.flush().map(|(hash, _)| hash).collect();
+
+        let touched: Vec<&Blake3Hash> = root_hashes
+            .iter()
+            .filter(|hash| written.contains(hash))
+            .collect();
+        assert!(
+            touched.is_empty(),
+            "unchanged children re-entered the delta as byte-identical re-stores: {touched:?}"
+        );
+        assert!(
+            !written.is_empty(),
+            "the touched child's rewrite must reach the delta"
+        );
+
         Ok(())
     }
 
@@ -2307,7 +2375,8 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .insert(far_key(), vec![9], &storage)
             .await?
             .insert(probe(), vec![2], &storage)
@@ -2346,7 +2415,8 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .insert(far_key(), vec![9], &storage)
             .await?
             .delete(&probe(), &storage)
@@ -2619,7 +2689,8 @@ mod tests {
 
         let mut delta = Delta::zero();
         let expected = base
-            .edit()
+            .edit_with_manifest(&storage)
+            .await?
             .insert(left, vec![1], &storage)
             .await?
             .insert(right, vec![9], &storage)
@@ -2776,9 +2847,30 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
         // A tree with buffered novelty across several links: build a broad
-        // base, then buffer scattered writes at the root and seal them.
+        // base, then buffer scattered writes at the root and seal them. Pin a
+        // small segment target so the base branches into several links (the
+        // shipped ~64 KiB default would pack these into one leaf, leaving no
+        // sealed sibling buffers to exercise). `HitchhikerTree::open` reads
+        // this manifest back from the base, so every path below stays
+        // consistent.
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
         let keys: Vec<u32> = (0..500).collect();
-        let base = sequential(&keys, &mut storage).await?;
+        let mut base = TestTree::empty();
+        {
+            let mut delta = Delta::zero();
+            for &k in &keys {
+                base =
+                    TransientTree::with_manifest(base.root().clone(), base.node_cache(), manifest)
+                        .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                        .await?
+                        .persist(&mut delta)?;
+                flush(&mut delta, &mut storage).await?;
+            }
+        }
         let mut buffered = HitchhikerTree::open(&base).with_op_buf_size(100_000);
         for k in (500..560u32).step_by(3) {
             buffered = buffered

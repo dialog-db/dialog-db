@@ -38,6 +38,8 @@ pub mod resource;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod web;
 
+pub mod dup_audit;
+
 mod encoder;
 pub use encoder::*;
 

@@ -588,16 +588,31 @@ impl TreeDescriptor {
         // Build the tree by inserting every key with its coins encoded into
         // the key bytes, where DistributionSimulator reads them back out.
         // Values carry the decoded base key.
+        //
+        // The spec drives shape purely through the encoded coins, so byte
+        // pacing must stay OFF (`max_segment == 0`): with it armed, the
+        // default's frame ceiling and weight coin would force-split the
+        // simulated shape and break the hand-built read patterns. Pinning it
+        // here keeps every `tree_spec!` test default-agnostic — its shape is
+        // exactly what the brackets describe, whatever the global default is.
+        let manifest = Manifest {
+            max_segment: 0,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
         let mut tree = TestTree::empty();
         let mut delta = Delta::zero();
         for key in &collection {
             let leaf_rank = if leaf_boundaries.contains(key) { 2 } else { 1 };
             let seam_rank = seam_ranks.get(key).copied().unwrap_or(1);
-            tree = tree
-                .edit()
-                .insert(encode_key(key, leaf_rank, seam_rank), key.clone(), &storage)
-                .await?
-                .persist(&mut delta)?;
+            tree = crate::TransientTree::with_manifest(
+                tree.root().clone(),
+                tree.node_cache(),
+                manifest,
+            )
+            .insert(encode_key(key, leaf_rank, seam_rank), key.clone(), &storage)
+            .await?
+            .persist(&mut delta)?;
 
             // Flush after each persist so the next edit (and the differentials
             // that read afterwards) can load the nodes this persist created: a

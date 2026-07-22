@@ -58,6 +58,7 @@ dialog-artifacts = { workspace = true }
 dialog-operator = { workspace = true }
 dialog-repository = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
+dialog-search-tree = { workspace = true }
 dialog-network = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "rt"] }

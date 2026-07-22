@@ -1355,7 +1355,9 @@ mod tests {
 
     use super::{Change, TreeDifference};
     use crate::helpers::{TestStorage, Traversable as _, TraversalOrder, TreeNodes as _};
-    use crate::{Buffer, ContentAddressedStorage, Delta, Entry, PersistentTree, tree_spec};
+    use crate::{
+        Buffer, ContentAddressedStorage, Delta, Entry, Manifest, PersistentTree, tree_spec,
+    };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1417,6 +1419,35 @@ mod tests {
                 .await?
                 .persist(&mut delta)?;
             // Flush after each persist so the next edit can load the nodes this persist created.
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+        Ok(tree)
+    }
+
+    /// [`build`] under an explicit `manifest`, so a fixture can pin a small
+    /// `max_segment` and branch into several leaves regardless of the global
+    /// default (which paces to ~64 KiB and would pack a small key set into one
+    /// leaf, collapsing the multi-subtree structure such a fixture needs).
+    async fn build_with_manifest(
+        keys: impl IntoIterator<Item = (u32, Vec<u8>)>,
+        manifest: Manifest,
+        storage: &mut ContentAddressedStorage<CountingBackend>,
+    ) -> Result<TestTree> {
+        let mut tree = TestTree::empty();
+        let mut delta = Delta::zero();
+        for (key, value) in keys {
+            tree = crate::TransientTree::with_manifest(
+                tree.root().clone(),
+                tree.node_cache(),
+                manifest,
+            )
+            .insert(key.to_le_bytes(), value, storage)
+            .await?
+            .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
                 storage
                     .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
@@ -1509,14 +1540,28 @@ mod tests {
     #[dialog_common::test]
     async fn it_avoids_reading_out_of_scope_subtrees() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(CountingBackend::new());
-        let base = build((0..250u32).map(|i| (i, vec![0])), &mut storage).await?;
+        // Pin a small segment target so the 250 tiny entries branch into
+        // several leaves: the whole premise is that an out-of-scope subtree
+        // can be skipped, which needs more than one subtree. Under the global
+        // ~64 KiB default these would pack into a single leaf and the scoped
+        // and full diffs would read the same nodes, making the assertion
+        // vacuous. The manifest rides into every edit below via
+        // `edit_with_manifest`, read back from the tree's own stored header.
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
+        let base =
+            build_with_manifest((0..250u32).map(|i| (i, vec![0])), manifest, &mut storage).await?;
 
         // A small in-scope change and a heavy out-of-scope change.
         let mut target = base.clone();
         let mut delta = Delta::zero();
         for i in (10..12u32).chain(100..250u32) {
             target = target
-                .edit()
+                .edit_with_manifest(&storage)
+                .await?
                 .insert(i.to_le_bytes(), vec![1], &storage)
                 .await?
                 .persist(&mut delta)?;

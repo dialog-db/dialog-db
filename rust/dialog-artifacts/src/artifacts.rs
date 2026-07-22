@@ -534,6 +534,8 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::helpers::generate_data;
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::tree::distribution;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStoreMutExt, Artifacts, Attribute,
         DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
@@ -819,6 +821,17 @@ mod tests {
                 .await?;
         }
         let commit_elapsed = commit_start.elapsed();
+
+        // Node-size capture: walk the persisted tree and report the byte-size
+        // distribution split by kind and height (one line per node when
+        // DIALOG_DIST_NODES is set). This is the flat, canonical dataset for
+        // the size-variance work; the replay harness in dialog-query covers
+        // the history-bearing shape.
+        {
+            let root = *facts.index.read().await.root().as_bytes();
+            let stats = distribution::capture(&root, &measured).await?;
+            distribution::report("tonk-import", &stats);
+        }
 
         let (write_bytes, writes) = {
             let storage = measured.lock().await;
@@ -2255,9 +2268,10 @@ mod tests {
         // bounded descent, not a full-tree walk. Small values now inline in the
         // key as their order-preserving form rather than a fixed 32-byte
         // reference, which changes leaf boundaries and the tree's shape, so the
-        // scan's bounded descent touches a few more blocks than the reference
-        // layout did.
-        assert_eq!(net_reads, 5);
+        // scan's bounded descent touches a different set of blocks than the
+        // reference layout did. Byte-paced boundaries (the default max_segment)
+        // pack this fixture's leaves so the descent lands on one fewer block.
+        assert_eq!(net_reads, 4);
         assert_eq!(net_writes, 0);
 
         Ok(())

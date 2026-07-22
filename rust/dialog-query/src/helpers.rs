@@ -41,8 +41,11 @@ use dialog_network::Network;
 use dialog_operator::helpers::{generate_data, unique_name};
 use dialog_operator::{Operator, Profile};
 use dialog_repository::{Branch, NetworkedIndex, RemoteSite, Repository, RepositoryExt as _};
+use dialog_search_tree::audit as tree_audit;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::{Blake3Hash, DialogStorageError, JournaledStorage, StorageBackend};
+use dialog_storage::{DUPLICATE_SETS, TOTAL_SETS, dup_audit};
+use std::sync::atomic::Ordering;
 // The platform temp filesystem (and the on-disk `BenchEnv::temp` variant
 // built on it) only exists off wasm — there is no native temp directory in
 // the browser, so the whole on-disk path is gated to non-wasm targets.
@@ -882,6 +885,12 @@ where
         let reuse = env::var("DIALOG_REUSE_BRANCH").is_ok();
         let mut held: Option<Branch> = None;
 
+        // Per-band accumulation for the depth curve: mean commit cost over
+        // all commits since the previous power of two, not one noisy sample
+        // at the boundary. Measurement plumbing, uncommitted.
+        let mut band_us: u128 = 0;
+        let mut band_commits: u128 = 0;
+
         for row in rows {
             let width = [txn_at, the_at, of_at, as_at, is_at]
                 .into_iter()
@@ -900,16 +909,23 @@ where
                         .await?;
                     let commit_micros = commit_start.elapsed().as_micros();
                     committed += 1;
+                    band_us += commit_micros;
+                    band_commits += 1;
 
                     if curve && committed.is_power_of_two() && committed >= 8 {
                         let run = self.run_query("se.post/title").await?;
                         eprintln!(
                             "TXNCURVE depth={committed:<7} commit_us={commit_micros:<7} \
+                             band_mean_us={:<7} band_commits={:<5} \
                              query_reads={:<5} query_unique={:<5} query_results={}",
+                            band_us / band_commits.max(1),
+                            band_commits,
                             run.reads,
                             run.unique_reads,
                             run.results.len(),
                         );
+                        band_us = 0;
+                        band_commits = 0;
                     }
 
                     if limit != 0 && committed >= limit {
@@ -1571,6 +1587,15 @@ mod test {
         };
         let elapsed = start.elapsed();
 
+        if env::var("DIALOG_TXN_AUDIT").is_ok() {
+            eprintln!(
+                "TXNAUDIT {} dup_sets={} total_sets={}{}",
+                tree_audit::report(),
+                DUPLICATE_SETS.swap(0, Ordering::Relaxed),
+                TOTAL_SETS.swap(0, Ordering::Relaxed),
+                dup_audit::report(),
+            );
+        }
         eprintln!(
             "TXNLOG replayed limit={limit} entities={} in {elapsed:?}",
             entities.len()
@@ -1734,9 +1759,88 @@ mod test {
     use super::*;
 
     #[cfg(not(target_arch = "wasm32"))]
+    use dialog_artifacts::tree::distribution;
+    #[cfg(not(target_arch = "wasm32"))]
     use std::fs::read_dir;
     #[cfg(not(target_arch = "wasm32"))]
     use std::path::Path;
+
+    /// Capture the node-size distribution of the tree a transaction-log
+    /// replay leaves behind: history region plus live per-link novelty
+    /// buffers, the shape a real commit sequence produces (deliberately not
+    /// canonicalized). Skipped unless `DIALOG_TXN_LOG` points at a file
+    /// produced by `scripts/se-transform.py`; `DIALOG_TXN_LIMIT` caps the
+    /// replay (default 2048, 0 replays all). `DIALOG_TXN_MEM` switches to the
+    /// in-memory backend — a deep replay writes cumulative block bytes far
+    /// beyond the final tree (every commit rewrites its touched path), so the
+    /// disk backend can exhaust storage long before the log ends.
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn it_reports_replay_distribution() -> Result<()> {
+        let Ok(path) = env::var("DIALOG_TXN_LOG") else {
+            eprintln!("DIALOG_TXN_LOG not set; skipping replay distribution");
+            return Ok(());
+        };
+        let limit: usize = env::var("DIALOG_TXN_LIMIT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2048);
+
+        if env::var("DIALOG_TXN_MEM").is_ok() {
+            capture_replay_distribution(BenchEnv::volatile().await?, &path, limit).await
+        } else {
+            capture_replay_distribution(BenchEnv::temp().await?, &path, limit).await
+        }
+    }
+
+    /// Replays the log on `env`, then walks the resulting tree and prints its
+    /// node-size distribution. Shared by both backend arms of
+    /// [`it_reports_replay_distribution`].
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn capture_replay_distribution<Env>(
+        env: BenchEnv<Env>,
+        path: &str,
+        limit: usize,
+    ) -> Result<()>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<SpaceLoad>
+            + Provider<SpaceCreate>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let start = Instant::now();
+        env.import_transaction_log(path, limit).await?;
+        eprintln!("TREEDIST replayed limit={limit} in {:?}", start.elapsed());
+
+        let branch = env
+            .repo
+            .branch(&env.branch)
+            .load()
+            .perform(env.operator())
+            .await?;
+        let Some(revision) = branch.revision() else {
+            eprintln!("replay left no revision; nothing to capture");
+            return Ok(());
+        };
+        let root = *revision.tree.hash();
+        // Any constrained selector works here; the catalog it names is the
+        // branch's archive index, which is where the tree nodes live.
+        let the: Attribute = "se.post/title".parse()?;
+        let select = branch.claims().select(ArtifactSelector::new().the(the));
+        let store = NetworkedIndex::new(env.operator(), select.catalog(), None);
+        let stats = distribution::capture(&root, &store).await?;
+        distribution::report(&format!("se-replay-{limit}"), &stats);
+        Ok(())
+    }
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);

@@ -61,6 +61,34 @@ pub const DEFAULT_INLINE_N: u32 = 4096;
 /// bytes (beyond it, the scan loads the block and post-filters).
 pub const DEFAULT_SPILL_PREFIX: u16 = 64;
 
+/// Default segment weight target, ~64 KiB: paces every node (leaf and, with
+/// the index-level machinery, index) toward this many weighted bytes between
+/// coin-decided cuts, and a leaf run whose summed entry weight (see
+/// [`entry_weight`](crate::distribution::cap::entry_weight)) exceeds it is
+/// force-split at deterministic positions (see
+/// [`forced_cut_positions`](crate::distribution::cap::forced_cut_positions)),
+/// bounding the unbounded leaves that runs of vetoed seams (near-duplicate
+/// keys) otherwise form. 0 disables byte-pacing entirely, recovering the old
+/// per-key geometric coin byte-for-byte.
+pub const DEFAULT_MAX_SEGMENT: u32 = 65536;
+
+/// Default frame ceiling factor: a frame (the run of entries between
+/// coin-decided cuts) over `frame_ceiling_factor * max_segment` is force-split
+/// at the accepted seams
+/// [`frame_cut_positions`](crate::distribution::cap::frame_cut_positions)
+/// chooses, bounding the weight coin's natural exponential tail. 3 caps the
+/// largest node near three times the target for a modest commit-CPU cost (the
+/// boundary-policy experiment measured 2 and 3; 3 is the default trade, 2 is
+/// available where tighter variance outweighs write CPU). 0 disables it.
+pub const DEFAULT_FRAME_CEILING_FACTOR: u32 = 3;
+
+/// Default forced-cut anchor selector (see
+/// [`AnchorSelector`](crate::distribution::cap::AnchorSelector)): 1 is the
+/// hybrid (shortest-separator class first, hash-minimum within it), which the
+/// experiment showed anchors forced cuts at the most stable semantic breaks
+/// (inserts never move them) for no measurable cost over pure rendezvous (0).
+pub const DEFAULT_ANCHOR_SELECTOR: u32 = 1;
+
 /// The self-describing format constants of a tree, inlined into every node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedManifest)]
@@ -77,17 +105,61 @@ pub struct Manifest {
     /// How many leading raw value bytes a spilled value's key carries as its
     /// order-preserving prefix.
     pub spill_prefix: u16,
+    /// Leaf-run weight cap; 0 disables it. A run between accepted seams whose
+    /// summed entry weight exceeds this is force-split at deterministic,
+    /// leaf-level-only positions.
+    pub max_segment: u32,
+    /// Hard ceiling on a frame's weight, as a multiple of `max_segment`; 0
+    /// disables it. A frame — the entries between coin-decided cuts — over
+    /// `frame_ceiling_factor * max_segment` is force-split at deterministic,
+    /// leaf-level-only accepted seams.
+    pub frame_ceiling_factor: u32,
+    /// Which candidate seam a forced cut anchors at: 0 = rendezvous
+    /// (hash-minimal), 1 = hybrid (shortest-separator class, then
+    /// hash-minimal within it).
+    pub anchor_selector: u32,
 }
 
 impl Default for Manifest {
     fn default() -> Self {
+        // Experiment plumbing for the boundary-policy arms (see
+        // notes/boundary-policy-experiment.md): the manifest a fresh tree is
+        // created under can be overridden through the environment, so the
+        // whole artifact stack runs a capture under an arm's format without
+        // threading configuration through every layer. Unset variables leave
+        // the shipped defaults untouched; existing trees always keep the
+        // manifest their root node carries.
         Self {
             version: FORMAT_VERSION,
             fanout_n: DEFAULT_FANOUT_N,
             max_separator: DEFAULT_MAX_SEPARATOR,
-            inline_n: DEFAULT_INLINE_N,
+            inline_n: env_override("DIALOG_TREE_INLINE_N", DEFAULT_INLINE_N),
             spill_prefix: DEFAULT_SPILL_PREFIX,
+            max_segment: env_override("DIALOG_TREE_MAX_SEGMENT", DEFAULT_MAX_SEGMENT),
+            frame_ceiling_factor: env_override(
+                "DIALOG_TREE_CEILING_FACTOR",
+                DEFAULT_FRAME_CEILING_FACTOR,
+            ),
+            anchor_selector: env_override("DIALOG_TREE_ANCHOR_SELECTOR", DEFAULT_ANCHOR_SELECTOR),
         }
+    }
+}
+
+/// Reads a `u32` manifest override from the environment, falling back to the
+/// built-in default when the variable is unset or unparsable. On targets
+/// without an environment (wasm) the fallback always wins.
+fn env_override(name: &str, fallback: u32) -> u32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(fallback)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = name;
+        fallback
     }
 }
 
@@ -104,6 +176,13 @@ impl Manifest {
             n if n >= 64 => u64::MAX,
             n => 1u64 << n,
         }
+    }
+
+    /// The effective frame ceiling in weighted bytes:
+    /// `frame_ceiling_factor * max_segment`. Zero — disabled — when either
+    /// knob is zero, so the ceiling can never outlive the coin it bounds.
+    pub fn frame_ceiling(&self) -> usize {
+        self.frame_ceiling_factor as usize * self.max_segment as usize
     }
 }
 
@@ -174,6 +253,9 @@ mod tests {
             max_separator: 512,
             inline_n: 4096,
             spill_prefix: 64,
+            max_segment: 131072,
+            frame_ceiling_factor: 2,
+            anchor_selector: 1,
         };
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&manifest)?;
         let decoded: Manifest = rkyv::from_bytes::<Manifest, rkyv::rancor::Error>(&bytes)?;
