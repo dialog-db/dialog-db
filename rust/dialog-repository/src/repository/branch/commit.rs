@@ -1,3 +1,4 @@
+use crate::rules::rule_facts;
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
@@ -11,8 +12,24 @@ use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
+use dialog_query::DeductiveRule;
 use dialog_search_tree::Delta;
 use futures_util::Stream;
+
+/// A privileged deductive-rule write staged on a [`Commit`].
+///
+/// Rules live under the reserved `dialog.rule/*` namespace, which the public
+/// instruction path refuses. A `RuleWrite` carries a rule to the commit's
+/// privileged rail — the same one revision records ride — so an app installs
+/// or removes a rule without being able to forge one through an ordinary
+/// assert.
+#[derive(Debug, Clone)]
+pub enum RuleWrite {
+    /// Install the rule: write its `dialog.rule/*` facts.
+    Install(DeductiveRule),
+    /// Remove the rule: erase its `dialog.rule/*` facts.
+    Remove(DeductiveRule),
+}
 
 /// Command that commits a stream of changes (assert/retract) to a branch.
 ///
@@ -22,6 +39,7 @@ pub struct Commit<'a, Changes> {
     changes: Changes,
     allow_empty: bool,
     canonicalize: bool,
+    rules: Vec<RuleWrite>,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -31,7 +49,21 @@ impl<'a, Changes> Commit<'a, Changes> {
             changes,
             allow_empty: false,
             canonicalize: false,
+            rules: Vec::new(),
         }
+    }
+
+    /// Stage privileged rule writes to travel with this commit.
+    ///
+    /// Called by [`Transaction::commit`](crate::Transaction::commit) to carry
+    /// rules staged via `install_rule` / `remove_rule` onto the commit's
+    /// privileged rail. They land in the tree through
+    /// [`BufferedBatch::install`](dialog_artifacts::BufferedBatch::install) /
+    /// [`uninstall`](dialog_artifacts::BufferedBatch::uninstall), never the
+    /// gated instruction stream.
+    pub fn with_rules(mut self, rules: Vec<RuleWrite>) -> Self {
+        self.rules = rules;
+        self
     }
 
     /// Flush the write buffers to the leaves before publishing, so the
@@ -120,6 +152,7 @@ where
     {
         let branch = self.branch;
         let changes = self.changes;
+        let rules = self.rules;
         // Checkpoint the head: capture the version we build this commit on top
         // of, so the publish below CAS's against it. A concurrent commit or
         // pull that advances the head while we apply changes then makes this
@@ -199,6 +232,27 @@ where
         let batch =
             dialog_artifacts::BufferedBatch::apply(&tree, &mut store, Some(version), changes)
                 .await?;
+
+        // Privileged rule writes ride the same buffered batch as the data, but
+        // enter through the install/uninstall rail rather than the instruction
+        // stream, so the reserved `dialog.` gate that refuses a hand-asserted
+        // `dialog.rule/*` fact never sees them. `install` spills a large rule
+        // body and writes all three index orderings; `uninstall` erases them.
+        // Both flip the batch's `changed` flag when they touch the tree, so a
+        // commit whose only writes are rule installs still mints a revision.
+        let mut batch = batch;
+        for rule in &rules {
+            batch = match rule {
+                RuleWrite::Install(rule) => {
+                    let facts = rule_facts(rule);
+                    batch.install(&mut store, &facts).await?
+                }
+                RuleWrite::Remove(rule) => {
+                    let facts = rule_facts(rule);
+                    batch.uninstall(&store, &facts).await?
+                }
+            };
+        }
         let changed = batch.changed();
 
         // A batch that left the indexes untouched (e.g. a transaction
@@ -722,6 +776,50 @@ mod history_tests {
                 ),
                 "writes to the reserved namespace must be refused: {result:?}"
             );
+        }
+
+        Ok(())
+    }
+
+    /// The rule namespace `dialog.rule/*` is reserved just like the rest of
+    /// `dialog.`: an app cannot forge a deductive rule by hand-asserting its
+    /// facts through the public write path. Only the privileged install rail
+    /// (`Transaction::install_rule`) may write them. This is the spoofing gap
+    /// the rename from the unreserved `db.rule/*` closed.
+    #[dialog_common::test]
+    async fn it_rejects_public_writes_to_the_reserved_rule_namespace() -> Result<()> {
+        use dialog_artifacts::DialogArtifactsError;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        for attribute in ["dialog.rule/conclusion", "dialog.rule/source"] {
+            let forged = Artifact {
+                the: attribute.parse()?,
+                of: "forged:rule".parse()?,
+                is: Value::String("lies".to_string()),
+                cause: None,
+            };
+            for instruction in [
+                Instruction::Assert(forged.clone()),
+                Instruction::Replace(forged.clone()),
+                Instruction::Retract(forged.clone()),
+            ] {
+                let result = branch
+                    .commit(stream::iter(vec![instruction]))
+                    .perform(&operator)
+                    .await;
+                assert!(
+                    matches!(
+                        result,
+                        Err(crate::CommitError::Artifact(
+                            DialogArtifactsError::ReservedAttribute(_)
+                        ))
+                    ),
+                    "a public write to {attribute} must be refused: {result:?}"
+                );
+            }
         }
 
         Ok(())

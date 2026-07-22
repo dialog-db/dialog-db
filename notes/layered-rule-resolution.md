@@ -10,7 +10,7 @@ the same way. This note records how that works and why.
 Each layer in the stack is a query source:
 
 - **Durable layer** — one per branch in scope. Facts come from the
-  branch's committed tree; rules come from `db.rule/*` facts on that
+  branch's committed tree; rules come from `dialog.rule/*` facts on that
   tree.
 - **Transient layer** — the per-query `Changes` overlay (`.with(...)`
   and a transaction's pending writes). Facts and rules both come from
@@ -22,13 +22,13 @@ the branches + overlay and implements `Provider<Select>` (facts) and
 single-branch `QueryEnv`, so committed and mid-transaction reads share
 one implementation and cannot diverge.
 
-## Rule storage (`db.rule/*`)
+## Rule storage (`dialog.rule/*`)
 
 A deductive rule is stored as two facts (see `rules.rs`):
 
-- `db.rule/conclusion` `of` rule-entity `is` concept-entity — the index;
-  "which rules conclude concept X".
-- `db.rule/source` `of` rule-entity `is` the rule body as canonical
+- `dialog.rule/conclusion` `of` rule-entity `is` concept-entity — the
+  index; "which rules conclude concept X".
+- `dialog.rule/source` `of` rule-entity `is` the rule body as canonical
   dag-cbor `DeductiveRuleDescriptor` (a `Value::Bytes`), hydrated with
   `DeductiveRule::decode`.
 
@@ -40,8 +40,14 @@ manual key sorting. (Stored as `Value::Bytes` rather than
 `Value::Record`: Record isn't yet supported end-to-end through the
 index; the bytes are opaque to the query layer either way.)
 
-These attribute names are a dialog-repository convention, like
-`dialog.session/*` and `dialog.meta/*`.
+These names live under the **reserved** `dialog.` namespace, the same
+prefix version-control lineage uses (`dialog.db/revision`). The write
+gate in `dialog_artifacts::tree::write_instructions` refuses any
+Assert/Replace/Retract whose attribute starts with `dialog.` on the
+public instruction path, so an app cannot forge a rule by hand-asserting
+`dialog.rule/*` — the way it could under the old, unreserved `db.rule/*`
+names. Rules therefore have a **privileged write path** (see *Writes*
+below), exactly like revision records.
 
 ## Resolution
 
@@ -51,7 +57,7 @@ These attribute names are a dialog-repository convention, like
    It reads the concept's attributes directly; it is not stored and has
    no content identity.
 2. For each branch, gather its **durable** rules: look up
-   `db.rule/conclusion = concept` against the tree, hydrate each body.
+   `dialog.rule/conclusion = concept` against the tree, hydrate each body.
 3. Gather **transient** rules from the overlay `Changes`.
 4. Install the durable + transient rules onto the implicit one and
    return the `ConceptRules`.
@@ -110,10 +116,31 @@ caller's names. Proven by `it_plans_independently_of_caller_variable_names`.
 
 ## Writes
 
-`tx.assert(rule)`, `tx.retract(rule)`, and `.with(rule)` all go through
-the existing `Statement` impl that writes/removes the `db.rule/*` facts.
-There is no separate rule-write path: the layer holding the facts
-(committed → durable, overlay → transient) surfaces them via resolution.
+Because `dialog.rule/*` is reserved, there are now two distinct write
+surfaces, split by whether the rule is *committed* or merely *overlaid*:
+
+- **Durable install (privileged).** `tx.install_rule(rule)` /
+  `tx.remove_rule(rule)` stage the rule on the transaction's rule rail,
+  separate from its `Changes`. At commit the facts enter the tree through
+  `BufferedBatch::install` / `uninstall` — the same privileged rail
+  revision records ride via `BufferedBatch::record` — so they bypass the
+  reserved-namespace gate that guards the public instruction stream. An
+  install writes all three (EAV/AEV/VAE) index orderings and marks the
+  batch changed (so a commit whose only writes are rule installs still
+  mints a revision); a remove erases those keys. Removal is an outright
+  key erase rather than a version-control retraction: rule entities are
+  content-addressed and reinstalled idempotently, so there is no
+  cross-replica merge contest to preserve a coverage record for.
+
+- **Transient overlay (unprivileged, never committed).** `.with(rule)`
+  and rule facts staged into a transaction's `Changes` surface as
+  transient-layer rules for that one query. They never reach the tree, so
+  the gate never applies; the overlay is a per-query read surface only.
+
+There is deliberately no public `assert(the!("dialog.rule/..."))` path: a
+committed rule can only come through the privileged install rail, which
+is what closes the spoofing gap the old unreserved `db.rule/*` names
+left open.
 
 ## Tests
 

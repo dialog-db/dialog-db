@@ -7,19 +7,27 @@
 //! and the union of those — plus the implicit per-descriptor rule built
 //! once — is what the query engine plans.
 //!
-//! # Storage shape (`db.rule/*`)
+//! # Storage shape (`dialog.rule/*`)
 //!
 //! A deductive rule is stored as facts:
-//! - `db.rule/conclusion` `of` rule-entity `is` the concept entity it
+//! - `dialog.rule/conclusion` `of` rule-entity `is` the concept entity it
 //!   concludes — the index a layer looks rules up by.
-//! - `db.rule/source` `of` rule-entity `is` the canonical dag-cbor
+//! - `dialog.rule/source` `of` rule-entity `is` the canonical dag-cbor
 //!   `DeductiveRuleDescriptor` (a `Value::Bytes`) — the body, hydrated
 //!   via `DeductiveRule::decode`. (Bytes, not Record: `Value::Record`
 //!   isn't yet supported end-to-end through the index; the bytes are
 //!   opaque to the query layer either way.)
 //!
-//! These names are a dialog-repository convention (like
-//! `dialog.session/*`).
+//! These names live under the reserved `dialog.` namespace, the same
+//! prefix version-control lineage uses (`dialog.db/revision`). That
+//! namespace is refused on the public write path (see the reservation
+//! gate in `dialog_artifacts::tree::write_instructions`), so a rule can
+//! only be *installed* through the sanctioned privileged rail
+//! (`Transaction::install_rule`, which writes through
+//! `BufferedBatch::install` exactly as revision records write through
+//! `BufferedBatch::record`). An app therefore cannot forge a rule by
+//! hand-asserting `dialog.rule/*` the way it once could under the
+//! unreserved `db.rule/*` names.
 //!
 //! # Two layers, two caches
 //!
@@ -53,17 +61,22 @@ use parking_lot::RwLock;
 
 use crate::{Revision, schema};
 
-/// The `db.rule/conclusion` index attribute, validated at compile time.
-fn conclusion_attr() -> Attribute {
-    the!("db.rule/conclusion").into()
+/// The `dialog.rule/conclusion` index attribute, validated at compile time.
+///
+/// This lives under the reserved `dialog.` namespace: it is writable only
+/// through the privileged install rail, never a public assert.
+pub(crate) fn conclusion_attr() -> Attribute {
+    the!("dialog.rule/conclusion").into()
 }
 
-/// The `db.rule/source` body attribute, validated at compile time.
-fn source_attr() -> Attribute {
-    the!("db.rule/source").into()
+/// The `dialog.rule/source` body attribute, validated at compile time.
+///
+/// Reserved like [`conclusion_attr`]; privileged-write only.
+pub(crate) fn source_attr() -> Attribute {
+    the!("dialog.rule/source").into()
 }
 
-/// Selector for `db.rule/conclusion is = <concept>` — finds the rule
+/// Selector for `dialog.rule/conclusion is = <concept>` — finds the rule
 /// entities concluding a concept.
 pub(crate) fn conclusion_selector(concept: &Entity) -> ArtifactSelector<Constrained> {
     ArtifactSelector::new()
@@ -71,25 +84,50 @@ pub(crate) fn conclusion_selector(concept: &Entity) -> ArtifactSelector<Constrai
         .is(Value::Entity(concept.clone()))
 }
 
-/// Selector for `db.rule/source of = <rule>` — fetches a rule's body.
+/// Selector for `dialog.rule/source of = <rule>` — fetches a rule's body.
 pub(crate) fn source_selector(rule: &Entity) -> ArtifactSelector<Constrained> {
     ArtifactSelector::new().the(source_attr()).of(rule.clone())
 }
 
-/// Hydrate a compiled [`DeductiveRule`] from a `db.rule/source` claim
+/// Hydrate a compiled [`DeductiveRule`] from a `dialog.rule/source` claim
 /// value (the canonical dag-cbor [`DeductiveRuleDescriptor`]).
 pub(crate) fn hydrate(source: &[u8]) -> Result<DeductiveRule, EvaluationError> {
     DeductiveRule::decode(source)
         .map_err(|reason| EvaluationError::Store(format!("rule hydrate: {reason}")))
 }
 
-/// Extract the rule entities from a batch of `db.rule/conclusion`
+/// Extract the rule entities from a batch of `dialog.rule/conclusion`
 /// artifacts — each artifact's `of` is a rule entity.
 pub(crate) fn rule_entities(conclusion_claims: Vec<Artifact>) -> Vec<Entity> {
     conclusion_claims.into_iter().map(|a| a.of).collect()
 }
 
-/// Extract the source bytes from a `db.rule/source` artifact batch.
+/// The two privileged facts that persist `rule`: the `conclusion` index
+/// (rule-entity `is` the concept it concludes) and the `source` body
+/// (rule-entity `is` the canonical dag-cbor bytes).
+///
+/// These carry the reserved `dialog.rule/*` attributes, so they are written
+/// through the privileged install rail (`Transaction::install_rule` →
+/// `BufferedBatch::install`), never the gated instruction path.
+pub(crate) fn rule_facts(rule: &DeductiveRule) -> [Artifact; 2] {
+    let entity = rule.this();
+    [
+        Artifact {
+            the: conclusion_attr(),
+            of: entity.clone(),
+            is: Value::Entity(rule.conclusion().this()),
+            cause: None,
+        },
+        Artifact {
+            the: source_attr(),
+            of: entity,
+            is: Value::from(rule.encode()),
+            cause: None,
+        },
+    ]
+}
+
+/// Extract the source bytes from a `dialog.rule/source` artifact batch.
 pub(crate) fn source_bytes(source_claims: Vec<Artifact>) -> Option<Vec<u8>> {
     source_claims.into_iter().find_map(|a| match a.is {
         Value::Bytes(bytes) => Some(bytes),
@@ -311,8 +349,8 @@ pub(crate) fn assemble(
 /// Read rules from an overlay [`Changes`] batch concluding `concept`.
 ///
 /// The overlay is in-memory, so this is cheap and done fresh every
-/// query (never cached). Walks the batch for `db.rule/conclusion`
-/// pointing at `concept`, then their `db.rule/source` bodies.
+/// query (never cached). Walks the batch for `dialog.rule/conclusion`
+/// pointing at `concept`, then their `dialog.rule/source` bodies.
 pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<DeductiveRule> {
     use dialog_artifacts::Change;
 
