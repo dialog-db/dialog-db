@@ -153,6 +153,52 @@ where
     Ok(())
 }
 
+/// Builds the tree entries that assert `artifact` as a *privileged* fact,
+/// spilling a large value into `store` first.
+///
+/// This is the privileged counterpart of the assert branch in
+/// [`write_instructions`]: it produces the three (EAV / AEV / VAE) index keys
+/// for the fact so it is discoverable by every scan shape, and persists a
+/// spilling value's block just as the ordinary path does. What it does NOT do
+/// is ride the instruction stream, so the fact is exempt from the reserved
+/// `dialog.` namespace gate that guards user writes.
+///
+/// It exists so a caller holding privileged data (rules installed through a
+/// sanctioned API) can write facts under the reserved `dialog.rule/*`
+/// namespace, which the public write path refuses. Unlike a revision record,
+/// which only needs the EAV and AEV orderings, a rule is looked up by value
+/// (its `conclusion` index) as well, so all three orderings are written.
+pub async fn privileged_entries<S>(
+    store: &mut S,
+    artifact: &Artifact,
+    manifest: &Manifest,
+) -> Result<Vec<(Key, State<Datum>)>, DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
+{
+    store_spilled_value(store, artifact, manifest).await?;
+    let (eav, aev, vae) = artifact_index_keys(artifact, manifest);
+    let added = State::Added(Datum::for_artifact(artifact));
+    Ok(vec![
+        (eav, added.clone()),
+        (aev, added.clone()),
+        (vae, added),
+    ])
+}
+
+/// The three (EAV / AEV / VAE) index keys of `artifact`, to erase a
+/// privileged fact written by [`privileged_entries`].
+///
+/// Removal of a privileged fact is an outright erase of its keys rather than a
+/// version-control retraction: rule facts are content-addressed (the rule
+/// entity is the hash of its body) and reinstalled idempotently, so there is no
+/// cross-replica merge contest to preserve a coverage record for. The spilled
+/// value block, being content-addressed and shared, is left in place.
+pub fn privileged_keys(artifact: &Artifact, manifest: &Manifest) -> Vec<Key> {
+    let (eav, aev, vae) = artifact_index_keys(artifact, manifest);
+    vec![eav, aev, vae]
+}
+
 /// A byte-bounded cache of spilled value blocks, keyed by their 32-byte
 /// content reference.
 ///

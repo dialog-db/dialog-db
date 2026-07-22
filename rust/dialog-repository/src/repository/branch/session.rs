@@ -437,7 +437,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    /// Read a `db.rule/*` selector against a single branch's committed
+    /// Read a `dialog.rule/*` selector against a single branch's committed
     /// tree only (NOT the overlay) and collect the matching artifacts.
     /// The durable layer's reads must be tree-only so the head-keyed
     /// discovery cache stays correct — overlay rules are handled
@@ -461,7 +461,7 @@ where
     }
 
     /// The durable rules concluding `concept` on `branch`: the committed
-    /// `db.rule/*` rules, read from the tree and cached by branch head
+    /// `dialog.rule/*` rules, read from the tree and cached by branch head
     /// (re-scanned only when the head moves), with hydrated bodies
     /// cached by content-addressed rule entity.
     async fn durable_rules(
@@ -492,7 +492,7 @@ where
         };
 
         // Hydration: reuse cached bodies (content-addressed, never stale),
-        // fetch + compile the rest from each rule's `db.rule/source`.
+        // fetch + compile the rest from each rule's `dialog.rule/source`.
         let mut rules = Vec::with_capacity(rule_entities.len());
         for rule_entity in rule_entities {
             if let Some(body) = cache.body(&rule_entity) {
@@ -527,8 +527,8 @@ where
         + 'static,
 {
     /// Resolve a concept's deductive rules by unioning across layers:
-    /// each branch is a durable layer (committed `db.rule/*`, head-cached),
-    /// the overlay is a transient layer (uncommitted `db.rule/*`, fresh).
+    /// each branch is a durable layer (committed `dialog.rule/*`, head-cached),
+    /// the overlay is a transient layer (uncommitted `dialog.rule/*`, fresh).
     /// The implicit per-descriptor rule is assembled once on top.
     ///
     /// The resolved rule set is checked against the program analysis
@@ -720,19 +720,25 @@ mod rule_tests {
         d.compile().expect("rule compiles")
     }
 
-    /// The `db.rule/*` facts that store `rule`: a `conclusion` index
-    /// pointing at the concept it concludes, and the `source` body.
-    /// Asserting these makes the durable/transient layer resolve it.
+    /// The `dialog.rule/*` facts that store `rule`, as query-overlay
+    /// statements: a `conclusion` index pointing at the concept it concludes,
+    /// and the `source` body. Staging these with `.query().with(..)` makes the
+    /// transient layer resolve the rule for that one query.
+    ///
+    /// This is the OVERLAY path only. A durable install goes through
+    /// `Transaction::install_rule`, because `dialog.rule/*` is a reserved
+    /// namespace the public commit path refuses — these statements would be
+    /// rejected if committed rather than kept in the per-query overlay.
     fn rule_statements(
         rule: &DeductiveRule,
     ) -> (impl Statement + 'static, impl Statement + 'static) {
         let rule_entity = rule.this();
         let conclusion = rule.conclusion().this();
         (
-            the!("db.rule/conclusion")
+            the!("dialog.rule/conclusion")
                 .of(rule_entity.clone())
                 .is(conclusion),
-            the!("db.rule/source").of(rule_entity).is(rule.encode()),
+            the!("dialog.rule/source").of(rule_entity).is(rule.encode()),
         )
     }
 
@@ -773,7 +779,6 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice: Entity = "id:alice".parse()?;
-        let (conc, src) = rule_statements(&employee_from_person());
         branch
             .transaction()
             .assert(
@@ -781,8 +786,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(conc)
-            .assert(src)
+            .install_rule(&employee_from_person())
             .commit()
             .perform(&operator)
             .await?;
@@ -791,6 +795,64 @@ mod rule_tests {
 
         let employees = query_employees(&branch, &operator).await?;
         assert!(employees.contains(&alice), "committed rule must resolve");
+        Ok(())
+    }
+
+    // ----- round-trip: privileged install is discoverable + hydrates --
+    // A rule installed through the privileged rail lands in the tree as
+    // the same `dialog.rule/*` facts the discovery scan reads: the
+    // `conclusion` index finds the rule entity by concept, and its
+    // `source` body hydrates back into the compiled rule. This proves
+    // the privileged write produces exactly the shape the reader expects,
+    // not merely that a query happens to resolve.
+
+    #[dialog_common::test]
+    async fn it_round_trips_a_privileged_rule_install() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let rule = employee_from_person();
+        branch
+            .transaction()
+            .install_rule(&rule)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // The `dialog.rule/conclusion` scan finds the rule entity by the
+        // concept it concludes.
+        let concept = rule.conclusion().this();
+        let conclusion_claims: Vec<Artifact> = branch
+            .claims()
+            .select(conclusion_selector(&concept))
+            .perform(&operator)
+            .await?
+            .try_collect()
+            .await?;
+        let entities = rule_entities(conclusion_claims);
+        assert_eq!(
+            entities,
+            vec![rule.this()],
+            "the conclusion index discovers the installed rule entity"
+        );
+
+        // Its `dialog.rule/source` body hydrates back into the rule.
+        let source_claims: Vec<Artifact> = branch
+            .claims()
+            .select(source_selector(&rule.this()))
+            .perform(&operator)
+            .await?
+            .try_collect()
+            .await?;
+        let bytes = source_bytes(source_claims).expect("the source body is present");
+        let hydrated = hydrate(&bytes).expect("the source body hydrates");
+        assert_eq!(
+            hydrated.this(),
+            rule.this(),
+            "the hydrated body is the installed rule"
+        );
         Ok(())
     }
 
@@ -982,11 +1044,9 @@ mod rule_tests {
         assert!(query_employees(&branch, &operator).await?.is_empty());
 
         // Commit the rule on the SAME handle → its head advances.
-        let (conc, src) = rule_statements(&employee_from_person());
         branch
             .transaction()
-            .assert(conc)
-            .assert(src)
+            .install_rule(&employee_from_person())
             .commit()
             .perform(&operator)
             .await?;
@@ -1020,8 +1080,6 @@ mod rule_tests {
             "distinct bodies ⇒ distinct identities"
         );
 
-        let (c1, s1) = rule_statements(&r1);
-        let (c2, s2) = rule_statements(&r2);
         branch
             .transaction()
             .assert(
@@ -1034,10 +1092,8 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(c1)
-            .assert(s1)
-            .assert(c2)
-            .assert(s2)
+            .install_rule(&r1)
+            .install_rule(&r2)
             .commit()
             .perform(&operator)
             .await?;
@@ -1068,7 +1124,6 @@ mod rule_tests {
         let bob: Entity = "id:bob".parse()?;
         // Commit rule #1 (person) + a person fact + a contractor fact.
         let r1 = rule_with_person_attr("org/person-name");
-        let (c1, s1) = rule_statements(&r1);
         branch
             .transaction()
             .assert(
@@ -1081,8 +1136,7 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(c1)
-            .assert(s1)
+            .install_rule(&r1)
             .commit()
             .perform(&operator)
             .await?;
@@ -1144,14 +1198,12 @@ mod rule_tests {
         assert!(query_employees(&handle_a, &operator).await?.is_empty());
 
         // Handle B (independent handle) commits the rule → branch head -> H1.
-        let (conc, src) = rule_statements(&employee_from_person());
         repo.branch("main")
             .open()
             .perform(&operator)
             .await?
             .transaction()
-            .assert(conc)
-            .assert(src)
+            .install_rule(&employee_from_person())
             .commit()
             .perform(&operator)
             .await?;
@@ -1184,7 +1236,6 @@ mod rule_tests {
         // `main` holds a person + the person rule.
         let alice: Entity = "id:alice".parse()?;
         let r_person = rule_with_person_attr("org/person-name");
-        let (cp, sp) = rule_statements(&r_person);
         repo.branch("main")
             .open()
             .perform(&operator)
@@ -1195,8 +1246,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(cp)
-            .assert(sp)
+            .install_rule(&r_person)
             .commit()
             .perform(&operator)
             .await?;
@@ -1204,7 +1254,6 @@ mod rule_tests {
         // A second branch holds a contractor + the contractor rule.
         let bob: Entity = "id:bob".parse()?;
         let r_contractor = rule_with_person_attr("org/contractor-name");
-        let (cc, sc) = rule_statements(&r_contractor);
         repo.branch("other")
             .open()
             .perform(&operator)
@@ -1215,8 +1264,7 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(cc)
-            .assert(sc)
+            .install_rule(&r_contractor)
             .commit()
             .perform(&operator)
             .await?;
@@ -1249,7 +1297,7 @@ mod rule_tests {
 
     // A committed rule that is later RETRACTED must stop resolving: the
     // retract moves the head, so the discovery cache re-scans and finds
-    // the rule's `db.rule/*` facts gone. The inverse of the
+    // the rule's `dialog.rule/*` facts gone. The inverse of the
     // head-move-adds case.
 
     #[dialog_common::test]
@@ -1260,7 +1308,6 @@ mod rule_tests {
 
         let alice: Entity = "id:alice".parse()?;
         let rule = employee_from_person();
-        let (conc, src) = rule_statements(&rule);
         branch
             .transaction()
             .assert(
@@ -1268,8 +1315,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(conc)
-            .assert(src)
+            .install_rule(&rule)
             .commit()
             .perform(&operator)
             .await?;
@@ -1277,12 +1323,10 @@ mod rule_tests {
         // Resolves while committed (also primes the cache at this head).
         assert!(query_employees(&branch, &operator).await?.contains(&alice));
 
-        // Retract the rule's facts on the same handle → head advances.
-        let (conc, src) = rule_statements(&rule);
+        // Remove the rule's facts on the same handle → head advances.
         branch
             .transaction()
-            .retract(conc)
-            .retract(src)
+            .remove_rule(&rule)
             .commit()
             .perform(&operator)
             .await?;
@@ -1310,7 +1354,6 @@ mod rule_tests {
         // v1 reads org/person-name; commit it + a matching person fact.
         let alice: Entity = "id:alice".parse()?;
         let v1 = rule_with_person_attr("org/person-name");
-        let (c1, s1) = rule_statements(&v1);
         branch
             .transaction()
             .assert(
@@ -1318,8 +1361,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(c1)
-            .assert(s1)
+            .install_rule(&v1)
             .commit()
             .perform(&operator)
             .await?;
@@ -1333,7 +1375,6 @@ mod rule_tests {
         let carol: Entity = "id:carol".parse()?;
         let v2 = rule_with_person_attr("org/agent-name");
         assert_ne!(v1.this(), v2.this());
-        let (c2, s2) = rule_statements(&v2);
         branch
             .transaction()
             .assert(
@@ -1341,8 +1382,7 @@ mod rule_tests {
                     .of(carol.clone())
                     .is("Carol".to_string()),
             )
-            .assert(c2)
-            .assert(s2)
+            .install_rule(&v2)
             .commit()
             .perform(&operator)
             .await?;

@@ -584,10 +584,15 @@ mod tests {
         Ok(())
     }
 
-    /// A rule whose `db.rule/*` facts are pending in the transaction
-    /// resolves as a transient overlay rule: the uncommitted view
-    /// derives through it without the rule (or the data) ever being
+    /// A rule whose `dialog.rule/*` facts are pending in the transaction's
+    /// change overlay resolves as a transient overlay rule: the uncommitted
+    /// view derives through it without the rule (or the data) ever being
     /// committed.
+    ///
+    /// This stages the rule facts directly into the transaction's `Changes`
+    /// (the overlay the pending-view query reads), NOT through `install_rule`,
+    /// which is the durable/privileged rail. The two are distinct: the overlay
+    /// is a per-view read surface, never persisted or gated.
     #[dialog_common::test]
     async fn it_resolves_rules_pending_in_the_transaction() -> anyhow::Result<()> {
         use dialog_query::rule::DeductiveRuleDescriptor;
@@ -619,11 +624,11 @@ mod tests {
         let tx = branch
             .transaction()
             .assert(
-                the!("db.rule/conclusion")
+                the!("dialog.rule/conclusion")
                     .of(rule.this())
                     .is(employee.this()),
             )
-            .assert(the!("db.rule/source").of(rule.this()).is(rule.encode()))
+            .assert(the!("dialog.rule/source").of(rule.this()).is(rule.encode()))
             .assert(
                 the!("org/person-name")
                     .of(alice.clone())

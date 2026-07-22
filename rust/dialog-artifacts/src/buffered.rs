@@ -42,8 +42,10 @@ use futures_util::Stream;
 use std::ops::RangeInclusive;
 
 use crate::history::Version;
-use crate::tree::{ArtifactTree, TreeStorageBridge, write_instructions};
-use crate::{Datum, DialogArtifactsError, Instruction, Key, State};
+use crate::tree::{
+    ArtifactTree, TreeStorageBridge, privileged_entries, privileged_keys, write_instructions,
+};
+use crate::{Artifact, Datum, DialogArtifactsError, Instruction, Key, State};
 
 /// The buffered counterpart of [`ArtifactTree`].
 ///
@@ -340,6 +342,70 @@ impl BufferedBatch {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
         for (key, value) in entries {
             self.tree = self.tree.write(key, value, &storage).await?;
+        }
+        Ok(self)
+    }
+
+    /// Installs privileged facts (deductive rules — see
+    /// [`privileged_entries`](crate::tree::privileged_entries)) into the open
+    /// buffered tree, spilling any large value block into `store` first.
+    ///
+    /// This is the sanctioned rule-write rail. Rules live under the reserved
+    /// `dialog.rule/*` namespace, which the public instruction path refuses;
+    /// routing them through this surface — the same one revision records use —
+    /// is what lets an app install a rule without being able to forge one
+    /// through an ordinary `assert`. The facts get all three index orderings so
+    /// the `conclusion` (by value) and `source` (by entity) scans both find
+    /// them, and marks the batch changed so a commit whose only writes are rule
+    /// installs still mints a revision.
+    #[tracing::instrument(skip_all, name = "install_rules")]
+    pub async fn install<S>(
+        mut self,
+        store: &mut S,
+        rules: &[Artifact],
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        for artifact in rules {
+            let entries = privileged_entries(store, artifact, &self.manifest).await?;
+            for (key, value) in entries {
+                self.tree = self.tree.write(key, value, &storage).await?;
+                self.changed = true;
+            }
+        }
+        Ok(self)
+    }
+
+    /// Removes privileged facts installed by [`install`](Self::install),
+    /// erasing every index key of each fact from the open buffered tree.
+    ///
+    /// A removal that erased nothing (the rule was never installed) leaves the
+    /// tree untouched and does not mark the batch changed, so a commit whose
+    /// only instruction is such a removal stays a no-op — the same shape a
+    /// retract of an absent fact takes on the public path.
+    #[tracing::instrument(skip_all, name = "uninstall_rules")]
+    pub async fn uninstall<S>(
+        mut self,
+        store: &S,
+        rules: &[Artifact],
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        for artifact in rules {
+            for key in privileged_keys(artifact, &self.manifest) {
+                if self.tree.read(&key, &storage).await?.is_some() {
+                    self.tree = self.tree.erase(&key, &storage).await?;
+                    self.changed = true;
+                }
+            }
         }
         Ok(self)
     }

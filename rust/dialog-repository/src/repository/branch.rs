@@ -111,7 +111,7 @@ pub struct Branch {
     spill_cache: SpillCache,
     /// Shared deductive-rule cache (discovery by head + hydrated bodies).
     /// Like `node_cache`, created once per opened branch and carried into
-    /// every query's durable rule resolution, so the `db.rule/*` scan is
+    /// every query's durable rule resolution, so the `dialog.rule/*` scan is
     /// paid once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
     /// Transient session overlay: ephemeral facts folded into every
