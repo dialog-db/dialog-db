@@ -1,6 +1,8 @@
 use dialog_common::Blake3Hash;
 use rkyv::{Archive, Deserialize, Serialize};
 
+use crate::Scale;
+
 /// A reference to a child node in an index node.
 ///
 /// Links connect index nodes to their children, storing the child's content
@@ -24,4 +26,10 @@ pub struct Link {
     pub separator: Vec<u8>,
     /// The [`Blake3Hash`] of the referenced node.
     pub node: Blake3Hash,
+    /// Rough size of the referenced subtree, for query planning.
+    ///
+    /// Advisory only: an upper bound within `sqrt(2)`, excluding ops still
+    /// pending in novelty buffers above their destination. Never act on it,
+    /// only prefer with it. See [`Scale`].
+    pub scale: Scale,
 }

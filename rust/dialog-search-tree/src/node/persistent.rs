@@ -9,7 +9,7 @@ use rkyv::{
 };
 
 use crate::{
-    Buffer, DialogSearchTreeError, Entry, Key, Link, Manifest, Schema, Value,
+    Buffer, DialogSearchTreeError, Entry, Key, Link, Manifest, Scale, Schema, Value,
     node::codec::{common_prefix, encode_keys},
     node::columnar::{ColumnData, StreamingLeaf, column_slices, encode_column_values},
 };
@@ -105,6 +105,24 @@ where
         Ok(Link {
             separator,
             node: self.buffer.blake3_hash().clone(),
+            scale: self.scale()?,
+        })
+    }
+
+    /// Rough size of the subtree this node roots, for query planning.
+    ///
+    /// A leaf reports its own entry count. An index sums its children's
+    /// estimates and encodes the total once, so error stays bounded by
+    /// `sqrt(2)` at any height rather than compounding per level (see
+    /// [`Scale::total`]). Reads only this node, never its children.
+    ///
+    /// Ops pending in an index's novelty are excluded: they have not yet
+    /// reached the subtree they are destined for, so counting them here would
+    /// double-count once they flush.
+    pub fn scale(&self) -> Result<Scale, DialogSearchTreeError> {
+        Ok(match self.body()? {
+            ArchivedNodeBody::Index(index) => Scale::total(index.scales.iter().map(Scale::from)),
+            ArchivedNodeBody::Segment(segment) => Scale::of(segment.count.to_native() as u64),
         })
     }
 
@@ -591,6 +609,15 @@ pub struct PersistentIndex<Value> {
     pub ends: Vec<u32>,
     /// Child node content hashes, in child order.
     pub hashes: Vec<Blake3Hash>,
+    /// Rough size of each child's subtree, in child order, for query planning.
+    ///
+    /// Advisory only, and deliberately coarse: a [`Scale`] changes only when a
+    /// subtree crosses a bucket boundary, so ordinary edits leave it (and
+    /// therefore this node's hash) untouched. An exact count would move on
+    /// every insert and dirty the whole root path. Excludes ops pending in
+    /// `novelty`, which have not yet reached the subtrees they are destined
+    /// for.
+    pub scales: Vec<Scale>,
     /// Ops pending against this node's subtrees, grouped per child link and
     /// encoded with the segment codec (the node's novelty). Sparse: only
     /// links with pending ops store a buffer, in ascending child order, each
@@ -627,6 +654,7 @@ impl<Value> PersistentIndex<Value> {
         let mut suffixes = Vec::new();
         let mut ends = Vec::with_capacity(links.len());
         let mut hashes = Vec::with_capacity(links.len());
+        let mut scales = Vec::with_capacity(links.len());
         for link in links {
             // Sorted separators make the first/last LCP a prefix of every
             // middle separator (any middle string is sandwiched between them
@@ -642,6 +670,7 @@ impl<Value> PersistentIndex<Value> {
             suffixes.extend_from_slice(&link.separator[at..]);
             ends.push(suffixes.len() as u32);
             hashes.push(link.node);
+            scales.push(link.scale);
         }
 
         Self {
@@ -650,6 +679,7 @@ impl<Value> PersistentIndex<Value> {
             suffixes,
             ends,
             hashes,
+            scales,
             novelty: Vec::new(),
         }
     }
