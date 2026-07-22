@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use dialog_capability::ForkInvocation;
 use dialog_capability::Provider;
 use dialog_effects::memory::*;
-use dialog_remote_s3::S3;
 
 use crate::site::UcanSite;
 
@@ -15,19 +14,7 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Resolve>,
     ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
-        let (permit, key) = crate::permit_cache::redeem_cached(
-            &invocation.authorization,
-            &invocation.address,
-            &invocation.capability,
-        )
-        .await?;
-        let result = permit.invoke(invocation.capability).perform(&S3).await;
-        if result.is_err() {
-            // A permit that failed downstream may be stale (revoked or
-            // expired server-side); drop it so the next attempt redeems.
-            crate::permit_cache::PermitCache::shared().invalidate(&key);
-        }
-        result
+        crate::permit_cache::execute_cached(invocation).await
     }
 }
 
@@ -38,19 +25,7 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Publish>,
     ) -> Result<Version, MemoryError> {
-        let (permit, key) = crate::permit_cache::redeem_cached(
-            &invocation.authorization,
-            &invocation.address,
-            &invocation.capability,
-        )
-        .await?;
-        let result = permit.invoke(invocation.capability).perform(&S3).await;
-        if result.is_err() {
-            // A permit that failed downstream may be stale (revoked or
-            // expired server-side); drop it so the next attempt redeems.
-            crate::permit_cache::PermitCache::shared().invalidate(&key);
-        }
-        result
+        crate::permit_cache::execute_cached(invocation).await
     }
 }
 
@@ -61,18 +36,6 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Retract>,
     ) -> Result<(), MemoryError> {
-        let (permit, key) = crate::permit_cache::redeem_cached(
-            &invocation.authorization,
-            &invocation.address,
-            &invocation.capability,
-        )
-        .await?;
-        let result = permit.invoke(invocation.capability).perform(&S3).await;
-        if result.is_err() {
-            // A permit that failed downstream may be stale (revoked or
-            // expired server-side); drop it so the next attempt redeems.
-            crate::permit_cache::PermitCache::shared().invalidate(&key);
-        }
-        result
+        crate::permit_cache::execute_cached(invocation).await
     }
 }
