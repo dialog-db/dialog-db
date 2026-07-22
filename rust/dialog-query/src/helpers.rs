@@ -41,9 +41,9 @@ use dialog_network::Network;
 use dialog_operator::helpers::{generate_data, unique_name};
 use dialog_operator::{Operator, Profile};
 use dialog_repository::{Branch, NetworkedIndex, RemoteSite, Repository, RepositoryExt as _};
+use dialog_search_tree::audit as tree_audit;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::{Blake3Hash, DialogStorageError, JournaledStorage, StorageBackend};
-use dialog_search_tree::audit as tree_audit;
 use dialog_storage::{DUPLICATE_SETS, TOTAL_SETS, dup_audit};
 use std::sync::atomic::Ordering;
 // The platform temp filesystem (and the on-disk `BenchEnv::temp` variant
