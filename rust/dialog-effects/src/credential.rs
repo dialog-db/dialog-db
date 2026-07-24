@@ -10,7 +10,8 @@
 //!         │   └── Load<Credential> → Result<Credential, CredentialError>
 //!         └── Site { address: String }
 //!             ├── Save<Secret> → Result<(), CredentialError>
-//!             └── Load<Secret> → Result<Secret, CredentialError>
+//!             ├── Load<Secret> → Result<Secret, CredentialError>
+//!             └── Retract<Secret> → Result<(), CredentialError>
 //! ```
 
 pub mod prelude;
@@ -161,6 +162,37 @@ impl Effect for Load<dialog_credentials::Credential> {
 impl Effect for Load<Secret> {
     type Of = Site;
     type Output = Result<Secret, CredentialError>;
+}
+
+/// Remove a stored value from storage.
+///
+/// Idempotent: retracting an address that holds nothing succeeds. Callers
+/// that need to distinguish "was present" from "was absent" should
+/// [`Load`] first.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct Retract<T> {
+    #[serde(skip)]
+    _marker: PhantomData<T>,
+}
+
+impl<T> Retract<T> {
+    /// Create a new retract effect.
+    pub fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Default for Retract<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Effect for Retract<Secret> {
+    type Of = Site;
+    type Output = Result<(), CredentialError>;
 }
 
 /// Errors that can occur during credential operations.

@@ -47,7 +47,8 @@ pub struct Storage<S: Clone> {
         credential::Load<Credential>,
         credential::Save<Credential>,
         credential::Load<Secret>,
-        credential::Save<Secret>
+        credential::Save<Secret>,
+        credential::Retract<Secret>
     )]
     router: Router<S>,
 }

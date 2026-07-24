@@ -204,9 +204,13 @@ pub(super) async fn ensure_dir(handle: &FileSystemHandle) -> Result<(), FileSyst
 
 pub(super) async fn read(handle: &FileSystemHandle) -> Result<Vec<u8>, FileSystemError> {
     let path: PathBuf = handle.try_into()?;
-    fs::read(&path)
-        .await
-        .map_err(|e| FileSystemError::Io(e.to_string()))
+    match fs::read(&path).await {
+        Ok(bytes) => Ok(bytes),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(FileSystemError::NotFound(path.display().to_string()))
+        }
+        Err(e) => Err(FileSystemError::Io(e.to_string())),
+    }
 }
 
 pub(super) async fn read_optional(

@@ -46,6 +46,7 @@ pub struct Operator<S: Clone> {
         credential::Save<Credential>,
         credential::Load<Secret>,
         credential::Save<Secret>,
+        credential::Retract<Secret>,
         memory::Resolve,
         memory::Publish,
         memory::Retract
