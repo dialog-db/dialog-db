@@ -11,6 +11,10 @@ pub enum FileSystemError {
     #[error("Filesystem I/O error: {0}")]
     Io(String),
 
+    /// No file exists at the requested location.
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     /// Lock acquisition failed.
     #[error("Lock error: {0}")]
     Lock(String),
@@ -26,7 +30,10 @@ pub enum FileSystemError {
 
 impl From<FileSystemError> for CredentialError {
     fn from(e: FileSystemError) -> Self {
-        Self::Storage(e.to_string())
+        match e {
+            FileSystemError::NotFound(location) => Self::NotFound(location),
+            other => Self::Storage(other.to_string()),
+        }
     }
 }
 

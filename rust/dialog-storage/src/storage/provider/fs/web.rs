@@ -570,7 +570,7 @@ pub(super) async fn ensure_dir(handle: &FileSystemHandle) -> Result<(), FileSyst
 pub(super) async fn read(handle: &FileSystemHandle) -> Result<Vec<u8>, FileSystemError> {
     read_optional(handle)
         .await?
-        .ok_or_else(|| FileSystemError::Io("file not found".into()))
+        .ok_or_else(|| FileSystemError::NotFound(handle.url().path().to_string()))
 }
 
 pub(super) async fn read_optional(

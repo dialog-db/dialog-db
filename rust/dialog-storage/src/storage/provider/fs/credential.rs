@@ -125,7 +125,7 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(CredentialError::NotFound(_))));
         Ok(())
     }
 
@@ -189,7 +189,24 @@ mod tests {
 
         let result = did.credential().key("self").load().perform(&provider).await;
 
-        assert!(result.is_err());
+        assert!(matches!(result, Err(CredentialError::NotFound(_))));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_returns_not_found_for_a_missing_site_secret() -> anyhow::Result<()> {
+        let location = StorageLocation::new(Directory::Temp, unique_name("fs-site-not-found"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
+
+        let result = did
+            .credential()
+            .site("never-saved.example")
+            .load()
+            .perform(&provider)
+            .await;
+
+        assert!(matches!(result, Err(CredentialError::NotFound(_))));
         Ok(())
     }
 
