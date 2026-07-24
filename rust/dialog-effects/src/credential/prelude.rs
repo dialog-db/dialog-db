@@ -5,7 +5,7 @@
 //! use dialog_effects::credential::prelude::*;
 //! ```
 
-use super::{Credential, Key, Load, Save, Secret, Site};
+use super::{Credential, Key, Load, Retract, Save, Secret, Site};
 use dialog_capability::{Capability, Did, Policy, SiteId, Subject};
 use dialog_credentials::Credential as KeyCredential;
 
@@ -87,15 +87,20 @@ pub trait CredentialSiteExt {
     type Load;
     /// The resulting save chain type.
     type Save;
+    /// The resulting retract chain type.
+    type Retract;
     /// Load a site secret from this address.
     fn load(self) -> Self::Load;
     /// Save a site secret to this address.
     fn save(self, secret: Secret) -> Self::Save;
+    /// Remove the site secret at this address.
+    fn retract(self) -> Self::Retract;
 }
 
 impl CredentialSiteExt for Capability<Site> {
     type Load = Capability<Load<Secret>>;
     type Save = Capability<Save<Secret>>;
+    type Retract = Capability<Retract<Secret>>;
 
     fn load(self) -> Capability<Load<Secret>> {
         self.invoke(Load::new())
@@ -103,6 +108,10 @@ impl CredentialSiteExt for Capability<Site> {
 
     fn save(self, secret: Secret) -> Capability<Save<Secret>> {
         self.invoke(Save::new(secret))
+    }
+
+    fn retract(self) -> Capability<Retract<Secret>> {
+        self.invoke(Retract::new())
     }
 }
 
@@ -163,5 +172,17 @@ impl SaveSecretExt for Capability<Save<Secret>> {
 
     fn secret(&self) -> &Secret {
         &Save::<Secret>::of(self).credential
+    }
+}
+
+/// Field accessors on `Capability<Retract<Secret>>`.
+pub trait RetractSecretExt {
+    /// Get the site address from the capability chain.
+    fn address(&self) -> &SiteId;
+}
+
+impl RetractSecretExt for Capability<Retract<Secret>> {
+    fn address(&self) -> &SiteId {
+        &Site::of(self).address
     }
 }

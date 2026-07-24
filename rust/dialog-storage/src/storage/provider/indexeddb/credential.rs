@@ -6,9 +6,9 @@ use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_credentials::credential::CredentialExport;
 use dialog_effects::credential::prelude::{
-    LoadCredentialExt, LoadSecretExt, SaveCredentialExt, SaveSecretExt,
+    LoadCredentialExt, LoadSecretExt, RetractSecretExt, SaveCredentialExt, SaveSecretExt,
 };
-use dialog_effects::credential::{CredentialError, Load, Save, Secret};
+use dialog_effects::credential::{CredentialError, Load, Retract, Save, Secret};
 use js_sys::Uint8Array;
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -123,6 +123,26 @@ impl Provider<Save<Secret>> for IndexedDb {
     }
 }
 
+#[async_trait(?Send)]
+impl Provider<Retract<Secret>> for IndexedDb {
+    async fn execute(&self, input: Capability<Retract<Secret>>) -> Result<(), CredentialError> {
+        let idb_key = format!("site/{}", input.address());
+
+        let store = self.store(CREDENTIAL).await?;
+        let key = JsValue::from_str(&idb_key);
+
+        store
+            .transact(|object_store| async move {
+                object_store
+                    .delete(key)
+                    .await
+                    .map_err(|e| CredentialError::Storage(e.to_string()))?;
+                Ok(())
+            })
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +151,50 @@ mod tests {
     use dialog_varsig::Principal;
 
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    #[dialog_common::test]
+    async fn it_retracts_a_stored_site_secret() -> anyhow::Result<()> {
+        let provider = IndexedDb::connect(unique_name("cred-retract")).await?;
+        let did = unique_did().await;
+
+        did.clone()
+            .credential()
+            .site("example.com")
+            .save(Secret::from(vec![1u8, 2, 3]))
+            .perform(&provider)
+            .await?;
+
+        did.clone()
+            .credential()
+            .site("example.com")
+            .retract()
+            .perform(&provider)
+            .await?;
+
+        let result = did
+            .credential()
+            .site("example.com")
+            .load()
+            .perform(&provider)
+            .await;
+
+        assert!(matches!(result, Err(CredentialError::NotFound(_))));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_retracts_a_missing_site_secret_without_error() -> anyhow::Result<()> {
+        let provider = IndexedDb::connect(unique_name("cred-retract-absent")).await?;
+        let did = unique_did().await;
+
+        did.credential()
+            .site("never-saved.example")
+            .retract()
+            .perform(&provider)
+            .await?;
+
+        Ok(())
+    }
 
     #[dialog_common::test]
     async fn it_returns_not_found_for_missing_credential() -> anyhow::Result<()> {

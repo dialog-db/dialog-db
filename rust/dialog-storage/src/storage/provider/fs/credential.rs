@@ -7,9 +7,9 @@ use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::{Credential, CredentialExport};
 use dialog_effects::credential::prelude::{
-    LoadCredentialExt, LoadSecretExt, SaveCredentialExt, SaveSecretExt,
+    LoadCredentialExt, LoadSecretExt, RetractSecretExt, SaveCredentialExt, SaveSecretExt,
 };
-use dialog_effects::credential::{CredentialError, Load, Save, Secret};
+use dialog_effects::credential::{CredentialError, Load, Retract, Save, Secret};
 
 const CREDENTIAL: &str = "credential";
 const KEY: &str = "key";
@@ -80,6 +80,15 @@ impl Provider<Save<Secret>> for FileSystem {
     }
 }
 
+#[async_trait::async_trait]
+impl Provider<Retract<Secret>> for FileSystem {
+    async fn execute(&self, input: Capability<Retract<Secret>>) -> Result<(), CredentialError> {
+        let handle = self.credential_site(input.address().as_str())?;
+        handle.remove().await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +97,89 @@ mod tests {
     use dialog_effects::prelude::*;
     use dialog_effects::storage::{Directory, Location as StorageLocation};
     use dialog_varsig::Principal;
+
+    #[dialog_common::test]
+    async fn it_retracts_a_stored_site_secret() -> anyhow::Result<()> {
+        let location = StorageLocation::new(Directory::Temp, unique_name("fs-cred-retract"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
+
+        did.clone()
+            .credential()
+            .site("example.com")
+            .save(Secret::from(vec![1u8, 2, 3]))
+            .perform(&provider)
+            .await?;
+
+        did.clone()
+            .credential()
+            .site("example.com")
+            .retract()
+            .perform(&provider)
+            .await?;
+
+        let result = did
+            .credential()
+            .site("example.com")
+            .load()
+            .perform(&provider)
+            .await;
+
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_retracts_a_missing_site_secret_without_error() -> anyhow::Result<()> {
+        let location = StorageLocation::new(Directory::Temp, unique_name("fs-cred-retract-absent"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
+
+        did.credential()
+            .site("never-saved.example")
+            .retract()
+            .perform(&provider)
+            .await?;
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_leaves_other_site_secrets_intact() -> anyhow::Result<()> {
+        let location = StorageLocation::new(Directory::Temp, unique_name("fs-cred-retract-other"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
+
+        did.clone()
+            .credential()
+            .site("first.example")
+            .save(Secret::from(vec![1u8]))
+            .perform(&provider)
+            .await?;
+        did.clone()
+            .credential()
+            .site("second.example")
+            .save(Secret::from(vec![2u8]))
+            .perform(&provider)
+            .await?;
+
+        did.clone()
+            .credential()
+            .site("first.example")
+            .retract()
+            .perform(&provider)
+            .await?;
+
+        let survivor = did
+            .credential()
+            .site("second.example")
+            .load()
+            .perform(&provider)
+            .await?;
+
+        assert_eq!(survivor.as_bytes(), &[2u8]);
+        Ok(())
+    }
 
     #[dialog_common::test]
     async fn it_returns_not_found_for_missing_credential() -> anyhow::Result<()> {
