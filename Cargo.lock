@@ -1292,6 +1292,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "ipld-core",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_bytes",

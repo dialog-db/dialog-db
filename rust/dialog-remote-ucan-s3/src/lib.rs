@@ -13,6 +13,7 @@
 //! - [`InvocationChain`] - Parsed UCAN container with invocation and delegation chain
 
 mod authorizer;
+mod permit_cache;
 mod provider;
 pub mod site;
 
