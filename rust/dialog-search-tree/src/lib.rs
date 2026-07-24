@@ -143,8 +143,17 @@ pub use dialog_common::Buffer;
 mod kv;
 pub use kv::*;
 
+mod component;
+pub use component::*;
+
+mod manifest;
+pub use manifest::*;
+
 mod link;
 pub use link::*;
+
+mod scale;
+pub use scale::*;
 
 mod entry;
 pub use entry::*;
@@ -157,6 +166,9 @@ pub use storage::*;
 
 mod tree;
 pub use tree::*;
+
+mod hitchhiker;
+pub use hitchhiker::*;
 
 mod delta;
 pub use delta::*;
@@ -178,9 +190,6 @@ pub use encoding::*;
 
 mod walker;
 pub use walker::*;
-
-mod compare;
-pub use compare::*;
 
 /// Helpers for testing and development.
 ///

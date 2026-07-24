@@ -32,9 +32,13 @@ pub mod math;
 /// String manipulation formulas (concatenate, length, uppercase, lowercase, like)
 pub mod string;
 
+/// Version-control revision record projections (revision, revision-parent)
+pub mod revision;
+
 pub use conversions::{ParseFloat, ParseSignedInteger, ParseUnsignedInteger, ToString};
 pub use logic::{And, Not, Or};
 pub use math::{Difference, Modulo, Product, Quotient, Sum};
+pub use revision::{Revision as RevisionFormula, RevisionParent as RevisionParentFormula};
 pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};
 
 use crate::Parameters;
@@ -94,14 +98,28 @@ pub trait Formula: Predicate + Sized + Clone {
     /// 2. For each output, calls `write` to add values to bindings
     /// 3. Returns the Match with the output values bound
     ///
+    /// A write that disagrees with what the row already holds — a
+    /// `Conflict` on a pre-bound output slot, an `Absent` binding, a
+    /// `TypeMismatch` — is local to *that* output: the row filters it
+    /// and keeps the outputs that do agree. A multi-row formula (e.g.
+    /// `dialog/revision-parent`, one row per parent) evaluated with an
+    /// output already bound is a membership test, and one non-matching
+    /// sibling must not discard the row that matches. Any other write
+    /// error is a genuine failure and propagates.
+    ///
     /// This default implementation should work for most formulas.
     fn resolve(bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
         let mut results = Vec::new();
         let input: Self::Input = bindings.try_into()?;
         for output in Self::compute(input) {
             let mut bindings = bindings.clone();
-            output.write(&mut bindings)?;
-            results.push(bindings.source);
+            match output.write(&mut bindings) {
+                Ok(()) => results.push(bindings.source),
+                Err(EvaluationError::Conflict { .. })
+                | Err(EvaluationError::Absent { .. })
+                | Err(EvaluationError::TypeMismatch { .. }) => continue,
+                Err(error) => return Err(error),
+            }
         }
 
         Ok(results)

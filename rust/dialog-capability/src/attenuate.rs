@@ -31,12 +31,17 @@ use serde::de::DeserializeOwned;
 /// # use serde::{Serialize, Deserialize};
 /// # use dialog_macros::Attenuate;
 /// # use dialog_common::Checksum;
+/// # use dialog_capability::{Effect, Subject};
 /// #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 /// pub struct Put {
 ///     pub digest: Vec<u8>,
 ///     #[attenuate(into = Checksum, with = Checksum::sha256, rename = checksum)]
 ///     pub content: Vec<u8>,
 /// }
+/// # impl Effect for Put {
+/// #     type Of = Subject;
+/// #     type Output = ();
+/// # }
 /// // Generates:
 /// // - `PutAttenuation { digest: Vec<u8>, checksum: Checksum }`
 /// // - `impl Attenuate for Put { type Attenuation = PutAttenuation; ... }`

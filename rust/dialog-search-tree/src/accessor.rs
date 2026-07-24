@@ -1,16 +1,13 @@
 use dialog_common::{Blake3Hash, ConditionalSend};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use rkyv::{
-    Deserialize,
     bytecheck::CheckBytes,
-    de::Pool,
     rancor::Strategy,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
 use crate::{
-    Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Key, PersistentNode,
-    SymmetryWith, Value,
+    Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Key, PersistentNode, Value,
 };
 
 /// Accessor for retrieving durable nodes from cache and content-addressed
@@ -57,13 +54,6 @@ where
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
     where
         Key: self::Key,
-        Key::Archived: for<'a> CheckBytes<
-                Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-            > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>
-            + PartialOrd<Key>
-            + PartialEq<Key>
-            + SymmetryWith<Key>
-            + Ord,
         Value: self::Value,
         Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,

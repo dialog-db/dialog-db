@@ -10,28 +10,68 @@
 //! The surface is [`Blob`] (the noun) plus a [`BlobArchive`] target that a
 //! [`Branch`] converts into:
 //!
-//! ```ignore
+//! ```no_run
+//! # use dialog_capability::{Fork, Provider};
+//! # use dialog_effects::archive::{Get, Import, Put};
+//! # use dialog_effects::authority::{Attest, Identify};
+//! # use dialog_effects::blob::{
+//! #     BlobError, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
+//! # };
+//! # use dialog_effects::memory::{Publish, Resolve};
+//! # use dialog_repository::{Blob, Branch, CommitError, RemoteSite};
+//! # async fn example<Env>(
+//! #     branch: &Branch,
+//! #     env: &Env,
+//! #     entity: dialog_artifacts::Entity,
+//! #     range: ByteRange,
+//! #     chunks: futures_util::stream::Iter<std::vec::IntoIter<Result<Vec<u8>, BlobError>>>,
+//! # ) -> Result<(), CommitError>
+//! # where
+//! #     Env: Provider<Get>
+//! #         + Provider<Put>
+//! #         + Provider<Import>
+//! #         + Provider<Resolve>
+//! #         + Provider<Publish>
+//! #         + Provider<Identify>
+//! #         + Provider<Attest>
+//! #         + Provider<BlobRead>
+//! #         + Provider<BlobWrite>
+//! #         + Provider<BlobImport>
+//! #         + Provider<Fork<RemoteSite, Get>>
+//! #         + Provider<Fork<RemoteSite, Resolve>>
+//! #         + Provider<Fork<RemoteSite, BlobRead>>
+//! #         + dialog_common::ConditionalSync
+//! #         + 'static,
+//! # {
 //! // read (whole, or a slice); local-first with remote hydration + cache
-//! let bytes = Blob::from(entity).read(branch.into()).perform(env).await?;
-//! let head  = Blob::from(entity).slice(range).read(branch.into()).perform(env).await?;
-//! let size  = Blob::from(entity).size(branch.into()).perform(env).await?;   // index-only
+//! let bytes = Blob::from(entity.clone()).read(branch.into()).perform(env).await?;
+//! let head = Blob::from(entity.clone())
+//!     .slice(range)
+//!     .read(branch.into())
+//!     .perform(env)
+//!     .await?;
+//! let size = Blob::from(entity).size(branch.into()).perform(env).await?; // index-only
 //!
 //! // write: stream chunks in, get the blob's entity back (recorded in the
 //! // index so `push` replicates it)
 //! let entity = Blob::import(chunks).write(branch.into()).perform(env).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::{
     Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, TreeReference, Upstream,
 };
+use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
+use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_effects::archive::prelude::{ArchiveSubjectExt as _, CatalogExt as _};
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Identify, OperatorExt as _};
+use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
@@ -340,6 +380,7 @@ where
             + Provider<Resolve>
             + Provider<Publish>
             + Provider<Identify>
+            + Provider<Attest>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
             + ConditionalSync
@@ -367,11 +408,20 @@ where
         let head = branch.revision.checkpoint();
         let base_revision = branch.revision();
 
-        let remote = match branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => {
-                branch.subject().remote(name).load().perform(env).await.ok()
-            }
-            _ => None,
+        // Same remote-fallback selection as `commit`: the first remote among
+        // ALL tracked upstreams, not only a remote default — a branch whose
+        // default upstream is local but which tracks a remote must still be
+        // able to hydrate blocks it holds by reference.
+        let upstreams = branch.upstreams();
+        let remote = match upstreams.remote_name() {
+            Some(name) => branch
+                .subject()
+                .remote(name.to_string())
+                .load()
+                .perform(env)
+                .await
+                .ok(),
+            None => None,
         };
         let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
@@ -386,6 +436,43 @@ where
         tree.put_blob(&mut store, &mut delta, &index_hash, BlobRecord::new(size))
             .await?;
 
+        // A blob write advances the branch like any commit, so its revision
+        // gets the full version-control treatment: a DAG edge and skip table
+        // in a signed revision record, and an issuer-signed head — otherwise
+        // the published head would fail pull-side verification and leave a
+        // hole in the ancestry walk.
+        let authority = Identify.perform(env).await?;
+        let issuer = authority.did();
+        let profile = authority.profile().clone();
+
+        let parent = base_revision.as_ref().map(Revision::version);
+        let skips = match &parent {
+            Some(parent) => {
+                let history = TreeHistory::from_root_with_cache(
+                    &base_tree_hash,
+                    store.clone(),
+                    branch.node_cache(),
+                )
+                .with_record_cache(branch.records());
+                extend_skips(&history, parent).await?
+            }
+            None => Vec::new(),
+        };
+        let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
+        let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
+        let mut revision = match base_revision {
+            Some(base) => base.advance(TreeReference::default(), branch_entity.clone(), issuer),
+            None => Revision::new(TreeReference::default(), branch_entity.clone(), issuer),
+        };
+        let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
+        record.signature = Attest::new(record.payload()?).perform(env).await?;
+        // The record's key carries its value through the tree's own
+        // inline-vs-spill threshold, so read it off the tree rather than
+        // assuming the default.
+        let manifest = tree.format_manifest(store.clone(), &delta).await?;
+        tree.record(&mut store, &mut delta, record.entries(&manifest)?)
+            .await?;
+
         // Persist the tree's pending nodes before referencing the root in a
         // revision; a revision must only point at durable blocks.
         branch
@@ -396,18 +483,42 @@ where
             .await
             .map_err(DialogArtifactsError::from)?;
 
-        let tree = TreeReference::from(*tree.root().as_bytes());
-
-        let authority = Identify.perform(env).await?;
-        let issuer = authority.did();
-        let profile = authority.profile().clone();
-
-        let revision = match base_revision {
-            Some(base) => base.advance(tree, issuer, profile),
-            None => Revision::new(tree, branch.of().clone(), issuer, profile),
+        // The new head's causal context: the parent's plus this write's
+        // own version, exactly as `Commit` derives it — a blob write
+        // advances the head like any commit and publishes its watermark
+        // the same way.
+        let contexts = branch.contexts();
+        let minted = revision.version();
+        let context = {
+            let mut context = match (&parent, base_context) {
+                (None, _) => Context::new(),
+                (Some(_), Some(context)) => context,
+                (Some(parent), None) => match contexts.cached(parent).await {
+                    Some(context) => context,
+                    None => {
+                        let history = TreeHistory::from_root_with_cache(
+                            &base_tree_hash,
+                            store.clone(),
+                            branch.node_cache(),
+                        )
+                        .with_record_cache(branch.records());
+                        context_of(parent, &history).await?
+                    }
+                },
+            };
+            context.record(minted);
+            context
         };
 
+        revision.tree = TreeReference::from(*tree.root().as_bytes());
+        revision.context = Some(context.clone());
+        revision.signature = Attest::new(revision.payload()).perform(env).await?;
+
         head.publish(revision, env).await?;
+
+        // Advance the branch memo so later pulls through this handle
+        // answer the context from memory.
+        contexts.insert(minted, context);
 
         Ok(Entity::from_blob(&index_hash)?)
     }
@@ -415,6 +526,7 @@ where
 
 #[cfg(test)]
 mod tests {
+
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 

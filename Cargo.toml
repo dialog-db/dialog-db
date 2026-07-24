@@ -153,6 +153,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"
 tower-http = "0.6"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 dialog-ucan-core = { path = "./rust/dialog-ucan-core" }
 dialog-ucan = { path = "./rust/dialog-ucan" }
 dialog-network = { path = "./rust/dialog-network" }

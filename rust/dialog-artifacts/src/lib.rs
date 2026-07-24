@@ -53,6 +53,10 @@ pub mod web;
 mod artifacts;
 pub use artifacts::*;
 
+pub mod history;
+mod revision;
+pub use revision::*;
+
 mod reference;
 pub use reference::*;
 
@@ -73,6 +77,9 @@ pub use state::*;
 mod blob_index;
 pub use blob_index::*;
 
+mod spill;
+pub use spill::*;
+
 mod constants;
 pub use constants::*;
 
@@ -80,6 +87,10 @@ mod key;
 pub use key::*;
 
 /// Shared tree-ops on the artifact prolly tree.
+mod buffered;
+pub use buffered::*;
+
+pub mod merge;
 pub mod tree;
 
 mod uri;

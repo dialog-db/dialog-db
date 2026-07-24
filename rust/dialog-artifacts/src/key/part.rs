@@ -1,76 +1,65 @@
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
-use crate::{
-    ATTRIBUTE_LENGTH, Attribute, DialogArtifactsError, ENTITY_LENGTH, Entity, MAXIMUM_ATTRIBUTE,
-    MAXIMUM_ENTITY, MAXIMUM_VALUE_REFERENCE, MINIMUM_ATTRIBUTE, MINIMUM_ENTITY,
-    MINIMUM_VALUE_REFERENCE, VALUE_REFERENCE_LENGTH,
-};
+use crate::{Attribute, DialogArtifactsError, Entity};
+
+/// The empty byte string: the minimum value of any variable-length component.
+const EMPTY: &[u8] = &[];
 
 /// A wrapper around a slice reference that corresponds to the [`Entity`] part
-/// of a [`KeyType`]
+/// of a [`KeyType`].
+///
+/// The slice is the entity's raw bytes (the full URI, losslessly), variable
+/// length.
 #[repr(transparent)]
-pub struct EntityKeyPart<'a>(pub &'a [u8; ENTITY_LENGTH]);
+pub struct EntityKeyPart<'a>(pub &'a [u8]);
 
 impl EntityKeyPart<'_> {
-    /// An [`EntityKeyPart`] where all bits are zero
+    /// An [`EntityKeyPart`] that is the smallest possible entity (empty).
     pub fn min() -> Self {
-        Self(&MINIMUM_ENTITY)
+        Self(EMPTY)
     }
 
-    /// An [`EntityKeyPart`] where all bits are one
-    pub fn max() -> Self {
-        Self(&MAXIMUM_ENTITY)
-    }
-
-    /// The internal array represented by this [`EntityKeyPart`]
-    pub fn raw(&self) -> &[u8; ENTITY_LENGTH] {
+    /// The raw bytes represented by this [`EntityKeyPart`].
+    pub fn raw(&self) -> &[u8] {
         self.0
     }
 }
 
 impl AsRef<[u8]> for EntityKeyPart<'_> {
     fn as_ref(&self) -> &[u8] {
-        self.0.as_ref()
+        self.0
     }
 }
 
 impl<'a> From<&'a Entity> for EntityKeyPart<'a> {
     fn from(value: &'a Entity) -> Self {
-        Self(value.key_bytes())
+        Self(value.as_str().as_bytes())
     }
 }
 
-// impl<'a> From<EntityKeyPart<'a>> for Entity {
-//     fn from(value: EntityKeyPart<'a>) -> Self {
-//         Self::from(value.0.to_owned())
-//     }
-// }
-
 /// A wrapper around a slice reference that corresponds to the [`Attribute`]
-/// part of a [`KeyType`]
+/// part of a [`KeyType`].
+///
+/// The slice is the attribute's raw `namespace/predicate` bytes, variable
+/// length.
 #[repr(transparent)]
-pub struct AttributeKeyPart<'a>(pub &'a [u8; ATTRIBUTE_LENGTH]);
+pub struct AttributeKeyPart<'a>(pub &'a [u8]);
 
 impl AttributeKeyPart<'_> {
-    /// An [`AttributeKeyPart`] where all bits are zero
+    /// An [`AttributeKeyPart`] that is the smallest possible attribute (empty).
     pub fn min() -> Self {
-        Self(&MINIMUM_ATTRIBUTE)
+        Self(EMPTY)
     }
 
-    /// An [`AttributeKeyPart`] where all bits are one
-    pub fn max() -> Self {
-        Self(&MAXIMUM_ATTRIBUTE)
-    }
-
-    /// The internal array represented by this [`AttributeKeyPart`]
-    pub fn raw(&self) -> &[u8; ATTRIBUTE_LENGTH] {
+    /// The raw bytes represented by this [`AttributeKeyPart`].
+    pub fn raw(&self) -> &[u8] {
         self.0
     }
 }
 
 impl<'a> From<&'a Attribute> for AttributeKeyPart<'a> {
     fn from(value: &'a Attribute) -> Self {
-        AttributeKeyPart(value.key_bytes())
+        AttributeKeyPart(value.as_str().as_bytes())
     }
 }
 
@@ -84,33 +73,6 @@ impl<'a> TryFrom<AttributeKeyPart<'a>> for Attribute {
 
 impl Display for AttributeKeyPart<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let parsed = String::from_utf8_lossy(self.0.as_ref())
-            .split('\u{0000}')
-            .take(1)
-            .collect::<String>();
-
-        write!(f, "{parsed}")
-    }
-}
-
-/// A wrapper around a slice reference that corresponds to the [`Value`]
-/// part of a [`KeyType`]
-#[repr(transparent)]
-pub struct ValueReferenceKeyPart<'a>(pub &'a [u8; VALUE_REFERENCE_LENGTH]);
-
-impl ValueReferenceKeyPart<'_> {
-    /// A [`ValueReferenceKeyPart`] where all bits are zero
-    pub fn min() -> Self {
-        Self(&MINIMUM_VALUE_REFERENCE)
-    }
-
-    /// A [`ValueReferenceKeyPart`] where all bits are one
-    pub fn max() -> Self {
-        Self(&MAXIMUM_VALUE_REFERENCE)
-    }
-
-    /// The internal array represented by this [`ValueKeyPart`]
-    pub fn raw(&self) -> &[u8; VALUE_REFERENCE_LENGTH] {
-        self.0
+        write!(f, "{}", String::from_utf8_lossy(self.0))
     }
 }

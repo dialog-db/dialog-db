@@ -15,12 +15,13 @@
 use async_stream::try_stream;
 use async_trait::async_trait;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Buffer, Change, ContentAddressedStorage, Delta, TreeDifference};
+use dialog_search_tree::{Buffer, ContentAddressedStorage, Delta, TreeDifference};
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    BLOB_KEY_TAG, BlobKey, Datum, DialogArtifactsError, Key, KeyBytes, State,
+    BlobKey, Datum, DialogArtifactsError, State,
+    spill::{ShipmentRef, shipment_refs},
     tree::{ArtifactTree, TreeStorageBridge},
 };
 
@@ -57,26 +58,26 @@ impl BlobRecord {
         let mut value = Vec::with_capacity(BLOB_RECORD_V1_LEN);
         value.push(self.version);
         value.extend_from_slice(&self.size.to_be_bytes());
-        // Blob entries carry only the record in `value`; the artifact-shaped
-        // fields are canonical empties and are never read (blob keys never
-        // reach the fact scan).
+        // Blob entries carry only the record in `blob`; blob keys never reach
+        // the fact scan, so the reconstruction fields do not apply.
         State::Added(Datum {
-            entity: String::new(),
-            attribute: String::new(),
-            value_type: 0,
-            value,
             cause: None,
+            blob: Some(value),
+            version: None,
+            collapsed: Vec::new(),
+            supersedes: Vec::new(),
+            retraction: false,
         })
     }
 
     /// Decode a blob record from a tree value. `Removed` (a retracted entry)
     /// decodes to `None`.
-    fn from_state(state: &State<Datum>) -> Result<Option<Self>, DialogArtifactsError> {
+    pub(crate) fn from_state(state: &State<Datum>) -> Result<Option<Self>, DialogArtifactsError> {
         let datum = match state {
             State::Added(datum) => datum,
             State::Removed => return Ok(None),
         };
-        let bytes = datum.value.as_slice();
+        let bytes = datum.blob.as_deref().unwrap_or(&[]);
         match bytes.first().copied() {
             Some(BLOB_RECORD_VERSION) if bytes.len() == BLOB_RECORD_V1_LEN => {
                 let size = u64::from_be_bytes(
@@ -139,24 +140,11 @@ where
     let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
     try_stream! {
         let difference = TreeDifference::compute(&checkpoint, &current, &storage, &storage).await?;
-        let changes = difference.changes();
-        tokio::pin!(changes);
-        for await change in changes {
-            let (entry, removed) = match change? {
-                Change::Add(entry) => (entry, false),
-                Change::Remove(entry) => (entry, true),
-            };
-            let key = Key::from(entry.key);
-            if key.tag() != BLOB_KEY_TAG {
-                continue;
-            }
-            let hash = BlobKey(key).blob_hash();
-            // Decoding rejects a malformed record; a `None` decode is a
-            // retraction tombstone, which is a reference only when removed.
-            match (removed, BlobRecord::from_state(&entry.value)?) {
-                (false, Some(_)) => yield BlobChange::Added(hash),
-                (true, _) => yield BlobChange::Removed(hash),
-                (false, None) => {}
+        let refs = shipment_refs(&difference);
+        tokio::pin!(refs);
+        for await item in refs {
+            if let ShipmentRef::Blob(change) = item? {
+                yield change;
             }
         }
     }
@@ -239,7 +227,7 @@ impl BlobIndexExt for ArtifactTree {
             + ConditionalSync,
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-        let key = KeyBytes::from(BlobKey::new(hash).into_key());
+        let key = BlobKey::new(hash).into_key();
         let transient = self
             .edit()
             .insert(key, record.into_state(), &storage)
@@ -259,7 +247,7 @@ impl BlobIndexExt for ArtifactTree {
             + ConditionalSync,
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-        let key = KeyBytes::from(BlobKey::new(hash).into_key());
+        let key = BlobKey::new(hash).into_key();
         match self.get(&key, &storage).await? {
             Some(state) => BlobRecord::from_state(&state),
             None => Ok(None),
@@ -280,14 +268,13 @@ impl BlobIndexExt for ArtifactTree {
         let tree: ArtifactTree = self;
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         try_stream! {
-            let range = KeyBytes::from(BlobKey::min().into_key())
-                ..=KeyBytes::from(BlobKey::max().into_key());
+            let range = BlobKey::min().into_key()..=BlobKey::max().into_key();
             let stream = tree.stream_range(range, &storage);
             tokio::pin!(stream);
             for await item in stream {
                 let entry = item?;
                 if let Some(record) = BlobRecord::from_state(&entry.value)? {
-                    let hash = BlobKey(Key::from(entry.key)).blob_hash();
+                    let hash = BlobKey(entry.key).blob_hash();
                     yield (hash, record);
                 }
             }

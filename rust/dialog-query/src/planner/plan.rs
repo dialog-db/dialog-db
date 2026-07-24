@@ -49,6 +49,9 @@ pub struct Header {
 /// stream logic; [`Negate`](Plan::Negate) wraps a nested `Plan` so
 /// negation filters against the lowered inner step.
 #[derive(Debug, Clone, PartialEq)]
+// The `Formula` variant inherits `FormulaQuery`'s width (see its allow
+// note); plans are transient per-query values, not bulk storage.
+#[allow(clippy::large_enum_variant)]
 pub enum Plan {
     /// Positive attribute lookup: an EAV/AEV/VAE scan with
     /// cardinality-aware winner selection folded into the wrapped
@@ -402,6 +405,37 @@ mod tests {
             kind.refinement().expect("refined").prefix.as_deref(),
             Some("did:key:"),
             "the proved prefix reaches the scan boundary"
+        );
+    }
+
+    /// The same prefix pipeline pushes a `starts-with` on the scan's *value*
+    /// variable down to the scan's value term, so the VAE value-range bound
+    /// (`ArtifactSelector::is_starting_with`) is driven by the constraint.
+    #[dialog_common::test]
+    fn it_stamps_prefix_refinements_onto_scan_values() {
+        let scan: Premise = AttributeQuery::new(
+            Term::from(the!("person/name")),
+            Term::<Entity>::var("e"),
+            Term::<String>::var("name").into(),
+            Term::blank(),
+            Some(Cardinality::One),
+        )
+        .into();
+        let predicate = Term::<Any>::var("name").starts_with("ali");
+
+        let plan = Planner::from(vec![scan, predicate])
+            .plan(&crate::Environment::new())
+            .unwrap();
+
+        let stamped = plan.steps.iter().find_map(|step| match step.as_premise() {
+            Premise::Assert(Proposition::Attribute(boxed)) => boxed.is().kind(),
+            _ => None,
+        });
+        let kind = stamped.expect("the scan's value term carries a kind");
+        assert_eq!(
+            kind.refinement().expect("refined").prefix.as_deref(),
+            Some("ali"),
+            "the proved value prefix reaches the scan boundary"
         );
     }
 

@@ -42,7 +42,7 @@ pub use remote::*;
 // without linking `dialog-query` or the storage/transport stack.
 // Re-exported here at their historical
 // `dialog_repository::{Revision, TreeReference}` paths.
-pub use dialog_capability::{EMPTY_TREE_HASH, Revision, TreeReference};
+pub use dialog_artifacts::{EMPTY_TREE_HASH, Revision, TreeReference};
 
 /// A repository scoped to a specific subject.
 ///
@@ -189,6 +189,7 @@ impl RepositoryExt for SpaceHandle {
 }
 #[cfg(test)]
 mod tests {
+
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -600,6 +601,7 @@ mod tests {
     }
 
     mod delegation_tests {
+
         use super::*;
         use crate::helpers::{test_operator_with_profile, unique_name};
         use dialog_effects::memory as fx_memory;
@@ -746,6 +748,7 @@ mod tests {
     }
 
     mod query_engine {
+
         use crate::helpers::{test_operator_with_profile, test_repo};
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term};
@@ -804,12 +807,12 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_resolves_only_latest_name_target_via_name_concept() -> anyhow::Result<()> {
-            /// The `dialog.meta/named-entity` attribute — the entity a
+            /// The `app.meta/named-entity` attribute — the entity a
             /// name currently points at. Cardinality `one` (the derive
             /// default), so re-pointing a name supersedes the prior
             /// claim instead of accumulating.
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
+            #[domain("app.meta")]
             pub struct NamedEntity(pub Entity);
 
             /// A user-published name — an `id:<n>` entity carrying a
@@ -906,7 +909,7 @@ mod tests {
             // both — cardinality-many accumulates, it does not collapse.
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
             #[cardinality(many)]
-            #[domain("dialog.meta")]
+            #[domain("app.meta")]
             pub struct Tag(pub String);
 
             #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -969,7 +972,7 @@ mod tests {
             // must be a no-op at the storage layer: the tree must not
             // change, so the revision's tree hash stays the same.
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
+            #[domain("app.meta")]
             pub struct NamedEntity(pub Entity);
 
             #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1033,18 +1036,20 @@ mod tests {
     }
 
     mod query_session {
+
         use super::query_engine::{Employee, employee};
         use crate::helpers::{test_operator_with_profile, test_repo};
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
         mod branch_meta {
+
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
+            #[domain("app.meta")]
             pub struct Name(pub String);
 
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[domain("dialog.meta")]
+            #[domain("app.meta")]
             pub struct RevisionHash(pub String);
         }
 
@@ -1193,7 +1198,7 @@ mod tests {
             branch
                 .transaction()
                 .assert(
-                    the!("dialog.meta/name")
+                    the!("app.meta/name")
                         .of(alice.clone())
                         .is("Alice".to_string()),
                 )
@@ -1232,15 +1237,15 @@ mod tests {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-            let origin = schema::Origin::new(profile.did(), branch.of().clone());
-            let expected = schema::Branch::new(&origin, "main");
+            let replica = schema::Replica::new(profile.did(), branch.of().clone());
+            let expected = schema::Branch::new(&replica, "main");
 
             let results: Vec<schema::Branch> = branch
                 .query()
                 .select(Query::<schema::Branch> {
                     this: expected.this.clone().into(),
                     name: Term::var("name"),
-                    origin: Term::var("origin"),
+                    replica: Term::var("replica"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1249,13 +1254,13 @@ mod tests {
             assert_eq!(results.len(), 1, "schema::Branch must auto-surface");
             assert_eq!(results[0].this, expected.this);
             assert_eq!(results[0].name.0, "main");
-            assert_eq!(results[0].origin.0, origin.this);
+            assert_eq!(results[0].replica.0, replica.this);
             Ok(())
         }
 
         #[dialog_common::test]
         async fn it_auto_includes_origin_in_metadata() -> anyhow::Result<()> {
-            // branch.query() should also auto-surface the schema::Origin
+            // branch.query() should also auto-surface the schema::Replica
             // anchoring the branch — entity is (profile, subject)-derived
             // and carries the two DIDs as attributes.
             use crate::schema;
@@ -1264,11 +1269,11 @@ mod tests {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-            let expected = schema::Origin::new(profile.did(), branch.of().clone());
+            let expected = schema::Replica::new(profile.did(), branch.of().clone());
 
-            let results: Vec<schema::Origin> = branch
+            let results: Vec<schema::Replica> = branch
                 .query()
-                .select(Query::<schema::Origin> {
+                .select(Query::<schema::Replica> {
                     this: expected.this.clone().into(),
                     subject: Term::var("subject"),
                     profile: Term::var("profile"),
@@ -1277,7 +1282,7 @@ mod tests {
                 .try_vec()
                 .await?;
 
-            assert_eq!(results.len(), 1, "schema::Origin must auto-surface");
+            assert_eq!(results.len(), 1, "schema::Replica must auto-surface");
             assert_eq!(results[0].this, expected.this);
             assert_eq!(results[0].subject.0, branch.of().this());
             assert_eq!(results[0].profile.0, profile.did().this());
@@ -1302,16 +1307,16 @@ mod tests {
                 .await?;
             // Reload so the revision cell reflects the commit.
             let branch = repo.branch("main").load().perform(&operator).await?;
-            let origin = schema::Origin::new(profile.did(), branch.of().clone());
-            let branch_concept = schema::Branch::new(&origin, "main");
+            let replica = schema::Replica::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&replica, "main");
 
             let results: Vec<schema::BranchRevision> = branch
                 .query()
                 .select(Query::<schema::BranchRevision> {
                     this: branch_concept.this.clone().into(),
                     tree: Term::var("tree"),
-                    period: Term::var("period"),
-                    moment: Term::var("moment"),
+                    edition: Term::var("edition"),
+                    revision: Term::var("revision"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1335,16 +1340,16 @@ mod tests {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-            let origin = schema::Origin::new(profile.did(), branch.of().clone());
-            let branch_concept = schema::Branch::new(&origin, "main");
+            let replica = schema::Replica::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&replica, "main");
 
             let results: Vec<schema::BranchRevision> = branch
                 .query()
                 .select(Query::<schema::BranchRevision> {
                     this: branch_concept.this.into(),
                     tree: Term::var("tree"),
-                    period: Term::var("period"),
-                    moment: Term::var("moment"),
+                    edition: Term::var("edition"),
+                    revision: Term::var("revision"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1369,8 +1374,8 @@ mod tests {
             let (operator, profile) = test_operator_with_profile().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
-            let origin = schema::Origin::new(profile.did(), branch.of().clone());
-            let branch_concept = schema::Branch::new(&origin, "main");
+            let replica = schema::Replica::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&replica, "main");
 
             // First commit.
             branch
@@ -1389,8 +1394,8 @@ mod tests {
                 .select(Query::<schema::BranchRevision> {
                     this: branch_concept.this.clone().into(),
                     tree: Term::var("tree"),
-                    period: Term::var("period"),
-                    moment: Term::var("moment"),
+                    edition: Term::var("edition"),
+                    revision: Term::var("revision"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1415,8 +1420,8 @@ mod tests {
                 .select(Query::<schema::BranchRevision> {
                     this: branch_concept.this.into(),
                     tree: Term::var("tree"),
-                    period: Term::var("period"),
-                    moment: Term::var("moment"),
+                    edition: Term::var("edition"),
+                    revision: Term::var("revision"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1426,6 +1431,206 @@ mod tests {
                 after_second[0].tree.0, first_tree,
                 "tree hash must change after the second commit, not be the stale first one"
             );
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_projects_revision_attribution_from_the_signed_record() -> anyhow::Result<()> {
+            // schema::Revision has no stored facts: a built-in rule
+            // scans the head's `dialog.db/revision` record and projects
+            // its fields through the `dialog/revision` formula, which
+            // verifies the issuer's signature before projecting. The
+            // overlay's BranchRevision carries the revision entity — the
+            // join key from "where is this branch?" to this concept.
+            use crate::schema;
+            use crate::schema::DidExt as _;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+            let branch = repo.branch("main").load().perform(&operator).await?;
+            let head = branch.revision().expect("branch has a revision");
+
+            // The overlay hands out the join key.
+            let replica = schema::Replica::new(profile.did(), branch.of().clone());
+            let branch_concept = schema::Branch::new(&replica, "main");
+            let pointers: Vec<schema::BranchRevision> = branch
+                .query()
+                .select(Query::<schema::BranchRevision> {
+                    this: branch_concept.this.clone().into(),
+                    tree: Term::var("tree"),
+                    edition: Term::var("edition"),
+                    revision: Term::var("revision"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(pointers.len(), 1);
+            let revision_entity = pointers[0].revision.0.clone();
+            assert_eq!(revision_entity, head.entity());
+
+            // ... and the concept answers "who committed this?".
+            let rows: Vec<schema::Revision> = branch
+                .query()
+                .select(Query::<schema::Revision> {
+                    this: revision_entity.into(),
+                    branch: Term::var("branch"),
+                    issuer: Term::var("issuer"),
+                    authority: Term::var("authority"),
+                    edition: Term::var("edition"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(rows.len(), 1, "the revision projects exactly once");
+            assert_eq!(rows[0].issuer.0, operator.did().this());
+            assert_eq!(rows[0].authority.0, profile.did().this());
+            assert_eq!(rows[0].branch.0, head.branch);
+            assert_eq!(rows[0].edition.0, head.edition.value());
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_projects_the_revision_dag_edge() -> anyhow::Result<()> {
+            // schema::RevisionParent derives the DAG edge from the same
+            // signed record: one row per parent, none for genesis.
+            use crate::schema;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+            let branch = repo.branch("main").load().perform(&operator).await?;
+            let first = branch.revision().expect("first revision");
+
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Bob".to_string()))
+                .commit()
+                .perform(&operator)
+                .await?;
+            let branch = repo.branch("main").load().perform(&operator).await?;
+            let second = branch.revision().expect("second revision");
+
+            let edges: Vec<schema::RevisionParent> = branch
+                .query()
+                .select(Query::<schema::RevisionParent> {
+                    this: second.entity().into(),
+                    parent: Term::var("parent"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(edges.len(), 1, "a sequential commit has one parent");
+            assert_eq!(edges[0].parent.0, first.entity());
+
+            let genesis: Vec<schema::RevisionParent> = branch
+                .query()
+                .select(Query::<schema::RevisionParent> {
+                    this: first.entity().into(),
+                    parent: Term::var("parent"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert!(genesis.is_empty(), "a genesis revision has no parents");
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
+        async fn it_derives_transitive_revision_ancestry() -> anyhow::Result<()> {
+            // schema::RevisionAncestor closes RevisionParent
+            // transitively: a recursive built-in rule, evaluated by the
+            // semi-naive fixpoint, walks the signature-verified DAG
+            // edges however far back they reach.
+            use crate::schema;
+
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let mut revisions = Vec::new();
+            for name in ["Alice", "Bob", "Carol"] {
+                branch
+                    .transaction()
+                    .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
+                    .commit()
+                    .perform(&operator)
+                    .await?;
+                revisions.push(branch.revision().expect("branch has a revision"));
+            }
+            let [first, second, third] = &revisions[..] else {
+                unreachable!("three commits were made");
+            };
+
+            // Everything reachable from the head: both prior revisions,
+            // exactly once each.
+            let mut reachable: Vec<Entity> = branch
+                .query()
+                .select(Query::<schema::RevisionAncestor> {
+                    this: third.entity().into(),
+                    ancestor: Term::var("ancestor"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?
+                .into_iter()
+                .map(|row| row.ancestor.0)
+                .collect();
+            reachable.sort();
+            let mut expected = vec![first.entity(), second.entity()];
+            expected.sort();
+            assert_eq!(reachable, expected, "the head reaches both priors");
+
+            // Membership: binding both ends asks "is X an ancestor of Y?".
+            let is_ancestor: Vec<schema::RevisionAncestor> = branch
+                .query()
+                .select(Query::<schema::RevisionAncestor> {
+                    this: third.entity().into(),
+                    ancestor: first.entity().into(),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(is_ancestor.len(), 1, "genesis is an ancestor of the head");
+
+            // ... and ancestry is directed: the head is not an ancestor
+            // of genesis, and genesis has no ancestors at all.
+            let inverted: Vec<schema::RevisionAncestor> = branch
+                .query()
+                .select(Query::<schema::RevisionAncestor> {
+                    this: first.entity().into(),
+                    ancestor: third.entity().into(),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert!(inverted.is_empty(), "ancestry does not run forward");
+            let genesis: Vec<schema::RevisionAncestor> = branch
+                .query()
+                .select(Query::<schema::RevisionAncestor> {
+                    this: first.entity().into(),
+                    ancestor: Term::var("ancestor"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert!(genesis.is_empty(), "a genesis revision has no ancestors");
+
             Ok(())
         }
 
@@ -1477,7 +1682,7 @@ mod tests {
                 .select(Query::<schema::Branch> {
                     this: Term::var("this"),
                     name: Term::var("name"),
-                    origin: Term::var("origin"),
+                    replica: Term::var("replica"),
                 })
                 .perform(&operator)
                 .try_vec()
@@ -1486,10 +1691,10 @@ mod tests {
             assert_eq!(branches[0].name.0, "main");
 
             // (2) What's my origin (subject, profile)?
-            let origins: Vec<schema::Origin> = branch
+            let origins: Vec<schema::Replica> = branch
                 .query()
-                .select(Query::<schema::Origin> {
-                    this: branches[0].origin.0.clone().into(),
+                .select(Query::<schema::Replica> {
+                    this: branches[0].replica.0.clone().into(),
                     subject: Term::var("subject"),
                     profile: Term::var("profile"),
                 })
@@ -1536,9 +1741,9 @@ mod tests {
             let session_entity = schema::Session::entity();
 
             // Build the expected branch entities for the two in-scope branches.
-            let origin = schema::Origin::new(profile.did(), main.of().clone());
-            let main_branch = schema::Branch::new(&origin, "main");
-            let feature_branch = schema::Branch::new(&origin, "feature");
+            let replica = schema::Replica::new(profile.did(), main.of().clone());
+            let main_branch = schema::Branch::new(&replica, "main");
+            let feature_branch = schema::Branch::new(&replica, "feature");
             let mut expected_branches = vec![main_branch.this.clone(), feature_branch.this.clone()];
             expected_branches.sort();
 
@@ -1643,6 +1848,7 @@ mod tests {
         }
 
         mod cardinality_one_attr {
+
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
             #[domain("person")]
             pub struct Nickname(pub String);
@@ -1740,7 +1946,7 @@ mod tests {
             use dialog_artifacts::selector::Constrained;
             use dialog_artifacts::{
                 ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey,
-                Update as _, Value, sort_key,
+                Update as _, Value, default_sort_key,
             };
             use dialog_capability::Provider;
             use futures_util::StreamExt as _;
@@ -1835,7 +2041,7 @@ mod tests {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>, DialogArtifactsError>>()?;
-                Ok(items.iter().map(sort_key).collect())
+                Ok(items.iter().map(default_sort_key).collect())
             }
 
             let scan_modes: &[(&str, ArtifactSelector<Constrained>)] = &[
@@ -1879,6 +2085,7 @@ mod tests {
     }
 
     mod profile_as_repository {
+
         use super::*;
         use crate::helpers::test_operator_with_profile;
         use dialog_query::{Entity, the};

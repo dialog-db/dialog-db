@@ -74,13 +74,7 @@ impl StatefulWidget for &DiagnoseTreeExplore {
             .style(Style::new().fg(Color::Cyan));
 
             match promise {
-                Promise::Resolved(TreeNode::Branch {
-                    upper_bound,
-                    children,
-                }) => {
-                    let mut upper_bound = upper_bound.to_base58();
-                    upper_bound.truncate(8);
-
+                Promise::Resolved(TreeNode::Branch { children, .. }) => {
                     let branch_type = if is_root { "Root" } else { "Branch" };
 
                     let bullet = match is_expanded {

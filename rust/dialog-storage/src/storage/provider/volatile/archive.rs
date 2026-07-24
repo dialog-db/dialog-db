@@ -74,6 +74,18 @@ impl Provider<Import> for Volatile {
                 catalog.to_string(),
                 buffer.blake3_hash().as_bytes().to_base58(),
             );
+            // Measurement-only (uncommitted): a block whose key already
+            // exists was re-encoded and re-hashed only to dedupe here.
+            let duplicate = session.archive.contains_key(&key);
+            crate::DUPLICATE_SETS
+                .fetch_add(u64::from(duplicate), core::sync::atomic::Ordering::Relaxed);
+            crate::TOTAL_SETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::dup_audit::note_store(
+                buffer.blake3_hash().as_bytes(),
+                "import",
+                buffer.as_ref().len(),
+                duplicate,
+            );
             // Content-addressed storage is idempotent
             session
                 .archive

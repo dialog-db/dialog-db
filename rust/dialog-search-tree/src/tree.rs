@@ -18,8 +18,8 @@ use rkyv::{
 
 use crate::{
     Accessor, Buffer, Cache, ContentAddressedStorage, DialogSearchTreeError, Differential,
-    Distribution, Entry, Geometric, Key, SearchOptions, SearchResult, SymmetryWith, TreeDifference,
-    TreeWalker, Value, into_owned,
+    Distribution, Entry, Geometric, Key, Manifest, PersistentNode, SearchOptions, SearchResult,
+    TreeDifference, TreeWalker, Value, into_owned,
 };
 
 /// A key-value store backed by a ranked prolly tree with content-addressed
@@ -52,8 +52,6 @@ use crate::{
 pub struct PersistentTree<Key, Value, D = Geometric>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
     D: Distribution,
 {
@@ -70,8 +68,6 @@ where
 impl<Key, Value, D> Clone for PersistentTree<Key, Value, D>
 where
     Key: self::Key,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord,
     Value: self::Value,
     D: Distribution,
 {
@@ -88,22 +84,7 @@ where
 
 impl<Key, Value, D> PersistentTree<Key, Value, D>
 where
-    Key: self::Key
-        + ConditionalSync
-        + 'static
-        + PartialOrd<Key::Archived>
-        + PartialEq<Key::Archived>
-        + for<'a> Serialize<
-            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-        >,
-    Key::Archived: PartialOrd<Key>
-        + PartialEq<Key>
-        + SymmetryWith<Key>
-        + Ord
-        + ConditionalSync
-        + for<'a> CheckBytes<
-            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-        > + Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
+    Key: self::Key + ConditionalSync + 'static,
     Value: self::Value
         + ConditionalSync
         + 'static
@@ -122,6 +103,14 @@ where
     /// used to reconstruct the tree from storage or to compare tree versions.
     pub fn root(&self) -> &Blake3Hash {
         &self.root
+    }
+
+    /// Returns a handle to this tree's node cache, shared by reference count.
+    ///
+    /// Used to open a [`HitchhikerTree`](crate::HitchhikerTree) over this tree
+    /// that shares its warm cache.
+    pub fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
+        self.node_cache.clone()
     }
 
     /// Creates a new empty [`PersistentTree`] with no entries.
@@ -187,8 +176,19 @@ where
         // (each layer is an Arc-backed node plus a child index), so the read
         // pays nothing for the siblings an update would later decode.
         if let Some(result) = self.search(key, storage, SearchOptions::default()).await? {
-            if let Some(entry) = result.leaf.body()?.find_entry(key)? {
-                into_owned(&entry.value).map(|value| Some(value))
+            // A write lands in an ancestor's buffer and only reaches the leaf
+            // when that buffer overflows, so a buffered op on the path is more
+            // recent than whatever the leaf holds: an assert shadows the stored
+            // value, a retract hides it.
+            if let Some(op) = crate::pending_for_key(&result.path, key.as_ref())? {
+                return Ok(match op {
+                    crate::NoveltyOp::Assert(value) => Some(value),
+                    crate::NoveltyOp::Retract => None,
+                });
+            }
+            let segment = result.leaf.as_segment()?;
+            if let Some(at) = segment.find::<Key>(key.as_ref())? {
+                into_owned(segment.value_at(at)?).map(Some)
             } else {
                 Ok(None)
             }
@@ -317,7 +317,33 @@ where
         }
     }
 
-    /// Opens a batch of in-place edits over this tree.
+    /// Reads this tree's format [`Manifest`] out of its root node.
+    ///
+    /// The manifest is data, not code: it is inlined into every node, so the
+    /// tree's real format constants are recovered by loading the root and
+    /// reading its header. An empty tree (a null root) has no node to read
+    /// from and therefore no format of its own yet, so it reports
+    /// [`Manifest::default`]: the format a first write would stamp into it.
+    /// This mirrors the fallback the stitch path uses when no source piece has
+    /// a manifest to inherit.
+    pub async fn manifest<Backend>(
+        &self,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Manifest, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        if &self.root == NULL_BLAKE3_HASH {
+            return Ok(Manifest::default());
+        }
+        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+        let node: PersistentNode<Key, Value> = accessor.get_node(&self.root).await?;
+        node.manifest()
+    }
+
+    /// Opens a batch of in-place edits over this tree, adopting the tree's own
+    /// format [`Manifest`].
     ///
     /// The returned [`TransientTree`] holds the tree's spine in transient form;
     /// apply [`insert`](TransientTree::insert) / [`delete`](TransientTree::delete)
@@ -325,9 +351,41 @@ where
     /// back into a [`PersistentTree`]. A single batch and the equivalent sequence
     /// of one-operation batches each persisted in turn converge on the same root.
     ///
+    /// This reads the root node to recover the tree's manifest (see
+    /// [`manifest`](Self::manifest)), so an edit of a tree built under
+    /// non-default format constants preserves that format instead of silently
+    /// rewriting it under the defaults. Prefer this over the synchronous
+    /// [`edit`](Self::edit) wherever an `await` is available.
+    pub async fn edit_with_manifest<Backend>(
+        &self,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<TransientTree<Key, Value, D>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        let manifest = self.manifest(storage).await?;
+        Ok(TransientTree::with_manifest(
+            self.root.clone(),
+            self.node_cache.clone(),
+            manifest,
+        ))
+    }
+
+    /// Opens a batch of in-place edits over this tree under the *default*
+    /// format [`Manifest`].
+    ///
     /// Opening is synchronous and touches no storage: the root is loaded lazily
     /// by the first edit that descends into it. Equivalent to
     /// [`TransientTree::from`].
+    ///
+    /// Because recovering a tree's real manifest means loading its root node,
+    /// which is async, this entry cannot do it and assumes the defaults. It is
+    /// therefore only sound for a tree whose manifest IS [`Manifest::default`]
+    /// (which today is every tree, since nothing constructs another). Editing a
+    /// non-default tree through this entry rewrites the touched path under the
+    /// default format. Use [`edit_with_manifest`](Self::edit_with_manifest)
+    /// whenever the caller can await.
     pub fn edit(&self) -> TransientTree<Key, Value, D> {
         TransientTree::new(self.root.clone(), self.node_cache.clone())
     }
@@ -366,15 +424,6 @@ where
 impl<Key, Value, D> From<Blake3Hash> for PersistentTree<Key, Value, D>
 where
     Key: self::Key + ConditionalSync + 'static,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord + ConditionalSync,
-    Key::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Key::Archived: Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
-    Key: for<'a> Serialize<
-        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-    >,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -393,15 +442,6 @@ where
 impl<Key, Value, D> From<&PersistentTree<Key, Value, D>> for TransientTree<Key, Value, D>
 where
     Key: self::Key + ConditionalSync + 'static,
-    Key: PartialOrd<Key::Archived> + PartialEq<Key::Archived>,
-    Key::Archived: PartialOrd<Key> + PartialEq<Key> + SymmetryWith<Key> + Ord + ConditionalSync,
-    Key::Archived: for<'a> CheckBytes<
-        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-    >,
-    Key::Archived: Deserialize<Key, Strategy<Pool, rkyv::rancor::Error>>,
-    Key: for<'a> Serialize<
-        Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
-    >,
     Value: self::Value + ConditionalSync + 'static,
     Value::Archived: for<'a> CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -424,10 +464,103 @@ mod tests {
     use anyhow::Result;
     use dialog_storage::MemoryStorageBackend;
 
-    use crate::{ContentAddressedStorage, Delta, PersistentTree};
+    use crate::{Accessor, ContentAddressedStorage, Delta, PersistentTree, Scale};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A real tree's root scale estimates its real entry count, within the
+    /// `sqrt(2)` bound, after a genuine build-and-persist round trip. This is
+    /// the end-to-end property the columnar `scales` field exists to provide:
+    /// the estimate must survive serialization and the bottom-up seal, and it
+    /// must be readable from the root node alone without descending.
+    #[dialog_common::test]
+    async fn it_estimates_tree_size_from_the_root_alone() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+
+        // Enough entries to force several levels, so the estimate is a sum of
+        // sums rather than a single leaf's count.
+        const COUNT: u32 = 2_000;
+
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+        let mut edit = tree.edit();
+        for i in 0..COUNT {
+            edit = edit
+                .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        tree = edit.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let accessor = Accessor::new(tree.node_cache(), storage.clone());
+        let root = accessor.get_node::<[u8; 4], Vec<u8>>(tree.root()).await?;
+        let estimate = root.scale()?.estimate();
+
+        assert!(
+            estimate >= COUNT as u64,
+            "scale must be an upper bound: {estimate} < {COUNT}"
+        );
+        // Error compounds by up to sqrt(2) per level (see `Scale`), so on a
+        // tree of this size the estimate can legitimately sit a small multiple
+        // above the truth. What matters for planning is that it stays the
+        // right order of magnitude rather than exact.
+        assert!(
+            estimate < COUNT as u64 * 4,
+            "scale drifted more than an order of magnitude: {estimate} vs {COUNT}"
+        );
+
+        Ok(())
+    }
+
+    /// Novelty is excluded from a node's scale. A buffered op has not reached
+    /// the subtree it is destined for, so counting it at the node that holds
+    /// the buffer would double-count it once it flushes.
+    #[dialog_common::test]
+    async fn it_excludes_pending_novelty_from_the_scale() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut delta = Delta::zero();
+
+        let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
+        let mut edit = tree.edit();
+        for i in 0..500u32 {
+            edit = edit
+                .insert(i.to_le_bytes(), i.to_le_bytes().to_vec(), &storage)
+                .await?;
+        }
+        tree = edit.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        let accessor = Accessor::new(tree.node_cache(), storage.clone());
+        let root = accessor.get_node::<[u8; 4], Vec<u8>>(tree.root()).await?;
+        let flushed = root.scale()?;
+
+        // A canonical tree carries no novelty, so its scale is a pure function
+        // of stored entries: re-reading it is stable.
+        assert_eq!(root.scale()?, flushed, "scale must be deterministic");
+        assert!(!flushed.is_empty());
+
+        Ok(())
+    }
+
+    /// An empty subtree is distinguishable from a single-entry one. If these
+    /// collapsed, "is this range empty" and "does it hold one entry" would be
+    /// the same question, and a planner could wrongly skip a non-empty range.
+    #[dialog_common::test]
+    async fn it_distinguishes_empty_from_single_entry_subtrees() -> Result<()> {
+        assert!(Scale::of(0).is_empty());
+        assert!(!Scale::of(1).is_empty());
+        assert_ne!(Scale::of(0), Scale::of(1));
+        Ok(())
+    }
 
     #[dialog_common::test]
     async fn it_retrieves_inserted_values() -> Result<()> {
@@ -459,6 +592,145 @@ mod tests {
         // Verify non-existent keys return None
         let missing = tree.get(&200u32.to_le_bytes(), &storage).await?;
         assert_eq!(missing, None);
+
+        Ok(())
+    }
+
+    /// A key type whose component layout is dispatched by a leading tag byte,
+    /// like the dialog artifact key's EAV/AEV/VAE orderings. Two layouts:
+    /// tag 0 puts the 2-byte arena field first, tag 1 puts the 1-byte
+    /// dictionary field first. Persisting keys of both tags into one tree and
+    /// reading them all back proves the tag-dispatched columnar codec.
+    mod tag_dispatched {
+        use crate::{Component, DialogSearchTreeError, Key, Schema};
+
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub(super) struct TaggedKey(pub [u8; 4]);
+
+        // tag 0: tag(1) ++ arena(2) ++ dict(1)
+        const LAYOUT0: &[Component] = &[
+            Component::dictionary(1),
+            Component::arena(2),
+            Component::dictionary(1),
+        ];
+        // tag 1: tag(1) ++ dict(1) ++ arena(2)
+        const LAYOUT1: &[Component] = &[
+            Component::dictionary(1),
+            Component::dictionary(1),
+            Component::arena(2),
+        ];
+
+        impl AsRef<[u8]> for TaggedKey {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+
+        impl Key for TaggedKey {
+            fn try_from_bytes(bytes: &[u8]) -> Result<Self, DialogSearchTreeError> {
+                bytes
+                    .try_into()
+                    .map(TaggedKey)
+                    .map_err(|_| DialogSearchTreeError::Encoding("bad tagged key".into()))
+            }
+
+            fn min() -> Self {
+                TaggedKey([0; 4])
+            }
+
+            fn max() -> Self {
+                TaggedKey([u8::MAX; 4])
+            }
+
+            fn layout(&self) -> u8 {
+                self.0[0]
+            }
+
+            fn schema(layout: u8) -> Schema {
+                match layout {
+                    0 => Schema::new(LAYOUT0),
+                    _ => Schema::new(LAYOUT1),
+                }
+            }
+
+            fn components<'a>(&'a self, out: &mut Vec<&'a [u8]>) {
+                let widths: [usize; 3] = if self.0[0] == 0 { [1, 2, 1] } else { [1, 1, 2] };
+                let mut at = 0;
+                for width in widths {
+                    out.push(&self.0[at..at + width]);
+                    at += width;
+                }
+            }
+
+            fn components_of<'a>(
+                bytes: &'a [u8],
+                layout: u8,
+                out: &mut Vec<&'a [u8]>,
+            ) -> Result<(), DialogSearchTreeError> {
+                let widths: [usize; 3] = if layout == 0 { [1, 2, 1] } else { [1, 1, 2] };
+                let mut at = 0;
+                for width in widths {
+                    out.push(&bytes[at..at + width]);
+                    at += width;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[dialog_common::test]
+    async fn it_round_trips_tag_dispatched_layouts() -> Result<()> {
+        use tag_dispatched::TaggedKey;
+
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = PersistentTree::<TaggedKey, Vec<u8>>::empty();
+        let mut delta = Delta::zero();
+
+        // Keys of both tags. Tag sorts first, so tag-0 keys form one run of
+        // leaves and tag-1 keys another; each leaf is single-layout.
+        let mut keys: Vec<TaggedKey> = Vec::new();
+        for tag in 0u8..2 {
+            for a in 0u8..16 {
+                for b in 0u8..8 {
+                    keys.push(TaggedKey([tag, a, b, (a ^ b) % 4]));
+                }
+            }
+        }
+        keys.sort();
+
+        for key in &keys {
+            tree = tree
+                .edit()
+                .insert(key.clone(), key.0.to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                storage
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        // Every key reads back under its own layout.
+        for key in &keys {
+            assert_eq!(
+                tree.get(key, &storage).await?,
+                Some(key.0.to_vec()),
+                "tagged key {:?} must round-trip",
+                key.0
+            );
+        }
+
+        // A full scan yields every key in order, decoding both layouts.
+        use futures_util::StreamExt;
+        let scanned: Vec<TaggedKey> = tree
+            .stream(&storage)
+            .map(|entry| entry.map(|entry| entry.key))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+        assert_eq!(scanned, keys, "scan must yield all keys, both layouts");
 
         Ok(())
     }

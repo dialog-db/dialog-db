@@ -67,8 +67,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::tree::{TreeStorageBridge, selector_range};
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, KeyBytes, State};
+use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled, selector_range};
+use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Key, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -89,7 +89,8 @@ use futures_util::TryStreamExt as _;
 use super::session::{QueryEnv, QueryLayer};
 use crate::layer::tombstones_from;
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, Revision,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt as _, Revision, Upstream,
 };
 
 /// The demand cover of one evaluation: every index key range the
@@ -99,19 +100,26 @@ use crate::{
 #[derive(Clone, Debug, Default)]
 pub struct Demand {
     /// Ranges read by fact scans: the query's data demand.
-    facts: Arc<Mutex<Vec<RangeInclusive<KeyBytes>>>>,
+    facts: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
     /// Ranges read by rule-discovery scans (`db.rule/*`). Kept
     /// apart because a change here can install a rule, which can
     /// affect any row — it invalidates the whole result, not one
     /// entity's slice.
-    rules: Arc<Mutex<Vec<RangeInclusive<KeyBytes>>>>,
+    rules: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
 }
 
 /// Insert a range into a cover, merging overlaps: the cover stays a
 /// sorted list of disjoint intervals, so it cannot grow beyond the
 /// number of genuinely distinct demanded regions no matter how many
 /// (nested, repeated) selectors record into it.
-fn record_range(ranges: &Mutex<Vec<RangeInclusive<KeyBytes>>>, range: RangeInclusive<KeyBytes>) {
+/// The default key format, used where a demand range must be built without a
+/// storage handle to read the tree's real manifest. See [`Demand::record`] for
+/// why that is sound today and what it costs later.
+fn default_manifest() -> dialog_search_tree::Manifest {
+    dialog_search_tree::Manifest::default()
+}
+
+fn record_range(ranges: &Mutex<Vec<RangeInclusive<Key>>>, range: RangeInclusive<Key>) {
     let mut ranges = ranges.lock().expect("demand lock");
     let (mut start, mut end) = range.into_inner();
     // Absorb every existing interval the new one overlaps.
@@ -120,8 +128,8 @@ fn record_range(ranges: &Mutex<Vec<RangeInclusive<KeyBytes>>>, range: RangeInclu
         if *existing.start() > end || *existing.end() < start {
             merged.push(existing);
         } else {
-            start = start.min(*existing.start());
-            end = end.max(*existing.end());
+            start = start.min(existing.start().clone());
+            end = end.max(existing.end().clone());
         }
     }
     merged.push(start..=end);
@@ -138,21 +146,33 @@ impl Demand {
     /// Record a fact scan's demanded range. The range covers
     /// everything the selector's scan would touch — including where
     /// no entries exist, so misses are demanded too.
+    ///
+    /// The range is built under the DEFAULT format [`Manifest`] rather than the
+    /// branch tree's own. `Demand` is built by the synchronous
+    /// [`Branch::subscribe`](crate::Branch::subscribe), which has no storage
+    /// handle and so cannot read a manifest. This is sound only while every
+    /// tree carries the default manifest, which is the case today (nothing
+    /// constructs another). Making manifests configurable requires the
+    /// subscription to carry its branch's manifest instead: a demand range
+    /// built under the wrong `inline_n` or `spill_prefix` brackets the wrong
+    /// keys for a value-constrained selector, so a write inside the real
+    /// scanned range would fail to invalidate the reader.
     pub(crate) fn record(&self, selector: &ArtifactSelector<Constrained>) {
-        record_range(&self.facts, selector_range(selector));
+        record_range(&self.facts, selector_range(selector, &default_manifest()));
     }
 
     /// Record a rule-discovery scan's demanded range.
+    /// Carries the same default-manifest caveat as [`Demand::record`].
     pub(crate) fn record_rules(&self, selector: &ArtifactSelector<Constrained>) {
-        record_range(&self.rules, selector_range(selector));
+        record_range(&self.rules, selector_range(selector, &default_manifest()));
     }
 
     /// Whether the key falls inside any recorded range.
-    pub fn covers(&self, key: &KeyBytes) -> bool {
+    pub fn covers(&self, key: &Key) -> bool {
         self.covers_facts(key) || self.covers_rules(key)
     }
 
-    fn covers_facts(&self, key: &KeyBytes) -> bool {
+    fn covers_facts(&self, key: &Key) -> bool {
         self.facts
             .lock()
             .expect("demand lock")
@@ -160,7 +180,7 @@ impl Demand {
             .any(|range| range.contains(key))
     }
 
-    fn covers_rules(&self, key: &KeyBytes) -> bool {
+    fn covers_rules(&self, key: &Key) -> bool {
         self.rules
             .lock()
             .expect("demand lock")
@@ -170,7 +190,7 @@ impl Demand {
 
     /// A snapshot of every recorded range (facts and rules): the
     /// scope a cover-gated tree diff walks.
-    pub(crate) fn ranges(&self) -> Vec<RangeInclusive<KeyBytes>> {
+    pub(crate) fn ranges(&self) -> Vec<RangeInclusive<Key>> {
         let mut ranges = self.facts.lock().expect("demand lock").clone();
         ranges.extend(self.rules.lock().expect("demand lock").iter().cloned());
         ranges
@@ -480,7 +500,26 @@ where
             return Ok(Touched::Nothing);
         }
 
-        let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), None);
+        // Load the remote if the branch tracks one, exactly as a select does:
+        // a pull replicates tree nodes along changed paths but never spilled
+        // value blocks, so the first poll after a pull that lands a spilled
+        // fact inside the cover must be able to read the block through the
+        // remote. Failing to load the remote (e.g. no credentials) is
+        // non-fatal — the local archive alone may still satisfy the poll.
+        let remote = match self.branch.upstream() {
+            Some(Upstream::Remote { remote: name, .. }) => self
+                .branch
+                .subject()
+                .remote(name)
+                .load()
+                .perform(env)
+                .await
+                .ok(),
+            _ => None,
+        };
+        let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), remote);
+        // Keep the raw backend to fetch spilled value blocks by reference.
+        let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
         let previous =
             Index::from_hash_with_cache(NodeHash::from(pinned), self.branch.node_cache());
@@ -513,16 +552,21 @@ where
             // at the same key.
             let arriving = matches!(&change, Change::Add(_));
             if let State::Added(datum) = &entry.value {
+                let spilled = fetch_spilled(&raw_store, &entry.key)
+                    .await
+                    .map_err(|error| EvaluationError::Store(format!("spilled fetch: {error:?}")))?;
+                let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
+                    .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
+                // Dedup on the fact's identity (entity, attribute, value), all
+                // now reconstructed from the key.
                 if !seen.insert((
                     arriving,
-                    datum.entity.clone(),
-                    datum.attribute.clone(),
-                    datum.value.clone(),
+                    fact.of.to_string(),
+                    fact.the.to_string(),
+                    fact.is.to_bytes(),
                 )) {
                     continue;
                 }
-                let fact = Artifact::try_from(datum.clone())
-                    .map_err(|error| EvaluationError::Store(format!("changed datum: {error:?}")))?;
                 subjects.insert(fact.of.clone());
                 if arriving {
                     asserted.push(fact);
@@ -772,6 +816,7 @@ where
 
 #[cfg(test)]
 mod tests {
+
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 

@@ -26,6 +26,9 @@ pub use std::fmt::Display;
 /// - `Constraint`: pure variable constraint (equality, comparison) that
 ///   filters or infers bindings without querying stored data.
 #[derive(Debug, Clone, PartialEq)]
+// The `Formula` variant inherits `FormulaQuery`'s width (see its allow
+// note); propositions are transient planning values, not bulk storage.
+#[allow(clippy::large_enum_variant)]
 pub enum Proposition {
     /// Concept realization - matching entities against concept patterns
     Concept(ConceptQuery),

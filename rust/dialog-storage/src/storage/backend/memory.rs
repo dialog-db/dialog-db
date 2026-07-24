@@ -1,3 +1,8 @@
+/// Measurement-only counters (uncommitted): duplicate vs total backend sets.
+pub static DUPLICATE_SETS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Total backend sets since the last snapshot.
+pub static TOTAL_SETS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 use std::{collections::HashMap, ops::DerefMut, sync::Arc};
 
 use async_stream::try_stream;
@@ -34,6 +39,13 @@ where
 
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         let mut entries = self.entries.write().await;
+        // Measurement-only (uncommitted): content-addressed writes whose key
+        // already exists are byte-identical re-stores, i.e. nodes that were
+        // re-encoded and re-hashed only to deduplicate here.
+        if entries.contains_key(&key) {
+            DUPLICATE_SETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        TOTAL_SETS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         entries.insert(key, value);
         Ok(())
     }

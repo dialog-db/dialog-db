@@ -24,7 +24,7 @@ const SIZES: [usize; 2] = [10_000, 50_000];
 struct Threshold<const M: u64>;
 
 impl<const M: u64> Distribution for Threshold<M> {
-    fn rank(key: &[u8]) -> Rank {
+    fn rank(key: &[u8], _manifest: &dialog_search_tree::Manifest) -> Rank {
         let hash = Blake3Hash::hash(key);
         let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *hash.as_bytes();
         let prefix = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
@@ -90,10 +90,10 @@ async fn report<const M: u64>(size: usize) {
             let node = PersistentNode::<[u8; 16], Vec<u8>>::new(bytes.into());
             if let Ok(index) = node.as_index() {
                 if depth == 0 {
-                    root_fanout = index.links.len();
+                    root_fanout = index.len();
                 }
-                for link in index.links.iter() {
-                    next.push(<&Blake3Hash>::from(&link.node).clone());
+                for at in 0..index.len() {
+                    next.push(index.hash_at(at).unwrap().clone());
                 }
             }
         }

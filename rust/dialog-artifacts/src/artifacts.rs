@@ -11,7 +11,7 @@ mod instruction;
 pub use instruction::*;
 
 pub mod selector;
-pub use selector::ArtifactSelector;
+pub use selector::{ArtifactSelector, ValueBound};
 
 mod query;
 pub use query::{ArtifactStream, Select};
@@ -20,7 +20,9 @@ mod store;
 pub use store::*;
 
 mod update;
-pub use update::{Change, ChangeStream, Changes, SortKey, Statement, Update, sort_key};
+pub use update::{
+    Change, ChangeStream, Changes, SortKey, Statement, Update, default_sort_key, sort_key,
+};
 
 mod attribute;
 pub use attribute::*;
@@ -30,6 +32,12 @@ pub use entity::*;
 
 mod value;
 pub use value::*;
+
+mod ordkey;
+pub use ordkey::*;
+
+mod ordvalue;
+pub use ordvalue::*;
 
 mod cause;
 pub use cause::*;
@@ -59,9 +67,11 @@ use async_stream::stream;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[cfg(feature = "csv")]
-use crate::{EntityKey, KeyBytes, KeyViewConstruct};
+use crate::{EntityKey, KeyViewConstruct};
 
-use crate::tree::{ArtifactTree, ArtifactTreeExt, TreeStorageBridge};
+use crate::tree::{
+    ArtifactTree, ArtifactTreeExt, SpillCache, TreeStorageBridge, fetch_spilled_cached, spill_cache,
+};
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
 };
@@ -100,6 +110,10 @@ where
     identifier: String,
     storage: Storage<CborEncoder, Backend>,
     index: Arc<RwLock<Index>>,
+    /// Caches spilled value blocks across selects so a repeated read of the
+    /// same large value skips the store fetch. Content-addressed, so it never
+    /// serves stale bytes.
+    spill_cache: SpillCache,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -151,7 +165,7 @@ where
                         ))
                     })?;
 
-                    storage.read::<Revision>(&hash).await?
+                    storage.read::<IndexRoot>(&hash).await?
                 }
             } else {
                 None
@@ -168,6 +182,7 @@ where
             identifier,
             storage,
             index: Arc::new(RwLock::new(index)),
+            spill_cache: spill_cache(),
         })
     }
 
@@ -196,16 +211,18 @@ where
         let mut csv = csv_async::AsyncSerializer::from_writer(write);
 
         let index = self.index.read().await;
-        let range = KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::min().0)
-            ..=KeyBytes::from(<EntityKey<Key> as KeyViewConstruct>::max().0);
+        let range = <EntityKey<Key> as KeyViewConstruct>::min().into_key()
+            ..=<EntityKey<Key> as KeyViewConstruct>::max().into_key();
         let tree_storage = TreeStorage::new(TreeStorageBridge(self.storage.clone()));
         let entity_stream = index.stream_range(range, &tree_storage);
 
         tokio::pin!(entity_stream);
 
         while let Some(entry) = entity_stream.try_next().await? {
-            if let State::Added(datum) = entry.value {
-                let artifact = Artifact::try_from(datum)?;
+            if let State::Added(datum) = &entry.value {
+                let spilled =
+                    fetch_spilled_cached(&self.storage, &self.spill_cache, &entry.key).await?;
+                let artifact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)?;
 
                 csv.serialize(artifact)
                     .await
@@ -255,7 +272,7 @@ where
         Ok(if root == NULL_BLAKE3_HASH {
             NULL_REVISION_HASH
         } else {
-            Revision::new(root.as_bytes()).as_reference().await?
+            IndexRoot::new(root.as_bytes()).as_reference().await?
         })
     }
 
@@ -307,7 +324,7 @@ where
                 // Otherwise we hydrate revision info from the store.
                 let revision = self
                     .storage
-                    .read::<Revision>(&required_hash)
+                    .read::<IndexRoot>(&required_hash)
                     .await?
                     .ok_or_else(|| {
                         DialogArtifactsError::InvalidRevision(format!(
@@ -340,47 +357,48 @@ where
 
         Ok(())
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> ArtifactStore for Artifacts<Backend>
-where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync
-        + 'static,
-{
-    fn select(
+    /// Get the currently asserted [`Datum`]s recorded for the given entity
+    /// and attribute. Multiple data are possible for attributes with more
+    /// than one asserted value.
+    pub async fn select_data(
+        &self,
+        of: &Entity,
+        the: &Attribute,
+    ) -> Result<Vec<Datum>, DialogArtifactsError> {
+        let index = self.index.read().await;
+        index.select_data(self.storage.clone(), of, the).await
+    }
+
+    /// Stream every [`Artifact`] matching `selector`.
+    pub fn select(
         &self,
         selector: ArtifactSelector<Constrained>,
     ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
     {
         let index = self.index.clone();
         let storage = self.storage.clone();
+        let cache = self.spill_cache.clone();
 
         try_stream! {
             // Clone the tree under the read lock to "pin" it at a
             // version for the stream's lifetime, then hand off to the
             // shared `ArtifactTreeExt::scan` for EAV/AEV/VAE dispatch.
             let tree = index.read().await.clone();
-            let scanned = tree.scan(storage, selector);
+            let scanned = tree.scan(storage, cache, selector);
             tokio::pin!(scanned);
             for await artifact in scanned {
                 yield artifact?;
             }
         }
     }
-}
 
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<Backend> ArtifactStoreMut for Artifacts<Backend>
-where
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync
-        + 'static,
-{
-    async fn commit<Instructions>(
+    /// Commit the given instructions to the store's indexes.
+    ///
+    /// Data committed this way carries no [`Version`](crate::history::Version)
+    /// tag and records no history — version-controlled writes go through the
+    /// branch commit path in `dialog-repository` instead.
+    async fn commit_instructions<Instructions>(
         &mut self,
         instructions: Instructions,
     ) -> Result<Blake3Hash, DialogArtifactsError>
@@ -394,8 +412,8 @@ where
 
             // The per-instruction EAV/AEV/VAE key writes (and
             // cardinality-one supersession) are the shared
-            // `ArtifactTreeExt::apply`. `commit` adds only the
-            // surrounding transaction bookkeeping — base-revision
+            // `ArtifactTreeExt::apply`. This method adds only
+            // the surrounding transaction bookkeeping — base-revision
             // capture, revision persistence, pointer advance, and the
             // rollback below.
             let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
@@ -421,7 +439,7 @@ where
             let next_revision = if root == NULL_BLAKE3_HASH {
                 None
             } else {
-                Some(Revision::new(root.as_bytes()))
+                Some(IndexRoot::new(root.as_bytes()))
             };
 
             let revision_hash = if let Some(revision) = &next_revision {
@@ -453,6 +471,56 @@ where
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> ArtifactStore for Artifacts<Backend>
+where
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync
+        + 'static,
+{
+    fn select(
+        &self,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    {
+        let index = self.index.clone();
+        let storage = self.storage.clone();
+        let cache = self.spill_cache.clone();
+
+        try_stream! {
+            // Clone the tree under the read lock to "pin" it at a
+            // version for the stream's lifetime, then hand off to the
+            // shared `ArtifactTreeExt::scan` for EAV/AEV/VAE dispatch.
+            let tree = index.read().await.clone();
+            let scanned = tree.scan(storage, cache, selector);
+            tokio::pin!(scanned);
+            for await artifact in scanned {
+                yield artifact?;
+            }
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Backend> ArtifactStoreMut for Artifacts<Backend>
+where
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync
+        + 'static,
+{
+    async fn commit<Instructions>(
+        &mut self,
+        instructions: Instructions,
+    ) -> Result<Blake3Hash, DialogArtifactsError>
+    where
+        Instructions: Stream<Item = Instruction> + ConditionalSend,
+    {
+        self.commit_instructions(instructions).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, iter::once, str::FromStr, sync::Arc};
@@ -466,23 +534,437 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::helpers::generate_data;
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::tree::distribution;
     use crate::{
-        Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute,
+        Artifact, ArtifactSelector, ArtifactStoreMutExt, Artifacts, Attribute,
         DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]
-    use wasm_bindgen_test::wasm_bindgen_test;
-    #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// On-demand bug-tracker footprint: seeds the same 300 bugs the query
+    /// benchmark uses (seven `squash.bug/*` facts each) into a disk-backed store
+    /// wrapped in a byte counter, and reports the persisted size and the block
+    /// (node) count + size distribution. Run on this revision and on `main` to
+    /// compare formats: it answers both "how much smaller on disk" and "why the
+    /// block-read count differs" (block count/size = tree shape). Gated on
+    /// `DIALOG_BUG_FOOTPRINT`; native only.
+    #[dialog_common::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::absolute_paths)]
+    async fn it_measures_bug_footprint() -> anyhow::Result<()> {
+        use std::str::FromStr;
+        use std::sync::Arc;
+
+        if std::env::var("DIALOG_BUG_FOOTPRINT").is_err() {
+            eprintln!("DIALOG_BUG_FOOTPRINT not set; skipping bug footprint");
+            return Ok(());
+        }
+        let count: usize = std::env::var("DIALOG_BUG_COUNT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+
+        const STATUSES: &[&str] = &["done", "triage", "todo", "canceled", "in-progress"];
+        const PRIORITIES: &[&str] = &["medium", "high", "low", "urgent"];
+        const ASSIGNEES: &[&str] = &[
+            "",
+            "did:key:z6MkDQtgLHmp664Wf8wn32G9MT79GpKncnQkcJmLYYu6HEJz",
+            "did:key:z6MkAoFSTzm7XMv6wc1X9H5iND4YSfEaHw2LYWiTR2xDPfu8",
+            "did:key:z6MkGSesqrS3iyekKGrhMCmHyp82RxJaohuvnNMmdQXG9kza",
+        ];
+        // Seven facts per bug, matching the query bench's `Bug` concept.
+        let field = |ns: &str, name: &str| Attribute::from_str(&format!("{ns}/{name}")).unwrap();
+        let mut data = Vec::with_capacity(count * 7);
+        for index in 0..count {
+            let of = Entity::new()?;
+            let push = |data: &mut Vec<Artifact>, the: Attribute, is: Value| {
+                data.push(Artifact {
+                    the,
+                    of: of.clone(),
+                    is,
+                    cause: None,
+                });
+            };
+            push(
+                &mut data,
+                field("squash.bug", "status"),
+                Value::String(STATUSES[index % STATUSES.len()].to_string()),
+            );
+            push(
+                &mut data,
+                field("squash.bug", "priority"),
+                Value::String(PRIORITIES[index % PRIORITIES.len()].to_string()),
+            );
+            push(
+                &mut data,
+                field("squash.bug", "assignee"),
+                Value::String(ASSIGNEES[index % ASSIGNEES.len()].to_string()),
+            );
+            push(
+                &mut data,
+                field("squash.bug", "title"),
+                Value::String(format!("Bug #{index}: something is off")),
+            );
+            // `detail` follows the real tonk data's shape: mostly a few hundred
+            // chars, but roughly 1 in 25 is a long paste (>4096 bytes) that
+            // spills to a content-addressed block. This is what makes the
+            // measurement representative — a fixed short detail would miss the
+            // spill path entirely.
+            let detail_len = if index % 25 == 7 { 20_000 } else { 284 };
+            push(
+                &mut data,
+                field("squash.bug", "detail"),
+                Value::String("x".repeat(detail_len)),
+            );
+            push(
+                &mut data,
+                field("squash.bug", "ident"),
+                Value::String(format!("SQ-{index:04}")),
+            );
+            push(
+                &mut data,
+                field("squash.bug", "ordering"),
+                Value::Float(index as f64 * 1000.0),
+            );
+        }
+        let fact_count = data.len();
+
+        let root = tempfile::tempdir()?;
+        let backend = dialog_storage::FileSystemStorageBackend::<crate::Blake3Hash, Vec<u8>>::new(
+            root.path(),
+        )
+        .await?;
+        let measured = Arc::new(tokio::sync::Mutex::new(
+            dialog_storage::MeasuredStorage::new(backend),
+        ));
+        let mut facts = Artifacts::anonymous(measured.clone()).await?;
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        // Walk the on-disk directory to size every persisted block and build a
+        // size histogram (the tree's node bytes drive both footprint and reads).
+        let mut sizes: Vec<u64> = Vec::new();
+        for entry in std::fs::read_dir(root.path())? {
+            let path = entry?.path();
+            if path.is_file() {
+                sizes.push(std::fs::metadata(&path)?.len());
+            }
+        }
+        sizes.sort_unstable();
+        let total: u64 = sizes.iter().sum();
+        let blocks = sizes.len();
+        let (write_bytes, writes) = {
+            let storage = measured.lock().await;
+            (storage.write_bytes(), storage.writes())
+        };
+        let median = sizes.get(blocks / 2).copied().unwrap_or(0);
+        let max = sizes.last().copied().unwrap_or(0);
+        // Big blocks are the index/leaf nodes; small ones are revisions/refs.
+        let big = sizes.iter().filter(|&&s| s > 1024).count();
+
+        eprintln!(
+            "BUGFOOTPRINT bugs={count} facts={fact_count} \
+             on_disk_bytes={total} blocks={blocks} \
+             bytes/bug={:.1} bytes/fact={:.1} \
+             write_bytes={write_bytes} writes={writes} \
+             block_median={median} block_max={max} blocks_over_1k={big}",
+            total as f64 / count as f64,
+            total as f64 / fact_count as f64,
+        );
+        Ok(())
+    }
+
+    /// On-demand real-data footprint + query harness. Skipped unless
+    /// `DIALOG_IMPORT_CSV` points at a `the,of,as,is,cause` CSV (produced by
+    /// `tonk export`). Imports every row into a disk-backed store wrapped in a
+    /// byte counter, reports the persisted size, and times an attribute scan —
+    /// run it on this revision and on the old tag to compare formats on real
+    /// data. Native only (it reads a file).
+    #[dialog_common::test]
+    #[cfg(not(target_arch = "wasm32"))]
+    // A gated, on-demand measurement harness: fully-qualified std/storage paths
+    // keep it self-contained without cluttering the test module's imports.
+    #[allow(clippy::absolute_paths)]
+    async fn it_reports_real_data_footprint() -> anyhow::Result<()> {
+        use std::str::FromStr;
+        use std::sync::Arc;
+
+        let Ok(csv_path) = std::env::var("DIALOG_IMPORT_CSV") else {
+            eprintln!("DIALOG_IMPORT_CSV not set; skipping real-data footprint harness");
+            return Ok(());
+        };
+
+        // Parse the CSV into artifacts (the columns are the,of,as,is,cause;
+        // `as` is the value type). A minimal RFC-4180 parser handling quoted
+        // fields with embedded commas, doubled quotes, and newlines (the tonk
+        // export puts multi-line HTML/CSS in the `is` column), so the harness
+        // has no CSV dependency and runs unchanged on the old tag.
+        fn parse_csv(text: &str) -> Vec<Vec<String>> {
+            let mut records = Vec::new();
+            let mut record = Vec::new();
+            let mut field = String::new();
+            let mut in_quotes = false;
+            let mut chars = text.chars().peekable();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '"' if in_quotes && chars.peek() == Some(&'"') => {
+                        field.push('"');
+                        chars.next();
+                    }
+                    '"' => in_quotes = !in_quotes,
+                    ',' if !in_quotes => record.push(std::mem::take(&mut field)),
+                    '\n' if !in_quotes => {
+                        record.push(std::mem::take(&mut field));
+                        records.push(std::mem::take(&mut record));
+                    }
+                    '\r' if !in_quotes => {}
+                    _ => field.push(ch),
+                }
+            }
+            if !field.is_empty() || !record.is_empty() {
+                record.push(field);
+                records.push(record);
+            }
+            records
+        }
+
+        let text = std::fs::read_to_string(&csv_path)?;
+        let mut artifacts_in = Vec::new();
+        let mut reserved_skipped = 0usize;
+        for record in parse_csv(&text).into_iter().skip(1) {
+            if record.len() < 4 {
+                continue;
+            }
+            // The `dialog.` namespace is reserved for version-control
+            // records on this branch, so real-world facts under it cannot be
+            // asserted through the public API. Skip them and report the count,
+            // so the footprint is over the facts actually imported.
+            if record[0].starts_with("dialog.") {
+                reserved_skipped += 1;
+                continue;
+            }
+            let Ok(the) = Attribute::from_str(&record[0]) else {
+                continue;
+            };
+            let Ok(of) = Entity::from_str(&record[1]) else {
+                continue;
+            };
+            let value_type = record[2].as_str();
+            let raw = record[3].as_str();
+            let parsed = match value_type {
+                "text" => Some(Value::String(raw.to_owned())),
+                "entity" => Entity::from_str(raw).ok().map(Value::Entity),
+                "natural" => raw.parse().ok().map(Value::UnsignedInt),
+                "integer" => raw.parse().ok().map(Value::SignedInt),
+                "float" => raw.parse().ok().map(Value::Float),
+                "boolean" => bool::from_str(raw).ok().map(Value::Boolean),
+                "attribute" => Attribute::from_str(raw).ok().map(Value::Symbol),
+                // Skip rows whose value type this minimal parser does not
+                // handle (bytes/record are base58 and not needed for a size
+                // comparison of the common text/entity/numeric mix).
+                _ => None,
+            };
+            let Some(is) = parsed else {
+                continue;
+            };
+            artifacts_in.push(Artifact {
+                the,
+                of,
+                is,
+                cause: None,
+            });
+        }
+        let fact_count = artifacts_in.len();
+
+        // Fresh, unique tempdir per run (tempfile::tempdir), so the on-disk
+        // size reflects THIS import alone — not a reused directory or a
+        // long-lived repo with accumulated history. Auto-removed on drop.
+        let root = tempfile::tempdir()?;
+        let backend = dialog_storage::FileSystemStorageBackend::<crate::Blake3Hash, Vec<u8>>::new(
+            root.path(),
+        )
+        .await?;
+        // Journaled(Measured(fs)): MeasuredStorage counts write/read bytes;
+        // JournaledStorage records the block hash of every read, so a query's
+        // reads can be named (and each block's on-disk size looked up) to show
+        // exactly which extra blocks a format touches and why.
+        let measured = Arc::new(tokio::sync::Mutex::new(
+            dialog_storage::JournaledStorage::new(dialog_storage::MeasuredStorage::new(backend)),
+        ));
+        // Fixed identifier so the tree can be reopened for cold per-query
+        // reads (see the query loop below).
+        let mut facts = Artifacts::open("bench".to_owned(), measured.clone()).await?;
+
+        // Commit incrementally so a malformed key names the artifact that
+        // produced it (set DIALOG_IMPORT_BISECT to enable; otherwise commit in
+        // one batch for the timing figure).
+        let commit_start = std::time::Instant::now();
+        if std::env::var("DIALOG_IMPORT_BISECT").is_ok() {
+            for (index, artifact) in artifacts_in.iter().enumerate() {
+                if let Err(error) = facts
+                    .commit(std::iter::once(Instruction::Assert(artifact.clone())))
+                    .await
+                {
+                    panic!(
+                        "commit failed at row {index}: {error}\n  the={} of={} is={:?}",
+                        artifact.the, artifact.of, artifact.is
+                    );
+                }
+            }
+        } else {
+            facts
+                .commit(artifacts_in.iter().cloned().map(Instruction::Assert))
+                .await?;
+        }
+        let commit_elapsed = commit_start.elapsed();
+
+        // Node-size capture: walk the persisted tree and report the byte-size
+        // distribution split by kind and height (one line per node when
+        // DIALOG_DIST_NODES is set). This is the flat, canonical dataset for
+        // the size-variance work; the replay harness in dialog-query covers
+        // the history-bearing shape.
+        {
+            let root = *facts.index.read().await.root().as_bytes();
+            let stats = distribution::capture(&root, &measured).await?;
+            distribution::report("tonk-import", &stats);
+        }
+
+        let (write_bytes, writes) = {
+            let storage = measured.lock().await;
+            (storage.backend().write_bytes(), storage.backend().writes())
+        };
+
+        // (1) TOTAL on-disk size after the import: recursively sum every file
+        // under the storage root — index blocks, spilled archive blocks, refs,
+        // everything the format persisted for this dataset. This is the size
+        // number the format reduction is about; write_bytes is cumulative
+        // bytes-written (counts overwrites), on_disk is the settled footprint.
+        fn dir_size(path: &std::path::Path) -> std::io::Result<(u64, u64)> {
+            let mut bytes = 0u64;
+            let mut files = 0u64;
+            for entry in std::fs::read_dir(path)? {
+                let entry = entry?;
+                let meta = entry.metadata()?;
+                if meta.is_dir() {
+                    let (b, f) = dir_size(&entry.path())?;
+                    bytes += b;
+                    files += f;
+                } else {
+                    bytes += meta.len();
+                    files += 1;
+                }
+            }
+            Ok((bytes, files))
+        }
+        let (on_disk_bytes, on_disk_files) = dir_size(root.path())?;
+
+        // Map a read (a block hash) back to its on-disk file size, so a
+        // query's reads can be summarized by count AND bytes moved. The
+        // FileSystemStorageBackend names each block file by its hash; the
+        // journal records the Blake3Hash key of each read.
+        let block_size_on_disk = |hash: &crate::Blake3Hash| -> u64 {
+            use base58::ToBase58;
+            let name = hash.to_base58();
+            let mut found = 0u64;
+            // Blocks live in per-store subdirectories (archive/index, ...);
+            // walk to find the file named for this hash.
+            fn walk(dir: &std::path::Path, name: &str, out: &mut u64) {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk(&path, name, out);
+                    } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
+                        *out = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    }
+                }
+            }
+            walk(root.path(), &name, &mut found);
+            found
+        };
+
+        // (2) + (3) Run realistic queries against the IMPORTED dataset on
+        // disk, journalling each so we can name the blocks read and time it.
+        // Pick the three most common attributes so the shapes are meaningful.
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for artifact in &artifacts_in {
+            *counts.entry(artifact.the.to_string()).or_default() += 1;
+        }
+        let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        eprintln!(
+            "REALDATA facts={fact_count} reserved_skipped={reserved_skipped} \
+             on_disk={on_disk_bytes}B ({on_disk_files} files, {:.1} B/fact, {:.1} B/entry) \
+             write_bytes={write_bytes} writes={writes} \
+             commit={commit_elapsed:?}",
+            on_disk_bytes as f64 / fact_count as f64,
+            on_disk_bytes as f64 / fact_count as f64 / 3.0,
+        );
+
+        for (attribute, count) in ranked.into_iter().take(3) {
+            let the = Attribute::from_str(&attribute)?;
+            // Reopen from the same on-disk storage so each query runs with a
+            // COLD in-memory tree cache (only the persisted blocks are shared).
+            // Otherwise the first scan warms the cache and later scans report
+            // reads=0, making per-query attribution order-dependent.
+            let facts = Artifacts::open("bench".to_owned(), measured.clone()).await?;
+            {
+                let storage = measured.lock().await;
+                storage.clear_journal();
+            }
+            let scan_start = std::time::Instant::now();
+            let selected: Vec<Artifact> = facts
+                .select(ArtifactSelector::new().the(the))
+                .try_collect()
+                .await?;
+            let scan_elapsed = scan_start.elapsed();
+
+            // Name the blocks this query read and the bytes each moved, so a
+            // read-count difference between formats is explained by the actual
+            // blocks (count and size), not a guess.
+            let reads = {
+                let storage = measured.lock().await;
+                storage.get_reads()
+            };
+            let mut unique: std::collections::BTreeMap<crate::Blake3Hash, usize> =
+                std::collections::BTreeMap::new();
+            for hash in &reads {
+                *unique.entry(*hash).or_default() += 1;
+            }
+            let read_bytes: u64 = unique.keys().map(block_size_on_disk).sum();
+            eprintln!(
+                "  scan the={attribute} n={count} results={} \
+                 time={scan_elapsed:?} reads={} unique_blocks={} read_bytes={read_bytes}",
+                selected.len(),
+                reads.len(),
+                unique.len(),
+            );
+            for (hash, times) in &unique {
+                use base58::ToBase58;
+                eprintln!(
+                    "    block {} size={}B reads={times}",
+                    hash.to_base58(),
+                    block_size_on_disk(hash)
+                );
+            }
+        }
+
+        Ok(())
+    }
 
     /// A selector that constrains the entity, the attribute and the value
     /// pins every component of the index key, so the scan range collapses
     /// to a single exact key. Regression guard: the range must be treated
     /// inclusively or the entry is unreachable (the old prolly tree papered
     /// over this with a point-lookup special case for start == end ranges).
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_selects_fully_constrained_artifacts() -> anyhow::Result<()> {
         let (storage_backend, _temp) = make_target_storage().await?;
         let data = generate_data(4)?;
@@ -511,8 +993,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_commits_and_selects_facts() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let entity_order = |l: &Artifact, r: &Artifact| l.of.cmp(&r.of);
@@ -550,12 +1031,59 @@ mod tests {
         Ok(())
     }
 
+    /// Regression: two separate commits (persist + reload between them) where
+    /// the second entity's keys sort BEFORE the first's must keep both facts.
+    /// This exact DID pair reproduced a drop of the first commit's fact.
+    #[dialog_common::test]
+    async fn it_keeps_prior_fact_when_second_commit_inserts_new_minimum() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        // alice sorts AFTER bob; alice is committed first, bob second.
+        let alice = Artifact {
+            the: Attribute::from_str("person/name")?,
+            of: "did:key:z6MkQmQKzPsjyUz49pvaxYdiiZEuQXyNqeBkS88GTrvqnov".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        };
+        let bob = Artifact {
+            the: Attribute::from_str("person/name")?,
+            of: "did:key:z6MkDiL3ZaJ4V7VSdQruLenZLA4RNbu6cErR5m8K5Wj99wTF".parse()?,
+            is: Value::String("Bob".into()),
+            cause: None,
+        };
+
+        facts
+            .commit(vec![alice.clone()].into_iter().map(Instruction::Replace))
+            .await?;
+        facts
+            .commit(vec![bob.clone()].into_iter().map(Instruction::Replace))
+            .await?;
+
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().the(Attribute::from_str("person/name")?))
+            .map(|fact| fact.unwrap())
+            .collect()
+            .await;
+
+        assert_eq!(
+            selected.len(),
+            2,
+            "both facts must survive two commits; got {:?}",
+            selected
+                .iter()
+                .map(|a| a.of.to_string())
+                .collect::<Vec<_>>()
+        );
+
+        Ok(())
+    }
+
     /// Retracting a fact that was never asserted is a no-op: no tombstone is
     /// written, so the tree root (and therefore the branch revision) is
     /// unchanged. Otherwise an idle synced branch would push a revision whose
     /// only content is a tombstone for a fact that never existed.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_treats_retracting_a_missing_fact_as_a_noop() -> Result<()> {
         let (storage_backend, _temp) = make_target_storage().await?;
         let mut facts = Artifacts::anonymous(storage_backend).await?;
@@ -592,8 +1120,7 @@ mod tests {
     /// cancel at the tree, no tombstone is written, and the root is unchanged.
     /// This is the transient-command shape (a concept asserted then retracted
     /// in one commit) that used to churn the branch head on every occurrence.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_leaves_no_key_when_assert_and_retract_a_novel_fact_in_one_batch() -> Result<()> {
         let (storage_backend, _temp) = make_target_storage().await?;
         let mut facts = Artifacts::anonymous(storage_backend).await?;
@@ -638,13 +1165,12 @@ mod tests {
         Ok(())
     }
 
-    /// Assert + retract of a fact whose value was **already committed** ends in
-    /// a retraction: a `Removed` tombstone replaces the live value, so the tree
-    /// changes (the removal must propagate on merge and beat a stale remote
-    /// assert) and the fact is no longer queryable.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
-    async fn it_tombstones_when_retracting_a_fact_that_had_a_committed_value() -> Result<()> {
+    /// Retracting a fact whose value was **already committed** deletes it
+    /// from the active indexes, with no tombstone (deletion now travels as a
+    /// history record; see `crate::merge`). The tree still changes, since
+    /// the fact's keys are gone, and the fact is no longer queryable.
+    #[dialog_common::test]
+    async fn it_deletes_from_the_indexes_when_retracting_a_committed_fact() -> Result<()> {
         let (storage_backend, _temp) = make_target_storage().await?;
         let mut facts = Artifacts::anonymous(storage_backend).await?;
 
@@ -666,10 +1192,11 @@ mod tests {
             .commit(once(Instruction::Retract(alice.clone())))
             .await?;
 
-        // The retraction changed the tree (a tombstone replaced the value).
+        // The retraction changed the tree: the fact's keys were deleted
+        // (and a retract record was appended to the history region).
         assert_ne!(
             committed_root, after_root,
-            "retracting a committed fact must write a tombstone (tree changes)"
+            "retracting a committed fact removes it from the indexes (tree changes)"
         );
         // The fact is gone from queries.
         let hits: Vec<Artifact> = facts
@@ -678,7 +1205,7 @@ mod tests {
             .await?;
         assert!(
             hits.is_empty(),
-            "the retracted fact must not be queryable after the tombstone"
+            "the retracted fact must not be queryable after deletion"
         );
         Ok(())
     }
@@ -686,8 +1213,7 @@ mod tests {
     /// An attribute-prefix selector ranges over the AEV index:
     /// attribute names are stored raw in the key, so the range is
     /// exact.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_selects_by_attribute_prefix() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let mut facts = Artifacts::anonymous(storage_backend).await?;
@@ -736,8 +1262,7 @@ mod tests {
     /// prefix longer than that must be confirmed against the stored
     /// datum — the second half of this test diverges two URIs past
     /// byte 32 to force that path.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_selects_by_entity_prefix() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let mut facts = Artifacts::anonymous(storage_backend).await?;
@@ -796,8 +1321,649 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    /// A value-prefix selector ranges over the VAE index. The M3
+    /// value-in-key format stores a string value's bytes inline and
+    /// order-preservingly, so a prefix scan brackets the value dimension
+    /// directly and returns exactly the string values beginning with the
+    /// prefix — across different attributes and entities, and excluding
+    /// non-string values that cannot carry the prefix.
+    #[dialog_common::test]
+    async fn it_selects_by_value_prefix() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let data = vec![
+            Artifact {
+                the: Attribute::from_str("person/name")?,
+                of: alice.clone(),
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            Artifact {
+                the: Attribute::from_str("person/city")?,
+                of: alice.clone(),
+                is: Value::String("Albuquerque".into()),
+                cause: None,
+            },
+            Artifact {
+                the: Attribute::from_str("person/name")?,
+                of: bob.clone(),
+                is: Value::String("Bob".into()),
+                cause: None,
+            },
+            // A non-string value that must never match a string prefix.
+            Artifact {
+                the: Attribute::from_str("person/age")?,
+                of: alice,
+                is: Value::UnsignedInt(40),
+                cause: None,
+            },
+        ];
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        // "Al" spans two attributes (name + city) on the same entity.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_starting_with("Al"))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), 2, "two values begin with Al");
+        assert!(
+            selected.iter().all(|fact| match &fact.is {
+                Value::String(string) => string.starts_with("Al"),
+                other => panic!("unexpected non-string match: {other:?}"),
+            }),
+            "every selected value carries the prefix"
+        );
+
+        // A narrower prefix isolates one value.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_starting_with("Ali"))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].is, Value::String("Alice".into()));
+
+        // A prefix that matches nothing returns nothing.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_starting_with("Zzz"))
+            .try_collect()
+            .await?;
+        assert!(selected.is_empty(), "no value begins with Zzz");
+
+        Ok(())
+    }
+
+    /// A range predicate is a filter, never a type assertion: values of a
+    /// different type than the bound simply do not match — no error, no
+    /// stream abort — and the matching-type values still come back. Degenerate
+    /// ranges (mismatched bound types, inverted bounds) select nothing,
+    /// silently.
+    #[dialog_common::test]
+    async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        // One attribute holding a mix of types, all on separate entities.
+        let field = Attribute::from_str("record/field")?;
+        let values = vec![
+            Value::UnsignedInt(10),
+            Value::UnsignedInt(50),
+            Value::String("forty".into()),
+            Value::Float(30.0),
+            Value::Boolean(true),
+        ];
+        let data: Vec<Artifact> = values
+            .into_iter()
+            .map(|is| {
+                Ok(Artifact {
+                    the: field.clone(),
+                    of: Entity::new()?,
+                    is,
+                    cause: None,
+                })
+            })
+            .collect::<anyhow::Result<_>>()?;
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        // An unsigned range matches only the unsigned values; the string,
+        // float, and boolean neighbors are non-matches, not errors.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(20)))
+            .try_collect()
+            .await?;
+        assert_eq!(
+            selected.len(),
+            1,
+            "only UnsignedInt(50) is >= 20u: {selected:?}"
+        );
+        assert_eq!(selected[0].is, Value::UnsignedInt(50));
+
+        // Same over the entity-pinned (EAV) route, where every type of the
+        // entity's values passes through the filter.
+        let mixed = Entity::new()?;
+        facts
+            .commit(vec![
+                Instruction::Assert(Artifact {
+                    the: field.clone(),
+                    of: mixed.clone(),
+                    is: Value::UnsignedInt(40),
+                    cause: None,
+                }),
+                Instruction::Assert(Artifact {
+                    the: Attribute::from_str("record/label")?,
+                    of: mixed.clone(),
+                    is: Value::String("labelled".into()),
+                    cause: None,
+                }),
+            ])
+            .await?;
+        let selected: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new()
+                    .of(mixed)
+                    .is_at_least(Value::UnsignedInt(20)),
+            )
+            .try_collect()
+            .await?;
+        assert_eq!(
+            selected.len(),
+            1,
+            "the string label is a non-match: {selected:?}"
+        );
+        assert_eq!(selected[0].is, Value::UnsignedInt(40));
+
+        // Degenerate ranges: mismatched bound types and inverted bounds are
+        // empty, not errors.
+        let selected: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new()
+                    .is_at_least(Value::UnsignedInt(20))
+                    .is_at_most(Value::Float(40.0)),
+            )
+            .try_collect()
+            .await?;
+        assert!(selected.is_empty(), "mixed-type bounds match nothing");
+
+        let selected: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new()
+                    .is_at_least(Value::UnsignedInt(50))
+                    .is_at_most(Value::UnsignedInt(20)),
+            )
+            .try_collect()
+            .await?;
+        assert!(selected.is_empty(), "inverted bounds match nothing");
+        Ok(())
+    }
+
+    /// Predicates whose answer lies BEYOND a spilled value's in-key prefix
+    /// load the block and post-filter: a probe longer than `spill_prefix`
+    /// distinguishes two large values that share their entire key-prefix, in
+    /// both the matching and non-matching directions, and a long range bound
+    /// widens its scan edge to the prefix cluster so shared-prefix candidates
+    /// are not missed.
+    #[dialog_common::test]
+    async fn it_post_filters_predicates_beyond_the_spill_prefix() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        let spill_prefix = dialog_search_tree::Manifest::default().spill_prefix as usize;
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        // Two large values identical through the whole in-key prefix (and
+        // beyond), diverging only deep in the tail.
+        let stem = "s".repeat(spill_prefix + 16);
+        let apple = format!("{stem}-apple-{}", "x".repeat(inline_n));
+        let zebra = format!("{stem}-zebra-{}", "x".repeat(inline_n));
+        let body = Attribute::from_str("doc/body")?;
+        facts
+            .commit(vec![
+                Instruction::Assert(Artifact {
+                    the: body.clone(),
+                    of: Entity::new()?,
+                    is: Value::String(apple.clone()),
+                    cause: None,
+                }),
+                Instruction::Assert(Artifact {
+                    the: body.clone(),
+                    of: Entity::new()?,
+                    is: Value::String(zebra.clone()),
+                    cause: None,
+                }),
+            ])
+            .await?;
+
+        // A probe longer than the in-key prefix: undecidable from the key,
+        // decided by loading the block. Only the matching value comes back.
+        let probe = format!("{stem}-apple");
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_starting_with(&probe))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), 1, "the probe distinguishes the tails");
+        assert_eq!(selected[0].is, Value::String(apple.clone()));
+
+        // A long lower bound between the two: the scan edge widens to the
+        // shared prefix cluster and the post-filter keeps exactly the value
+        // above the bound.
+        let bound = format!("{stem}-m");
+        let selected: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new()
+                    .the(body.clone())
+                    .is_at_least(Value::String(bound)),
+            )
+            .try_collect()
+            .await?;
+        assert_eq!(
+            selected.len(),
+            1,
+            "the long bound decides beyond the prefix: {:?}",
+            selected
+                .iter()
+                .map(|a| a.is.data_type())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(selected[0].is, Value::String(zebra.clone()));
+
+        // Cardinality-many: both same-prefix values coexist on ONE entity and
+        // both read back (the trailing whole-value hash keeps their keys
+        // distinct).
+        let both = Entity::new()?;
+        facts
+            .commit(vec![
+                Instruction::Assert(Artifact {
+                    the: body.clone(),
+                    of: both.clone(),
+                    is: Value::String(apple.clone()),
+                    cause: None,
+                }),
+                Instruction::Assert(Artifact {
+                    the: body,
+                    of: both.clone(),
+                    is: Value::String(zebra.clone()),
+                    cause: None,
+                }),
+            ])
+            .await?;
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().of(both))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), 2, "same-prefix large values coexist");
+        let mut values: Vec<String> = selected
+            .into_iter()
+            .map(|fact| match fact.is {
+                Value::String(s) => s,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        values.sort();
+        assert_eq!(values, {
+            let mut expected = vec![apple, zebra];
+            expected.sort();
+            expected
+        });
+        Ok(())
+    }
+
+    /// Combining `is_starting_with` with a value bound must intersect the two
+    /// constraints, not corrupt the scan range. Regression guard: the prefix
+    /// branch once installed an unterminated String payload in the range key,
+    /// and the bound branch's rebuild then failed to re-parse it and fell
+    /// back to `KeyParts::max`, silently discarding every previously set
+    /// field — the scan started above all real entries and returned nothing.
+    #[dialog_common::test]
+    async fn it_composes_value_prefix_with_value_bounds() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        let name = Attribute::from_str("user/name")?;
+        let mut data = Vec::new();
+        for value in ["a", "al", "am", "an", "z"] {
+            data.push(Artifact {
+                the: name.clone(),
+                of: Entity::new()?,
+                is: Value::String(value.into()),
+                cause: None,
+            });
+        }
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let selected: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new()
+                    .the(name.clone())
+                    .is_starting_with("a")
+                    .is_at_most(Value::String("am".into())),
+            )
+            .try_collect()
+            .await?;
+        let mut values: Vec<String> = selected
+            .into_iter()
+            .map(|fact| match fact.is {
+                Value::String(s) => s,
+                other => panic!("unexpected value {other:?}"),
+            })
+            .collect();
+        values.sort();
+        assert_eq!(
+            values,
+            vec!["a".to_string(), "al".into(), "am".into()],
+            "prefix and bound intersect"
+        );
+
+        // The boundary value itself is included exactly when inclusive.
+        let selected: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new()
+                    .the(name)
+                    .is_starting_with("a")
+                    .is_less_than(Value::String("am".into())),
+            )
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), 2, "exclusive bound drops the boundary");
+        Ok(())
+    }
+
+    /// `-0.0` and `0.0` are numerically equal but encode differently
+    /// (order-preserving encodings place `-0.0` strictly below `+0.0`), so
+    /// the scanned range edges must widen to the zero cluster or a stored
+    /// `-0.0` silently falls below an `is_at_least(0.0)` range start that the
+    /// semantic filter would have admitted.
+    #[dialog_common::test]
+    async fn it_includes_negative_zero_in_zero_bounded_ranges() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        let measure = Attribute::from_str("measure/value")?;
+        let data: Vec<Artifact> = [-0.0f64, 0.0, 1.0, -1.0]
+            .into_iter()
+            .map(|float| {
+                Ok(Artifact {
+                    the: measure.clone(),
+                    of: Entity::new()?,
+                    is: Value::Float(float),
+                    cause: None,
+                })
+            })
+            .collect::<anyhow::Result<_>>()?;
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_at_least(Value::Float(0.0)))
+            .try_collect()
+            .await?;
+        assert_eq!(
+            selected.len(),
+            3,
+            "-0.0, +0.0 and 1.0 all satisfy >= 0.0: {selected:?}"
+        );
+
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_at_most(Value::Float(-0.0)))
+            .try_collect()
+            .await?;
+        assert_eq!(
+            selected.len(),
+            3,
+            "-1.0, -0.0 and +0.0 all satisfy <= -0.0: {selected:?}"
+        );
+        Ok(())
+    }
+
+    /// Value predicates treat a spilled value exactly as if it were inline:
+    /// its key carries the value's leading bytes, so a numeric range still
+    /// excludes it by TYPE, a string prefix within the in-key prefix matches
+    /// it, and the entity-scoped (EAV) route agrees with the VAE route. A
+    /// prefix predicate is also a STRING predicate: a non-string value whose
+    /// raw payload bytes happen to begin with the prefix bytes must not
+    /// match.
+    #[dialog_common::test]
+    async fn it_applies_value_predicates_to_spilled_values_as_if_inline() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let data = vec![
+            Artifact {
+                the: Attribute::from_str("person/age")?,
+                of: alice.clone(),
+                is: Value::UnsignedInt(20),
+                cause: None,
+            },
+            // Spills: well over the inline threshold, and begins with "Zzz".
+            Artifact {
+                the: Attribute::from_str("doc/body")?,
+                of: alice.clone(),
+                is: Value::String("Zzz".repeat(inline_n)),
+                cause: None,
+            },
+            // Inline integer whose big-endian payload begins 0x41 0x6C ("Al"),
+            // on its own entity so it cannot satisfy alice's numeric range.
+            Artifact {
+                the: Attribute::from_str("stat/blob")?,
+                of: bob.clone(),
+                is: Value::UnsignedInt(0x416Cu128 << 112),
+                cause: None,
+            },
+        ];
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        // Entity-pinned numeric range: the spilled string is inside the
+        // scanned EAV range but must not satisfy a numeric bound.
+        let selected: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new()
+                    .of(alice.clone())
+                    .is_at_least(Value::UnsignedInt(30)),
+            )
+            .try_collect()
+            .await?;
+        assert!(
+            selected.is_empty(),
+            "a spilled string must not satisfy a numeric range: {selected:?}"
+        );
+
+        // Entity-pinned prefix: the spilled string begins with the prefix and
+        // the answer lies within its in-key prefix, so it matches — decided
+        // from the key, with the block fetched only for reconstruction.
+        let selected: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new()
+                    .of(alice.clone())
+                    .is_starting_with("Zzz"),
+            )
+            .try_collect()
+            .await?;
+        assert_eq!(
+            selected.len(),
+            1,
+            "a spilled string matches a prefix within its in-key prefix: {selected:?}"
+        );
+        assert_eq!(
+            selected[0].is,
+            Value::String("Zzz".repeat(inline_n)),
+            "the spilled value reconstructs fully"
+        );
+
+        // The VAE route agrees: the same prefix scan with no entity pin finds
+        // the same spilled fact, because spilled strings sort INSIDE the
+        // String band by their leading bytes.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_starting_with("Zzz"))
+            .try_collect()
+            .await?;
+        assert_eq!(
+            selected.len(),
+            1,
+            "the VAE route sees spilled strings in-band: {selected:?}"
+        );
+
+        // Entity-pinned prefix: an integer whose payload bytes spell the
+        // prefix is not a string and must not match.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().of(bob).is_starting_with("Al"))
+            .try_collect()
+            .await?;
+        assert!(
+            selected.is_empty(),
+            "a prefix predicate only matches string values: {selected:?}"
+        );
+        Ok(())
+    }
+
+    /// A float value's key must round-trip once it accumulates into a shared
+    /// leaf. Regression guard for a value-tail width bug: `encode_f64` writes 8
+    /// bytes but the key parser once claimed 16 for `Float`, so a float key
+    /// over-read into the following components and split into fewer parts than
+    /// its schema — every commit that packed such a key into an index leaf then
+    /// failed. Commit enough float-valued facts to force a leaf, then read them
+    /// back.
+    #[dialog_common::test]
+    async fn it_round_trips_many_float_values() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        let attribute = Attribute::from_str("measure/value")?;
+        let mut data = Vec::new();
+        for index in 0..400u64 {
+            data.push(Artifact {
+                the: attribute.clone(),
+                of: Entity::new()?,
+                // A mix of magnitudes and signs, including a large timestamp-
+                // like integer stored as a float (the shape that first tripped
+                // this in real data).
+                is: Value::Float(index as f64 * 1.5 - 100.0),
+                cause: None,
+            });
+        }
+        data.push(Artifact {
+            the: attribute.clone(),
+            of: Entity::new()?,
+            is: Value::Float(1783112056217.0),
+            cause: None,
+        });
+        let expected = data.len();
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().the(attribute))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), expected, "every float fact reads back");
+        assert!(
+            selected
+                .iter()
+                .all(|fact| matches!(fact.is, Value::Float(_))),
+            "every value round-trips as a float"
+        );
+        Ok(())
+    }
+
+    /// Numeric value range scans over the VAE index. The M3 value-in-key
+    /// format sorts numeric values order-preservingly within their type band,
+    /// so `is_at_least`/`is_at_most`/`is_between` (and their exclusive
+    /// variants) bracket the value dimension; exclusivity and the type band are
+    /// enforced by the per-entry re-check.
+    #[dialog_common::test]
+    async fn it_selects_by_value_range() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+
+        let age = Attribute::from_str("person/age")?;
+        let fact = |value: u128| -> anyhow::Result<Artifact> {
+            Ok(Artifact {
+                the: age.clone(),
+                of: Entity::new()?,
+                is: Value::UnsignedInt(value),
+                cause: None,
+            })
+        };
+        let mut data = Vec::new();
+        for value in [10u128, 20, 30, 40, 50] {
+            data.push(fact(value)?);
+        }
+        // A string value on the same attribute must never match a numeric range.
+        data.push(Artifact {
+            the: age.clone(),
+            of: Entity::new()?,
+            is: Value::String("not a number".into()),
+            cause: None,
+        });
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let values = |facts: &[Artifact]| -> Vec<u128> {
+            let mut out: Vec<u128> = facts
+                .iter()
+                .map(|fact| match fact.is {
+                    Value::UnsignedInt(value) => value,
+                    ref other => panic!("unexpected non-numeric match: {other:?}"),
+                })
+                .collect();
+            out.sort_unstable();
+            out
+        };
+
+        // Inclusive lower bound.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(30)))
+            .try_collect()
+            .await?;
+        assert_eq!(values(&selected), vec![30, 40, 50], ">= 30");
+
+        // Exclusive lower bound drops the boundary value.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_greater_than(Value::UnsignedInt(30)))
+            .try_collect()
+            .await?;
+        assert_eq!(values(&selected), vec![40, 50], "> 30");
+
+        // Inclusive upper bound.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_at_most(Value::UnsignedInt(20)))
+            .try_collect()
+            .await?;
+        assert_eq!(values(&selected), vec![10, 20], "<= 20");
+
+        // A closed interval.
+        let selected: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new().is_between(Value::UnsignedInt(20), Value::UnsignedInt(40)),
+            )
+            .try_collect()
+            .await?;
+        assert_eq!(values(&selected), vec![20, 30, 40], "[20, 40]");
+
+        // A range that spans nothing.
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(1000)))
+            .try_collect()
+            .await?;
+        assert!(selected.is_empty(), ">= 1000 matches nothing");
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
     async fn it_pins_a_stream_at_the_version_where_iteration_begins() -> Result<()> {
         let storage_backend = MemoryStorageBackend::default();
         let data = generate_data(5)?;
@@ -831,8 +1997,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_can_export_to_and_import_from_csv() -> Result<()> {
         let (csv, expected_ids, expected_revision) = {
             let storage_backend = MemoryStorageBackend::default();
@@ -872,8 +2037,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
@@ -930,8 +2094,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
@@ -992,8 +2155,64 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    /// Measures on-disk size and write amplification per fact. Not a pass/fail
+    /// assertion of an exact number (that would be brittle across format
+    /// tweaks); it prints the persisted bytes-per-fact so the M3 format epoch's
+    /// size win can be tracked, and guards a loose upper bound so a regression
+    /// that doubled the size would fail. `generate_data` is a realistic mixed
+    /// workload (five attributes per entity, several value types).
+    #[dialog_common::test]
+    async fn it_measures_persisted_size_per_fact() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let entities = 512;
+        let data = generate_data(entities)?;
+        let fact_count = data.len();
+
+        let storage_backend = Arc::new(Mutex::new(MeasuredStorage::new(storage_backend)));
+        let mut facts = Artifacts::anonymous(storage_backend.clone()).await?;
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let (write_bytes, writes) = {
+            let storage = storage_backend.lock().await;
+            (storage.write_bytes(), storage.writes())
+        };
+
+        let bytes_per_fact = write_bytes as f64 / fact_count as f64;
+        // Each logical fact writes three index entries (EAV/AEV/VAE); the
+        // per-entry figure is the apples-to-apples comparison against the
+        // pre-M3 baseline, which was measured per single index entry (~172
+        // B/entry, where the payload stored the whole fact again).
+        let bytes_per_entry = bytes_per_fact / 3.0;
+        let blocks_per_fact = writes as f64 / fact_count as f64;
+        println!(
+            "SIZE {fact_count} facts: {write_bytes} bytes total, \
+             {bytes_per_fact:.1} bytes/fact = {bytes_per_entry:.1} bytes/entry \
+             (3 indexes), {blocks_per_fact:.3} blocks/fact"
+        );
+
+        // Regression guard. Three measured points on this fixture:
+        //
+        //   pre-M3 (value-hash key, whole fact in payload)  ~172 B/entry
+        //   value-in-key alone (#393)                        118 B/entry
+        //   value-in-key + version control (this branch)     186 B/entry
+        //
+        // Version control adds a history record and a coverage entry per
+        // write, so it costs ~68 B/entry over #393 on this synthetic fixture
+        // (every fact is a distinct entity, which is the worst case for the
+        // history region: nothing shares a lineage). The guard tracks the
+        // combined figure — the number that matters is the one users pay.
+        assert!(
+            bytes_per_entry < 200.0,
+            "per-entry size regressed to {bytes_per_entry:.1} bytes/entry \
+             (value-in-key alone is 118, with version control ~186)"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
     async fn it_uses_indexes_to_optimize_reads() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let data = generate_data(256)?.into_iter().map(Instruction::Assert);
@@ -1044,18 +2263,21 @@ mod tests {
             )
         };
 
-        // The broad attribute scan walks far fewer blocks under the
-        // threshold-based geometric distribution: its exact 1/m split at
-        // every level keeps the tree flat, where the bit-batch distribution
-        // built taller upper levels that cost more reads to traverse.
+        // Cumulative reads across both queries in this test (the baseline is
+        // captured once, before the first). The broad attribute scan is a
+        // bounded descent, not a full-tree walk. Small values now inline in the
+        // key as their order-preserving form rather than a fixed 32-byte
+        // reference, which changes leaf boundaries and the tree's shape, so the
+        // scan's bounded descent touches a different set of blocks than the
+        // reference layout did. Byte-paced boundaries (the default max_segment)
+        // pack this fixture's leaves so the descent lands on one fewer block.
         assert_eq!(net_reads, 4);
         assert_eq!(net_writes, 0);
 
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_completes_a_query_when_no_data_matches() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let data = [124u128; 3]
@@ -1083,8 +2305,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_distinguishes_same_value_across_different_entities() -> Result<()> {
         // NOTE: This covers a bug where we weren't aggregating entities in the value index properly
         let (storage_backend, _temp_directory) = make_target_storage().await?;
@@ -1116,8 +2337,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_produces_the_same_version_with_different_insertion_order() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let data = generate_data(32)?;
@@ -1147,8 +2367,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_can_restore_a_previously_commited_version() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let data = generate_data(64)?;
@@ -1181,8 +2400,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_can_upsert_facts() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let storage_backend = Arc::new(Mutex::new(storage_backend));
@@ -1222,8 +2440,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_can_reset_to_an_earlier_version() -> Result<()> {
         let (storage_backend, _temp_directory) = make_target_storage().await?;
         let data = generate_data(16)?;
@@ -1262,8 +2479,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_can_reset_before_commit() -> Result<()> {
         let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
 
@@ -1273,8 +2489,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_stores_null_revision_hash_directly() -> Result<()> {
         // Use memory storage backend to avoid file system errors
         let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
@@ -1299,8 +2514,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_handles_existing_null_revision() -> Result<()> {
         // Use memory storage backend to avoid file system errors
         let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
@@ -1353,8 +2567,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_treats_null_revision_as_empty() -> Result<()> {
         // Use memory storage backend to avoid file system errors
         let storage_backend = MemoryStorageBackend::default();
@@ -1398,8 +2611,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_verifies_storage_operations_for_null_revision() -> Result<()> {
         // Test that null revision hash is stored correctly
         let storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
@@ -1421,8 +2633,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_can_open_with_null_revision_hash() -> Result<()> {
         // Use memory storage backend to avoid file system errors
         let mut storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
@@ -1473,8 +2684,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[dialog_common::test]
     async fn it_avoids_unnecessary_storage_writes() -> Result<()> {
         // Use a memory storage backend so we can track writes
         let mut storage_backend = MemoryStorageBackend::<[u8; 32], Vec<u8>>::default();
@@ -1522,6 +2732,316 @@ mod tests {
             "Storage value should not change when reset called with None"
         );
 
+        Ok(())
+    }
+
+    /// A value larger than the inline threshold spills: its key carries a
+    /// 32-byte reference, its bytes land as a content-addressed block in the
+    /// store (keyed by that reference), and a select reconstructs the exact
+    /// value by fetching the block. Inline values are unaffected.
+    #[dialog_common::test]
+    async fn it_round_trips_a_spilled_value() -> Result<()> {
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let big = "s".repeat(inline_n + 1);
+        let value = Value::String(big.clone());
+        let reference = value.to_reference();
+
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let attribute = Attribute::from_str("doc/body")?;
+        let entity = Entity::new()?;
+
+        artifacts
+            .commit(vec![Instruction::Assert(Artifact {
+                the: attribute.clone(),
+                of: entity.clone(),
+                is: value.clone(),
+                cause: None,
+            })])
+            .await?;
+
+        // The value bytes live as a block keyed by the value reference.
+        assert_eq!(
+            artifacts.storage.get(&reference).await?,
+            Some(value.to_bytes()),
+            "spilled value bytes are stored as a block under the value reference"
+        );
+
+        // A select reconstructs the exact value by fetching the block.
+        let results = artifacts
+            .select(ArtifactSelector::new().the(attribute))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].is, value, "spilled value reconstructs exactly");
+
+        Ok(())
+    }
+
+    /// The inline threshold is inclusive: a value whose encoded form is exactly
+    /// `inline_n` bytes stays inline (no block written); one byte larger spills.
+    #[dialog_common::test]
+    async fn it_spills_exactly_above_the_threshold() -> Result<()> {
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        // `encode_value` of a String is the 0x00-escaped bytes plus a
+        // terminator; for an all-ASCII string with no NULs that is len + 1. So
+        // a string of `inline_n - 1` ASCII bytes encodes to exactly `inline_n`.
+        let at = Value::String("a".repeat(inline_n - 1));
+        let over = Value::String("a".repeat(inline_n));
+        assert_eq!(
+            crate::encode_value_owned(&at).len(),
+            inline_n,
+            "at boundary"
+        );
+        assert!(
+            crate::encode_value_owned(&over).len() > inline_n,
+            "over boundary"
+        );
+
+        for (value, should_spill) in [(at, false), (over, true)] {
+            let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+            let entity = Entity::new()?;
+            artifacts
+                .commit(vec![Instruction::Assert(Artifact {
+                    the: Attribute::from_str("doc/body")?,
+                    of: entity.clone(),
+                    is: value.clone(),
+                    cause: None,
+                })])
+                .await?;
+            let block = artifacts.storage.get(&value.to_reference()).await?;
+            assert_eq!(
+                block.is_some(),
+                should_spill,
+                "spill decision at the exact boundary is inclusive"
+            );
+            // Either way the value reconstructs.
+            let results = artifacts
+                .select(ArtifactSelector::new().of(entity))
+                .map(|r| r.unwrap())
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].is, value);
+        }
+        Ok(())
+    }
+
+    /// Every reconstructable spillable value type round-trips through a spill:
+    /// String and Bytes (including a `0x00`-escape case) reconstruct exactly.
+    /// `Record` reconstruction from raw bytes is unimplemented workspace-wide
+    /// (see `Value::try_from`), which is orthogonal to spilling; it is not
+    /// exercised here.
+    #[dialog_common::test]
+    async fn it_spills_and_round_trips_every_value_type() -> Result<()> {
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 64;
+        let values = vec![
+            Value::String("s".repeat(n)),
+            Value::Bytes(vec![0xABu8; n]),
+            Value::Bytes({
+                let mut v = vec![0u8; n];
+                v[0] = 0x00; // exercise the 0x00-escape in the encoding
+                v
+            }),
+            // A spilled record must reconstruct from its raw block bytes;
+            // this path once hit an `unimplemented!()` and panicked on read.
+            Value::Record(vec![7u8; n]),
+        ];
+        for value in values {
+            assert!(
+                crate::encode_value_owned(&value).len()
+                    > dialog_search_tree::Manifest::default().inline_n as usize,
+                "value must spill: {value:?}"
+            );
+            let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+            let entity = Entity::new()?;
+            artifacts
+                .commit(vec![Instruction::Assert(Artifact {
+                    the: Attribute::from_str("doc/body")?,
+                    of: entity.clone(),
+                    is: value.clone(),
+                    cause: None,
+                })])
+                .await?;
+            let results = artifacts
+                .select(ArtifactSelector::new().of(entity))
+                .map(|r| r.unwrap())
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].is, value, "{value:?} round-trips through spill");
+        }
+        Ok(())
+    }
+
+    /// Replacing a fact whose prior value was spilled supersedes the prior
+    /// (reconstructed via the block) and leaves exactly the new value, whether
+    /// the new value is itself spilled or inline.
+    #[dialog_common::test]
+    async fn it_replaces_a_spilled_prior() -> Result<()> {
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
+        let spilled_prior = Value::String("p".repeat(n));
+
+        for new_value in [Value::String("r".repeat(n)), Value::String("small".into())] {
+            let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+            let entity = Entity::new()?;
+            let attribute = Attribute::from_str("doc/body")?;
+            let of_the = |is: Value| Artifact {
+                the: attribute.clone(),
+                of: entity.clone(),
+                is,
+                cause: None,
+            };
+            artifacts
+                .commit(vec![Instruction::Replace(of_the(spilled_prior.clone()))])
+                .await?;
+            artifacts
+                .commit(vec![Instruction::Replace(of_the(new_value.clone()))])
+                .await?;
+
+            let results = artifacts
+                .select(ArtifactSelector::new().of(entity).the(attribute.clone()))
+                .map(|r| r.unwrap())
+                .collect::<Vec<_>>()
+                .await;
+            assert_eq!(results.len(), 1, "cardinality-one keeps one value");
+            assert_eq!(
+                results[0].is, new_value,
+                "the new value supersedes the spilled prior"
+            );
+        }
+        Ok(())
+    }
+
+    /// Retracting a fact whose value spilled removes it from the scan (a
+    /// tombstone), and no fact is returned.
+    #[dialog_common::test]
+    async fn it_retracts_a_spilled_fact() -> Result<()> {
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
+        let value = Value::String("t".repeat(n));
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let entity = Entity::new()?;
+        let fact = Artifact {
+            the: Attribute::from_str("doc/body")?,
+            of: entity.clone(),
+            is: value.clone(),
+            cause: None,
+        };
+        artifacts
+            .commit(vec![Instruction::Assert(fact.clone())])
+            .await?;
+        artifacts.commit(vec![Instruction::Retract(fact)]).await?;
+
+        let results = artifacts
+            .select(ArtifactSelector::new().of(entity))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            results.is_empty(),
+            "a retracted spilled fact is not returned"
+        );
+        Ok(())
+    }
+
+    /// Two facts with the same large value share one content-addressed block:
+    /// the block is stored once under the shared reference, and both facts
+    /// reconstruct it.
+    #[dialog_common::test]
+    async fn it_dedups_a_shared_spilled_block() -> Result<()> {
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
+        let value = Value::String("d".repeat(n));
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let attribute = Attribute::from_str("doc/body")?;
+        let a = Entity::new()?;
+        let b = Entity::new()?;
+        artifacts
+            .commit(vec![
+                Instruction::Assert(Artifact {
+                    the: attribute.clone(),
+                    of: a,
+                    is: value.clone(),
+                    cause: None,
+                }),
+                Instruction::Assert(Artifact {
+                    the: attribute.clone(),
+                    of: b,
+                    is: value.clone(),
+                    cause: None,
+                }),
+            ])
+            .await?;
+
+        // One block under the shared reference; both facts read it.
+        assert_eq!(
+            artifacts.storage.get(&value.to_reference()).await?,
+            Some(value.to_bytes())
+        );
+        let results = artifacts
+            .select(ArtifactSelector::new().the(attribute))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(results.len(), 2, "two facts share one spilled block");
+        assert!(results.iter().all(|r| r.is == value));
+        Ok(())
+    }
+
+    /// A missing spilled block surfaces a clean error (not a panic) on read.
+    #[dialog_common::test]
+    async fn it_errors_when_a_spilled_block_is_missing() -> Result<()> {
+        use crate::EntityKey;
+        use crate::key::default_manifest;
+        use crate::tree::fetch_spilled;
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
+        let value = Value::String("m".repeat(n));
+        let artifact = Artifact {
+            the: Attribute::from_str("doc/body")?,
+            of: Entity::new()?,
+            is: value.clone(),
+            cause: None,
+        };
+        let key = EntityKey::from_artifact(&artifact, &default_manifest()).into_key();
+        // A store that never had the block written.
+        let empty = MemoryStorageBackend::<dialog_storage::Blake3Hash, Vec<u8>>::default();
+        let result = fetch_spilled(&empty, &key).await;
+        assert!(
+            matches!(result, Err(DialogArtifactsError::InvalidValue(_))),
+            "a missing spilled block is a clean error, got {result:?}"
+        );
+        Ok(())
+    }
+
+    /// A value-equality select on a spilled value returns exactly that fact:
+    /// the selector's value reference matches the spilled key's reference.
+    #[dialog_common::test]
+    async fn it_selects_by_a_spilled_value() -> Result<()> {
+        let n = dialog_search_tree::Manifest::default().inline_n as usize + 8;
+        let wanted = Value::String("w".repeat(n));
+        let other = Value::String("o".repeat(n));
+        let mut artifacts = Artifacts::anonymous(MemoryStorageBackend::default()).await?;
+        let attribute = Attribute::from_str("doc/body")?;
+        for value in [wanted.clone(), other.clone()] {
+            artifacts
+                .commit(vec![Instruction::Assert(Artifact {
+                    the: attribute.clone(),
+                    of: Entity::new()?,
+                    is: value,
+                    cause: None,
+                })])
+                .await?;
+        }
+        let results = artifacts
+            .select(ArtifactSelector::new().is(wanted.clone()))
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(
+            results.len(),
+            1,
+            "equality-by-spilled-value returns one fact"
+        );
+        assert_eq!(results[0].is, wanted);
         Ok(())
     }
 }

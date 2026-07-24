@@ -9,8 +9,6 @@ use crate::{Attribute, Entity, Value};
 #[cfg(doc)]
 use crate::ArtifactStore;
 
-use super::Blake3Hash;
-
 /// A marker type that represents a totally open-ended [`ArtifactSelector`]
 #[derive(Clone)]
 pub struct Unconstrained;
@@ -23,6 +21,18 @@ pub struct Constrained;
 impl ArtifactSelectorState for Constrained {}
 
 trait ArtifactSelectorState {}
+
+/// A one-sided bound on a [`Value`]: the bounding value and whether the bound
+/// itself is included. Used for the value range constraints
+/// ([`ArtifactSelector::is_at_least`] and friends).
+#[derive(Debug, Clone)]
+pub struct ValueBound {
+    /// The bounding value.
+    pub value: Value,
+    /// Whether the bound is inclusive (`>=` / `<=`) rather than exclusive
+    /// (`>` / `<`).
+    pub inclusive: bool,
+}
 
 /// The basic query system for selecting [`Artifact`]s from a [`ArtifactStore`]
 /// You can assign its fields directly, but for convenience and ergonomics it is
@@ -46,19 +56,34 @@ where
     attribute: Option<Attribute>,
     value: Option<Value>,
 
-    value_reference: Option<Blake3Hash>,
-
     /// Prefix bound on the entity URI: selected [`Artifact`]s'
     /// entities must have URIs beginning with this string. The
-    /// entity key stores the first 32 URI bytes raw (the rest is
-    /// hashed), so scans range over the raw head and re-check
-    /// longer prefixes against the stored datum.
+    /// entity key stores the full URI raw, so this bound is an
+    /// exact key range.
     entity_prefix: Option<String>,
     /// Prefix bound on the attribute name: selected [`Artifact`]s'
     /// attributes must have names beginning with this string. The
     /// attribute key stores the full (64-byte-capped) name raw, so
     /// this bound is an exact key range.
     attribute_prefix: Option<String>,
+    /// Prefix bound on the value: selected [`Artifact`]s' values must
+    /// be strings beginning with this string. The M3 value-in-key
+    /// format stores the value order-preservingly in the VAE index, so
+    /// this is an exact key range over the value dimension. Spilled
+    /// values participate through the leading bytes their key carries:
+    /// a prefix within that in-key prefix decides from the key alone,
+    /// and a longer one loads the value and post-filters. A prefix
+    /// containing a NUL byte cannot match past the NUL (the inline
+    /// payload escapes `0x00`).
+    value_prefix: Option<String>,
+    /// Lower bound on the value: selected [`Artifact`]s' values must be
+    /// `>=` (or `>`, when not inclusive) this. The value sorts
+    /// order-preservingly in the VAE index, so this is a key range bound;
+    /// exclusivity is enforced by the per-entry re-check.
+    value_lower: Option<ValueBound>,
+    /// Upper bound on the value: selected [`Artifact`]s' values must be
+    /// `<=` (or `<`, when not inclusive) this.
+    value_upper: Option<ValueBound>,
     state_type: PhantomData<State>,
 }
 
@@ -77,9 +102,11 @@ impl ArtifactSelector<Unconstrained> {
             entity: None,
             attribute: None,
             value: None,
-            value_reference: None,
             entity_prefix: None,
             attribute_prefix: None,
+            value_prefix: None,
+            value_lower: None,
+            value_upper: None,
             state_type: PhantomData,
         }
     }
@@ -104,11 +131,6 @@ where
         self.value.as_ref()
     }
 
-    /// The [`Blake3Hash`] of the configured [`Value`], if any
-    pub fn value_reference(&self) -> Option<&Blake3Hash> {
-        self.value_reference.as_ref()
-    }
-
     /// The prefix bound on entity URIs, if any
     pub fn entity_prefix(&self) -> Option<&str> {
         self.entity_prefix.as_deref()
@@ -119,15 +141,32 @@ where
         self.attribute_prefix.as_deref()
     }
 
+    /// The prefix bound on values, if any
+    pub fn value_prefix(&self) -> Option<&str> {
+        self.value_prefix.as_deref()
+    }
+
+    /// The lower bound on values, if any
+    pub fn value_lower(&self) -> Option<&ValueBound> {
+        self.value_lower.as_ref()
+    }
+
+    /// The upper bound on values, if any
+    pub fn value_upper(&self) -> Option<&ValueBound> {
+        self.value_upper.as_ref()
+    }
+
     /// Set the [`Attribute`] field (the predicate) of the [`ArtifactSelector`]
     pub fn the(self, attribute: Attribute) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
             attribute: Some(attribute),
             entity: self.entity,
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            value_prefix: self.value_prefix,
+            value_lower: self.value_lower,
+            value_upper: self.value_upper,
             state_type: PhantomData,
         }
     }
@@ -137,10 +176,12 @@ where
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: Some(entity),
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            value_prefix: self.value_prefix,
+            value_lower: self.value_lower,
+            value_upper: self.value_upper,
             state_type: PhantomData,
         }
     }
@@ -150,10 +191,12 @@ where
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
-            value_reference: Some(value.to_reference()),
             value: Some(value),
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            value_prefix: self.value_prefix,
+            value_lower: self.value_lower,
+            value_upper: self.value_upper,
             state_type: PhantomData,
         }
     }
@@ -166,10 +209,12 @@ where
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: Some(prefix.into()),
+            value_prefix: self.value_prefix,
+            value_lower: self.value_lower,
+            value_upper: self.value_upper,
             state_type: PhantomData,
         }
     }
@@ -182,10 +227,107 @@ where
         ArtifactSelector::<Constrained> {
             attribute: self.attribute,
             entity: self.entity,
-            value_reference: self.value_reference,
             value: self.value,
             entity_prefix: Some(prefix.into()),
             attribute_prefix: self.attribute_prefix,
+            value_prefix: self.value_prefix,
+            value_lower: self.value_lower,
+            value_upper: self.value_upper,
+            state_type: PhantomData,
+        }
+    }
+
+    /// Constrain selected [`Artifact`]s to string values beginning with
+    /// `prefix`. A prefix is a constraint, so the resulting selector is
+    /// [`Constrained`]; an exact value set via [`ArtifactSelector::is`] takes
+    /// precedence during scans.
+    ///
+    /// The M3 value-in-key format stores the value order-preservingly in the
+    /// VAE index, so this narrows the scan to the value sub-range whose keys
+    /// begin with `prefix`. A spilled value participates through the leading
+    /// bytes its key carries: a probe within that in-key prefix decides from
+    /// the key alone, and a longer probe loads the value and post-filters.
+    pub fn is_starting_with(self, prefix: impl Into<String>) -> ArtifactSelector<Constrained> {
+        ArtifactSelector::<Constrained> {
+            attribute: self.attribute,
+            entity: self.entity,
+            value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
+            value_prefix: Some(prefix.into()),
+            value_lower: self.value_lower,
+            value_upper: self.value_upper,
+            state_type: PhantomData,
+        }
+    }
+
+    /// Constrain selected [`Artifact`]s to values greater than or equal to
+    /// `value` (`>= value`). The value sorts order-preservingly in the VAE
+    /// index, so this bounds the scan's value sub-range from below.
+    pub fn is_at_least(self, value: Value) -> ArtifactSelector<Constrained> {
+        self.with_value_lower(ValueBound {
+            value,
+            inclusive: true,
+        })
+    }
+
+    /// Constrain selected [`Artifact`]s to values strictly greater than
+    /// `value` (`> value`).
+    pub fn is_greater_than(self, value: Value) -> ArtifactSelector<Constrained> {
+        self.with_value_lower(ValueBound {
+            value,
+            inclusive: false,
+        })
+    }
+
+    /// Constrain selected [`Artifact`]s to values less than or equal to
+    /// `value` (`<= value`). Bounds the scan's value sub-range from above.
+    pub fn is_at_most(self, value: Value) -> ArtifactSelector<Constrained> {
+        self.with_value_upper(ValueBound {
+            value,
+            inclusive: true,
+        })
+    }
+
+    /// Constrain selected [`Artifact`]s to values strictly less than `value`
+    /// (`< value`).
+    pub fn is_less_than(self, value: Value) -> ArtifactSelector<Constrained> {
+        self.with_value_upper(ValueBound {
+            value,
+            inclusive: false,
+        })
+    }
+
+    /// Constrain selected [`Artifact`]s to values in the inclusive range
+    /// `[lower, upper]`.
+    pub fn is_between(self, lower: Value, upper: Value) -> ArtifactSelector<Constrained> {
+        self.is_at_least(lower).is_at_most(upper)
+    }
+
+    fn with_value_lower(self, bound: ValueBound) -> ArtifactSelector<Constrained> {
+        ArtifactSelector::<Constrained> {
+            attribute: self.attribute,
+            entity: self.entity,
+            value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
+            value_prefix: self.value_prefix,
+            value_lower: Some(bound),
+            value_upper: self.value_upper,
+            state_type: PhantomData,
+        }
+    }
+
+    fn with_value_upper(self, bound: ValueBound) -> ArtifactSelector<Constrained> {
+        ArtifactSelector::<Constrained> {
+            attribute: self.attribute,
+            entity: self.entity,
+            value: self.value,
+            entity_prefix: self.entity_prefix,
+            attribute_prefix: self.attribute_prefix,
+            value_prefix: self.value_prefix,
+            value_lower: self.value_lower,
+            value_upper: Some(bound),
             state_type: PhantomData,
         }
     }

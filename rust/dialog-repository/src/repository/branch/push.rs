@@ -1,19 +1,20 @@
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{BlobChange, BlobIndexExt as _, blob_changes};
+use dialog_artifacts::{BlobChange, BlobIndexExt as _, ShipmentRef, shipment_refs};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, TreeDifference};
+use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use crate::{
-    Branch, Index, LocalIndex, PushError, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt, Revision, Upstream,
+    Branch, Index, LocalIndex, PublishError, PushError, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -22,19 +23,33 @@ use crate::{
 /// dispatch to local or remote push logic.
 pub struct Push<'a> {
     branch: &'a Branch,
+    to: Option<Upstream>,
 }
 
 impl<'a> Push<'a> {
     fn new(branch: &'a Branch) -> Self {
-        Self { branch }
+        Self { branch, to: None }
+    }
+
+    /// Push to the given branch instead of the default upstream.
+    ///
+    /// Accepts either a `&Branch` or a `&RemoteBranch` — the same inputs as
+    /// [`Branch::set_upstream`]. If the target is already tracked, its
+    /// recorded sync base drives the fast-forward check and the novelty
+    /// upload; otherwise the empty base does (only a target with no
+    /// revision of its own accepts such a push), and a successful push
+    /// starts tracking the target — without changing the default upstream.
+    pub fn to(mut self, source: impl Into<UpstreamBranch>) -> Self {
+        self.to = Some(Upstream::from(source.into()));
+        self
     }
 }
 
 impl Branch {
     /// Create a command to push local changes to the upstream branch.
     ///
-    /// Reads the upstream configuration from branch state and dispatches
-    /// to local or remote push logic.
+    /// Targets the default upstream; chain [`Push::to`] to push to another
+    /// tracked (or brand-new) upstream instead.
     pub fn push(&self) -> Push<'_> {
         Push::new(self)
     }
@@ -51,7 +66,13 @@ impl Push<'_> {
     ///   the last sync; pull to integrate before pushing again.
     ///
     /// For remote upstream, novel tree blocks are uploaded before the
-    /// revision is published.
+    /// revision is published, so a published head never references bytes
+    /// the remote is missing. A known limit: the novelty diff reads the
+    /// LOCAL archive only, so a head carrying subtrees adopted by
+    /// reference from a *different* remote (a scenario-3 pull) cannot be
+    /// pushed to a second remote until those blocks are hydrated locally
+    /// — the push fails loudly on the missing blocks rather than
+    /// publishing a head the target cannot serve.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PushError>
     where
         Env: Provider<Get>
@@ -68,11 +89,29 @@ impl Push<'_> {
             + 'static,
     {
         let branch = self.branch;
-        let upstream_state = branch
-            .upstream()
-            .ok_or_else(|| PushError::BranchHasNoUpstream {
-                branch: branch.name().to_string(),
-            })?;
+
+        // Select the upstream entry to push to: the default when no
+        // explicit target was given, otherwise the tracked entry for that
+        // target — or, for a target not tracked yet, a fresh entry whose
+        // empty sync base only fast-forwards onto an empty target.
+        let upstreams = branch.upstreams();
+        let upstream_state = match self.to {
+            None => upstreams.default_upstream().cloned().ok_or_else(|| {
+                PushError::BranchHasNoUpstream {
+                    branch: branch.name().to_string(),
+                }
+            })?,
+            Some(target) => {
+                if let Upstream::Local { branch: name, .. } = &target
+                    && name == branch.name()
+                {
+                    return Err(PushError::UpstreamIsItself {
+                        branch: branch.name().to_string(),
+                    });
+                }
+                upstreams.find(&target).cloned().unwrap_or(target)
+            }
+        };
 
         let revision = match branch.revision() {
             Some(revision) => revision,
@@ -136,6 +175,16 @@ impl Push<'_> {
                 // was in our last snapshot.
                 upstream.fetch().perform(env).await?;
 
+                // The trust boundary, same as pull's: this head was minted
+                // elsewhere, and every gate below (the fast-forward check,
+                // the novelty diff, the upload) acts on it. A forged or
+                // tampered head is rejected before a single byte moves.
+                if let Some(fetched) = upstream.revision() {
+                    fetched
+                        .verify()
+                        .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+                }
+
                 let current = upstream.revision().map(|r| r.tree).unwrap_or_default();
                 if current != base {
                     return Err(PushError::NonFastForward {
@@ -164,70 +213,120 @@ impl Push<'_> {
                 // stream type and produces large futures.
                 Box::pin(upload).await?;
 
-                // Ship blobs newly referenced since the sync checkpoint. The
-                // entry-level view of the same differential, restricted to the
-                // BLOB tag, names exactly what the remote lacks under
-                // fast-forward. Bytes must land on the remote before we publish
+                // Ship the blocks the tree nodes reference but the node upload
+                // does not carry: blob bytes and spilled value blocks. Both
+                // are surfaced by ONE entry-level drain of the SAME
+                // differential the node upload just walked (`shipment_refs`),
+                // so the changed paths are read once per push instead of once
+                // per concern. Bytes must land on the remote before we publish
                 // a revision that references them, so a failed upload here
                 // aborts the push with the revision still unpublished.
                 let blob_store = LocalIndex::new(env, index.clone());
                 let current_index = Index::from_hash(NodeHash::from(*revision.tree.hash()));
                 let address = remote.address();
-                let mut changes = std::pin::pin!(blob_changes(
-                    Index::from_hash(NodeHash::from(*base.hash())),
-                    Index::from_hash(NodeHash::from(*revision.tree.hash())),
-                    blob_store.clone(),
-                ));
-                while let Some(change) = changes.next().await {
-                    // Removals ship nothing; the remote keeps its bytes.
-                    let BlobChange::Added(hash) = change? else {
-                        continue;
-                    };
-                    let digest = dialog_common::Blake3Hash::from(hash);
-                    // Size from the current tree's blob index (no byte fetch).
-                    let record = current_index
-                        .get_blob(&blob_store, &hash)
-                        .await?
-                        .ok_or_else(|| {
-                            BlobError::ExecutionError(format!(
-                                "blob {digest:?} referenced by the tree but absent from its index"
-                            ))
-                        })?;
-                    // Local bytes -> remote import sink. Mirrors the remote
-                    // `Read` fork in `branch/blob.rs` and `RemotePut`'s `Put`
-                    // fork in `remote/archive.rs`, substituting the blob
-                    // `Import` effect (single-part on the current providers).
-                    let mut source = branch
-                        .archive()
-                        .blob()
-                        .read(digest.clone())
-                        .perform(env)
-                        .await?;
-                    let mut sink = address
-                        .subject
-                        .clone()
-                        .archive()
-                        .blob()
-                        .import(digest.clone(), record.size)
-                        .fork(address.site())
-                        .perform(env)
-                        .await?;
-                    while let Some(chunk) = source.next().await? {
-                        sink.write_all(&chunk).await?;
+                let mut refs = std::pin::pin!(shipment_refs(&difference));
+                while let Some(shipment) = refs.next().await {
+                    match shipment? {
+                        // Removals ship nothing; the remote keeps its bytes.
+                        ShipmentRef::Blob(BlobChange::Removed(_)) => {}
+                        ShipmentRef::Blob(BlobChange::Added(hash)) => {
+                            let digest = dialog_common::Blake3Hash::from(hash);
+                            // Size from the current tree's blob index (no byte
+                            // fetch).
+                            let record = current_index
+                                .get_blob(&blob_store, &hash)
+                                .await?
+                                .ok_or_else(|| {
+                                    BlobError::ExecutionError(format!(
+                                        "blob {digest:?} referenced by the tree but absent from its index"
+                                    ))
+                                })?;
+                            // Local bytes -> remote import sink. Mirrors the
+                            // remote `Read` fork in `branch/blob.rs` and
+                            // `RemotePut`'s `Put` fork in `remote/archive.rs`,
+                            // substituting the blob `Import` effect
+                            // (single-part on the current providers).
+                            let mut source = branch
+                                .archive()
+                                .blob()
+                                .read(digest.clone())
+                                .perform(env)
+                                .await?;
+                            let mut sink = address
+                                .subject
+                                .clone()
+                                .archive()
+                                .blob()
+                                .import(digest.clone(), record.size)
+                                .fork(address.site())
+                                .perform(env)
+                                .await?;
+                            while let Some(chunk) = source.next().await? {
+                                sink.write_all(&chunk).await?;
+                            }
+                            sink.finish().await?;
+                        }
+                        // A value larger than the inline threshold lives as a
+                        // content-addressed block (addressed by its 32-byte
+                        // value reference) in the same store as the tree
+                        // nodes. Local bytes -> remote block put, mirroring
+                        // the novel node upload.
+                        ShipmentRef::SpilledValue(reference) => {
+                            let bytes = blob_store.get(&reference).await?.ok_or_else(|| {
+                                BlobError::ExecutionError(format!(
+                                    "spilled value block {reference:?} referenced by the tree but absent from the local archive"
+                                ))
+                            })?;
+                            remote_index.put(Buffer::from(bytes)).perform(env).await?;
+                        }
                     }
-                    sink.finish().await?;
                 }
 
                 upstream.publish(revision.clone()).perform(env).await?;
             }
         }
 
-        // Advance our recorded sync point to the just-pushed tree.
-        branch
-            .upstream
-            .publish(upstream_state.with_tree(revision.tree.clone()))
-            .perform(env)
-            .await?;
+        // Advance this upstream's recorded sync point to the just-pushed
+        // tree. A target pushed explicitly for the first time gets tracked
+        // here (appended, not made the default).
+        //
+        // Same tracking-cell protocol as the pull commit: this write races
+        // other syncs of the cell (a pull, a push to another upstream, a
+        // set_upstream through another handle), and a plain publish from a
+        // stale snapshot would either fail the whole push AFTER the target
+        // already advanced — leaving the base behind so every retried push
+        // reads as non-fast-forward until a pull — or silently drop a
+        // concurrent writer's entry. On a version mismatch, re-read: if our
+        // entry is untouched, fold our advance into the current state and
+        // publish once more; if our own entry moved, a concurrent sync of
+        // this same upstream already recorded a consistent pair, so yield
+        // rather than regress it.
+        let advanced = upstream_state.with_tree(revision.tree.clone());
+        let marker = branch.upstream.checkpoint();
+        let mut upstreams = branch.upstreams();
+        upstreams.upsert(advanced.clone());
+        let publish = marker.publish(upstreams, env).await;
+        if let Err(PublishError::VersionMismatch { .. }) = publish {
+            branch.upstream.resolve().perform(env).await?;
+            let marker = branch.upstream.checkpoint();
+            let mut upstreams = branch.upstreams();
+            let ours_untouched = match upstreams.find(&advanced) {
+                None => true,
+                Some(entry) => *entry.tree() == base,
+            };
+            if ours_untouched {
+                upstreams.upsert(advanced);
+                match marker.publish(upstreams, env).await {
+                    // The cell is contended; give up on the marker
+                    // advance — the push itself landed, the next sync
+                    // is just heavier.
+                    Err(PublishError::VersionMismatch { .. }) => {}
+                    other => other?,
+                }
+            }
+        } else {
+            publish?;
+        }
 
         Ok(Some(revision))
     }
@@ -235,6 +334,7 @@ impl Push<'_> {
 
 #[cfg(test)]
 mod tests {
+
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -243,7 +343,7 @@ mod tests {
     use anyhow::Result;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
-    use futures_util::stream;
+    use futures_util::{StreamExt as _, stream};
 
     #[dialog_common::test]
     async fn it_pushes_to_local_upstream() -> Result<()> {
@@ -276,6 +376,76 @@ mod tests {
             .revision()
             .expect("main should have a revision after push");
         assert_eq!(main_rev.tree, feature_revision.tree);
+
+        Ok(())
+    }
+
+    /// Pushing a spilling value ships its block to the local upstream, a
+    /// spilled value shared by many facts ships once, and a re-push with
+    /// nothing new is a no-op (no re-upload).
+    #[dialog_common::test]
+    async fn it_pushes_spilled_value_blocks_once() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+        let big = "z".repeat(inline_n + 1);
+        let value = Value::String(big);
+
+        // Two facts share the same large value -> one spilled block.
+        feature
+            .commit(stream::iter(vec![
+                Instruction::Assert(Artifact {
+                    the: "doc/body".parse()?,
+                    of: "doc:a".parse()?,
+                    is: value.clone(),
+                    cause: None,
+                }),
+                Instruction::Assert(Artifact {
+                    the: "doc/body".parse()?,
+                    of: "doc:b".parse()?,
+                    is: value.clone(),
+                    cause: None,
+                }),
+            ]))
+            .perform(&operator)
+            .await?;
+
+        let first = feature.push().perform(&operator).await?;
+        assert!(first.is_some(), "the first push lands the commit");
+
+        // The main branch (the upstream) can now read both facts back,
+        // reconstructing the shared spilled value from the shipped block.
+        let main_reloaded = repo.branch("main").load().perform(&operator).await?;
+        let results: Vec<_> = main_reloaded
+            .claims()
+            .select(dialog_artifacts::ArtifactSelector::new().the("doc/body".parse()?))
+            .perform(&operator)
+            .await?
+            .filter_map(|r| async { r.ok() })
+            .collect()
+            .await;
+        assert_eq!(
+            results.len(),
+            2,
+            "both facts hydrate from the shipped block"
+        );
+        assert!(
+            results.iter().all(|r| r.is == value),
+            "the shared spilled value reconstructs for both facts"
+        );
+
+        // A re-push with nothing new is a no-op.
+        let second = feature.push().perform(&operator).await?;
+        assert_eq!(
+            second.map(|r| r.tree),
+            first.map(|r| r.tree),
+            "a re-push with nothing new returns the same revision"
+        );
 
         Ok(())
     }
@@ -320,6 +490,179 @@ mod tests {
             second.map(|r| r.tree),
             Some(revision.tree),
             "second push with nothing new returns the current revision as a no-op"
+        );
+
+        Ok(())
+    }
+
+    /// A push whose tracking-cell snapshot went stale — another handle of
+    /// the same branch reconfigured upstreams after this handle opened —
+    /// must still succeed and fold its advance into the current cell
+    /// state rather than failing after the target already advanced (which
+    /// left the recorded base behind, so every retried push read as
+    /// non-fast-forward until a pull) or clobbering the other handle's
+    /// entry. The push-side analogue of
+    /// `it_folds_tracking_updates_racing_from_another_handle`.
+    #[dialog_common::test]
+    async fn it_folds_tracking_updates_when_pushing_from_a_stale_handle() -> Result<()> {
+        use crate::Upstream;
+        use crate::helpers::test_operator_with_profile;
+        use crate::helpers::test_repo;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let backup = repo.branch("backup").open().perform(&operator).await?;
+
+        // Handle A of "feature" opens (snapshotting the upstream cell),
+        // then handle B reconfigures tracking, advancing the cell version
+        // past A's snapshot.
+        let feature_a = repo.branch("feature").open().perform(&operator).await?;
+        feature_a.set_upstream(&main).perform(&operator).await?;
+        feature_a
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:1".parse()?,
+                is: Value::String("Alice".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let feature_b = repo.branch("feature").open().perform(&operator).await?;
+        feature_b.set_upstream(&backup).perform(&operator).await?;
+        feature_b.push().to(&backup).perform(&operator).await?;
+
+        // A's push to main runs against its stale tracking snapshot: it
+        // must land, and the cell must end up carrying BOTH entries —
+        // A's advanced base for main and B's entry for backup.
+        let pushed = feature_a.push().to(&main).perform(&operator).await?;
+        assert!(pushed.is_some(), "the stale-handle push lands");
+
+        let fresh = repo.branch("feature").open().perform(&operator).await?;
+        let upstreams = fresh.upstreams();
+        let revision = feature_a.revision().expect("feature has a head");
+        assert!(
+            upstreams.iter().any(|entry| matches!(
+                entry,
+                Upstream::Local { branch, tree } if branch == "main" && *tree == revision.tree
+            )),
+            "A's tracking advance for main lands despite the stale snapshot"
+        );
+        assert!(
+            upstreams
+                .iter()
+                .any(|entry| matches!(entry, Upstream::Local { branch, .. } if branch == "backup")),
+            "B's entry for backup survives A's fold"
+        );
+
+        // And the retried bare push is a clean no-op, not NonFastForward.
+        let again = feature_a.push().to(&main).perform(&operator).await?;
+        assert_eq!(
+            again.map(|r| r.tree),
+            Some(revision.tree),
+            "a re-push after the fold is a no-op"
+        );
+
+        Ok(())
+    }
+
+    /// A branch can push to an upstream other than its default: the target
+    /// advances, starts being tracked with its own sync base, and the
+    /// default stays put.
+    #[dialog_common::test]
+    async fn it_pushes_to_a_non_default_upstream_and_tracks_it() -> Result<()> {
+        use crate::Upstream;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let backup = repo.branch("backup").open().perform(&operator).await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        feature
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:123".parse()?,
+                is: Value::String("Alice".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let revision = feature.revision().expect("feature has a revision");
+
+        // Bare push targets the default upstream (main)...
+        feature.push().perform(&operator).await?;
+        let main = repo.branch("main").load().perform(&operator).await?;
+        assert_eq!(main.revision().map(|r| r.tree), Some(revision.tree.clone()));
+
+        // ... and an explicit push targets another branch entirely.
+        let pushed = feature.push().to(&backup).perform(&operator).await?;
+        assert!(pushed.is_some());
+        let backup = repo.branch("backup").load().perform(&operator).await?;
+        assert_eq!(
+            backup.revision().map(|r| r.tree),
+            Some(revision.tree.clone())
+        );
+
+        // Backup is now tracked with its own sync base; main stays default.
+        let upstreams = feature.upstreams();
+        assert_eq!(upstreams.iter().count(), 2);
+        assert!(matches!(
+            upstreams.default_upstream(),
+            Some(Upstream::Local { branch, .. }) if branch == "main"
+        ));
+        assert!(upstreams.iter().any(|entry| matches!(
+            entry,
+            Upstream::Local { branch, tree } if branch == "backup" && *tree == revision.tree
+        )));
+
+        // Pushing to the branch itself is refused.
+        let selfish = feature.push().to(&feature).perform(&operator).await;
+        assert!(matches!(selfish, Err(PushError::UpstreamIsItself { .. })));
+
+        Ok(())
+    }
+
+    /// Pushing to an untracked target that already has its own history is
+    /// refused as non-fast-forward: with no recorded sync base, only an
+    /// empty target can be fast-forwarded onto. Pull it first.
+    #[dialog_common::test]
+    async fn it_refuses_pushing_to_an_untracked_nonempty_target() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let occupied = repo.branch("occupied").open().perform(&operator).await?;
+        occupied
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:theirs".parse()?,
+                is: Value::String("Existing".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:ours".parse()?,
+                is: Value::String("New".to_string()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+
+        let result = feature.push().to(&occupied).perform(&operator).await;
+        assert!(
+            matches!(result, Err(PushError::NonFastForward { .. })),
+            "an untracked, nonempty target must not be overwritten: {result:?}"
         );
 
         Ok(())

@@ -255,6 +255,411 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
     Ok(())
 }
 
+/// Push ships a spilling scalar value's block to the remote before publishing.
+///
+/// A value larger than the tree's inline threshold does not travel in the key
+/// or the fact payload; its bytes are a content-addressed block in the archive,
+/// keyed by the value's 32-byte reference. The push spilled-ref differential
+/// must surface that block so it lands on the remote alongside the tree nodes.
+///
+/// Proven two ways: (1) the block is directly readable from the remote archive
+/// under its value reference, byte-equal to the value's bytes; and (2) a second
+/// site with an entirely separate local store pulls the revision and selects
+/// the fact back, reconstructing the exact `Value` it never wrote locally —
+/// only possible if the spilled block reached the remote. A same-store local
+/// select on site A confirms the round-trip end too.
+#[dialog_common::test]
+async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()> {
+    // A value comfortably larger than the inline threshold, so its key spills to
+    // a 32-byte reference and its bytes become a separate archive block.
+    let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+    let big = "x".repeat(inline_n + 1);
+    let value = Value::String(big.clone());
+    let reference = value.to_reference();
+
+    // --- Site A: commit a spilling fact, push. ---
+    let storage_a = Storage::temp();
+    let profile_a = Profile::open(unique_name("spill-ship-a"))
+        .perform(&storage_a)
+        .await?;
+    let operator_a = profile_a
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_a)
+        .await?;
+
+    let repo_a = profile_a
+        .repository(unique_name("spill-ship"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .credential()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_a)
+        .await?;
+
+    let origin_a = repo_a
+        .remote("origin")
+        .create(site_a)
+        .perform(&operator_a)
+        .await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+
+    let artifact = Artifact {
+        the: "doc/body".parse()?,
+        of: "doc:1".parse()?,
+        is: value.clone(),
+        cause: None,
+    };
+    branch_a
+        .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+        .perform(&operator_a)
+        .await?;
+
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // A same-store local select reconstructs the spilled value.
+    let local: Vec<_> = branch_a
+        .claims()
+        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .perform(&operator_a)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(local.len(), 1, "site A should read its own spilled fact");
+    assert_eq!(local[0].is, value, "local select reconstructs the value");
+
+    // The spilled block itself is present on the REMOTE archive, byte-equal to
+    // the value's bytes, under the value's 32-byte reference.
+    let remote_block = origin_a
+        .archive()
+        .index()
+        .get(reference)
+        .perform(&operator_a)
+        .await?;
+    assert_eq!(
+        remote_block,
+        Some(value.to_bytes()),
+        "the spilled value block must be on the remote after push"
+    );
+
+    // --- Site B: same remote subject, separate local store; pull then select. ---
+    let storage_b = Storage::temp();
+    let profile_b = Profile::open(unique_name("spill-ship-b"))
+        .perform(&storage_b)
+        .await?;
+    let operator_b = profile_b
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_b)
+        .await?;
+
+    let repo_b = profile_b
+        .repository(unique_name("spill-ship-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .credential()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_b)
+        .await?;
+
+    let origin_b = repo_b
+        .remote("origin")
+        .create(site_b)
+        .subject(repo_a.did())
+        .perform(&operator_b)
+        .await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+
+    branch_b.pull().perform(&operator_b).await?;
+
+    // Site B never wrote the value locally; reconstructing it from its own store
+    // proves the spilled block was shipped to the remote and hydrated on pull.
+    let remote_side: Vec<_> = branch_b
+        .claims()
+        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .perform(&operator_b)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(remote_side.len(), 1, "site B should read the pulled fact");
+    assert_eq!(
+        remote_side[0].is, value,
+        "site B reconstructs the spilled value from the remote-shipped block"
+    );
+
+    Ok(())
+}
+
+/// A replica that pulled a spilled fact (pull ships tree nodes, never value
+/// blocks) can retract it and push WITHOUT ever having read the value: a
+/// retraction writes tombstones at the spilled keys, and tombstones must not
+/// demand the value block from the local archive — requiring it would wedge
+/// this replica's push forever, since nothing ever writes the block locally.
+#[dialog_common::test]
+async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Result<()> {
+    let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+    let artifact = Artifact {
+        the: "doc/body".parse()?,
+        of: "doc:1".parse()?,
+        is: Value::String("x".repeat(inline_n + 1)),
+        cause: None,
+    };
+
+    // --- Site A: commit the spilling fact, push. ---
+    let storage_a = Storage::temp();
+    let profile_a = Profile::open(unique_name("spill-retract-a"))
+        .perform(&storage_a)
+        .await?;
+    let operator_a = profile_a
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_a)
+        .await?;
+    let repo_a = profile_a
+        .repository(unique_name("spill-retract"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .credential()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_a)
+        .await?;
+    let origin_a = repo_a
+        .remote("origin")
+        .create(site_a)
+        .perform(&operator_a)
+        .await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+    branch_a
+        .commit(stream::iter(vec![Instruction::Assert(artifact.clone())]))
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // --- Site B: separate local store; pull, retract WITHOUT selecting, push. ---
+    let storage_b = Storage::temp();
+    let profile_b = Profile::open(unique_name("spill-retract-b"))
+        .perform(&storage_b)
+        .await?;
+    let operator_b = profile_b
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_b)
+        .await?;
+    let repo_b = profile_b
+        .repository(unique_name("spill-retract-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .credential()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_b)
+        .await?;
+    let origin_b = repo_b
+        .remote("origin")
+        .create(site_b)
+        .subject(repo_a.did())
+        .perform(&operator_b)
+        .await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+    branch_b.pull().perform(&operator_b).await?;
+
+    // The retraction is constructed from application state; site B never
+    // selected the fact, so its local archive has no spilled block.
+    branch_b
+        .commit(stream::iter(vec![Instruction::Retract(artifact.clone())]))
+        .perform(&operator_b)
+        .await?;
+    assert!(
+        branch_b.push().perform(&operator_b).await?.is_some(),
+        "a tombstone push must not demand the spilled block locally"
+    );
+
+    // --- Site A observes the retraction. ---
+    branch_a.pull().perform(&operator_a).await?;
+    let remaining: Vec<_> = branch_a
+        .claims()
+        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .perform(&operator_a)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        remaining.is_empty(),
+        "the retraction round-trips: {remaining:?}"
+    );
+
+    Ok(())
+}
+
+/// A subscription's change poll can see a spilled fact that arrived via pull:
+/// pull replicates tree nodes but never value blocks, so the poll's spilled
+/// fetch must fall back to the branch's remote exactly as a select does.
+#[dialog_common::test]
+async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Result<()> {
+    use dialog_query::attribute::The;
+    use dialog_query::{AttributeQuery, Term, the};
+
+    let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+    let body = "b".repeat(inline_n + 1);
+
+    // --- Site A: repo + remote. ---
+    let storage_a = Storage::temp();
+    let profile_a = Profile::open(unique_name("spill-sub-a"))
+        .perform(&storage_a)
+        .await?;
+    let operator_a = profile_a
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_a)
+        .await?;
+    let repo_a = profile_a
+        .repository(unique_name("spill-sub"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .credential()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_a)
+        .await?;
+    let origin_a = repo_a
+        .remote("origin")
+        .create(site_a)
+        .perform(&operator_a)
+        .await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+
+    // --- Site B: separate store, subscribed to doc bodies. ---
+    let storage_b = Storage::temp();
+    let profile_b = Profile::open(unique_name("spill-sub-b"))
+        .perform(&storage_b)
+        .await?;
+    let operator_b = profile_b
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_b)
+        .await?;
+    let repo_b = profile_b
+        .repository(unique_name("spill-sub-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .credential()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_b)
+        .await?;
+    let origin_b = repo_b
+        .remote("origin")
+        .create(site_b)
+        .subject(repo_a.did())
+        .perform(&operator_b)
+        .await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+
+    let query = AttributeQuery::from(
+        Term::<The>::from(the!("doc/body"))
+            .of(Term::<dialog_artifacts::Entity>::var("e"))
+            .is(Term::<String>::var("v")),
+    );
+    let mut subscription = branch_b.subscribe(query);
+    let initial = subscription
+        .poll(&operator_b)
+        .await?
+        .expect("the initial poll evaluates");
+    assert!(initial.asserted.is_empty(), "nothing published yet");
+
+    // --- Site A publishes a spilled fact; B pulls and polls. ---
+    branch_a
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "doc/body".parse()?,
+            of: "doc:1".parse()?,
+            is: Value::String(body.clone()),
+            cause: None,
+        })]))
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    branch_b.pull().perform(&operator_b).await?;
+
+    let delta = subscription
+        .poll(&operator_b)
+        .await?
+        .expect("the pulled spilled fact must surface as a delta");
+    assert_eq!(delta.asserted.len(), 1, "one asserted row: {delta:?}");
+    assert_eq!(
+        delta.asserted[0].is,
+        Value::String(body),
+        "the spilled value reconstructs through the remote fallback"
+    );
+
+    Ok(())
+}
+
 #[dialog_common::test]
 async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
@@ -720,20 +1125,14 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
         .await?;
 
     let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
-    let remote_branch = origin.branch("main").open().perform(&operator).await?;
-    bob_branch
-        .set_upstream(remote_branch)
-        .perform(&operator)
-        .await?;
 
     // Set Bob's revision to Alice's without pulling blocks
     bob_branch.reset(alice_revision).perform(&operator).await?;
 
-    // First, remove upstream so select has no remote to fall back to.
-    // This should fail because tree blocks aren't local.
-    let nowhere = bob_repo.branch("nowhere").open().perform(&operator).await?;
-    bob_branch.set_upstream(&nowhere).perform(&operator).await?;
-
+    // Without any remote upstream tracked there is nothing to fall back
+    // to, so reads of the unreplicated tree fail. (Upstreams accumulate —
+    // `set_upstream` re-points the default but keeps tracking the rest —
+    // so this check must run before the remote is ever tracked.)
     let no_remote_result = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
@@ -744,7 +1143,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
         "select should fail without remote when blocks aren't local"
     );
 
-    // Restore upstream so fallback can reach the remote
+    // Track the remote so fallback can reach it
     let remote_branch = origin.branch("main").open().perform(&operator).await?;
     bob_branch
         .set_upstream(remote_branch)

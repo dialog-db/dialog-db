@@ -14,7 +14,7 @@ pub use builder::{OperatorBuilder, OperatorError};
 use crate::Authority;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
-use dialog_effects::authority::{Identify, Operator as AuthOperator};
+use dialog_effects::authority::{Attest, Identify, Operator as AuthOperator};
 use dialog_effects::credential::Secret;
 use dialog_effects::storage as storage_fx;
 use dialog_effects::{archive, blob, credential, memory};
@@ -31,8 +31,8 @@ use dialog_varsig::{Did, Principal};
 /// - Remote for fork invocations
 #[derive(Provider)]
 pub struct Operator<S: Clone> {
-    #[provide(Identify)]
-    /// Provider for authority effects (identity).
+    #[provide(Identify, Attest)]
+    /// Provider for authority effects (identity and attestation).
     authority: Authority,
 
     #[provide(

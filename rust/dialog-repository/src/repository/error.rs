@@ -306,6 +306,10 @@ pub enum CommitError {
     /// Ingesting a blob's bytes into the store failed.
     #[error("Blob ingest failed during write: {0}")]
     Blob(#[from] BlobError),
+
+    /// A cell resolve during commit failed.
+    #[error("Failed to resolve during commit: {0}")]
+    Resolve(#[from] ResolveError),
 }
 
 /// Errors specific to a pull operation.
@@ -315,6 +319,13 @@ pub enum PullError {
     #[error("Branch {branch} has no upstream to pull from")]
     BranchHasNoUpstream {
         /// The local branch with no configured upstream.
+        branch: String,
+    },
+
+    /// Pull targeted the branch itself.
+    #[error("Branch {branch} cannot pull from itself")]
+    UpstreamIsItself {
+        /// The branch name.
         branch: String,
     },
 
@@ -337,6 +348,10 @@ pub enum PullError {
     /// A cell publish during pull failed.
     #[error("Failed to publish merged revision: {0}")]
     Publish(#[from] PublishError),
+
+    /// A cell resolve during pull failed.
+    #[error("Failed to resolve during pull: {0}")]
+    Resolve(#[from] ResolveError),
 
     /// Identifying the current authority for the merge revision failed.
     #[error("Failed to identify authority for merge: {0}")]
@@ -362,6 +377,13 @@ pub enum PushError {
     #[error("Branch {branch} has no upstream")]
     BranchHasNoUpstream {
         /// The local branch with no configured upstream.
+        branch: String,
+    },
+
+    /// Push targeted the branch itself.
+    #[error("Branch {branch} cannot push to itself")]
+    UpstreamIsItself {
+        /// The branch name.
         branch: String,
     },
 
@@ -420,6 +442,15 @@ pub enum PushError {
     /// Shipping a newly-referenced blob to the remote failed.
     #[error("Blob operation failed during push: {0}")]
     Blob(#[from] BlobError),
+
+    /// Reading a spilled value block from the local archive during push failed.
+    #[error("Storage operation failed during push: {0}")]
+    Storage(#[from] DialogStorageError),
+
+    /// A remote archive operation (e.g. writing a spilled value block) during
+    /// push failed.
+    #[error("Remote archive operation failed during push: {0}")]
+    Archive(#[from] ArchiveError),
 }
 
 /// Errors returned by cell resolve operations.

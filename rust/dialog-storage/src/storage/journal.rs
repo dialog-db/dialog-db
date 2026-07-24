@@ -158,6 +158,12 @@ where
         }
     }
 
+    /// Borrow the wrapped backend, so a wrapped measuring/counting backend's
+    /// figures remain reachable through the journal.
+    pub fn backend(&self) -> &Backend {
+        &self.backend
+    }
+
     /// Get a copy of all recorded operations (both reads and writes) in the order they occurred.
     pub fn get_journal(&self) -> Vec<JournalEntry<Backend::Key>> {
         self.state.read().unwrap().log.clone()

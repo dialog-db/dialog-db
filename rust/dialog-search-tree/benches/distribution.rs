@@ -72,7 +72,7 @@ const INSERT_SAMPLES: usize = 10;
 struct BitBatch<const M: u64>;
 
 impl<const M: u64> Distribution for BitBatch<M> {
-    fn rank(key: &[u8]) -> Rank {
+    fn rank(key: &[u8], _manifest: &dialog_search_tree::Manifest) -> Rank {
         let hash = Blake3Hash::hash(key);
         let bytes = hash.as_bytes();
         let m = M as u32;
@@ -101,7 +101,7 @@ impl<const M: u64> Distribution for BitBatch<M> {
 struct Threshold<const M: u64>;
 
 impl<const M: u64> Distribution for Threshold<M> {
-    fn rank(key: &[u8]) -> Rank {
+    fn rank(key: &[u8], _manifest: &dialog_search_tree::Manifest) -> Rank {
         let hash = Blake3Hash::hash(key);
         let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *hash.as_bytes();
         let prefix = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
@@ -352,12 +352,12 @@ where
                 node_count += 1;
                 match node.as_index() {
                     Ok(index) => {
-                        fanout_sum += index.links.len();
-                        for link in index.links.iter() {
-                            next.push(<&Blake3Hash>::from(&link.node).clone());
+                        fanout_sum += index.len();
+                        for at in 0..index.len() {
+                            next.push(index.hash_at(at).unwrap().clone());
                         }
                     }
-                    Err(_) => fanout_sum += node.as_segment().unwrap().entries.len(),
+                    Err(_) => fanout_sum += node.as_segment().unwrap().len(),
                 }
             }
 
