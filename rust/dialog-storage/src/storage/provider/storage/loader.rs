@@ -22,16 +22,31 @@ use crate::resource::{Pool, Resource};
 ///
 /// Maintains a location -> DID mapping so that loading the same location
 /// twice returns the existing DID (important for non-persistent backends).
+///
+/// Both tables are shared behind an `Arc`, so a clone of a loader
+/// resolves locations through the same mapping and mounts into the same
+/// pool. Cloning to get a second handle onto one set of spaces is the
+/// point; a clone with its own mounts table would hand the same location
+/// two DIDs.
 pub struct Loader<S> {
     spaces: Arc<Pool<Did, S>>,
-    mounts: Pool<String, Did>,
+    mounts: Arc<Pool<String, Did>>,
+}
+
+impl<S> Clone for Loader<S> {
+    fn clone(&self) -> Self {
+        Self {
+            spaces: Arc::clone(&self.spaces),
+            mounts: Arc::clone(&self.mounts),
+        }
+    }
 }
 
 impl<S> Loader<S> {
     pub fn new(spaces: Arc<Pool<Did, S>>) -> Self {
         Self {
             spaces,
-            mounts: Pool::new(),
+            mounts: Arc::new(Pool::new()),
         }
     }
 
