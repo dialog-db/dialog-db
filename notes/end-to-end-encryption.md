@@ -245,10 +245,10 @@ in the sealed frame so a reader can strip padding by the length prefix.
 Two rotation rates, because they have wildly different costs.
 
 **The seal key** encrypts data. Rotating it changes every block address in the
-space, so rotation is a full rewrite of the database — structural sharing does
-not help, because *every* ciphertext changes. It rotates rarely and explicitly.
-Call its counter the **generation** `g`; it is carried in the block header and
-announced in the head.
+space, because every ciphertext changes and structural sharing cannot help. It
+rotates rarely. Call its counter the **generation** `g`; it is carried in the
+block header and announced in the head. Crucially, rotation does *not* imply an
+immediate rewrite — see [lazy revocation](#rotation-is-lazy) below.
 
 **The epoch key** comes from BeeKEM's group secret and rotates on every
 membership change or key update — which is to say, constantly. It never
@@ -264,10 +264,17 @@ K_head_g    = blake3::derive_key("dialog/e2ee/head/v1",  K_seal_g)
 K_blob_g    = blake3::derive_key("dialog/e2ee/blob/v1",  K_seal_g)
 ```
 
-Each epoch publishes a **key-wrap block**: `AEAD(K_epoch_e, {g → K_seal_g}*)`,
-holding every seal generation the group is still expected to read. A member
-who can derive `K_epoch_e` gets the whole seal-key ring, and therefore the
-whole readable history.
+Each epoch publishes a **key-wrap block**: `AEAD(K_epoch_e, K_seal_g)` for the
+current generation only. Older generations are reachable through a chain of
+*cryptographic links* — `K_seal_g → K_seal_{g-1}`, one 32-byte symmetric link
+published when a generation opens — so a member who can derive `K_epoch_e` gets
+the newest seal key and walks the chain back for history.
+
+This is Cryptree's symmetric link, and the reason to use it rather than
+enumerating every generation in the wrap block is the argument Cryptree makes
+against key regression: a link permits an *arbitrary* new key, so re-keying
+from an external source or out of order stays possible, and the wrap block
+stays `O(1)` instead of `O(generations)`.
 
 `blake3::derive_key` is used throughout rather than HKDF — blake3 is already a
 dependency, its KDF mode is domain-separated by construction, and it keeps the
@@ -306,6 +313,45 @@ Note the consequence for the credential store: it currently writes key material
 to disk in the clear. Adding a second secret does not make that worse, but a
 seal key ring sitting next to it does raise the stakes. See open question 2.
 
+#### Inviting a member
+
+`K_seal_0` is minted client-side from `getrandom` when the space is created and
+never leaves the client unwrapped. Getting it to a second person means two
+independent grants, and conflating them is the easiest way to get this wrong:
+
+- The **UCAN delegation** gives Bob the right to *fetch bytes*. Already built.
+- The **BeeKEM add** gives Bob the ability to *read* them. Not built.
+
+Neither implies the other. Keeping them separate is useful — fetch rights can
+be revoked without touching keys — but an invite is not complete until both
+land, so it should be one API call rather than two things a caller must
+remember to do.
+
+The ordering is forced. Bob cannot read the BeeKEM operation graph until he can
+fetch from the archive, so the delegation goes first, out of band. Then Alice
+runs `Add(bob)` + `Update`, which bumps the epoch and puts Bob's X25519 public
+key at a leaf; Bob walks up the BeeKEM tree from that leaf to derive the group
+secret, hence `K_epoch`, hence the wrap block.
+
+That requires Alice to already know Bob's X25519 identity key, which is not
+always true. Two invite shapes cover the cases:
+
+- **Directed invite.** Alice fetches Bob's signed identity announcement from
+  his profile space and adds him by key. Requires Bob to exist and be
+  reachable.
+- **Claim invite.** Alice mints an *ephemeral* X25519 keypair, adds that as the
+  member, and puts the private half in the invite link fragment — never sent to
+  a server. Whoever claims it derives the group secret with the ephemeral key
+  and immediately performs `Add(self)` + `Remove(ephemeral)` + `Update`. This
+  is what "send someone a link" actually requires, since Alice does not know
+  who will accept. It is a bearer token: single-use, short expiry, and the
+  ephemeral member *must* be removed on claim or the link stays live forever.
+
+The identity announcement itself — `{did, x25519_pk, valid_from}`, signed by
+the DID key — should be **public and unencrypted**. It is public keys; there is
+nothing to protect but correlation, and `Add` cannot work if it is not
+discoverable.
+
 #### Membership semantics that follow
 
 - **Add.** BeeKEM `Add` + `Update` bumps the epoch. The new member receives the
@@ -317,15 +363,51 @@ seal key ring sitting next to it does raise the stakes. See open question 2.
   cannot derive `K_epoch_{e+1}` and so never sees another wrap block. **They
   retain the ability to decrypt every block written under generations they
   already held.** Removal is forward-protecting only.
-- **Rotate.** To actually revoke read access to existing data, open generation
-  `g+1` and re-seal. This is an `O(database size)` background job that rewrites
-  every block under a new key and publishes a new root. It should be an
-  explicit, user-visible operation, not something that happens implicitly on
-  every removal.
+- **Rotate.** To revoke read access to existing data, open generation `g+1`.
+  See below — this is much cheaper than it sounds.
 
 Being blunt about this in the API and the docs matters more than the mechanism.
 "Removing a collaborator does not un-share the data they already had" is true
 of every E2EE system and is routinely mis-sold.
+
+#### Rotation is lazy
+
+Opening a new generation does **not** rewrite the database. Following Cepheus
+and Cryptree, rotation is *lazy*: generation `g` is marked dirty, `g+1` opens,
+new writes seal under `g+1`, and blocks still at `g` are re-sealed only when
+they are next written. Ordinary write traffic cleans the space incrementally.
+
+The `g+1 → g` link keeps history readable for current members and does not help
+the removed member, who already held `K_seal_g` and can never obtain
+`K_seal_{g+1}` — it is only ever published wrapped under an epoch key they
+cannot derive.
+
+The accepted trade, exactly as in the Cryptree literature, is that a removed
+member can still read whatever nobody has touched since. For spaces where that
+is unacceptable, a **forced scrub** re-seals everything at `g` under `g+1` as a
+resumable background job; it changes every address and therefore re-uploads the
+whole space. That is the "we really mean it" button, not the default price of a
+removal.
+
+Rotation triggers differ sharply between the two keys, and it is worth stating
+them separately:
+
+| | Epoch (BeeKEM `Update`) | Generation (new seal key) |
+| --- | --- | --- |
+| Triggered by | every add, every remove, periodic PCS, lost device | only when a removal must deny access to *existing* data |
+| Cost | `O(log n)` — `⌈log n⌉` X25519 keygens, one broadcast op | free at rotation time; amortized over subsequent writes |
+| Rewrites blocks | never | lazily, or all at once under a forced scrub |
+| Announced via | an operation block in the archive, found on normal sync | `generation` in the signed head and in every block header |
+
+Because the generation is in each block header, a reader always knows which key
+to use without a lookup. A writer that sees a head at a higher generation than
+its own must fetch the new wrap block before writing, or it forks the
+generation and the differential sees the whole tree as novel (§5).
+
+A member offline across several epochs replays the operation graph on return
+and lands on the current group secret, provided their leaf was not blanked. If
+they were removed and re-added they get a fresh leaf. If they missed a fork
+beyond `κ`, that is the republication case above.
 
 #### Recovery from a lost epoch
 
@@ -426,11 +508,113 @@ L2 (key ranges) is the highest-leak, lowest-value tier — server-side tree
 validation is not something we do today and the client already validates
 structurally on read. Defer indefinitely.
 
-Group-scoped L3 (different facts encrypted for different groups) is real and
-worth having, but it belongs in a later phase: it means per-region seal keys,
-with a region's key wrapped in its parent link, which is a `Link` format change
-(32 → 64+ bytes) and a meaningful size regression on index nodes. Design it
-once the single-key case is running.
+Group-scoped L3 — different facts readable by different collaborators — is real
+and worth having, but it is a *different layer* from everything above, and it
+should not be built by putting keys in tree links. See
+[Fact-level access control](#fact-level-access-control-a-second-layer).
+
+## Fact-level access control: a second layer
+
+Everything above encrypts **blocks**, with one key per space per generation.
+That defends against the storage provider, and it is deliberately all-or-nothing
+among collaborators: anyone who can open a block sees every fact in it.
+
+Restricting *which facts* a collaborator can read is a second, independent
+layer, and the temptation is to build it structurally — per-subtree keys
+wrapped in tree links. That is wrong, for reasons worth writing down because
+they are not obvious.
+
+### Why not a Cryptree over the index tree
+
+[Cryptree] lays cryptographic links over a *folder hierarchy*, so holding one
+folder's key derives every descendant's key and grants a subtree in `O(1)`. The
+prolly tree is a tree, so the analogy is tempting. It fails on three counts:
+
+- **Shape is not user-meaningful.** Cryptree's unit of sharing is the folder
+  because that is how people think. A prolly subtree is an arbitrary key range
+  chosen by `blake3(key)` coin flips. "Grant Bob this subtree" means "grant Bob
+  the entities whose keys happen to fall in this range" — not a sentence anyone
+  wants to say.
+- **Nodes are not stable.** Cryptree's downward inheritance works because the
+  folder graph persists across edits. Our nodes split, merge, and shift
+  boundaries on insert. "Bob holds the key for node X" stops meaning anything
+  the moment X splits.
+- **Three indexes, one grant.** The same facts are indexed EAV, AEV, and VAE.
+  One semantic grant spans ranges in three trees that are not the same
+  subtrees.
+
+Write control is a fourth difference: Cryptree needed asymmetric links because
+it had no capability layer and had to enforce writes cryptographically. We get
+write control from UCAN, so we do not need them.
+
+What *does* port from Cryptree is the primitive, not the topology:
+cryptographic links (already used for the seal-key chain, §4) and lazy
+revocation (§4).
+
+### The EAV hierarchy is the hierarchy
+
+[CrypTable] — an early draft from the authors of BeeKEM and WNFS — makes the
+move that resolves this: put the cryptree on the **data model** rather than on
+the index. A triple store already has a user-meaningful hierarchy:
+
+```
+Root → Store → Entity → Attribute → Value
+```
+
+Grant an entity key and every attribute and value under it derives. That is
+exactly the granularity people ask for ("everything about this entity"), and
+unlike a scope hierarchy we would have to invent and maintain, it is inherent
+in the triple structure Dialog already has.
+
+Two refinements from that draft are worth taking:
+
+- **Derivation, not links, on the common path.** Classic Cryptree walks down by
+  fetching and decrypting a link at each level. CrypTable derives —
+  `K_attr = KDF(K_entity, attribute)` — so a reader can jump straight to any
+  fact's key with no intermediate round trips. For a database with random
+  access that is a large win over link-walking.
+- **`causedBy` is not in the hierarchy.** Access to a fact must not imply
+  access to its transitive causal history; the provenance relation and the
+  access-control relation are simply different. This applies directly to
+  Dialog's revision DAG and watermarks, and it is the kind of thing that is
+  obvious once stated and easy to get wrong silently.
+
+### The unresolved parts
+
+Being clear about what this does *not* settle, because the draft does not
+settle it either — sections 3.1, 3.2, 4 (Tag Derivation) and 5 (Key Rotation)
+are one-line stubs, and the two most load-bearing for us are among them.
+
+1. **Derivation fights revocation.** If `K_entity = KDF(K_store, entity)`, one
+   entity's key cannot be rotated without rotating the store key. Pure
+   derivation is key-regression-shaped, and Cryptree §7 argues against exactly
+   that because it cannot accept an arbitrary new key. The likely answer is a
+   hybrid: derive on the common path, and carry an explicit link as an override
+   where a scope has been re-keyed. That needs designing.
+2. **AEV and VAE become second-class.** An entity-rooted key hierarchy means an
+   attribute-scoped grantee ("everyone's `name`") needs every entity key. The
+   draft acknowledges this — it assumes grants are hierarchical even though
+   access often is not. For us it is sharper, because AEV and VAE exist
+   precisely to serve those patterns. Either access control is entity-rooted
+   and those indexes stay readable only to full-space readers, or we need
+   per-index hierarchies and 3x the key material.
+3. **Encrypted values break value predicates.** Sealing values individually
+   means range predicates over values stop working for a scoped reader, and the
+   VAE index is useless to them. Real cost, needs to be stated in whatever API
+   exposes this.
+4. **Searchable tags need analysis.** The draft's tag construction —
+   hash(scoped attribute nonce ‖ cleartext CID), stored as an associative map
+   label — is cheap and avoids per-fact HMAC keys, but it leaks the entity and
+   attribute of facts a holder *cannot* read. The draft calls this "a small
+   amount of data"; in a store where facts reference each other densely, that
+   deserves a bound before adoption.
+
+The layering conclusion is the useful part: **block sealing and fact-level
+encryption are complementary, not alternatives.** Block sealing hides
+everything from the storage provider, including tree-shape metadata, and keeps
+sync, dedup, and convergence intact. Fact-level EAV-derived keys restrict what
+a collaborator who can already open blocks is allowed to read. Build the first;
+the second is a separate design with its own open questions.
 
 ## What still leaks
 
@@ -554,17 +738,22 @@ New crate `rust/dialog-group`.
 
 ### Phase 5 — rotation and revocation
 
-- `rotate()`: open generation `g+1`, re-seal the tree, publish the new root.
-  Resumable, since it is `O(database size)`.
-- Wire removal to epoch bump, with rotation as an explicit follow-on.
+- `rotate()`: open generation `g+1`, publish the wrap block and the
+  `g+1 → g` link. Cheap — no data is touched.
+- Lazy cleaning: writers seal under the current generation, so ordinary traffic
+  converges the space without a dedicated job.
+- `scrub()`: the optional forced re-seal, resumable, `O(database size)`.
+- Wire removal to an epoch bump, with generation rotation as an explicit
+  follow-on rather than an implicit consequence.
 - Document the forward-only semantics of removal prominently.
 
 ### Phase 6 — optional, if warranted
 
 - Sealed sync manifest for L1 delegation (§8).
-- Per-region seal keys for group-scoped access, with the `Link` format change
-  that implies.
 - Keyed branch names.
+- Fact-level access control over the EAV hierarchy — a design of its own, with
+  the four unresolved problems listed above to settle first. Not a phase of
+  this work so much as the next piece of work.
 
 ## Open questions
 
@@ -603,3 +792,15 @@ New crate `rust/dialog-group`.
   the graft merge whose by-hash subtree adoption constrains rotation.
 - [`blob-replication.md`](./blob-replication.md) — blob identity and BAO
   streaming.
+- Grolimund, Meisser, Schmid, Wattenhofer. *Cryptree: A Folder Tree Structure
+  for Cryptographic File Systems.* SRDS 2006 — cryptographic links, lazy
+  revocation, and the argument against key regression.
+- Wilton, Zelenka. *CrypTable v0.1.0* (first draft),
+  `github.com/RhizomeDB/cryptable` — a cryptree over the EAV hierarchy of a
+  triple store. Incomplete, but the hierarchy-selection idea is the one we
+  want.
+- Fu, Kamara, Kohno. *Key Regression: Enabling Efficient Key Distribution for
+  Secure Distributed Storage* — the alternative to cryptographic links.
+
+[Cryptree]: https://raw.githubusercontent.com/ianopolous/peergos/master/papers/wuala-cryptree.pdf
+[CrypTable]: https://github.com/RhizomeDB/cryptable/tree/first-draft
