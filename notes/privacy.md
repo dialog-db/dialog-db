@@ -1,5 +1,13 @@
 # DialogDB Privacy RFC
 
+> **Status:** superseded in part by
+> [`end-to-end-encryption.md`](./end-to-end-encryption.md), which turns this
+> sketch into an implementable design against the current code. The access-level
+> goals below still stand; the nested per-tier node encryption described under
+> [Tiered Encryption Implementation](#tiered-encryption-implementation) does
+> not — see that note's *Access tiers, revisited* for why, and for the sealed
+> sync manifest that reaches the same L1 goal without a node-format change.
+
 ## Design Goals
 
 DialogDB's privacy model is designed with the following goals:
