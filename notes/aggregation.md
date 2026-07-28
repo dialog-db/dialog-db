@@ -86,6 +86,30 @@ machinery does not need an aggregate arm. This holds precisely because
 aggregate results do **not** feed back into rule derivation. Not allowing that
 feedback is the feature, not a limitation to work around.
 
+## Settled semantics
+
+Decided 2026-07-27:
+
+- **Absent rows are skipped**, SQL-NULL-style: an aggregator folds only
+  `Present` bindings, and `count` counts present bindings. Coherent with how
+  optionality behaves everywhere else; coalesce first for other behavior.
+- **`min`/`max` are restricted to comparable types** — the same comparable
+  set the range-predicate machinery orders (numerics, strings, ...). Applying
+  them to a non-comparable type is an error at projection construction.
+- **`sum` accumulates in `i128`** and returns the narrowest fitting `Value`;
+  a result exceeding what `Value` can represent errors loudly. Datomic-style
+  auto-widening to arbitrary precision is the eventual goal but requires a
+  `Value` big-integer variant — a format-level decision (it ripples through
+  the order-preserving key encoding and the type system), tracked separately
+  (bead dialog-db-65 covers the encoding side; bijou is bounded at 128-bit
+  and its zigzag signed variants are not numerically lexicographic, so an
+  arbitrary-precision lexicographic encoding would be bijou-inspired, not
+  bijou). `avg` always returns Float.
+- **Phase-1 aggregator set**: `count`, `count-distinct`, `sum`, `min`,
+  `max`, `avg`. Datomic's `median`/`variance`/`stddev` are addable behind
+  the same enum later; `rand`/`sample` are permanently excluded as
+  nondeterministic in a convergent system.
+
 ## Scope
 
 Phase 1: aggregation at the ad-hoc query projection only — the pure Datomic
