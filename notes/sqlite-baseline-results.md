@@ -185,28 +185,3 @@ election results per unchanged frame; cut per-edit entry clones. Small
 real-world commits (se_replay, 2.6 facts/commit) never touch the ceiling
 regime and were expectedly unmoved — their costs are the Group 1 note's
 per-commit encode/persist constants, untouched here.
-
-## Group 2: leaf weight bookkeeping (branch `claude/perf-3-weight-cache`)
-
-Changes: the frame-ceiling gate, stretch-weight walks, and fast-path
-canonicality checks no longer re-derive entry weights over whole leaves on
-every membership-changing edit (weights are carried/banked incrementally;
-`distribution.rs`, `tree/transient.rs`, `node/transient.rs`,
-`hitchhiker.rs`). First attempt (ceiling-gate cache alone) measured only
--4.6% — the callgrind re-profile showed the remaining O(leaf) terms, which
-this final version removes. Canonical roots unchanged (full convergence
-suite passes; 290 tests).
-
-| benchmark | dialog_mem | dialog_disk | control drift |
-|---|---|---|---|
-| write_batch | **-52.6%** (1.83 → 0.82 s) | **-53.0%** (1.87 → 0.83 s) | ±4% |
-| write_small_txns | -0.0% | **-31.8%** (86 → 59 ms) | sqlite_disk -6.2% |
-| se_replay_write | +1.7% | -18.4% (control -12.1%) | disk noisy |
-| reads (point/scan/join) | within noise | within noise | ±5% |
-
-Batch commits are ~2.2× faster and the per-entity cost curve flattened
-(native profile target: 1000 entities 2.17 s → 1.16 s in dev). Small
-in-memory commits are unmoved — their leaves are small, so the removed
-O(leaf) term never dominated there; their cost is per-instruction encode
-and the canonical rebuild path (next group), plus file-per-block I/O on
-disk.
