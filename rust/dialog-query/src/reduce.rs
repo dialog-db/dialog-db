@@ -5,9 +5,17 @@
 //! the names of the grouping fields, and a list of [`ReduceEntry`]
 //! folds, it groups the rows and emits one output [`Match`] per group.
 //! It knows nothing about rules, descriptors, or the analyzer — those
-//! wire in at milestone A3, and static typing of the entries arrives at
-//! A2. Until then every semantic violation an entry can express is a
-//! loud runtime [`EvaluationError`].
+//! wire in at milestone A3.
+//!
+//! Static typing (milestone A2) lives beside the fold:
+//! [`Aggregator::input_requirement`] states what a fold can consume as
+//! a [`Type`], [`Aggregator::output_type`] computes what it produces —
+//! including the optionality algebra below — and the checked
+//! constructor [`ReduceEntry::try_new`] rejects an entry whose input
+//! type cannot feed its aggregator at construction, as a
+//! [`TypeError`]. The dynamic path ([`ReduceEntry::new`]) stays open
+//! for untyped callers; for it, every semantic violation an entry can
+//! express remains a loud runtime [`EvaluationError`] backstop.
 //!
 //! # Semantics
 //!
@@ -85,12 +93,14 @@ use std::pin::pin;
 
 use futures_util::TryStreamExt;
 
+use crate::artifact::Type as ValueType;
 use crate::artifact::Value;
-use crate::error::EvaluationError;
+use crate::error::{EvaluationError, TypeError};
 use crate::formula::number::Numeric;
 use crate::selection::{Binding, Match, Selection};
 use crate::term::Term;
 use crate::try_stream;
+use crate::type_system::{Primitive, Type};
 use crate::types::Any;
 
 /// The fold applied to a reduced field's inputs, one group at a time.
@@ -130,6 +140,84 @@ impl Display for Aggregator {
     }
 }
 
+impl Aggregator {
+    /// The type this fold's inputs must inhabit when present.
+    ///
+    /// `sum`/`avg` consume the numeric band; `min`/`max` the
+    /// COMPARABLE set — exactly the range-predicate ordering they
+    /// fold with; `count`/`count-distinct` accept anything present.
+    /// Expressed as a [`Type`] so compatibility is a meet: an input
+    /// type can feed this fold iff the meet of its present part with
+    /// this requirement is non-empty.
+    pub fn input_requirement(self) -> Type {
+        let primitive = match self {
+            Aggregator::Count | Aggregator::CountDistinct => Primitive::ALL,
+            Aggregator::Sum | Aggregator::Avg => Primitive::NUMERIC,
+            Aggregator::Min | Aggregator::Max => Primitive::COMPARABLE,
+        };
+        Type::from(primitive)
+    }
+
+    /// The output type of this fold over an input of the given type
+    /// — the algebra from `notes/aggregation.md` — or `None` when
+    /// the input cannot feed this fold at all: no present shape of
+    /// the input meets [`Aggregator::input_requirement`] (a
+    /// `Nothing`-only input, being never present, feeds nothing).
+    ///
+    /// - `count`/`count-distinct` produce `UnsignedInt`, never
+    ///   optional: the identity 0 exists, so even an optional input
+    ///   yields a present output.
+    /// - `sum` produces the input's numeric band, never optional
+    ///   (identity 0). The integer band stays integral — the `i128`
+    ///   accumulator narrows per group to `UnsignedInt` or
+    ///   `SignedInt`, so an input touching either integer type
+    ///   admits both — and floats stay `Float`.
+    /// - `min`/`max` produce the input type itself (the result is
+    ///   one of the inputs, so a refinement rides along); `avg`
+    ///   produces `Float`. These three have no identity: an
+    ///   optional input propagates `Nothing` into the output type.
+    ///   That propagation is what lets the existing
+    ///   `RequiredHeadFromOptional` check enforce — with no new
+    ///   analyzer rule — that a head field fed by `min`/`max`/`avg`
+    ///   over an optional input must itself be declared optional.
+    pub fn output_type(self, input: &Type) -> Option<Type> {
+        // What the fold consumes: the present shapes of the input
+        // that meet the requirement.
+        let consumed = input
+            .clone()
+            .required()
+            .intersect(&self.input_requirement())?;
+        let optional = input.is_optional();
+        Some(match self {
+            Aggregator::Count | Aggregator::CountDistinct => Type::from(ValueType::UnsignedInt),
+            Aggregator::Sum => {
+                let integers = Primitive::singleton(ValueType::UnsignedInt)
+                    .union(Primitive::singleton(ValueType::SignedInt));
+                let consumed = consumed.primitive_part();
+                let mut band = Primitive::EMPTY;
+                if consumed.intersect(integers).is_some() {
+                    band = band.union(integers);
+                }
+                if consumed.contains(ValueType::Float) {
+                    band = band.union(Primitive::singleton(ValueType::Float));
+                }
+                Type::from(band)
+            }
+            Aggregator::Min | Aggregator::Max => {
+                if optional {
+                    consumed.optional()
+                } else {
+                    consumed
+                }
+            }
+            Aggregator::Avg => {
+                let mean = Type::from(ValueType::Float);
+                if optional { mean.optional() } else { mean }
+            }
+        })
+    }
+}
+
 /// One reduced output field: the field name, the fold to apply, and
 /// the term supplying the fold's input from each row.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -147,12 +235,62 @@ pub struct ReduceEntry {
 impl ReduceEntry {
     /// Create a reduce entry binding `field` to `aggregator` folded
     /// over `input`.
+    ///
+    /// This is the *dynamic* path: no input type is known, so
+    /// nothing is checked and every violation surfaces as a runtime
+    /// [`EvaluationError`]. Wherever the input's type is declared or
+    /// inferred, construct through [`ReduceEntry::try_new`] instead.
     pub fn new(field: impl Into<String>, aggregator: Aggregator, input: Term<Any>) -> Self {
         Self {
             field: field.into(),
             aggregator,
             input,
         }
+    }
+
+    /// Checked construction against the declared or inferred type of
+    /// the input — the valid-by-construction path (the
+    /// `NamedAttributes::try_new` precedent).
+    ///
+    /// Fails with [`TypeError::ReduceInput`] when no present shape
+    /// of `input_type` meets the aggregator's requirement: `sum`
+    /// over a `String` input, `min` over a non-comparable input, or
+    /// any fold over a `Nothing`-only input is unwriteable here, at
+    /// construction, rather than a fold-time failure.
+    pub fn try_new(
+        field: impl Into<String>,
+        aggregator: Aggregator,
+        input: Term<Any>,
+        input_type: &Type,
+    ) -> Result<Self, TypeError> {
+        let field = field.into();
+        if aggregator.output_type(input_type).is_none() {
+            return Err(TypeError::ReduceInput {
+                field,
+                aggregator,
+                required: Box::new(aggregator.input_requirement()),
+                actual: Box::new(input_type.clone()),
+            });
+        }
+        Ok(Self {
+            field,
+            aggregator,
+            input,
+        })
+    }
+
+    /// The type this entry binds its output field to, given the
+    /// input's type: [`Aggregator::output_type`] with the entry's
+    /// field attached to the failure.
+    pub fn output_type(&self, input_type: &Type) -> Result<Type, TypeError> {
+        self.aggregator
+            .output_type(input_type)
+            .ok_or_else(|| TypeError::ReduceInput {
+                field: self.field.clone(),
+                aggregator: self.aggregator,
+                required: Box::new(self.aggregator.input_requirement()),
+                actual: Box::new(input_type.clone()),
+            })
     }
 }
 
@@ -910,5 +1048,213 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(present(&rows[0], "n"), Value::UnsignedInt(2));
+    }
+
+    fn typed(vt: ValueType) -> Type {
+        Type::from(vt)
+    }
+
+    /// The integer band `sum` produces: `UnsignedInt|SignedInt`.
+    fn int_band() -> Type {
+        Type::from(
+            Primitive::singleton(ValueType::UnsignedInt)
+                .union(Primitive::singleton(ValueType::SignedInt)),
+        )
+    }
+
+    /// Constructing an entry whose input type cannot feed its
+    /// aggregator fails at construction with the typed error, per
+    /// aggregator: `sum`/`avg` reject non-numeric input, `min`/`max`
+    /// reject non-comparable input, and even `count` rejects a
+    /// `Nothing`-only input (never present, so nothing to count).
+    #[dialog_common::test]
+    fn it_rejects_incompatible_inputs_at_construction() {
+        let rejected = [
+            (Aggregator::Sum, typed(ValueType::String)),
+            (Aggregator::Avg, typed(ValueType::String)),
+            (Aggregator::Sum, typed(ValueType::Boolean)),
+            (Aggregator::Min, typed(ValueType::Boolean)),
+            (Aggregator::Max, typed(ValueType::Record)),
+            (Aggregator::Count, Type::nothing()),
+            (Aggregator::CountDistinct, Type::nothing()),
+        ];
+        for (aggregator, input_type) in rejected {
+            let result = ReduceEntry::try_new("out", aggregator, Term::var("x"), &input_type);
+            match result {
+                Err(TypeError::ReduceInput {
+                    field,
+                    aggregator: reported,
+                    required,
+                    actual,
+                }) => {
+                    assert_eq!(field, "out");
+                    assert_eq!(reported, aggregator);
+                    assert_eq!(*required, aggregator.input_requirement());
+                    assert_eq!(*actual, input_type);
+                }
+                other => panic!("{aggregator} over {input_type} must fail, got {other:?}"),
+            }
+        }
+    }
+
+    /// `count`/`count-distinct` accept anything present, including
+    /// non-comparable, non-numeric shapes.
+    #[dialog_common::test]
+    fn it_accepts_any_present_input_for_count() {
+        for aggregator in [Aggregator::Count, Aggregator::CountDistinct] {
+            for input_type in [
+                typed(ValueType::String),
+                typed(ValueType::Boolean),
+                typed(ValueType::Record),
+                typed(ValueType::Record).optional(),
+            ] {
+                assert!(
+                    ReduceEntry::try_new("n", aggregator, Term::var("x"), &input_type).is_ok(),
+                    "{aggregator} over {input_type} must construct"
+                );
+            }
+        }
+    }
+
+    /// `count`/`count-distinct` produce `UnsignedInt` and — because
+    /// the identity 0 exists — a *required* output even over an
+    /// optional input.
+    #[dialog_common::test]
+    fn it_types_count_output_as_required_unsigned() {
+        for aggregator in [Aggregator::Count, Aggregator::CountDistinct] {
+            for input_type in [
+                typed(ValueType::String),
+                typed(ValueType::String).optional(),
+            ] {
+                let output = aggregator.output_type(&input_type).unwrap();
+                assert_eq!(output, typed(ValueType::UnsignedInt));
+                assert!(!output.is_optional(), "count has an identity");
+            }
+        }
+    }
+
+    /// `sum` keeps the input's numeric band: either integer variant
+    /// admits the whole integer band (the accumulator narrows per
+    /// group), floats stay `Float`, and — identity 0 — the output is
+    /// required even over an optional input.
+    #[dialog_common::test]
+    fn it_types_sum_output_by_numeric_band() {
+        for input_type in [
+            typed(ValueType::UnsignedInt),
+            typed(ValueType::SignedInt),
+            int_band(),
+            typed(ValueType::UnsignedInt).optional(),
+        ] {
+            let output = Aggregator::Sum.output_type(&input_type).unwrap();
+            assert_eq!(output, int_band(), "integer input sums to the integer band");
+            assert!(!output.is_optional(), "sum has an identity");
+        }
+
+        let output = Aggregator::Sum
+            .output_type(&typed(ValueType::Float).optional())
+            .unwrap();
+        assert_eq!(output, typed(ValueType::Float), "float input sums to Float");
+
+        let numeric = Type::from(Primitive::NUMERIC);
+        let output = Aggregator::Sum.output_type(&numeric).unwrap();
+        assert_eq!(
+            output, numeric,
+            "the full numeric band sums to the full numeric band"
+        );
+    }
+
+    /// `min`/`max` produce the input type itself and `avg` produces
+    /// `Float`; none has an identity, so optionality propagates:
+    /// optional input, optional output — required input, required
+    /// output. This propagation is what routes the A3 head check
+    /// through the existing `RequiredHeadFromOptional` rule.
+    #[dialog_common::test]
+    fn it_propagates_optionality_for_identityless_folds() {
+        for aggregator in [Aggregator::Min, Aggregator::Max] {
+            let output = aggregator.output_type(&typed(ValueType::String)).unwrap();
+            assert_eq!(output, typed(ValueType::String));
+            assert!(!output.is_optional(), "required input, required output");
+
+            let output = aggregator
+                .output_type(&typed(ValueType::Float).optional())
+                .unwrap();
+            assert_eq!(output, typed(ValueType::Float).optional());
+            assert!(output.is_optional(), "optional input, optional output");
+        }
+
+        let output = Aggregator::Avg
+            .output_type(&typed(ValueType::UnsignedInt))
+            .unwrap();
+        assert_eq!(output, typed(ValueType::Float));
+        let output = Aggregator::Avg
+            .output_type(&typed(ValueType::UnsignedInt).optional())
+            .unwrap();
+        assert_eq!(output, typed(ValueType::Float).optional());
+    }
+
+    /// `min`/`max` consume only the comparable part of a mixed
+    /// input: the output narrows to the meet with COMPARABLE, and
+    /// the entry's own `output_type` reports the same result with
+    /// field context on failure.
+    #[dialog_common::test]
+    fn it_narrows_min_max_output_to_the_comparable_meet() {
+        let mixed = Type::from(
+            Primitive::singleton(ValueType::Float).union(Primitive::singleton(ValueType::Boolean)),
+        );
+        let output = Aggregator::Min.output_type(&mixed).unwrap();
+        assert_eq!(output, typed(ValueType::Float));
+
+        let entry = ReduceEntry::try_new("least", Aggregator::Min, Term::var("x"), &mixed).unwrap();
+        assert_eq!(
+            entry.output_type(&mixed).unwrap(),
+            typed(ValueType::Float),
+            "the entry reports the aggregator's output type"
+        );
+        match entry.output_type(&typed(ValueType::Boolean)) {
+            Err(TypeError::ReduceInput { field, .. }) => assert_eq!(field, "least"),
+            other => panic!("expected ReduceInput with field context, got {other:?}"),
+        }
+    }
+
+    /// A well-typed entry constructs through the checked path and
+    /// still folds correctly through the A1 engine; the folded
+    /// values inhabit the statically computed output types.
+    #[dialog_common::test]
+    async fn it_folds_checked_entries_and_matches_output_types() {
+        let salary = typed(ValueType::UnsignedInt);
+        let name = typed(ValueType::String).optional();
+        let total = ReduceEntry::try_new("total", Aggregator::Sum, Term::var("salary"), &salary)
+            .expect("sum over UnsignedInt is well-typed");
+        let first = ReduceEntry::try_new("first", Aggregator::Min, Term::var("name"), &name)
+            .expect("min over optional String is well-typed");
+        let total_type = total.output_type(&salary).unwrap();
+        let first_type = first.output_type(&name).unwrap();
+        assert_eq!(total_type, int_band());
+        assert_eq!(first_type, typed(ValueType::String).optional());
+
+        let reduce = Reduce::new(vec!["dept".to_string()], vec![total, first]);
+        let rows = reduce
+            .fold(selection(vec![
+                row(&[
+                    ("dept", Some(dept("eng"))),
+                    ("salary", Some(Value::UnsignedInt(10))),
+                    ("name", Some(Value::String("ada".to_string()))),
+                ]),
+                row(&[
+                    ("dept", Some(dept("eng"))),
+                    ("salary", Some(Value::UnsignedInt(20))),
+                    ("name", None),
+                ]),
+            ]))
+            .await
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        let folded_total = present(&rows[0], "total");
+        assert_eq!(folded_total, Value::UnsignedInt(30));
+        assert!(total_type.admits(&folded_total));
+        let folded_first = present(&rows[0], "first");
+        assert_eq!(folded_first, Value::String("ada".to_string()));
+        assert!(first_type.admits(&folded_first));
     }
 }

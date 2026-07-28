@@ -8,6 +8,7 @@ use std::fmt;
 use crate::artifact::{ArtifactTypeError, DialogArtifactsError, Type, Value};
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
+use crate::reduce::Aggregator;
 pub use crate::rule::Rule;
 pub use crate::rule::deductive::DeductiveRule;
 use crate::term::Term;
@@ -279,6 +280,27 @@ pub enum TypeError {
     InvalidAttributeSyntax {
         /// The malformed attribute string.
         actual: String,
+    },
+
+    /// A reduce entry applies an aggregator to an input whose type
+    /// cannot feed it: no present shape of the input meets the
+    /// aggregator's requirement (`sum`/`avg` need numeric input,
+    /// `min`/`max` comparable input). Raised at construction by
+    /// [`ReduceEntry::try_new`](crate::reduce::ReduceEntry::try_new),
+    /// never at evaluation.
+    #[error(
+        "Reduce field \"{field}\" applies {aggregator} to a {actual} input, \
+         but {aggregator} requires {required}"
+    )]
+    ReduceInput {
+        /// The reduce output field being declared.
+        field: String,
+        /// The aggregator that cannot consume the input.
+        aggregator: Aggregator,
+        /// The aggregator's input requirement.
+        required: Box<Kind>,
+        /// The declared or inferred type of the input.
+        actual: Box<Kind>,
     },
 }
 
