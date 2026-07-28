@@ -6,6 +6,11 @@ edition = { workspace = true }
 license = { workspace = true }
 authors = { workspace = true }
 
+# This crate is native-only (bundled SQLite, filesystem-backed stores,
+# multi-threaded tokio); the library compiles to nothing on wasm32 (see the
+# crate-level cfg in src/lib.rs), and every native-only dependency is
+# target-gated so the workspace's wasm dependency set is unaffected.
+
 [dependencies]
 anyhow = { workspace = true }
 base58 = { workspace = true }
@@ -14,6 +19,8 @@ dialog-storage = { workspace = true }
 futures-util = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

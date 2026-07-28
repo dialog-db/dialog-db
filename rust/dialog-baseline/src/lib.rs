@@ -1,4 +1,9 @@
 #![warn(missing_docs)]
+// Native-only: SQLite links a bundled C library and the harness drives
+// filesystem stores and a multi-threaded runtime, none of which exist on
+// wasm32. The crate compiles to nothing there so the workspace's wasm
+// builds are unaffected.
+#![cfg(not(target_arch = "wasm32"))]
 
 //! Reference benchmarks: dialog-db vs SQLite on identical workloads.
 //!
