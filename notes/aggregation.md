@@ -1,122 +1,132 @@
-# Aggregation
+# Aggregation: the `reduce` clause
 
-Aggregation over query results, modeled on Datomic: an aggregate is a property
-of the **query projection** (Datomic's `:find`), never of a rule or a premise.
-This is what makes a malformed aggregation *unwriteable* rather than
-*rejected by the analyzer* — the concern the design is built around.
+Aggregation lives on deductive rules as a third clause beside `when` and
+`unless`. The head stays an ordinary concept, so aggregate results compose —
+any rule or query consumes a reducing rule's concept like any other. The
+design goal, kept from the start: malformed aggregation is *unwriteable*
+wherever structurally possible, with exactly one narrow analyzer check as the
+residue of name-based head↔body binding.
 
-## The problem this avoids
+## Shape
 
-The classic Datalog aggregation bug is a variable that is both aggregated and
-also appears as a plain (grouping) term — e.g. `total(?dept, sum(?salary))`
-where `?salary` also leaks in as a grouping key. Systems that put the aggregate
-inside the rule head or body must then *check* that the grouped and aggregated
-variable sets are disjoint, and reject rules that violate it. That is a
-stringly-typed validation: the bad rule is representable, then refused.
-
-Datomic removes the site where the bug could be written. Aggregation lives
-only in `:find`; the `:where` body is ordinary pattern matching that has no
-notion of aggregation at all. So:
-
-- The body cannot express "aggregated yet also matched" — it is
-  aggregation-free by construction.
-- A `:find` element is either a plain variable (a grouping key) or an aggregate
-  expression over a variable — a sum type, never both.
-- The grouping set is **derived, not declared**: it is exactly the plain
-  variables in `:find`. There is nothing to keep consistent, so there is
-  nothing to check.
-
-The whole class of "grouped and aggregated" bugs has no syntactic home. There
-is no analyzer rule for it because there is no way to state the error.
-
-## Where this lands in dialog
-
-The map of the current rule/query model (`notes/` and the rule analyzer) shows
-two facts that make the Datomic approach a clean fit:
-
-1. A **rule head is a name-keyed record of typed fields** with no positional or
-   role structure; head↔body binding is by name coincidence. Adding aggregation
-   *into* rules would mean adding brand-new role information to
-   `ConceptDescriptor` and a new cross-field disjointness check in `analyze()`.
-   The Datomic model needs none of that: rules are untouched.
-2. A query evaluates to a **stream of `Match` (bindings rows)**. The projection
-   from that stream to results is currently *implicit* (a `Query<C>` shapes rows
-   into concept instances by field name); there is no explicit `:find` spec.
-   That stream is exactly the result table an aggregate folds over, and the
-   projection boundary is exactly where Datomic's `:find` sits.
-
-So aggregation is a new **projection layer at the query result boundary**, not
-a change to `DeductiveRule`, `ConceptDescriptor`, `Premise`, or the analyzer.
-
-## Design
-
-A query gains an explicit projection spec (the `:find`-analog). Each projected
-position is a sum type:
-
-```
-enum Find {
-    Group(Variable),           // a grouping key
-    Aggregate(Aggregate, Variable),  // fold over the variable within the group
-}
+```yaml
+deduce: DeptTotal
+  dept:  entity
+  total: uint
+when:
+  - Employee(?e, dept: ?dept, salary: ?salary)
+reduce:
+  total: sum(?salary)
 ```
 
-- `Group | Aggregate` being a sum type is the entire invalid-by-construction
-  story: a projected position is one or the other, never both. A variable
-  cannot be tagged as grouped-and-aggregated because that state does not exist.
-- The **grouping key set is derived**: the `Group` positions. Not declared, so
-  not checkable-and-wrong.
-- Evaluation: run the query as today to get the `Match` stream, then group the
-  rows by the tuple of `Group` variables' values and fold each group with the
-  `Aggregate` functions. A group-by-then-fold over the finished result table.
+Semantics, as a pipeline:
 
-### Aggregate functions and output types
+1. Evaluate `when` / `unless` exactly as today → rows (`Match` stream).
+2. Group rows by the bindings of the **non-reduced head fields** (`dept`).
+3. Per group, compute each `reduce` entry's fold over its input variable.
+4. Emit one head row per group: grouping fields from the group key, reduced
+   fields from the folds.
 
-`count: any -> UnsignedInt`, `sum: numeric -> numeric`, `min/max: T -> T`,
-`avg`, `count-distinct`, etc. The output type is computed from the projected
-variable's already-inferred type — no new inference arm inside rule analysis,
-just a function applied at the projection.
+## Why the classic hazard cannot be written
 
-### Why stratification is not needed here
+The classic Datalog formulation `total(?dept, sum(?salary)) :- ...` defines
+the grouping set as "head variables minus aggregated variables". Writing a
+variable in both roles makes that definition self-contradictory (the variable
+must be both excluded and included), so such systems must detect and reject.
 
-In Datomic (and here) aggregates run over the **finished result set** of the
-query, after any recursive rules have reached fixpoint. The aggregate never
-observes a relation mid-computation, so there is no "aggregate over a relation
-still being derived" hazard — the negation-through-recursion stratification
-machinery does not need an aggregate arm. This holds precisely because
-aggregate results do **not** feed back into rule derivation. Not allowing that
-feedback is the feature, not a limitation to work around.
+Here, roles attach to **fields, not variables**:
+
+- `reduce` is a name-keyed map over head fields. A field is aggregated iff it
+  is a key in `reduce`; a `BTreeMap` key cannot be present and absent, so "a
+  field both grouped and reduced" is unrepresentable.
+- The grouping set is **derived** — the head fields not in `reduce` — never
+  declared, so it cannot be declared inconsistently.
+- The head is a plain `ConceptDescriptor`; there is no head slot an aggregate
+  expression could occupy.
+- A *variable* carries no role. It may feed a grouping field, a fold, or both.
+  Feeding both is well-defined, not ambiguous: grouping happens first, so
+  within a group both reads of the column agree (group by `?salary` and
+  `sum(?salary)` yields `salary × group-size`, exactly Datomic's legal
+  `[:find ?salary (sum ?salary)]`). The classic contradiction was a statement
+  about variables in a variable-defined grouping set; that sentence cannot be
+  formed when the grouping set is made of fields.
+
+The one representable error, and the single analyzer check this design needs:
+a body variable named the same as a *reduced* field (body binds `?total`
+while `reduce` defines `total`) — two definitions for one field. This is
+inherently cross-clause and name-based (head↔body binding in this codebase is
+name coincidence), so it cannot be a construction-time property. It is always
+authored confusion, so it is a **hard error**, sibling of
+`RequiredHeadFromOptional` in the analyzer. Optional cosmetic lint (later,
+`DeadOptionality` tier): a variable feeding both a grouping field and a fold.
 
 ## Settled semantics
 
-Decided 2026-07-27:
+- **Absent rows are skipped**, SQL-NULL-style: folds consume only `Present`
+  bindings; `count` counts present bindings. Coalesce first for other
+  behavior.
+- **Empty groups do not exist** (groups arise from rows), but a group's fold
+  inputs may all be Absent. The algebra decides the output type:
+  - `count`, `sum` have identities (0) → output always present; reduced field
+    may be required.
+  - `min`, `max`, `avg` have no identity → over an optional input the output
+    type admits `Nothing`, so the head field must be declared optional —
+    enforced by the **existing** `RequiredHeadFromOptional` check. No new
+    rule.
+- **`min`/`max` require comparable types** (the range-predicate comparable
+  set); `sum`/`avg` require numeric. Violations are construction-time errors
+  on the reduce entry, checked against the head field's declared type at
+  descriptor construction and against the body-inferred input type in the
+  analyzer's typing pass.
+- **`sum` accumulates in `i128`**, returns the narrowest fitting `Value`,
+  errors loudly past representability. Datomic-style arbitrary-precision
+  widening awaits a big-integer `Value` variant — a format decision tracked
+  in bead dialog-db-65 (lexicographic encoding side; bijou is 128-bit-capped
+  and zigzag-signed, so an arbitrary-precision order-preserving encoding
+  would be bijou-inspired, not bijou). `avg` returns Float.
+- **Phase-1 aggregators**: `count`, `count-distinct`, `sum`, `min`, `max`,
+  `avg`. `median`/`variance`/`stddev` addable behind the same enum;
+  `rand`/`sample` permanently excluded (nondeterministic in a convergent
+  system).
+- **Grouping keys** are compared by dag-cbor bytes of the group values (the
+  fixpoint `AnswerTable` precedent; `Value` has no `Ord`).
 
-- **Absent rows are skipped**, SQL-NULL-style: an aggregator folds only
-  `Present` bindings, and `count` counts present bindings. Coherent with how
-  optionality behaves everywhere else; coalesce first for other behavior.
-- **`min`/`max` are restricted to comparable types** — the same comparable
-  set the range-predicate machinery orders (numerics, strings, ...). Applying
-  them to a non-comparable type is an error at projection construction.
-- **`sum` accumulates in `i128`** and returns the narrowest fitting `Value`;
-  a result exceeding what `Value` can represent errors loudly. Datomic-style
-  auto-widening to arbitrary precision is the eventual goal but requires a
-  `Value` big-integer variant — a format-level decision (it ripples through
-  the order-preserving key encoding and the type system), tracked separately
-  (bead dialog-db-65 covers the encoding side; bijou is bounded at 128-bit
-  and its zigzag signed variants are not numerically lexicographic, so an
-  arbitrary-precision lexicographic encoding would be bijou-inspired, not
-  bijou). `avg` always returns Float.
-- **Phase-1 aggregator set**: `count`, `count-distinct`, `sum`, `min`,
-  `max`, `avg`. Datomic's `median`/`variance`/`stddev` are addable behind
-  the same enum later; `rand`/`sample` are permanently excluded as
-  nondeterministic in a convergent system.
+## Stratification
 
-## Scope
+A reducing rule's folds read complete relations, so every positive concept
+premise of a reducing rule contributes an **aggregating edge** to the
+program dependency graph (`session/dependencies.rs`): a third `Polarity`
+treated like negation — an aggregating edge inside its own SCC is
+`AggregationThroughRecursion`, exact sibling of `NegationThroughRecursion`,
+same Apt-Blair-Walker/SCC machinery. Registration stays unconditional
+(replica convergence); validity is checked at acquire, as for negation.
 
-Phase 1: aggregation at the ad-hoc query projection only — the pure Datomic
-model. No aggregate ever appears in a rule.
+Future refinement, deliberately out of scope: `min`/`max` are monotone
+lattice joins and could in principle pass through recursion (Flix-style
+least-fixpoint semantics); their aggregating edges could later be downgraded.
+`sum`/`count`/`avg` stratify regardless (not idempotent).
 
-Deliberately out of scope (a separate, later decision): a *concept* whose
-fields are aggregates (a materialized "DeptTotal" concept). Datomic does not
-have this; it would reintroduce the "aggregate defines a head field" question
-and its cross-field check. If wanted, it is an explicit extension beyond the
-Datomic model, and should be named as one — not folded in silently here.
+## Composition and storage
+
+A reducing rule deduces an ordinary concept — other rules and queries consume
+it with no special machinery. Rules are stored under the reserved
+`dialog.rule/*` namespace via the privileged install rail; reducing rules add
+a `reduce` block to the same content-addressed descriptor
+(`{ deduce, when, unless, reduce }`). Ad-hoc aggregation queries are reducing
+rules over an anonymous head; no separate find-spec notation exists.
+
+## Milestones (beads dialog-db-60..64)
+
+- **A1** — core group-by fold: pure module over an `impl Selection` given
+  (grouping field names, reduce entries); dag-cbor group keys; absent-skip;
+  property tests over synthetic `Match` streams (grouping correctness,
+  absent policy, overflow, determinism across row order).
+- **A2** — typing: aggregator input/output types, identity-vs-no-identity
+  optionality propagation, construction-time checks on reduce entries.
+- **A3** — the `reduce` clause on `DeductiveRuleDescriptor` + evaluation
+  wiring (group by non-reduced head fields, fold, emit) + the reduced-field
+  name-collision hard error + notation round-trip.
+- **A4** — stratification: aggregating `Polarity`,
+  `AggregationThroughRecursion`, tests mirroring the negation violations.
+- **A5 (later)** — incremental maintenance under subscriptions
+  (recompute-per-poll is correct first); materialized-aggregate performance.
