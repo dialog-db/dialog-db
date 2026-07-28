@@ -490,6 +490,21 @@ pub enum EvaluationError {
         message: String,
     },
 
+    /// An aggregation fold failed at evaluation time: overflow past
+    /// the `i128` accumulator, an incomparable pair under `min`/`max`,
+    /// a non-numeric input to a numeric fold, or mixed integer/float
+    /// inputs in one group. Milestone A2 makes most of these
+    /// unconstructable statically; this is the runtime backstop.
+    #[error("Reduce {aggregator} over field {field:?} failed: {reason}")]
+    Reduce {
+        /// The reduce output field being computed.
+        field: String,
+        /// Display name of the aggregator that failed.
+        aggregator: String,
+        /// Why the fold failed.
+        reason: String,
+    },
+
     /// The queried concept's dependency closure contains a cycle
     /// through negation: some rule concluding `concept` negates
     /// `negated` inside the same dependency cycle, so the negation
