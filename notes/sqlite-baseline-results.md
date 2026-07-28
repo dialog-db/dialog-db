@@ -94,3 +94,26 @@ they are the local-first interactive case (many small commits). The
 audit's phase-1/phase-2 items target exactly these constants; each
 improvement group PR should re-run both benches above and quote the deltas
 against this file, then update it.
+
+## Group 1: trust-once validation (branch `claude/perf-2-trust-once`)
+
+Changes: bytecheck validation memoized per buffer (`TypeId`-keyed, then
+`access_unchecked`); point `get` binary-searches the memoized flat key
+decode from a leaf's second touch; `Delta::get` takes the read lock.
+
+Measured deltas (criterion vs the baselines above; SQLite rows are the
+noise controls):
+
+| benchmark | dialog_mem | dialog_disk | control drift |
+|---|---|---|---|
+| point_get | **-36.6%** (23.6 → 14.4 µs) | **-33.5%** (23.2 → 15.8 µs) | ±3% |
+| se_title_get | **-21.3%** (9.3 → 7.3 µs) | **-17.2%** (9.3 → 7.7 µs) | ±2% |
+| se_kind_lookup | **-15.1%** (250 → 212 µs) | **-12.4%** (249 → 218 µs) | ±5% |
+| write_small_txns | -3.0% | -8.5% | sqlite_disk moved -7.4% → treat as noise |
+| write_batch / scans / join | within noise | within noise | ±5-10% |
+
+Reads got the predicted win; the remaining point-get gap vs SQLite
+(~15 µs vs 2.2 µs) is per-query pipeline setup, walker descent, and
+per-row `Entity` reconstruction — later groups. Write benches did not
+move outside noise, as expected: the write path's costs are dominated by
+encode/hash work, not validation.
