@@ -248,10 +248,9 @@ where
                 // empty separator there.
                 let separator = D::reseparate(entry.key.as_ref(), &[]);
                 TransientNode::Index(TransientIndex {
-                    children: vec![Node::Transient(TransientNode::Segment(TransientSegment {
-                        entries: vec![entry],
-                        separator,
-                    }))],
+                    children: vec![Node::Transient(TransientNode::Segment(
+                        TransientSegment::new(vec![entry], separator),
+                    ))],
                     novelty: Novelty::new(),
                 })
             }
@@ -342,8 +341,11 @@ where
                     }
                 }
                 TransientNode::Segment(segment) => {
-                    return match segment.entries.binary_search_by(|entry| entry.key.cmp(key)) {
-                        Ok(at) => Ok(Some(segment.entries[at].value.clone())),
+                    return match segment
+                        .entries()
+                        .binary_search_by(|entry| entry.key.cmp(key))
+                    {
+                        Ok(at) => Ok(Some(segment.entries()[at].value.clone())),
                         Err(_) => Ok(None),
                     };
                 }
@@ -909,19 +911,23 @@ where
         } else {
             match (&self, follow(&mut root, &path)?) {
                 (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
-                    match segment.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                    match segment
+                        .entries()
+                        .binary_search_by(|e| e.key.cmp(&entry.key))
+                    {
                         // A value update with a changed payload weight moves
                         // pacing decisions just like a membership change.
                         Ok(at) => {
-                            segment.entries[at].value.payload_weight()
+                            segment.entries()[at].value.payload_weight()
                                 != entry.value.payload_weight()
                         }
                         Err(_) => true,
                     }
                 }
-                (Edit::Delete(key), TransientNode::Segment(segment)) => {
-                    segment.entries.binary_search_by(|e| e.key.cmp(key)).is_ok()
-                }
+                (Edit::Delete(key), TransientNode::Segment(segment)) => segment
+                    .entries()
+                    .binary_search_by(|e| e.key.cmp(key))
+                    .is_ok(),
                 _ => true,
             }
         };
@@ -954,15 +960,16 @@ where
         // The frame ceiling's fast-path gate: a membership-changing edit
         // that leaves its segment over the ceiling must reach the regroup,
         // which force-splits the frame — the in-place fast path would let
-        // the segment grow past the hard bound. The weight sum is paid only
-        // when a ceiling is armed and membership changes; an upsert of an
-        // existing key never gets here (weights are key-derived).
+        // the segment grow past the hard bound. The gate reads the segment's
+        // cached total weight (exact, maintained incrementally by the
+        // in-place edit methods), so a batch of edits into one leaf pays the
+        // O(entries) sum once instead of on every membership change.
         let over_ceiling = if !changes_membership || manifest.frame_ceiling() == 0 {
             false
         } else {
             match follow(&mut root, &path)? {
                 TransientNode::Segment(segment) => {
-                    let weight: usize = segment.entries.iter().map(Entry::weight).sum();
+                    let weight = segment.total_weight();
                     let weight = match &self {
                         Edit::Upsert(entry) => weight + entry.weight(),
                         Edit::Delete(_) => weight,
@@ -982,7 +989,7 @@ where
         // yet must still fuse rightward, which the local check cannot see.
         let is_boundary_delete = match (&self, follow(&mut root, &path)?) {
             (Edit::Delete(_), TransientNode::Segment(segment)) => segment
-                .entries
+                .entries()
                 .last()
                 .map(|e| &e.key == key)
                 .unwrap_or(false),
@@ -1028,14 +1035,14 @@ where
                 // Cheapest test first: only a key sorting past the segment's
                 // last entry can be an orphan append, so the coin hashes are
                 // paid only on true appends.
-                match segment.entries.last() {
+                match segment.entries().last() {
                     Some(last) if entry.key > last.key => {
                         if manifest.max_segment == 0 {
                             D::rank(last.key.as_ref(), &manifest) > BOTTOM_RANK
                                 && D::rank(entry.key.as_ref(), &manifest) <= BOTTOM_RANK
                         } else if D::vetoes(last.key.as_ref(), entry.key.as_ref(), &manifest) {
                             let bank = trailing_stretch_weight::<Key, Value, D>(
-                                &segment.entries,
+                                segment.entries(),
                                 &manifest,
                             );
                             !D::leaf_cut(entry.key.as_ref(), bank + entry.weight(), &manifest)
@@ -1064,9 +1071,9 @@ where
         } else {
             match (&self, follow(&mut root, &path)?) {
                 (Edit::Delete(key), TransientNode::Segment(segment)) => {
-                    match segment.entries.binary_search_by(|e| e.key.cmp(key)) {
-                        Ok(at) if at + 1 < segment.entries.len() => {
-                            let entries = &segment.entries;
+                    match segment.entries().binary_search_by(|e| e.key.cmp(key)) {
+                        Ok(at) if at + 1 < segment.entries().len() => {
+                            let entries = segment.entries();
                             let beside_stretch = (at > 0
                                 && D::vetoes(
                                     entries[at - 1].key.as_ref(),
@@ -1105,7 +1112,10 @@ where
         // evaluated below, once the right neighbor's minimum is reachable.
         let min_move = match (&self, follow(&mut root, &path)?) {
             (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
-                match segment.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                match segment
+                    .entries()
+                    .binary_search_by(|e| e.key.cmp(&entry.key))
+                {
                     Err(0) => Some((
                         segment.separator.clone(),
                         D::reseparate(entry.key.as_ref(), &segment.separator),
@@ -1114,10 +1124,10 @@ where
                 }
             }
             (Edit::Delete(key), TransientNode::Segment(segment)) => {
-                match segment.entries.binary_search_by(|e| e.key.cmp(key)) {
-                    Ok(0) if segment.entries.len() > 1 => Some((
+                match segment.entries().binary_search_by(|e| e.key.cmp(key)) {
+                    Ok(0) if segment.entries().len() > 1 => Some((
                         segment.separator.clone(),
-                        D::reseparate(segment.entries[1].key.as_ref(), &segment.separator),
+                        D::reseparate(segment.entries()[1].key.as_ref(), &segment.separator),
                     )),
                     _ => None,
                 }
@@ -1176,14 +1186,15 @@ where
                     "Path did not reach a segment".into(),
                 ));
             };
-            if fast_path_keeps_canonical::<Key, Value, D>(&segment.entries, &self, &manifest) {
-                apply_to_segment(&mut segment.entries, self);
+            if fast_path_keeps_canonical::<Key, Value, D>(segment.entries(), &self, &manifest) {
+                apply_to_segment(segment, self);
                 // The seam at the segment's left edge moves with its first
                 // key. Re-derive the separator from the new minimum against
                 // the old separator as the floor; the rule is idempotent
                 // when the minimum did not change.
-                if let Some(first) = segment.entries.first() {
-                    segment.separator = D::reseparate(first.key.as_ref(), &segment.separator);
+                if let Some(first) = segment.entries().first() {
+                    let separator = D::reseparate(first.key.as_ref(), &segment.separator);
+                    segment.separator = separator;
                 }
                 // A moved separator moves a link boundary in the deepest
                 // ancestor where this leaf is not on the leftmost edge, and
@@ -1259,14 +1270,14 @@ where
             || match &neighbor_path {
                 Some(neighbor_path) => {
                     let floor = match follow(&mut root, &path)? {
-                        TransientNode::Segment(segment) if segment.entries.len() == 1 => {
+                        TransientNode::Segment(segment) if segment.entries().len() == 1 => {
                             Some(segment.separator.clone())
                         }
                         _ => None,
                     };
                     match floor {
                         Some(floor) => match follow(&mut root, neighbor_path)? {
-                            TransientNode::Segment(neighbor) => match neighbor.entries.first() {
+                            TransientNode::Segment(neighbor) => match neighbor.entries().first() {
                                 Some(first) => seam_cut_dissolves::<D>(
                                     &floor,
                                     &D::reseparate(first.key.as_ref(), &floor),
@@ -1357,7 +1368,7 @@ where
                                 "Path did not reach a segment".into(),
                             ));
                         };
-                        apply_to_segment(&mut segment.entries, edit);
+                        apply_to_segment(segment, edit);
                         None
                     }
                 };
@@ -1769,24 +1780,24 @@ where
                 "Vetoed-stretch window member was not a leaf segment".into(),
             ));
         };
+        let (segment_entries, segment_separator) = segment.into_parts();
         if offset == 0 {
-            separator = segment.separator;
+            separator = segment_separator;
         }
         if let Some(link) = piece_links[offset].take() {
             origins.push(PieceOrigin {
                 start: entries.len(),
-                end: entries.len() + segment.entries.len(),
+                end: entries.len() + segment_entries.len(),
                 link,
             });
         }
-        entries.extend(segment.entries);
+        entries.extend(segment_entries);
     }
     parent.children.insert(
         lo,
-        Node::Transient(TransientNode::Segment(TransientSegment {
-            entries,
-            separator,
-        })),
+        Node::Transient(TransientNode::Segment(TransientSegment::new(
+            entries, separator,
+        ))),
     );
     if !pending.is_empty() {
         let bounds = link_bounds(&parent.children)?;
@@ -2038,17 +2049,20 @@ where
             // shift by the entry-count delta, earlier ones stand.
             let (landed, shift) = match &edit {
                 Edit::Upsert(entry) => {
-                    match segment.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                    match segment
+                        .entries()
+                        .binary_search_by(|e| e.key.cmp(&entry.key))
+                    {
                         Ok(at) => (at, 0isize),
                         Err(at) => (at, 1),
                     }
                 }
-                Edit::Delete(key) => match segment.entries.binary_search_by(|e| e.key.cmp(key)) {
+                Edit::Delete(key) => match segment.entries().binary_search_by(|e| e.key.cmp(key)) {
                     Ok(at) => (at, -1isize),
                     Err(at) => (at, 0),
                 },
             };
-            apply_to_segment(&mut segment.entries, edit);
+            apply_to_segment(segment, edit);
             let adjusted: Vec<PieceOrigin> = origins
                 .iter()
                 .filter_map(|origin| {
@@ -2085,7 +2099,7 @@ where
             // paths, which have the neighbor's keys in memory.
             let floor = std::mem::take(&mut segment.separator);
             Ok(regroup_entries_reusing::<Key, Value, D>(
-                std::mem::take(&mut segment.entries),
+                segment.take_entries(),
                 floor,
                 manifest,
                 &adjusted,
@@ -2216,10 +2230,10 @@ where
             // node in an index that can. The wrapper keeps the same key range,
             // so routing is unchanged; its single link takes every op.
             other => {
-                let placeholder = Node::Transient(TransientNode::Segment(TransientSegment {
-                    entries: Vec::new(),
-                    separator: Vec::new(),
-                }));
+                let placeholder = Node::Transient(TransientNode::Segment(TransientSegment::new(
+                    Vec::new(),
+                    Vec::new(),
+                )));
                 let wrapped = std::mem::replace(other, placeholder);
                 let mut novelty = Novelty::new();
                 novelty.route::<Key>(&[], bucket)?;
@@ -2447,12 +2461,16 @@ where
             // nothing, so there is nothing to lift here.
             let floor = std::mem::take(&mut main.separator);
             if let Some(key) = key
-                && main.entries.last().map(|e| &e.key == key).unwrap_or(false)
+                && main
+                    .entries()
+                    .last()
+                    .map(|e| &e.key == key)
+                    .unwrap_or(false)
             {
-                main.entries.pop();
+                main.entries_mut().pop();
             }
-            let mut entries = main.entries;
-            entries.extend(neighbor.entries);
+            let mut entries = main.into_entries();
+            entries.extend(neighbor.into_entries());
             Ok((
                 regroup_entries::<Key, Value, D>(entries, floor, manifest),
                 Vec::new(),
@@ -2822,14 +2840,14 @@ where
 {
     match node {
         TransientNode::Segment(segment) => {
-            let before = segment.entries.len();
-            segment.entries.retain(|entry| {
+            let before = segment.entries().len();
+            segment.entries_mut().retain(|entry| {
                 (!trim_start || &entry.key >= range.start())
                     && (!trim_end || &entry.key <= range.end())
             });
-            Ok(if segment.entries.is_empty() {
+            Ok(if segment.entries().is_empty() {
                 Trim::Empty
-            } else if segment.entries.len() == before {
+            } else if segment.entries().len() == before {
                 Trim::Unchanged
             } else {
                 Trim::Trimmed
@@ -3094,12 +3112,13 @@ where
     D: Distribution,
 {
     match (left, right) {
-        (TransientNode::Segment(mut left), TransientNode::Segment(right)) => {
+        (TransientNode::Segment(left), TransientNode::Segment(right)) => {
             // Leaves buffer nothing.
             let floor = left.separator.clone();
-            left.entries.extend(right.entries);
+            let mut entries = left.into_entries();
+            entries.extend(right.into_entries());
             Ok((
-                regroup_entries::<Key, Value, D>(left.entries, floor, manifest),
+                regroup_entries::<Key, Value, D>(entries, floor, manifest),
                 Vec::new(),
             ))
         }
@@ -3283,21 +3302,16 @@ where
     }
 }
 
-/// Applies one edit to a sorted segment in place.
-fn apply_to_segment<Key, Value>(entries: &mut Vec<Entry<Key, Value>>, edit: Edit<Key, Value>)
+/// Applies one edit to a sorted segment in place, through the segment's own
+/// edit methods so its cached total weight stays exact.
+fn apply_to_segment<Key, Value>(segment: &mut TransientSegment<Key, Value>, edit: Edit<Key, Value>)
 where
-    Key: Ord,
+    Key: self::Key,
+    Value: self::Value,
 {
     match edit {
-        Edit::Upsert(entry) => match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
-            Ok(at) => entries[at].value = entry.value,
-            Err(at) => entries.insert(at, entry),
-        },
-        Edit::Delete(key) => {
-            if let Ok(at) = entries.binary_search_by(|e| e.key.cmp(&key)) {
-                entries.remove(at);
-            }
-        }
+        Edit::Upsert(entry) => segment.upsert(entry),
+        Edit::Delete(key) => segment.delete(&key),
     }
 }
 
@@ -3394,7 +3408,7 @@ fn collect_stream_plan<Key, Value>(
             }
         }
         TransientNode::Segment(segment) => {
-            for entry in &segment.entries {
+            for entry in segment.entries() {
                 if bounds.contains(&entry.key) {
                     plan.push(StreamStep::Entry(entry.clone()));
                 }

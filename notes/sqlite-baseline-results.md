@@ -117,3 +117,96 @@ Reads got the predicted win; the remaining point-get gap vs SQLite
 per-row `Entity` reconstruction — later groups. Write benches did not
 move outside noise, as expected: the write path's costs are dominated by
 encode/hash work, not validation.
+
+## Group 2: leaf weight caching (branch `claude/perf-3-weight-cache`)
+
+Changes, in the order the profile forced them:
+
+1. **Leaf weight cache.** `TransientSegment` now carries its exact total
+   entry weight (`Option<usize>`, computed lazily, maintained
+   incrementally by the segment's own `upsert`/`delete`, seeded from the
+   regroup's already-computed per-entry weights when a group is sealed,
+   and invalidated by any wholesale mutation). The edit path's
+   frame-ceiling gate reads it in O(1) instead of re-summing the whole
+   leaf (`Entry::weight` over every entry) on every membership-changing
+   edit. The segment's `entries` field went private so the compiler
+   forces every mutation through the cache-maintaining methods; exactness
+   is additionally pinned by test-build asserts.
+2. **First measurement was a negative result.** The cache removed the
+   weight complex at small N (callgrind, dev profile, `profile_commit`:
+   N=300 fell 100.3M → 55.5M instructions, `payload_weight` 22.1% → 0.3%)
+   but `write_batch/1000` moved only ~-5%. Re-profiling at N=1000 showed
+   why: per-entity instructions jump ~45× between N=300 and N=1000
+   (17.7B total) because frames cross the 192 KiB ceiling and enter the
+   force-split regime, where every membership edit re-merges the frame
+   and re-runs the whole-frame anchor election — `cap::frame_cut_positions`
+   alone was 62.7% of ALL instructions, split between the blake3 memo's
+   SipHash table lookups (~27%), the per-seam candidacy test that
+   allocated a 513-byte padded separator just to compare it (~28%), and
+   byte-wise `lcp` scans (~11%). The weight sums were a minor term there.
+3. **Election constants, shape-safely.** Three fixes, none touching any
+   decision value: `is_frame_candidate` decides candidacy without
+   materializing the padded separator (pinned to
+   `frame_separator(..).is_some()` by an exhaustive equivalence test plus
+   a test-build assert on every call); the blake3 memo's table hasher is
+   now FxHash instead of SipHash (the memo compares full keys, so hash
+   quality affects probes, never values); `lcp` compares word-at-a-time.
+
+Measured deltas (criterion medians; SQLite rows are the noise controls):
+
+| benchmark | dialog_mem | dialog_disk | control drift |
+|---|---|---|---|
+| write_batch (1000, 1 txn) | **-55.5%** (1.833 s → 815 ms) | **-55.8%** (1.867 s → 826 ms) | sqlite ±5% |
+| write_small_txns | within noise (13.4 ms) | -34% (96 → 59 ms), but likely file-I/O variance, not a claimed win | ±5% |
+| se_replay_write (500 real txns) | within noise (437 ms) | -17% printed, but sqlite_disk also -12% → I/O noise | sqlite_mem +8.8% |
+| se_title_get / se_kind_lookup | within control drift (controls swung ±20% between two runs an hour apart; a quiet re-run measured kind_lookup flat) | same | ±20% |
+
+Profile attribution (callgrind instruction counts, `profile_commit`,
+dev profile):
+
+| N | before | after | per entity |
+|---|---|---|---|
+| 100 | 22.8M Ir | 15.4M Ir (-33%) | 228K → 154K |
+| 300 | 100.3M Ir | 52.0M Ir (-48%) | 334K → 173K |
+| 1000 | 17.70B Ir | 7.73B Ir (-56%) | 17.7M → 7.7M |
+
+Wall (dev profile): `profile_commit 1000` 2.07 s → ~1.05 s.
+
+Interpretation: the batch-commit constant halved, but the shape of the
+curve stands — per-entity cost still jumps ~45× from N=300 to N=1000,
+because the frame-ceiling regime re-merges and re-elects over the whole
+frame on every edit, and that is architectural, not a constant. What
+remains at N=1000: memcpy 28% (entry moves and clones through
+`Vec::insert` and the merge/regroup concatenations), the memoized-hash
+table lookups ~18%, election bookkeeping ~8%. Group 3 candidates, in
+expected order of value: route batch commits through the buffered
+(hitchhiker) path instead of one canonical edit per key; memoize frame
+election results per unchanged frame; cut per-edit entry clones. Small
+real-world commits (se_replay, 2.6 facts/commit) never touch the ceiling
+regime and were expectedly unmoved — their costs are the Group 1 note's
+per-commit encode/persist constants, untouched here.
+
+## Group 2: leaf weight bookkeeping (branch `claude/perf-3-weight-cache`)
+
+Changes: the frame-ceiling gate, stretch-weight walks, and fast-path
+canonicality checks no longer re-derive entry weights over whole leaves on
+every membership-changing edit (weights are carried/banked incrementally;
+`distribution.rs`, `tree/transient.rs`, `node/transient.rs`,
+`hitchhiker.rs`). First attempt (ceiling-gate cache alone) measured only
+-4.6% — the callgrind re-profile showed the remaining O(leaf) terms, which
+this final version removes. Canonical roots unchanged (full convergence
+suite passes; 290 tests).
+
+| benchmark | dialog_mem | dialog_disk | control drift |
+|---|---|---|---|
+| write_batch | **-52.6%** (1.83 → 0.82 s) | **-53.0%** (1.87 → 0.83 s) | ±4% |
+| write_small_txns | -0.0% | **-31.8%** (86 → 59 ms) | sqlite_disk -6.2% |
+| se_replay_write | +1.7% | -18.4% (control -12.1%) | disk noisy |
+| reads (point/scan/join) | within noise | within noise | ±5% |
+
+Batch commits are ~2.2× faster and the per-entity cost curve flattened
+(native profile target: 1000 entities 2.17 s → 1.16 s in dev). Small
+in-memory commits are unmoved — their leaves are small, so the removed
+O(leaf) term never dominated there; their cost is per-instruction encode
+and the canonical rebuild path (next group), plus file-per-block I/O on
+disk.

@@ -495,8 +495,11 @@ where
                     }
                 }
                 TransientNode::Segment(segment) => {
-                    return match segment.entries.binary_search_by(|entry| entry.key.cmp(key)) {
-                        Ok(at) => Ok(Some(segment.entries[at].value.clone())),
+                    return match segment
+                        .entries()
+                        .binary_search_by(|entry| entry.key.cmp(key))
+                    {
+                        Ok(at) => Ok(Some(segment.entries()[at].value.clone())),
                         Err(_) => Ok(None),
                     };
                 }
@@ -785,10 +788,10 @@ where
 
             let child = std::mem::replace(
                 &mut index.children[at],
-                Node::Transient(TransientNode::Segment(TransientSegment {
-                    entries: Vec::new(),
-                    separator: Vec::new(),
-                })),
+                Node::Transient(TransientNode::Segment(TransientSegment::new(
+                    Vec::new(),
+                    Vec::new(),
+                ))),
             )
             .into_transient()?;
             // Amortized cascades one level: the child buffers normally. Recursive
@@ -978,7 +981,7 @@ fn collect_stored_plan<Key, Value, R>(
             }
         }
         TransientNode::Segment(segment) => {
-            for entry in &segment.entries {
+            for entry in segment.entries() {
                 if bounds.contains(&entry.key) {
                     plan.push(StoredStep::Entry(entry.clone()));
                 }

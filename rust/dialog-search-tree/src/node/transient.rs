@@ -684,13 +684,117 @@ pub(crate) fn link_bounds<Key, Value>(
 /// A leaf segment holding live key-value entries.
 #[derive(Debug)]
 pub struct TransientSegment<Key, Value> {
-    /// The key-value entries stored in this segment.
-    pub entries: Vec<Entry<Key, Value>>,
+    /// The key-value entries stored in this segment. Private so every
+    /// mutation flows through a method that keeps the cached total weight
+    /// exact; readers borrow through [`TransientSegment::entries`].
+    entries: Vec<Entry<Key, Value>>,
     /// The separator at this segment's left edge: the shortest byte string
     /// above everything left of the seam and at or below this segment's
     /// first key. Empty for the tree's global leftmost segment. This is the
     /// ground truth every index level above derives its separators from.
     pub separator: Vec<u8>,
+    /// Cached sum of the entries' weights ([`Entry::weight`]), `None` until
+    /// first queried or after a wholesale mutation invalidated it. The edit
+    /// path's frame-ceiling gate reads this once per edit; without the cache
+    /// it re-summed the whole leaf on every membership-changing edit, which
+    /// made batch commits quadratic in leaf size. The cached value must be
+    /// exact whenever it is `Some`: an under-report would let a segment
+    /// exceed the frame ceiling and change tree shape.
+    weight: Option<usize>,
+}
+
+impl<Key, Value> TransientSegment<Key, Value> {
+    /// Builds a segment from its entries and left-edge separator.
+    pub fn new(entries: Vec<Entry<Key, Value>>, separator: Vec<u8>) -> Self {
+        Self {
+            entries,
+            separator,
+            weight: None,
+        }
+    }
+
+    /// The key-value entries stored in this segment.
+    pub fn entries(&self) -> &[Entry<Key, Value>] {
+        &self.entries
+    }
+
+    /// Mutable access to the entries for wholesale edits (trims, pops).
+    /// Invalidates the cached total weight; the targeted edit methods
+    /// ([`upsert`](Self::upsert), [`delete`](Self::delete)) maintain it
+    /// incrementally instead and should be preferred on hot paths.
+    pub fn entries_mut(&mut self) -> &mut Vec<Entry<Key, Value>> {
+        self.weight = None;
+        &mut self.entries
+    }
+
+    /// Consumes the segment, returning its entries.
+    pub fn into_entries(self) -> Vec<Entry<Key, Value>> {
+        self.entries
+    }
+
+    /// Consumes the segment, returning its entries and separator.
+    pub fn into_parts(self) -> (Vec<Entry<Key, Value>>, Vec<u8>) {
+        (self.entries, self.separator)
+    }
+
+    /// Takes the entries out of the segment, leaving it empty.
+    pub fn take_entries(&mut self) -> Vec<Entry<Key, Value>> {
+        self.weight = None;
+        std::mem::take(&mut self.entries)
+    }
+}
+
+impl<Key, Value> TransientSegment<Key, Value>
+where
+    Key: self::Key,
+    Value: self::Value,
+{
+    /// The exact sum of the entries' weights ([`Entry::weight`]): the number
+    /// the frame-ceiling gate compares against `Manifest::frame_ceiling`.
+    /// Computed once per segment and maintained incrementally by
+    /// [`upsert`](Self::upsert) and [`delete`](Self::delete), so repeated
+    /// edits into the same leaf pay O(1) here instead of O(entries).
+    pub fn total_weight(&mut self) -> usize {
+        match self.weight {
+            Some(weight) => weight,
+            None => {
+                let weight = self.entries.iter().map(Entry::weight).sum();
+                self.weight = Some(weight);
+                weight
+            }
+        }
+    }
+
+    /// Inserts or replaces the entry for `entry.key`, keeping the cached
+    /// total weight exact: a replacement adjusts by the weight delta, an
+    /// insert adds the entry's weight.
+    pub fn upsert(&mut self, entry: Entry<Key, Value>) {
+        match self.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+            Ok(at) => {
+                if let Some(weight) = self.weight.as_mut() {
+                    *weight = *weight + entry.weight() - self.entries[at].weight();
+                }
+                self.entries[at].value = entry.value;
+            }
+            Err(at) => {
+                if let Some(weight) = self.weight.as_mut() {
+                    *weight += entry.weight();
+                }
+                self.entries.insert(at, entry);
+            }
+        }
+    }
+
+    /// Removes the entry for `key` (a missing key is a no-op), keeping the
+    /// cached total weight exact.
+    pub fn delete(&mut self, key: &Key) {
+        if let Ok(at) = self.entries.binary_search_by(|e| e.key.cmp(key)) {
+            if let Some(weight) = self.weight.as_mut() {
+                *weight -= self.entries[at].weight();
+            }
+            self.entries.remove(at);
+        }
+    }
 }
 
 impl<Key, Value> TransientNode<Key, Value> {
@@ -859,10 +963,9 @@ where
                         value: into_owned(segment.value_at(at)?)?,
                     });
                 }
-                Ok(TransientNode::Segment(TransientSegment {
-                    entries,
-                    separator,
-                }))
+                Ok(TransientNode::Segment(TransientSegment::new(
+                    entries, separator,
+                )))
             }
         }
     }
@@ -1326,6 +1429,13 @@ where
             .find(|origin| origin.start == start && origin.end == end)
             .map(|origin| &origin.link)
     };
+    // The per-entry weights are already in hand, so each sealed group's
+    // exact total rides into the segment's weight cache: a freshly
+    // regrouped leaf then answers the edit path's frame-ceiling gate
+    // without re-summing its entries.
+    let group_weight = |start: usize, end: usize| -> Option<usize> {
+        (manifest.max_segment > 0).then(|| weights[start..end].iter().sum())
+    };
     let mut group_start = 0usize;
     for (at, entry) in entries.into_iter().enumerate() {
         pending.push(entry);
@@ -1338,6 +1448,7 @@ where
                 forced_start[group_start],
                 manifest,
                 origin_for(group_start, at + 1),
+                group_weight(group_start, at + 1),
             );
             group_start = at + 1;
         }
@@ -1352,6 +1463,7 @@ where
             forced_start[group_start],
             manifest,
             origin_for(group_start, count),
+            group_weight(group_start, count),
         );
     }
 
@@ -1363,6 +1475,10 @@ where
 /// long forced form when the group starts at a backstop anchor, and the
 /// canonical shortest-distinguishing prefix against the previous group's
 /// last key everywhere else.
+///
+/// `weight`, when given, must be the exact sum of the group's entry weights
+/// (the caller sums the same per-entry weights its cut decisions read); it
+/// seeds the sealed segment's weight cache.
 #[allow(clippy::too_many_arguments)]
 fn seal<Key, Value, D>(
     pending: &mut Vec<Entry<Key, Value>>,
@@ -1372,6 +1488,7 @@ fn seal<Key, Value, D>(
     forced: bool,
     manifest: &Manifest,
     origin: Option<&Link>,
+    weight: Option<usize>,
 ) where
     Key: self::Key,
     Value: self::Value,
@@ -1406,7 +1523,22 @@ fn seal<Key, Value, D>(
         groups.push(Node::Persistent(link.clone()));
         return;
     }
-    groups.push(TransientNode::Segment(TransientSegment { entries, separator }).into());
+    #[cfg(test)]
+    if let Some(weight) = weight {
+        debug_assert_eq!(
+            weight,
+            entries.iter().map(Entry::weight).sum::<usize>(),
+            "a sealed group's cached weight must equal the sum of its entry weights"
+        );
+    }
+    groups.push(
+        TransientNode::Segment(TransientSegment {
+            entries,
+            separator,
+            weight,
+        })
+        .into(),
+    );
 }
 
 #[cfg(test)]
