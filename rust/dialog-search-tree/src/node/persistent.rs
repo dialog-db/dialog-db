@@ -52,6 +52,24 @@ impl DecodedKeys {
     pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
         (0..self.len()).map(|index| self.get(index).expect("index in range"))
     }
+
+    /// Position of the key equal to `probe`, or `None`. Keys are stored in
+    /// entry (sorted) order, so this is a binary search — O(log n) key
+    /// comparisons against the linear front-coded stream a fresh decode
+    /// requires.
+    pub fn binary_search(&self, probe: &[u8]) -> Option<usize> {
+        let mut low = 0usize;
+        let mut high = self.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match self.get(middle).expect("index in range").cmp(probe) {
+                Ordering::Less => low = middle + 1,
+                Ordering::Greater => high = middle,
+                Ordering::Equal => return Some(middle),
+            }
+        }
+        None
+    }
 }
 
 /// A tree node in its serialized, content-addressed form.
@@ -139,9 +157,28 @@ where
     }
 
     /// Accesses the deserialized body of this node.
+    ///
+    /// Bytecheck validation runs once per buffer: the first access walks the
+    /// full archive and records the validation on the (immutable, shared)
+    /// buffer, and every later access — from any clone of the node or any
+    /// reader served the same buffer from the node cache — takes the
+    /// unchecked path. This removes the per-touch validation that previously
+    /// dominated warm reads, without weakening the boundary: bytes always
+    /// pass one full validation before any unchecked access.
     pub fn body(&self) -> Result<&ArchivedNodeBody<Value>, DialogSearchTreeError> {
-        rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
-            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
+        if self.buffer.is_validated::<ArchivedNodeBody<Value>>() {
+            // SAFETY: this exact buffer already passed a full bytecheck
+            // validation as `ArchivedNodeBody<Value>` (recorded under that
+            // type's `TypeId`), and buffers are immutable, so the bytes it
+            // validated are the bytes accessed here.
+            return Ok(unsafe {
+                rkyv::access_unchecked::<ArchivedNodeBody<Value>>(self.buffer.as_ref())
+            });
+        }
+        let body = rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
+            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+        self.buffer.mark_validated::<ArchivedNodeBody<Value>>();
+        Ok(body)
     }
 
     /// Whether a scan over this leaf should reuse a memoized decode
