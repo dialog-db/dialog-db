@@ -76,6 +76,15 @@ where
         if bundle.recursion().is_some() {
             return Ok(None);
         }
+        // A reducing rule's fold spans entities: one changed fact
+        // moves its whole group's row, and a retraction can make a
+        // group's row disappear without any change to the head
+        // entity's own facts. Per-entity re-derivation cannot bound
+        // that, so the caller recomputes (A3's recompute-per-poll
+        // model; incremental aggregate maintenance is A4).
+        if bundle.rules().any(|rule| !rule.reduce().is_empty()) {
+            return Ok(None);
+        }
         let rules: Vec<DeductiveRule> = bundle.rules().cloned().collect();
         let mut targets = BTreeSet::new();
         for rule in &rules {

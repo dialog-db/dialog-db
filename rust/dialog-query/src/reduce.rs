@@ -109,6 +109,7 @@ use crate::types::Any;
 /// `stddev` are addable behind this same enum; `rand`/`sample` are
 /// permanently excluded (nondeterministic in a convergent system).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Aggregator {
     /// Number of present bindings in the group.
     Count,
@@ -215,6 +216,32 @@ impl Aggregator {
                 if optional { mean.optional() } else { mean }
             }
         })
+    }
+}
+
+/// One `reduce` block entry in the formal notation: the fold to
+/// apply and the term supplying its input. The output field name is
+/// the entry's *key* in the descriptor's name-keyed `reduce` map, so
+/// a field being both grouped and reduced is unrepresentable — a
+/// `BTreeMap` key is either present (reduced) or absent (grouping).
+///
+/// ```json
+/// "reduce": { "total": { "apply": "sum", "of": { "?": { "name": "salary" } } } }
+/// ```
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ReduceSpec {
+    /// The fold applied to the group's inputs.
+    pub apply: Aggregator,
+    /// The term supplying the fold's input, one lookup per body row.
+    pub of: Term<Any>,
+}
+
+impl From<&ReduceEntry> for ReduceSpec {
+    fn from(entry: &ReduceEntry) -> Self {
+        ReduceSpec {
+            apply: entry.aggregator,
+            of: entry.input.clone(),
+        }
     }
 }
 

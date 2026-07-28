@@ -104,7 +104,7 @@ pub use predicate::*;
 pub use premise::*;
 pub use proposition::*;
 pub use query::*;
-pub use reduce::{Aggregator, Reduce, ReduceEntry};
+pub use reduce::{Aggregator, Reduce, ReduceEntry, ReduceSpec};
 pub use rule::*;
 pub use schema::*;
 pub use selection::*;

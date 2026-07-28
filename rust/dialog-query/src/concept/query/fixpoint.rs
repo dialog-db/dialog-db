@@ -265,7 +265,7 @@ fn bind_occurrence(matched: &mut Match, occurrence: &ConceptQuery, row: &Row) ->
 /// Project a rule's result match into a conclusion [`Row`]: one
 /// entry per conclusion operand bound to a present value; operands
 /// resolved to `Absent` (or never bound) are omitted.
-fn project(descriptor: &ConceptDescriptor, matched: &Match) -> Row {
+pub(crate) fn project(descriptor: &ConceptDescriptor, matched: &Match) -> Row {
     let mut row = Row::new();
     let operands = iter::once("this").chain(descriptor.with().keys());
     for operand in operands {

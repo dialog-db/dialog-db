@@ -302,6 +302,51 @@ pub enum TypeError {
         /// The declared or inferred type of the input.
         actual: Box<Kind>,
     },
+
+    /// A `reduce` block names an output field the rule's head
+    /// (`deduce`) does not declare. The map is keyed by head field
+    /// name — a key with no head field has nothing to bind. Raised
+    /// at descriptor construction, before analysis.
+    #[error("Reduce block names field \"{field}\" which the rule's head does not declare")]
+    ReducedFieldNotInHead {
+        /// The unknown reduce key.
+        field: String,
+    },
+
+    /// A body premise binds a variable with the same name as a
+    /// *reduced* head field: the fold defines that field, so the
+    /// body binding is a second definition for it. Always authored
+    /// confusion; a hard error, sibling of
+    /// [`RequiredHeadFromOptional`](Self::RequiredHeadFromOptional).
+    #[error(
+        "Rule {rule}: field \"{field}\" is defined by the reduce clause, \
+         but a body premise also binds a variable named \"{field}\" — \
+         two definitions for one field. Rename the body variable."
+    )]
+    ReducedFieldCollision {
+        /// The offending rule.
+        rule: Box<Rule>,
+        /// The doubly defined field.
+        field: String,
+    },
+
+    /// A reduce entry's output type does not unify with its head
+    /// field's declared content type: no value the fold can produce
+    /// inhabits the declared type.
+    #[error(
+        "Reduce field \"{field}\": {aggregator} produces {output}, \
+         which does not unify with the head field's declared type {declared}"
+    )]
+    ReduceOutput {
+        /// The reduce output field.
+        field: String,
+        /// The aggregator whose output mismatches.
+        aggregator: Aggregator,
+        /// The fold's output type.
+        output: Box<Kind>,
+        /// The head field's declared type.
+        declared: Box<Kind>,
+    },
 }
 
 impl From<AnalyzerError> for TypeError {
@@ -546,6 +591,21 @@ pub enum EvaluationError {
         negated: String,
     },
 
+    /// The queried concept's dependency closure contains a
+    /// *reducing* rule on a dependency cycle: its folds read the
+    /// complete relation, which the cycle is still deriving.
+    /// Rejected until the aggregating polarity refines this to the
+    /// SCC-based check (milestone A4) — never silently mis-evaluated.
+    #[error(
+        "Aggregation through recursion: a reducing rule concluding {concept} \
+         sits on a dependency cycle; its folds would read a relation \
+         the cycle is still deriving"
+    )]
+    AggregationThroughRecursion {
+        /// The recursive concept concluded by a reducing rule.
+        concept: String,
+    },
+
     /// A recursive concept's semi-naive fixpoint did not converge
     /// within the round cap. A round derives at least one new row,
     /// so purely fact-driven recursion terminates well under the
@@ -777,4 +837,19 @@ pub enum AnalysisError {
         /// The conclusion concept's URI.
         concept: String,
     },
+    /// A body premise binds a variable named as a *reduced* head
+    /// field — two definitions for one field. See
+    /// [`TypeError::ReducedFieldCollision`].
+    #[error("body premise binds reduced field {field}")]
+    ReducedFieldCollision {
+        /// The doubly defined field.
+        field: String,
+    },
+    /// A reduce entry failed its type check: the carried
+    /// [`TypeError`] is one of the entry-scoped variants
+    /// ([`TypeError::ReduceInput`], [`TypeError::ReduceOutput`],
+    /// [`TypeError::ReducedFieldNotInHead`]), passed through
+    /// unchanged by rule compilation.
+    #[error("{0}")]
+    Reduce(Box<TypeError>),
 }

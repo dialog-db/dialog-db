@@ -794,6 +794,82 @@ mod rule_tests {
         Ok(())
     }
 
+    /// A *reducing* rule stores, discovers, and hydrates through the
+    /// same `db.rule/*` rail: the committed rule's reduce block
+    /// survives the durable layer round trip, and queries evaluate
+    /// its fold over committed facts.
+    #[dialog_common::test]
+    async fn it_resolves_a_committed_reducing_rule() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // dept-total(this, total: sum(?salary)) grouped by department.
+        let rule = {
+            let json = serde_json::json!({
+                "deduce": { "with": {
+                    "total": { "the": "org/dept-total", "as": "UnsignedInteger" }
+                }},
+                "when": [{
+                    "assert": { "with": {
+                        "dept": { "the": "org/dept", "as": "Entity" },
+                        "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "employee" } },
+                        "dept": { "?": { "name": "this" } },
+                        "salary": { "?": { "name": "salary" } }
+                    }
+                }],
+                "reduce": {
+                    "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
+                }
+            });
+            let descriptor: DeductiveRuleDescriptor =
+                serde_json::from_value(json).expect("descriptor parses");
+            descriptor.compile().expect("reducing rule compiles")
+        };
+        let dept_total = rule.conclusion().clone();
+
+        let dept: Entity = "id:dept-a".parse()?;
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let (conc, src) = rule_statements(&rule);
+        branch
+            .transaction()
+            .assert(the!("org/dept").of(alice.clone()).is(dept.clone()))
+            .assert(the!("org/salary").of(alice.clone()).is(3u32))
+            .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))
+            .assert(the!("org/salary").of(bob.clone()).is(4u32))
+            .assert(conc)
+            .assert(src)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("dept"));
+        terms.insert("total".into(), Term::var("total"));
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: dept_total,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "one folded row for the department");
+        assert_eq!(*rows[0].entity(), dept);
+        assert_eq!(
+            rows[0].get::<u64>("total")?,
+            7,
+            "the hydrated reduce block folded the committed salaries"
+        );
+        Ok(())
+    }
+
     // ----- (7) no rules => implicit-only, empty -----------------------
 
     #[dialog_common::test]

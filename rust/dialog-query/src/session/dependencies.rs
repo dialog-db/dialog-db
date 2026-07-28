@@ -111,6 +111,12 @@ pub struct ProgramAnalysis {
     component: HashMap<Entity, usize>,
     /// Every negative edge that lands inside its own component.
     violations: Vec<NegationViolation>,
+    /// Concepts concluded by at least one *reducing* rule. A
+    /// reducing conclusion on a dependency cycle is rejected at
+    /// [`check`](Self::check): its folds would read a relation the
+    /// cycle is still deriving. Milestone A4 refines this into an
+    /// aggregating [`Polarity`] with the SCC-based check.
+    reducing: HashSet<Entity>,
 }
 
 /// The shape of a queried concept's dependency closure, as
@@ -134,10 +140,14 @@ impl ProgramAnalysis {
     pub fn analyze<'a>(entries: impl IntoIterator<Item = (&'a Entity, &'a ConceptRules)>) -> Self {
         let mut edges: HashMap<Entity, Vec<(Entity, Polarity)>> = HashMap::new();
         let mut pending: VecDeque<ConceptDescriptor> = VecDeque::new();
+        let mut reducing: HashSet<Entity> = HashSet::new();
 
         for (entity, rules) in entries {
             let mut out = Vec::new();
             for rule in rules.rules() {
+                if !rule.reduce().is_empty() {
+                    reducing.insert(entity.clone());
+                }
                 for (target, polarity) in rule_edges(rule) {
                     out.push((target.this(), polarity));
                     pending.push_back(target);
@@ -228,6 +238,7 @@ impl ProgramAnalysis {
             recursive,
             component,
             violations,
+            reducing,
         }
     }
 
@@ -301,6 +312,21 @@ impl ProgramAnalysis {
                     negated: violation.negated.to_string(),
                 });
             }
+        }
+        // A reducing conclusion on a dependency cycle would fold a
+        // relation the cycle is still deriving; the fixpoint
+        // evaluator has no aggregation semantics, so reject rather
+        // than mis-evaluate. (A4 refines this to the SCC-based
+        // aggregating-polarity check.) Aggregation *over* a
+        // lower-stratum recursive concept is fine: that concept is
+        // recursive but not reducing.
+        if let Some(entity) = order
+            .iter()
+            .find(|entity| self.recursive.contains(*entity) && self.reducing.contains(*entity))
+        {
+            return Err(EvaluationError::AggregationThroughRecursion {
+                concept: entity.to_string(),
+            });
         }
         if order.iter().any(|entity| self.recursive.contains(entity)) {
             Ok(Closure::Recursive)
