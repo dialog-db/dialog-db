@@ -64,7 +64,28 @@ transaction per commit — real commit boundaries, real supersession
 in SQLite), real long-tailed value sizes crossing the 4096-byte spill
 boundary.
 
-<!-- SE_RESULTS -->
+Replay of the first 500 real transactions (1,289 facts), fresh store per
+iteration; reads against a store seeded with the first 2,000 transactions:
+
+| workload | sqlite_mem | sqlite_disk | sqlite_disk_nosync | dialog_mem | dialog_disk |
+|---|---|---|---|---|---|
+| replay 500 txns | 10.2 ms | 93.6 ms | 23.4 ms | 444 ms | 1.61 s |
+| per commit | 20 µs | 187 µs | 47 µs | 888 µs | 3.2 ms |
+| kind lookup (value-indexed, ~700 rows) | 34.9 µs | 40.5 µs | 35.5 µs | 261 µs | 244 µs |
+| title point get (superseded pair) | 0.97 µs | 6.07 µs | 2.68 µs | 9.34 µs | 9.41 µs |
+
+### What the real workload adds
+
+- **Small real commits: 43× (memory), 17× against SQLite's *durable*
+  NORMAL config, 69× against the durability-equivalent nosync config.**
+  Real commits average 2.6 facts and include `Replace` supersession
+  (prior scan + retract + assert), which costs more than the synthetic
+  pure-assert path — the realistic per-commit price is ~0.9 ms CPU plus
+  ~2.3 ms of file-per-block I/O.
+- **Value-indexed lookups: 7×** — consistent with the synthetic scan gap;
+  per-row reconstruction costs dominate.
+- **Point gets: ~1.5× vs cold-ish sqlite_disk, ~10× vs sqlite_mem.** The
+  dialog store again shows memory ≡ disk (9.4 µs both): pure CPU.
 
 ## Reading the numbers
 
