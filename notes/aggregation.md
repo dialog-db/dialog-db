@@ -130,3 +130,49 @@ rules over an anonymous head; no separate find-spec notation exists.
   `AggregationThroughRecursion`, tests mirroring the negation violations.
 - **A5 (later)** — incremental maintenance under subscriptions
   (recompute-per-poll is correct first); materialized-aggregate performance.
+
+## Test coverage matrix (acceptance for A3/A4; do not ship without)
+
+Engine-level (A1, landed): grouping correctness, absent-as-input and
+absent-as-group-key, identities vs Absent outputs, overflow, distinct-by-
+bytes, permutation determinism, compare-machinery ordering, empty stream,
+global group. Typing (A2): per-aggregator input rejection, output algebra,
+optionality propagation both directions.
+
+Rule-level (A3):
+- The name-collision hard error (body variable named as a reduced field).
+- The grouped-and-folded variable case is WELL-DEFINED, pinned: a head field
+  and a fold fed by the same variable yields key x count / identity
+  semantics, not an error.
+- Optional-input min/max/avg forces an optional head field via the existing
+  RequiredHeadFromOptional — pinned both ways (required head + optional
+  input rejected; optional head accepted and yields Absent on all-absent
+  groups).
+- Descriptor round-trip: a reducing rule serializes/deserializes through the
+  formal notation and through dialog.rule/* storage (privileged install
+  rail), and the discovery scan hydrates the reduce block intact.
+- Composition: a plain rule consuming a reducing rule's concept; a reducing
+  rule over another reducing rule's concept (two strata); results correct.
+- Overlay rules: an uncommitted reducing rule staged on a transaction
+  resolves in pending-view queries.
+
+Subscription lifecycle (A3 acceptance, using recompute-per-poll):
+- Subscribe over a reducing rule's concept; assert facts -> poll delta shows
+  the old aggregate row retracted and the new one asserted.
+- Retract contributing facts -> aggregate updates; retracting a group's last
+  row -> the group's row disappears from the subscription.
+- Optional-input min/max group transitioning between present and Absent
+  output across polls.
+- A subscription over a CONSUMER of the reducing concept (composition depth
+  2) also updates on base-fact changes.
+
+Stratification (A4):
+- Reducing rule in its own SCC -> AggregationThroughRecursion, mirroring
+  every NegationThroughRecursion test shape.
+- Aggregation over a recursive-but-lower-stratum concept: fixpoint completes
+  first, fold sees the full relation — pinned with a recursive ancestor-
+  style fixture.
+- Combined negation + aggregation strata in one program.
+
+Cross-cutting: all tests #[dialog_common::test] (native + wasm dedicated
+worker); rule-level determinism across insertion orders of base facts.
