@@ -81,7 +81,7 @@ where
         // group's row disappear without any change to the head
         // entity's own facts. Per-entity re-derivation cannot bound
         // that, so the caller recomputes (A3's recompute-per-poll
-        // model; incremental aggregate maintenance is A4).
+        // model; incremental aggregate maintenance is A5).
         if bundle.rules().any(|rule| !rule.reduce().is_empty()) {
             return Ok(None);
         }

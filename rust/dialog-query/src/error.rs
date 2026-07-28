@@ -591,19 +591,27 @@ pub enum EvaluationError {
         negated: String,
     },
 
-    /// The queried concept's dependency closure contains a
-    /// *reducing* rule on a dependency cycle: its folds read the
-    /// complete relation, which the cycle is still deriving.
-    /// Rejected until the aggregating polarity refines this to the
-    /// SCC-based check (milestone A4) — never silently mis-evaluated.
+    /// The queried concept's dependency closure contains a cycle
+    /// through aggregation: some *reducing* rule concluding
+    /// `concept` folds over `aggregated` inside the same dependency
+    /// cycle, so the fold reads a relation the cycle itself is
+    /// still deriving. No stratified semantics exists for such a
+    /// program. Exact sibling of
+    /// [`NegationThroughRecursion`](Self::NegationThroughRecursion):
+    /// rules are installed unconditionally (replicas must converge
+    /// on the merged rule set), so this surfaces at query time, on
+    /// exactly the queries whose closure is ill-stratified.
     #[error(
-        "Aggregation through recursion: a reducing rule concluding {concept} \
-         sits on a dependency cycle; its folds would read a relation \
-         the cycle is still deriving"
+        "Aggregation through recursion: rules for {concept} fold over \
+         {aggregated} inside the same dependency cycle; no stratified \
+         semantics exists"
     )]
     AggregationThroughRecursion {
-        /// The recursive concept concluded by a reducing rule.
+        /// The concluding concept whose reducing rule folds into
+        /// its cycle.
         concept: String,
+        /// The aggregated concept inside the same cycle.
+        aggregated: String,
     },
 
     /// A recursive concept's semi-naive fixpoint did not converge

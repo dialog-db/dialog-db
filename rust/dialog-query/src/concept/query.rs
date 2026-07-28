@@ -351,7 +351,7 @@ impl ConceptQuery {
 /// fold groups by the non-reduced head fields and computes each
 /// entry, and every folded match projects to a conclusion row for
 /// the caller join. Recomputed per query — incremental maintenance
-/// is milestone A4.
+/// is milestone A5.
 ///
 /// [`Reduce`]: crate::reduce::Reduce
 async fn reduce_rows<'a, Env>(
@@ -2109,10 +2109,10 @@ mod tests {
             Ok(())
         }
 
-        /// A reducing rule on a dependency cycle is rejected at
-        /// acquire with a structured error, never silently
-        /// mis-evaluated (the A4 aggregating polarity will refine
-        /// this to the SCC-based check).
+        /// A reducing rule whose body reads its own conclusion is an
+        /// aggregating edge inside its own strongly connected
+        /// component: rejected at acquire with the structured
+        /// stratification error, never silently mis-evaluated.
         #[dialog_common::test]
         async fn it_rejects_recursive_reducing_rule() -> anyhow::Result<()> {
             let conclusion = ConceptDescriptor::try_from(vec![(
@@ -2148,8 +2148,16 @@ mod tests {
             let mut registry = RuleRegistry::new();
             registry.register(rule)?;
             match registry.acquire(&conclusion) {
-                Err(EvaluationError::AggregationThroughRecursion { concept }) => {
+                Err(EvaluationError::AggregationThroughRecursion {
+                    concept,
+                    aggregated,
+                }) => {
                     assert_eq!(concept, conclusion.this().to_string());
+                    assert_eq!(
+                        aggregated,
+                        conclusion.this().to_string(),
+                        "the self-referential body is the aggregated concept"
+                    );
                 }
                 other => panic!("expected AggregationThroughRecursion, got {other:?}"),
             }

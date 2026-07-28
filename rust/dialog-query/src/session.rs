@@ -4,7 +4,9 @@
 pub mod dependencies;
 /// Registry for deductive rules, indexed by conclusion entity.
 pub mod rule_registry;
-pub use dependencies::{Closure, NegationViolation, Polarity, ProgramAnalysis};
+pub use dependencies::{
+    AggregationViolation, Closure, NegationViolation, Polarity, ProgramAnalysis, Violation,
+};
 pub use rule_registry::*;
 
 #[cfg(test)]
