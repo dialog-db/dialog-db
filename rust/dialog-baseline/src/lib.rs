@@ -26,6 +26,8 @@
 //! production SQLite deployment would actually run, and is the number to
 //! beat once dialog has an explicit durability story.
 
+pub mod se;
+
 use std::str::FromStr;
 
 use anyhow::Result;
@@ -101,6 +103,16 @@ pub struct SqliteFacts {
 }
 
 impl SqliteFacts {
+    /// The underlying connection, for sibling workload modules.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    /// The underlying connection, mutably, for sibling workload modules.
+    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
+
     /// Open a fresh store in the given mode with the schema applied.
     pub fn open(mode: SqliteMode) -> Result<Self> {
         let (connection, dir) = match mode {
@@ -293,7 +305,7 @@ impl DialogFacts {
         Ok(())
     }
 
-    async fn collect(
+    pub(crate) async fn collect(
         &self,
         selector: ArtifactSelector<dialog_artifacts::selector::Constrained>,
     ) -> Result<Vec<Artifact>> {

@@ -24,3 +24,7 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 [[bench]]
 name = "sqlite_vs_dialog"
 harness = false
+
+[[bench]]
+name = "se_replay"
+harness = false
