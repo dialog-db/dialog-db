@@ -1,0 +1,26 @@
+[package]
+name = "dialog-baseline"
+description = "Reference benchmarks comparing dialog-db against SQLite on identical workloads"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+base58 = { workspace = true }
+dialog-artifacts = { workspace = true }
+dialog-storage = { workspace = true }
+futures-util = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "sqlite_vs_dialog"
+harness = false

@@ -17,6 +17,7 @@ strip = "debuginfo"
 [workspace]
 members = [
     "rust/dialog-artifacts",
+    "rust/dialog-baseline",
     "rust/dialog-capability",
     "rust/dialog-credentials",
     "rust/dialog-common",
