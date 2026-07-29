@@ -313,3 +313,153 @@ What to try next, in expected order of value:
    background-canonicalize idle trees) to claw back the +5-15%.
 4. The buffered path's own per-op constant (+36M Ir per 100-key batch at
    small N) — likely the per-write node clone in the hitchhiker layer.
+
+## Group 5 spike: DCAA single-file archive (branch `claude/perf-6-dcaa-spike`)
+
+What was built: the DCAA v1 single-file archive from `notes/dcaa.md`,
+implemented as a capability provider — another member of the archive
+provider family, a peer of the file-per-blob `FileSystem` archive on
+native and the IndexedDB/OPFS archive providers on the web, NOT a
+`StorageBackend` implementation. `dialog_storage::provider::dcaa::Dcaa`
+serves `archive::{Get, Put, Import}` from one append-only `.dialog` file
+per catalog, opens from a `Location` via `Resource` like the other
+providers, and a `Space` selects it by using it as its archive field
+(the bench harness composes
+`Space<TempDcaa, TempFileSystem, ...>`). It lives as a module inside
+dialog-storage rather than a new crate because that is where every other
+provider lives and where the `Resource`/`Space` composition machinery it
+plugs into is defined; the module is cfg'd off wasm32 (the engine needs
+file offsets, `set_len`, fdatasync).
+
+Both review-note amendments are implemented:
+
+1. **Per-commit index deltas** with a periodic fold (threshold 32 by
+   default, `DIALOG_DCAA_FOLD` overrides, 0 = merged index every commit).
+2. **Outboard policy**: `outboard_len = 0` at or below 64 KiB
+   (whole-blob BLAKE3 verification — every tree node in these workloads),
+   full BAO outboard above it (`bao-tree` 0.16 builds and verifies fine
+   in this environment; the plain-BLAKE3 fallback was not needed).
+
+Spec deviations, documented in the module docs: the footer is 72 bytes
+(delta-chain fields: base index location, previous footer offset, chain
+length), and the footer checksum covers the commit's whole appended
+payload, not just the footer bytes. The latter is what makes a SINGLE
+fsync per commit crash-safe: with no write barrier between payload and
+footer, the kernel may persist the footer page before the payload pages,
+and a footer-only checksum would validate that torn state. Covering the
+payload costs nothing at commit time (the bytes are in hand) and O(tail
+commit) at recovery. Tests cover torn-tail truncation, a
+footer-persisted/payload-torn commit, media corruption of durable
+commits (BAO and whole-blob paths), redaction semantics, dedup no-ops
+(a fully-duplicate transaction appends zero bytes), and lookup
+correctness across an unfolded delta chain after reopen.
+
+Commit granularity maps 1:1 onto effect granularity: the repository
+layer sends one `Import` per branch commit, and each `Import` is one
+DCAA transaction — records + index delta + footer in one buffered write,
+one fdatasync.
+
+### Measured (same-run criterion medians, 4-core shared container)
+
+DURABILITY CAVEAT, read before comparing: `repo_dcaa` is the only dialog
+row with real durability — fdatasync on every commit, stronger than
+`sqlite_disk`'s WAL + `synchronous=NORMAL` (which defers the fsync to
+checkpoints; that is why sqlite_disk's per-commit cost looks so low) and
+comparable to `synchronous=FULL`. `repo_disk` / `dialog_disk`
+(file-per-block) never fsync. This container's disk is shared and noisy
+(run-to-run drift up to ±30% on disk rows; two runs of this same branch
+put repo_disk at 1.17 s and 1.92 s), so only same-run ratios are quoted.
+
+SE replay, 500 real transactions (1,289 facts), fresh store per
+iteration, one run:
+
+| config | median | per commit | durable? |
+|---|---|---|---|
+| sqlite_mem | 10.8 ms | 22 µs | no |
+| sqlite_disk (WAL, NORMAL) | 84.9 ms | 170 µs | checkpoint-deferred |
+| sqlite_disk_nosync | 21.5 ms | 43 µs | no |
+| dialog_mem (raw store) | 155 ms | 310 µs | no |
+| dialog_disk (raw store, file-per-block) | 937 ms | 1.9 ms | no |
+| repo_mem | 413 ms | 826 µs | no |
+| repo_disk (file-per-block) | 1.92 s | 3.8 ms | no |
+| **repo_dcaa** | **2.45 s** | **4.9 ms** | **yes, per commit** |
+
+Synthetic writes (same run):
+
+| config | write_small_txns (100 × 1 txn) | write_batch (1000, 1 txn) |
+|---|---|---|
+| sqlite_mem | 0.86 ms | 4.97 ms |
+| sqlite_disk | 2.87 ms | 5.93 ms |
+| sqlite_disk_nosync | 2.61 ms | 5.57 ms |
+| dialog_mem | 11.1 ms | 1.18 s |
+| dialog_disk | 55.6 ms | 1.29 s |
+| repo_mem | 34.0 ms | 1.61 s |
+| repo_disk | 156 ms | 1.65 s |
+| **repo_dcaa** | **369 ms** | **1.73 s** |
+
+Read: DCAA costs +27% wall on the real replay and +5% on the batch
+shape versus the fsync-free file-per-block row, while adding per-commit
+durability that no other dialog row has. The small-txn synthetic is the
+worst case (2.4×): 100 back-to-back commits are fsync-bound, ~2 ms extra
+per commit on this host's shared disk. When commits batch (write_batch:
+one commit, one fsync) durability is nearly free.
+
+### Index amplification (review amendment 1, measured)
+
+`cargo run -p dialog-baseline --release --example dcaa_amplification`
+replays the SE log through the repo harness with the delta chain ON
+(fold 32) and OFF (`DIALOG_DCAA_FOLD=0`, a complete merged index every
+commit — the pre-amendment spec), plus the file-per-block control. The
+DCAA file is strictly append-only, so final file size == total bytes
+written:
+
+| SE txns | fold 32 | fold 0 (merged every commit) | file-per-block control | total ratio | index-bytes ratio |
+|---|---|---|---|---|---|
+| 500 (835 blocks) | 53.7 MiB | 61.8 MiB | 51.5 MiB / 835 files | 1.15× | ~4.7× (2.2 vs 10.3 MiB) |
+| 2000 (5,043 blocks) | 403.0 MiB | 568.9 MiB | 378.7 MiB / 5,043 files | 1.41× | ~7.9× (24 vs 190 MiB) |
+
+(Index bytes = total minus the record bytes, which are identical across
+the two configs.) The amendment is validated and the effect grows with
+entry count exactly as predicted — at 835 entries the merged index is
+only 33 KiB so rewriting it per commit barely shows; at 5k entries the
+merged-per-commit config already spends a THIRD of all bytes on index
+churn, and the spec's 100k-entry projection (~4 MB of index per 1-fact
+commit) makes the chain non-optional at scale. Fold-32 wall time was
+within noise of fold-0 at both sizes.
+
+The bigger number in that table is neither config's index: ~379 MiB of
+RECORD bytes for 4,675 facts. The append-only prolly tree supersedes
+spine/leaf blocks on every commit and nothing ever reclaims them —
+file-per-block leaves the same dead bytes as 5,043 loose files. Any
+production adoption of DCAA needs the spec's compaction section
+implemented (and gets it much cheaper than a directory walk: one
+sequential rewrite + rename).
+
+### Verdict
+
+Should DCAA replace file-per-block as the native store? Qualified yes —
+adopt, but not by default until two gaps close:
+
+- FOR: one file instead of thousands (835-5,043 files for these small
+  replays; the OS-metadata and backup/sync cost of that shape only
+  grows), real per-commit durability at +5-27% wall on realistic
+  workloads (the honest comparison is against a file-per-block backend
+  that would ALSO have to fsync to make the same promise — one fsync
+  per block file would cost far more than DCAA's one per commit),
+  self-verifying reads (whole-blob BLAKE3 below 64 KiB, BAO
+  chunk-verified above), dedup no-ops, redaction, and crash recovery
+  with tests that truncate and tear mid-commit files.
+- AGAINST, today: no compaction (the append-only file grows without
+  bound and dead tree blocks dominate it — same bytes as file-per-block
+  leaves behind, but in one file the user can see), single-writer with
+  a coarse per-catalog mutex (fine for the current single-operator
+  process model, unexamined beyond it), and every `Get` re-verifies its
+  blob on this path (cheap BLAKE3 for tree nodes, but it shows up in
+  hot read loops where file-per-block skips verification entirely —
+  unmeasured here because the read benches drive the raw store, not the
+  repo layer).
+- The fsync-per-commit policy should stay a policy, not a law: an
+  explicit relaxed mode (fsync every N commits / on idle) would put
+  DCAA strictly ahead of file-per-block on every axis measured here
+  except compaction.
+

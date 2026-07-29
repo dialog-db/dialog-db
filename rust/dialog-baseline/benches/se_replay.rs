@@ -104,7 +104,26 @@ fn bench_replay_write(c: &mut Criterion) {
     });
     group.bench_with_input(BenchmarkId::new("repo_disk", size), &log, |b, log| {
         b.iter_batched(
-            || rt.block_on(async { DialogRepo::temp().await.expect("open repo") }),
+            || {
+                dialog_baseline::repo::clean_temp_storage();
+                rt.block_on(async { DialogRepo::temp().await.expect("open repo") })
+            },
+            |repo| {
+                rt.block_on(async { repo.replay_se(log).await.expect("replay") });
+                repo
+            },
+            BatchSize::PerIteration,
+        );
+    });
+    // DCAA single-file archive. Durability caveat for honest comparison:
+    // this row fsyncs once per commit, while repo_disk's file-per-block
+    // archive never fsyncs (sqlite_disk is the durable control there).
+    group.bench_with_input(BenchmarkId::new("repo_dcaa", size), &log, |b, log| {
+        b.iter_batched(
+            || {
+                dialog_baseline::repo::clean_temp_storage();
+                rt.block_on(async { DialogRepo::dcaa().await.expect("open repo") })
+            },
             |repo| {
                 rt.block_on(async { repo.replay_se(log).await.expect("replay") });
                 repo
