@@ -10,7 +10,7 @@ pub enum DialogSearchTreeError {
 
     /// An error from the storage backend.
     #[error("{0}")]
-    Storage(DialogStorageError),
+    Storage(#[source] DialogStorageError),
 
     /// An error that occurs during a tree operation.
     #[error("Failed to operate the tree: {0}")]

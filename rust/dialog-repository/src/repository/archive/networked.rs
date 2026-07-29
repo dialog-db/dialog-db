@@ -83,7 +83,7 @@ where
             .fork(&address.address)
             .perform(env)
             .await
-            .map_err(|e| DialogStorageError::StorageBackend(e.to_string()))?;
+            .map_err(DialogStorageError::from)?;
 
         match remote_result {
             Some(bytes) => {

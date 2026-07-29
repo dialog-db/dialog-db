@@ -4,6 +4,7 @@ use std::error::Error;
 
 use thiserror::Error as ThisError;
 
+use crate::service::ServiceResponseError;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{
     DialogCapabilityAuthorizationError, DialogCapabilityPerformError, StorageError,
@@ -37,9 +38,19 @@ pub enum BlobError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    /// A remote service returned a non-success HTTP response.
+    #[error("{0}")]
+    ServiceResponse(#[source] ServiceResponseError),
+
     /// An I/O error occurred.
     #[error("IO error: {0}")]
     Io(String),
+}
+
+impl From<ServiceResponseError> for BlobError {
+    fn from(error: ServiceResponseError) -> Self {
+        Self::ServiceResponse(error)
+    }
 }
 
 impl From<StorageError> for BlobError {
