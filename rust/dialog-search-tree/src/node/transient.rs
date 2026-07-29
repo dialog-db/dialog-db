@@ -475,10 +475,18 @@ where
                 }
                 LinkNovelty::Sealed(buffer) => {
                     let mut keys = buffer.keys::<K>()?;
-                    // The pending winner: the last-seen index for the current
-                    // key, flushed when the key changes or the scan ends.
-                    let mut winner: Option<(usize, Vec<u8>)> = None;
+                    // The pending winner: the last-seen (index, value slot)
+                    // for the current key, flushed when the key changes or
+                    // the scan ends. The slot is tracked as the polarity
+                    // column is walked (`keys()` validated it), so decoding
+                    // a winner costs no per-op polarity re-scan.
+                    let mut winner: Option<(usize, usize, Vec<u8>)> = None;
+                    let mut asserts = 0usize;
                     while let Some((at, key)) = keys.next_key()? {
+                        let slot = asserts;
+                        if buffer.polarity.get(at).copied() == Some(1) {
+                            asserts += 1;
+                        }
                         let after_start = match start {
                             Bound::Included(bound) => key >= bound,
                             Bound::Excluded(bound) => key > bound,
@@ -496,22 +504,25 @@ where
                             break;
                         }
                         match &mut winner {
-                            Some((winning, current)) if current.as_slice() == key => *winning = at,
+                            Some((winning, winning_slot, current)) if current.as_slice() == key => {
+                                *winning = at;
+                                *winning_slot = slot;
+                            }
                             _ => {
-                                if let Some((winning, current)) = winner.take() {
+                                if let Some((winning, winning_slot, current)) = winner.take() {
                                     out.push(NoveltyEntry {
                                         key: current,
-                                        op: buffer.op_at(winning)?,
+                                        op: buffer.op_with_slot(winning, winning_slot)?,
                                     });
                                 }
-                                winner = Some((at, key.to_vec()));
+                                winner = Some((at, slot, key.to_vec()));
                             }
                         }
                     }
-                    if let Some((winning, current)) = winner {
+                    if let Some((winning, winning_slot, current)) = winner {
                         out.push(NoveltyEntry {
                             key: current,
-                            op: buffer.op_at(winning)?,
+                            op: buffer.op_with_slot(winning, winning_slot)?,
                         });
                     }
                 }

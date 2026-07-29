@@ -1087,7 +1087,7 @@ pub async fn write_instructions<W, S, I>(
     instructions: I,
 ) -> Result<(W, bool), DialogArtifactsError>
 where
-    W: ArtifactWriter,
+    W: ArtifactWriter + ConditionalSend,
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + Clone
         + ConditionalSync,
@@ -1107,7 +1107,7 @@ where
     let mut history_records: BTreeMap<Key, Record> = BTreeMap::new();
     let mut changed = false;
     let buffer_record = |records: &mut BTreeMap<Key, Record>, record: Record, version: &Version| {
-        let (key, _) = record.clone().into_entry(version, manifest);
+        let key = record.key(version, manifest);
         match records.remove(&key) {
             None => {
                 records.insert(key, record);
@@ -1192,12 +1192,15 @@ where
                 }
                 let added = State::Added(datum);
                 transient = transient
-                    .write(entity_key.clone(), added.clone(), storage)
+                    .write_all(
+                        vec![
+                            (entity_key, added.clone()),
+                            (attribute_key, added.clone()),
+                            (value_key, added),
+                        ],
+                        storage,
+                    )
                     .await?;
-                transient = transient
-                    .write(attribute_key.clone(), added.clone(), storage)
-                    .await?;
-                transient = transient.write(value_key, added, storage).await?;
             }
             Instruction::Replace(artifact) => {
                 let entity_key = EntityKey::from_artifact(&artifact, manifest);
@@ -1320,12 +1323,15 @@ where
                 datum.version = version;
                 let added = State::Added(datum);
                 transient = transient
-                    .write(entity_key.clone(), added.clone(), storage)
+                    .write_all(
+                        vec![
+                            (entity_key, added.clone()),
+                            (attribute_key, added.clone()),
+                            (value_key, added),
+                        ],
+                        storage,
+                    )
                     .await?;
-                transient = transient
-                    .write(attribute_key.clone(), added.clone(), storage)
-                    .await?;
-                transient = transient.write(value_key, added, storage).await?;
             }
             Instruction::Retract(artifact) => {
                 let (entity_key, attribute_key, value_key) =
@@ -1393,13 +1399,18 @@ where
     // collides exactly when the record key does, and both then carry
     // the same folded lineage.
     if let Some(version) = &version {
-        for record in history_records.into_values() {
-            if let Some((key, entry)) = record.coverage_entry(version) {
-                transient = transient.write(key, entry, storage).await?;
+        let mut entries = Vec::with_capacity(history_records.len() * 2);
+        for (key, record) in history_records {
+            if let Some(coverage) = record.coverage_entry(version) {
+                entries.push(coverage);
             }
-            let (key, entry) = record.into_entry(version, manifest);
-            transient = transient.write(key, entry, storage).await?;
+            // The map key IS the record's history key (that is what the fold
+            // deduplicated on), so the write reuses it instead of rebuilding
+            // it from the claim.
+            let entry = record.into_datum(version);
+            entries.push((key, entry));
         }
+        transient = transient.write_all(entries, storage).await?;
     }
 
     Ok((transient, changed))

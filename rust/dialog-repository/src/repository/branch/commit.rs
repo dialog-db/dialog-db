@@ -159,8 +159,7 @@ where
             .as_ref()
             .map(|base| base.edition.successor())
             .unwrap_or(Edition::GENESIS);
-        let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
-        let origin = crate::origin_of(&branch_entity, &issuer);
+        let (branch_entity, origin) = branch.commit_identity(&profile, &issuer);
         let version = Version::new(origin, edition);
 
         // Walk forward from the current revision's tree root, or from

@@ -463,13 +463,27 @@ where
     /// polarity column; an assert clones its value from the assert-aligned
     /// value table.
     pub fn op_at(&self, at: usize) -> Result<NoveltyOp<Value>, DialogSearchTreeError> {
+        let slot = self.polarity[..at.min(self.polarity.len())]
+            .iter()
+            .filter(|&&p| p == 1)
+            .count();
+        self.op_with_slot(at, slot)
+    }
+
+    /// The op at entry `at` given its value-table `slot` (the number of
+    /// asserts before it), for readers that track the slot while streaming
+    /// the buffer instead of re-scanning the polarity column per op.
+    pub(crate) fn op_with_slot(
+        &self,
+        at: usize,
+        slot: usize,
+    ) -> Result<NoveltyOp<Value>, DialogSearchTreeError> {
         match self.polarity.get(at) {
             None => Err(DialogSearchTreeError::Encoding(
                 "Novelty entry out of range".into(),
             )),
             Some(0) => Ok(NoveltyOp::Retract),
             Some(1) => {
-                let slot = self.polarity[..at].iter().filter(|&&p| p == 1).count();
                 let value = self.values.get(slot).ok_or_else(|| {
                     DialogSearchTreeError::Encoding("Novelty value out of range".into())
                 })?;
@@ -484,21 +498,30 @@ where
     /// The winning op for `key` in this buffer, or `None` when the key is not
     /// buffered here. The buffer is sorted by key with the newest op for a key
     /// last, so the scan keeps the last equal key and stops at the first
-    /// greater one; only the winner's value is decoded.
+    /// greater one; the winner's value-table slot is tracked as the polarity
+    /// column is walked, and only the winner's value is decoded.
     pub fn resolve<Key: self::Key>(
         &self,
         key: &[u8],
     ) -> Result<Option<NoveltyOp<Value>>, DialogSearchTreeError> {
         let mut keys = self.keys::<Key>()?;
-        let mut winner = None;
+        let mut winner: Option<(usize, usize)> = None;
+        let mut asserts = 0usize;
         while let Some((at, entry_key)) = keys.next_key()? {
+            let slot = asserts;
+            // `keys()` validated every polarity byte as 0 or 1.
+            if self.polarity.get(at).copied() == Some(1) {
+                asserts += 1;
+            }
             match entry_key.cmp(key) {
                 Ordering::Less => {}
-                Ordering::Equal => winner = Some(at),
+                Ordering::Equal => winner = Some((at, slot)),
                 Ordering::Greater => break,
             }
         }
-        winner.map(|at| self.op_at(at)).transpose()
+        winner
+            .map(|(at, slot)| self.op_with_slot(at, slot))
+            .transpose()
     }
 
     /// Decodes the whole buffer to owned entries, in entry order: the lift a

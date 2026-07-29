@@ -82,6 +82,28 @@ pub trait ArtifactWriter: Sized {
         S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync;
 
+    /// Insert (or overwrite) a batch of entries.
+    ///
+    /// Semantically identical to writing the entries one at a time; a target
+    /// that can enqueue them in one pass (the buffered tree) overrides this
+    /// so a commit's per-instruction key fan-out (three index orderings, the
+    /// revision-record pair) pays one descent instead of one per key.
+    async fn write_all<S>(
+        mut self,
+        entries: Vec<(Key, State<Datum>)>,
+        storage: &ContentAddressedStorage<S>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Self: ConditionalSend,
+    {
+        for (key, value) in entries {
+            self = self.write(key, value, storage).await?;
+        }
+        Ok(self)
+    }
+
     /// Remove `key`, if present.
     async fn erase<S>(
         self,
@@ -185,6 +207,18 @@ impl ArtifactWriter for BufferedArtifactTree {
             + ConditionalSync,
     {
         self.insert(key, value, storage).await
+    }
+
+    async fn write_all<S>(
+        self,
+        entries: Vec<(Key, State<Datum>)>,
+        storage: &ContentAddressedStorage<S>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        self.insert_all(entries, storage).await
     }
 
     async fn erase<S>(
@@ -344,9 +378,7 @@ impl BufferedBatch {
             + ConditionalSync,
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
-        for (key, value) in entries {
-            self.tree = self.tree.write(key, value, &storage).await?;
-        }
+        self.tree = self.tree.write_all(entries, &storage).await?;
         Ok(self)
     }
 
