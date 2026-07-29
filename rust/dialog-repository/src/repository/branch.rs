@@ -40,6 +40,9 @@ pub use fetch::*;
 mod import;
 pub use import::*;
 
+mod install;
+pub use install::*;
+
 mod load;
 pub use load::*;
 

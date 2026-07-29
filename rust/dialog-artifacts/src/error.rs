@@ -1,5 +1,6 @@
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::memory::MemoryError;
+use dialog_effects::service::ServiceResponseError;
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::DialogStorageError;
 use thiserror::Error;
@@ -16,6 +17,10 @@ pub enum DialogArtifactsError {
     /// An error occurred in prolly tree-related code
     #[error("Tree operation failed: {0}")]
     Tree(String),
+
+    /// A remote service returned a non-success HTTP response.
+    #[error("{0}")]
+    ServiceResponse(#[source] ServiceResponseError),
 
     /// A database index was not shaped as expected
     #[error("Malformed database index: {0}")]
@@ -76,27 +81,47 @@ pub enum DialogArtifactsError {
     IncompleteHistory(String),
 }
 
+impl From<ServiceResponseError> for DialogArtifactsError {
+    fn from(error: ServiceResponseError) -> Self {
+        Self::ServiceResponse(error)
+    }
+}
+
 impl From<DialogStorageError> for DialogArtifactsError {
-    fn from(value: DialogStorageError) -> Self {
-        DialogArtifactsError::Storage(format!("{value}"))
+    fn from(error: DialogStorageError) -> Self {
+        match error {
+            DialogStorageError::ServiceResponse(error) => Self::ServiceResponse(error),
+            error => Self::Storage(error.to_string()),
+        }
     }
 }
 
 impl From<ArchiveError> for DialogArtifactsError {
-    fn from(e: ArchiveError) -> Self {
-        Self::Storage(e.to_string())
+    fn from(error: ArchiveError) -> Self {
+        match error {
+            ArchiveError::ServiceResponse(error) => Self::ServiceResponse(error),
+            error => Self::Storage(error.to_string()),
+        }
     }
 }
 
 impl From<MemoryError> for DialogArtifactsError {
-    fn from(e: MemoryError) -> Self {
-        Self::Storage(e.to_string())
+    fn from(error: MemoryError) -> Self {
+        match error {
+            MemoryError::ServiceResponse(error) => Self::ServiceResponse(error),
+            error => Self::Storage(error.to_string()),
+        }
     }
 }
 
 impl From<DialogSearchTreeError> for DialogArtifactsError {
-    fn from(value: DialogSearchTreeError) -> Self {
-        DialogArtifactsError::Tree(format!("{value}"))
+    fn from(error: DialogSearchTreeError) -> Self {
+        match error {
+            DialogSearchTreeError::Storage(DialogStorageError::ServiceResponse(error)) => {
+                Self::ServiceResponse(error)
+            }
+            error => Self::Tree(error.to_string()),
+        }
     }
 }
 

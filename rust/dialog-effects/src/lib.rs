@@ -42,6 +42,7 @@ pub mod authority;
 pub mod blob;
 pub mod credential;
 pub mod memory;
+pub mod service;
 pub mod space;
 pub mod storage;
 

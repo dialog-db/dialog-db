@@ -1,10 +1,13 @@
 use crate::TreeReference;
 use dialog_artifacts::DialogArtifactsError;
+use dialog_artifacts::history::HistoryError;
+use dialog_common::Blake3Hash;
 use dialog_credentials::Ed25519SignerError;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
 use dialog_effects::blob::BlobError;
 use dialog_effects::memory::{MemoryError, Version};
+use dialog_effects::service::ServiceResponseError;
 use dialog_effects::storage::StorageError;
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::DialogStorageError;
@@ -135,6 +138,55 @@ pub enum PublishRemoteBranchError {
     /// not happen in normal operation.
     #[error("Upstream cell missing edition after publish")]
     MissingEdition,
+}
+
+/// Errors returned while installing an exact revision into another storage.
+#[derive(Error, Debug)]
+pub enum InstallRevisionError {
+    /// The revision signature or structure failed validation.
+    #[error(transparent)]
+    History(#[from] HistoryError),
+
+    /// A referenced artifact failed validation.
+    #[error(transparent)]
+    Artifact(#[from] DialogArtifactsError),
+
+    /// Walking the revision's tree failed.
+    #[error(transparent)]
+    Tree(#[from] DialogSearchTreeError),
+
+    /// Reading or writing an archive block failed.
+    #[error(transparent)]
+    Archive(#[from] ArchiveError),
+
+    /// Reading or writing a blob failed.
+    #[error(transparent)]
+    Blob(#[from] BlobError),
+
+    /// Loading the staged branch's remote failed.
+    #[error(transparent)]
+    LoadRemote(#[from] LoadRemoteError),
+
+    /// The staged archive does not contain a referenced block.
+    #[error("Referenced archive block is missing: {0}")]
+    MissingArchiveBlock(Blake3Hash),
+
+    /// A spilled-value key carried a malformed content reference.
+    #[error("Spilled-value reference is not 32 bytes: {0:?}")]
+    InvalidSpillReference(Vec<u8>),
+
+    /// A destination blob import returned a digest other than its declared address.
+    #[error("Installed blob digest mismatch: expected {expected}, got {actual}")]
+    BlobDigestMismatch {
+        /// Digest declared by the staged revision.
+        expected: Blake3Hash,
+        /// Digest returned by the destination import.
+        actual: Blake3Hash,
+    },
+
+    /// Accessing the staged archive backend failed.
+    #[error(transparent)]
+    Storage(#[from] DialogStorageError),
 }
 
 /// Errors returned by the load remote branch command.
@@ -473,6 +525,10 @@ pub enum ResolveError {
     #[error("Authorization error: {0}")]
     Authorization(String),
 
+    /// A remote service returned a non-success HTTP response.
+    #[error("{0}")]
+    ServiceResponse(#[source] ServiceResponseError),
+
     /// IO failure.
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
@@ -482,6 +538,12 @@ pub enum ResolveError {
     Decode(String),
 }
 
+impl From<ServiceResponseError> for ResolveError {
+    fn from(error: ServiceResponseError) -> Self {
+        Self::ServiceResponse(error)
+    }
+}
+
 impl From<MemoryError> for ResolveError {
     fn from(error: MemoryError) -> Self {
         match error {
@@ -489,6 +551,7 @@ impl From<MemoryError> for ResolveError {
                 Self::VersionMismatch { expected, actual }
             }
             MemoryError::Storage(message) => Self::Storage(message),
+            MemoryError::ServiceResponse(error) => Self::ServiceResponse(error),
             MemoryError::Authorization(message) => Self::Authorization(message),
             MemoryError::Io(error) => Self::Io(error),
         }
@@ -515,6 +578,10 @@ pub enum PublishError {
     #[error("Authorization error: {0}")]
     Authorization(String),
 
+    /// A remote service returned a non-success HTTP response.
+    #[error("{0}")]
+    ServiceResponse(#[source] ServiceResponseError),
+
     /// IO failure.
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
@@ -524,6 +591,12 @@ pub enum PublishError {
     Encode(String),
 }
 
+impl From<ServiceResponseError> for PublishError {
+    fn from(error: ServiceResponseError) -> Self {
+        Self::ServiceResponse(error)
+    }
+}
+
 impl From<MemoryError> for PublishError {
     fn from(error: MemoryError) -> Self {
         match error {
@@ -531,6 +604,7 @@ impl From<MemoryError> for PublishError {
                 Self::VersionMismatch { expected, actual }
             }
             MemoryError::Storage(message) => Self::Storage(message),
+            MemoryError::ServiceResponse(error) => Self::ServiceResponse(error),
             MemoryError::Authorization(message) => Self::Authorization(message),
             MemoryError::Io(error) => Self::Io(error),
         }
@@ -546,9 +620,75 @@ pub enum UploadError {
 
     /// Failed to read a block from the local archive before uploading.
     #[error("Failed to read block from local archive: {0}")]
-    LocalRead(ArchiveError),
+    LocalRead(#[source] ArchiveError),
 
     /// Failed to write a block to the remote archive.
     #[error("Failed to write block to remote archive: {0}")]
-    RemoteWrite(ArchiveError),
+    RemoteWrite(#[source] ArchiveError),
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unused_async)]
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use std::error::Error as StdError;
+
+    use dialog_effects::service::find_service_response;
+
+    use super::*;
+
+    fn response() -> ServiceResponseError {
+        ServiceResponseError::new(
+            403,
+            Some("CREDENTIAL_REVOKED".to_string()),
+            "Credential revoked",
+        )
+    }
+
+    fn assert_response(error: &(dyn StdError + 'static)) {
+        let response = find_service_response(error).expect("structured response survives");
+        assert_eq!(response.status, 403);
+        assert_eq!(response.code.as_deref(), Some("CREDENTIAL_REVOKED"));
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_memory_service_responses_through_pull_and_push() {
+        let pull = PullError::FetchRemoteBranch(FetchRemoteBranchError::Resolve(
+            ResolveError::from(MemoryError::ServiceResponse(response())),
+        ));
+        let push = PushError::PublishRemoteBranch(PublishRemoteBranchError::Publish(
+            PublishError::from(MemoryError::ServiceResponse(response())),
+        ));
+
+        assert_response(&pull);
+        assert_response(&push);
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_archive_service_responses_through_pull_and_push() {
+        let storage = DialogStorageError::from(ArchiveError::ServiceResponse(response()));
+        let pull = PullError::Tree(DialogSearchTreeError::from(storage));
+        let push = PushError::Upload(UploadError::RemoteWrite(ArchiveError::ServiceResponse(
+            response(),
+        )));
+
+        assert_response(&pull);
+        assert_response(&push);
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_blob_service_responses_through_push() {
+        let push = PushError::Blob(BlobError::ServiceResponse(response()));
+        assert_response(&push);
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_artifact_service_responses_through_push() {
+        let tree = DialogSearchTreeError::from(DialogStorageError::ServiceResponse(response()));
+        let push = PushError::Artifact(DialogArtifactsError::from(tree));
+        assert_response(&push);
+    }
 }
