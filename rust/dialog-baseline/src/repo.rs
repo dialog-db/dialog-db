@@ -53,13 +53,17 @@ pub fn clean_temp_storage() {
 /// temp directory the same way [`TempFileSystem`] redirects, so the DCAA
 /// benchmark rows write next to (and never over) the file-per-block rows.
 /// The fold threshold is read from `DIALOG_DCAA_FOLD` at open (default 32;
-/// 0 folds the delta chain on every commit).
+/// 0 folds the delta chain on every commit). `DURABLE` selects the fsync
+/// policy at the type level so the durable and relaxed rows can coexist
+/// in one bench process without racing on env vars: `true` fsyncs every
+/// commit, `false` skips it — the file-per-block archive's durability
+/// level, isolating DCAA's non-fsync overhead.
 #[derive(Clone, Debug)]
-pub struct TempDcaa {
+pub struct TempDcaa<const DURABLE: bool = true> {
     inner: Dcaa,
 }
 
-impl TempDcaa {
+impl<const DURABLE: bool> TempDcaa<DURABLE> {
     /// The space root directory the archive files live under.
     pub fn root(&self) -> &PathBuf {
         self.inner.root()
@@ -69,7 +73,7 @@ impl TempDcaa {
 /// Forward every command the wrapped [`Dcaa`] can handle, mirroring
 /// [`TempFileSystem`]'s forwarding impl.
 #[async_trait::async_trait]
-impl<C> Provider<C> for TempDcaa
+impl<const DURABLE: bool, C> Provider<C> for TempDcaa<DURABLE>
 where
     C: Command,
     C::Input: ConditionalSync + 'static,
@@ -81,7 +85,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl Resource<Location> for TempDcaa {
+impl<const DURABLE: bool> Resource<Location> for TempDcaa<DURABLE> {
     type Error = FileSystemError;
 
     async fn open(location: &Location) -> Result<Self, FileSystemError> {
@@ -90,7 +94,7 @@ impl Resource<Location> for TempDcaa {
         let fs = TempFileSystem::open(location).await?;
         let root: PathBuf = fs.handle().try_into()?;
         Ok(Self {
-            inner: Dcaa::at(root, fold_threshold_from_env()),
+            inner: Dcaa::configured(root, fold_threshold_from_env(), DURABLE),
         })
     }
 }
@@ -100,6 +104,12 @@ impl Resource<Location> for TempDcaa {
 /// [`TempFileSystem`] — the archive is the only concern DCAA covers.
 pub type DcaaTempSpace =
     Space<TempDcaa, TempFileSystem, TempFileSystem, TempFileSystem, TempFileSystem>;
+
+/// [`DcaaTempSpace`] with the per-commit fdatasync skipped: the durability
+/// control that makes the DCAA vs file-per-block comparison
+/// apples-to-apples.
+pub type DcaaNosyncTempSpace =
+    Space<TempDcaa<false>, TempFileSystem, TempFileSystem, TempFileSystem, TempFileSystem>;
 
 /// A repository with one open branch, generic over the operator's space so
 /// the volatile (in-memory) and temp (on-disk) variants share the workload
@@ -153,6 +163,28 @@ impl DialogRepo<Operator<DcaaTempSpace>> {
     /// fsyncs once per `Import`/`Put`.
     pub async fn dcaa() -> Result<Self> {
         let storage: Storage<DcaaTempSpace> = Storage::new();
+        let profile = Profile::open(unique_name("baseline"))
+            .perform(&storage)
+            .await?;
+        let operator = profile
+            .derive(b"baseline")
+            .allow(Subject::any())
+            .network(Network::default())
+            .build(storage)
+            .await?;
+        Self::assemble(operator, &profile).await
+    }
+}
+
+impl DialogRepo<Operator<DcaaNosyncTempSpace>> {
+    /// Open a fresh DCAA-archived repository with the per-commit
+    /// fdatasync SKIPPED — the durability control: same store, same
+    /// bytes, same recovery, but only the file-per-block archive's
+    /// crash guarantees. The delta against [`DialogRepo::dcaa`] is the
+    /// price of durability; the delta against [`DialogRepo::temp`] is
+    /// DCAA's non-fsync overhead.
+    pub async fn dcaa_nosync() -> Result<Self> {
+        let storage: Storage<DcaaNosyncTempSpace> = Storage::new();
         let profile = Profile::open(unique_name("baseline"))
             .perform(&storage)
             .await?;

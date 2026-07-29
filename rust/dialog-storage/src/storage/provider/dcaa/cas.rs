@@ -127,14 +127,26 @@ pub struct CasFile {
     /// Offset of the last committed footer (0 = none).
     last_footer: u64,
     fold_threshold: usize,
+    /// When false, commits skip the per-commit fdatasync (relaxed mode).
+    durable: bool,
 }
 
 impl CasFile {
     /// Open or create the archive at `path`, recovering from any torn tail
     /// per the spec's crash model. `fold_threshold` is the maximum delta
     /// chain length before a commit folds the chain (0 = merged index
-    /// every commit).
-    pub fn open(path: impl AsRef<Path>, fold_threshold: usize) -> Result<Self, CasError> {
+    /// every commit). `durable` controls the per-commit fdatasync: when
+    /// false, commits leave persistence to the OS writeback cache — the
+    /// same (absence of a) durability guarantee the file-per-block
+    /// archive provides. Crash RECOVERY is unaffected either way: the
+    /// footer scan still finds the last commit whose bytes actually
+    /// reached the disk and truncates the rest; relaxed mode only widens
+    /// how many recent commits that can be.
+    pub fn open(
+        path: impl AsRef<Path>,
+        fold_threshold: usize,
+        durable: bool,
+    ) -> Result<Self, CasError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -158,11 +170,14 @@ impl CasFile {
             deltas: Vec::new(),
             last_footer: 0,
             fold_threshold,
+            durable,
         };
 
         if len == 0 {
             store.file.write_all(&header_bytes())?;
-            store.file.sync_data()?;
+            if durable {
+                store.file.sync_data()?;
+            }
             return Ok(store);
         }
 
@@ -448,7 +463,13 @@ impl CasFile {
         // crash before fdatasync returns loses at most this commit; after
         // it returns the commit is durable, including the file size
         // (fdatasync flushes the metadata needed to read appended bytes).
-        self.file.sync_data()?;
+        // Relaxed mode skips the fdatasync: recovery still works (the
+        // footer scan finds whatever prefix the OS actually persisted),
+        // but recent commits can be lost — the file-per-block archive's
+        // durability level.
+        if self.durable {
+            self.file.sync_data()?;
+        }
 
         self.committed_len = footer_offset + FOOTER_LEN;
         self.entry_count = entry_count;
@@ -723,7 +744,7 @@ mod tests {
     #[test]
     fn it_round_trips_small_and_large_blobs() {
         let path = temp_path("roundtrip");
-        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("open");
+        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("open");
 
         let small = b"hello dcaa".to_vec();
         let large: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
@@ -750,12 +771,12 @@ mod tests {
         let payloads: Vec<Vec<u8>> = (0..10u8).map(|i| vec![i; 100 + i as usize]).collect();
         let mut addresses = Vec::new();
         {
-            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("open");
+            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("open");
             for payload in &payloads {
                 addresses.push(commit_one(&mut store, payload));
             }
         }
-        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("reopen");
+        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("reopen");
         assert_eq!(store.len(), payloads.len() as u64);
         for (address, payload) in addresses.iter().zip(&payloads) {
             assert_eq!(&store.read(address).expect("read"), payload);
@@ -766,7 +787,7 @@ mod tests {
     #[test]
     fn it_dedups_duplicate_inserts_without_writing() {
         let path = temp_path("dedup");
-        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("open");
+        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("open");
         let address = commit_one(&mut store, b"same bytes");
         let len_after_first = store.file_len();
 
@@ -791,7 +812,7 @@ mod tests {
     #[test]
     fn it_redacts_and_rejects_reinsertion() {
         let path = temp_path("redact");
-        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("open");
+        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("open");
         let address = commit_one(&mut store, b"secret");
 
         let mut tx = store.begin();
@@ -817,7 +838,7 @@ mod tests {
 
         // Redaction survives reopen.
         drop(store);
-        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("reopen");
+        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("reopen");
         assert!(matches!(store.read(&address), Err(CasError::Redacted(_))));
 
         std::fs::remove_file(&path).ok();
@@ -828,7 +849,7 @@ mod tests {
         let path = temp_path("corrupt");
         let large: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
         let (small_address, large_address, small_entry, large_entry) = {
-            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("open");
+            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("open");
             let small_address = commit_one(&mut store, b"small blob");
             let large_address = commit_one(&mut store, &large);
             // A trailing intact commit: recovery verifies the TAIL
@@ -848,7 +869,7 @@ mod tests {
         bytes[(large_entry.offset + 16 + large_entry.outboard_len + 12345) as usize] ^= 1;
         std::fs::write(&path, &bytes).expect("write file");
 
-        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("reopen");
+        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("reopen");
         assert!(matches!(
             store.read(&small_address),
             Err(CasError::Corrupt(_))
@@ -868,7 +889,7 @@ mod tests {
         let b;
         let full_len;
         {
-            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("open");
+            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("open");
             a = commit_one(&mut store, b"first commit");
             let before_second = store.file_len();
             b = commit_one(&mut store, b"second commit");
@@ -881,7 +902,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read file");
         std::fs::write(&path, &bytes[..(full_len as usize - 17)]).expect("truncate");
 
-        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("recover");
+        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("recover");
         assert_eq!(store.read(&a).expect("first survives"), b"first commit");
         assert!(matches!(store.read(&b), Err(CasError::NotFound(_))));
         assert_eq!(store.len(), 1);
@@ -899,7 +920,7 @@ mod tests {
         let a;
         let record_offset;
         {
-            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("open");
+            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("open");
             a = commit_one(&mut store, b"durable commit");
             record_offset = store.file_len();
             commit_one(&mut store, b"torn commit");
@@ -913,7 +934,7 @@ mod tests {
         bytes[record_offset as usize + 16] ^= 1;
         std::fs::write(&path, &bytes).expect("write file");
 
-        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("recover");
+        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("recover");
         assert_eq!(store.len(), 1, "torn commit must be discarded");
         assert_eq!(store.read(&a).expect("read"), b"durable commit");
 
@@ -924,13 +945,13 @@ mod tests {
     fn it_recovers_an_empty_store_from_a_torn_first_commit() {
         let path = temp_path("torn-first");
         {
-            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("open");
+            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("open");
             commit_one(&mut store, b"only commit");
         }
         let bytes = std::fs::read(&path).expect("read file");
         std::fs::write(&path, &bytes[..bytes.len() - 5]).expect("truncate");
 
-        let store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD).expect("recover");
+        let store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("recover");
         assert!(store.is_empty());
         assert_eq!(store.file_len(), 8);
 
@@ -943,7 +964,7 @@ mod tests {
         let fold_threshold = 4;
         let mut addresses = Vec::new();
         {
-            let mut store = CasFile::open(&path, fold_threshold).expect("open");
+            let mut store = CasFile::open(&path, fold_threshold, true).expect("open");
             // 11 single-entry commits with threshold 4: folds at commits
             // 5 and 10, leaving one unfolded delta after commit 11.
             for i in 0..11u32 {
@@ -962,7 +983,7 @@ mod tests {
         }
 
         // Reopen: state is rebuilt by walking the on-disk footer chain.
-        let mut store = CasFile::open(&path, fold_threshold).expect("reopen");
+        let mut store = CasFile::open(&path, fold_threshold, true).expect("reopen");
         assert_eq!(store.chain_len(), 1);
         assert_eq!(store.len(), 11);
         for (i, address) in addresses.iter().enumerate() {
@@ -976,17 +997,54 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// Relaxed mode (`durable = false`) writes the identical byte format
+    /// and recovers through the same footer scan; only the fdatasync is
+    /// skipped, so a crash may lose recent commits. On a live OS the page
+    /// cache makes unsynced commits visible to a reopen.
+    #[test]
+    fn it_round_trips_in_relaxed_fsync_mode() {
+        let path = temp_path("relaxed");
+        let mut addresses = Vec::new();
+        {
+            let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, false).expect("open");
+            for i in 0..5u32 {
+                addresses.push(commit_one(&mut store, format!("relaxed {i}").as_bytes()));
+            }
+        }
+        // Reopen durable: the modes share the format, so recovery and
+        // reads behave identically.
+        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, true).expect("reopen");
+        assert_eq!(store.len(), 5);
+        for (i, address) in addresses.iter().enumerate() {
+            assert_eq!(
+                store.read(address).expect("read"),
+                format!("relaxed {i}").as_bytes()
+            );
+        }
+
+        // A truncated (lost) tail still recovers to the longest valid
+        // prefix, exactly as in durable mode.
+        drop(store);
+        let bytes = std::fs::read(&path).expect("read file");
+        std::fs::write(&path, &bytes[..bytes.len() - 9]).expect("truncate");
+        let mut store = CasFile::open(&path, DEFAULT_FOLD_THRESHOLD, false).expect("recover");
+        assert_eq!(store.len(), 4, "the torn tail commit is discarded");
+        assert_eq!(store.read(&addresses[3]).expect("read"), b"relaxed 3");
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn it_folds_every_commit_at_threshold_zero() {
         let path = temp_path("fold-zero");
-        let mut store = CasFile::open(&path, 0).expect("open");
+        let mut store = CasFile::open(&path, 0, true).expect("open");
         for i in 0..5u32 {
             commit_one(&mut store, format!("payload {i}").as_bytes());
             assert_eq!(store.chain_len(), 0, "threshold 0 folds every commit");
         }
         drop(store);
 
-        let mut store = CasFile::open(&path, 0).expect("reopen");
+        let mut store = CasFile::open(&path, 0, true).expect("reopen");
         assert_eq!(store.len(), 5);
         assert_eq!(store.chain_len(), 0);
         let address = *blake3::hash(b"payload 3").as_bytes();
@@ -1000,7 +1058,7 @@ mod tests {
         // A redaction recorded in a NEWER delta must win over the live
         // entry in an older delta or the base.
         let path = temp_path("chain-redact");
-        let mut store = CasFile::open(&path, 8).expect("open");
+        let mut store = CasFile::open(&path, 8, true).expect("open");
         let address = commit_one(&mut store, b"live then redacted");
         commit_one(&mut store, b"unrelated");
         let mut tx = store.begin();
@@ -1009,7 +1067,7 @@ mod tests {
         assert!(matches!(store.read(&address), Err(CasError::Redacted(_))));
 
         drop(store);
-        let mut store = CasFile::open(&path, 8).expect("reopen");
+        let mut store = CasFile::open(&path, 8, true).expect("reopen");
         assert!(matches!(store.read(&address), Err(CasError::Redacted(_))));
 
         std::fs::remove_file(&path).ok();

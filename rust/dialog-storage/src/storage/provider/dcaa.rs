@@ -56,22 +56,42 @@ pub fn fold_threshold_from_env() -> usize {
         .unwrap_or(DEFAULT_FOLD_THRESHOLD)
 }
 
+/// Environment variable enabling relaxed-fsync mode (`1` skips the
+/// per-commit fdatasync). Crash-safety then degrades to the
+/// file-per-block archive's level: recovery still works via the footer
+/// scan, but commits the OS had not yet written back are lost.
+pub const NOSYNC_ENV: &str = "DIALOG_DCAA_NOSYNC";
+
+/// True (the default) unless [`NOSYNC_ENV`] is set to `1`.
+pub fn durable_from_env() -> bool {
+    std::env::var(NOSYNC_ENV).ok().as_deref() != Some("1")
+}
+
 /// DCAA archive provider for one space: each catalog is a single
 /// append-only `.dialog` file under `{root}/archive/`.
 #[derive(Clone, Debug)]
 pub struct Dcaa {
     root: PathBuf,
     fold_threshold: usize,
+    durable: bool,
     catalogs: Arc<Mutex<HashMap<String, Arc<Mutex<CasFile>>>>>,
 }
 
 impl Dcaa {
-    /// A provider rooted at `root`. Files are created lazily on first
-    /// effect, not here.
+    /// A provider rooted at `root`, fsyncing every commit. Files are
+    /// created lazily on first effect, not here.
     pub fn at(root: impl Into<PathBuf>, fold_threshold: usize) -> Self {
+        Self::configured(root, fold_threshold, true)
+    }
+
+    /// A provider with an explicit durability choice: `durable = false`
+    /// skips the per-commit fdatasync (see [`NOSYNC_ENV`] for the
+    /// trade-off).
+    pub fn configured(root: impl Into<PathBuf>, fold_threshold: usize, durable: bool) -> Self {
         Self {
             root: root.into(),
             fold_threshold,
+            durable,
             catalogs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -89,7 +109,11 @@ impl Dcaa {
             return Ok(Arc::clone(existing));
         }
         let path = self.root.join("archive").join(format!("{name}.dialog"));
-        let store = Arc::new(Mutex::new(CasFile::open(path, self.fold_threshold)?));
+        let store = Arc::new(Mutex::new(CasFile::open(
+            path,
+            self.fold_threshold,
+            self.durable,
+        )?));
         catalogs.insert(name.to_string(), Arc::clone(&store));
         Ok(store)
     }
@@ -180,7 +204,11 @@ impl Resource<Location> for Dcaa {
     async fn open(location: &Location) -> Result<Self, FileSystemError> {
         let fs = FileSystem::open(location).await?;
         let root: PathBuf = fs.handle().try_into()?;
-        Ok(Self::at(root, fold_threshold_from_env()))
+        Ok(Self::configured(
+            root,
+            fold_threshold_from_env(),
+            durable_from_env(),
+        ))
     }
 }
 

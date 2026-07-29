@@ -131,6 +131,27 @@ fn bench_replay_write(c: &mut Criterion) {
             BatchSize::PerIteration,
         );
     });
+    // The durability control: DCAA with the per-commit fdatasync skipped,
+    // so this row and repo_disk make the same (lack of a) crash promise.
+    // repo_dcaa minus this row is the price of durability; this row minus
+    // repo_disk is DCAA's non-fsync overhead.
+    group.bench_with_input(
+        BenchmarkId::new("repo_dcaa_nosync", size),
+        &log,
+        |b, log| {
+            b.iter_batched(
+                || {
+                    dialog_baseline::repo::clean_temp_storage();
+                    rt.block_on(async { DialogRepo::dcaa_nosync().await.expect("open repo") })
+                },
+                |repo| {
+                    rt.block_on(async { repo.replay_se(log).await.expect("replay") });
+                    repo
+                },
+                BatchSize::PerIteration,
+            );
+        },
+    );
     group.finish();
 }
 
