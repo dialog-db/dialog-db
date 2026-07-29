@@ -185,3 +185,131 @@ election results per unchanged frame; cut per-edit entry clones. Small
 real-world commits (se_replay, 2.6 facts/commit) never touch the ceiling
 regime and were expectedly unmoved — their costs are the Group 1 note's
 per-commit encode/persist constants, untouched here.
+
+## Group 3: commit path (branch `claude/perf-4-commit-path`)
+
+Changes:
+
+1. **Single value encode per instruction** (`dialog-artifacts`).
+   `EncodedValue` computes the key payload and, for a spilling value, the
+   raw block bytes plus their 32-byte reference in ONE pass;
+   `write_instructions` threads it through key building and the spill
+   store. Previously each instruction re-encoded its value in the key
+   builder, again in the spill check, and (spilled values) re-hashed and
+   re-serialized twice more in the spill store. A provable lower bound on
+   the encoded length short-circuits the spill decision without the full
+   encode (byte-string encodings are strictly longer than raw; numerics
+   are fixed-width; symbols never short-circuit). Same keys, same blocks.
+2. **`Artifacts::commit` goes through the buffered (hitchhiker) path and
+   seals WITHOUT canonicalizing.** This is a policy decision from the
+   project owner, not just an optimization: commit roots are now the
+   buffered form — valid, publishable, content-exact (a node's hash covers
+   its buffered ops) but NOT canonical. Canonicalization is an explicit,
+   separate operation: `Artifacts::canonicalize()` (mirroring the
+   repository layer's pre-existing `commit(..).canonicalize()` builder).
+   The policy across the stack: ordinary commits seal buffered; sync and
+   publish do NOT canonicalize (buffered novelty sits near the root, so
+   replicas differ in a few top blocks and the diff exchanges FEWER
+   blocks than fully-canonicalized trees whose differences smear across
+   leaf paths); bulk loads canonicalize once at the end —
+   `Artifacts::import` now does. Tests pinning canonical-root equality
+   (insertion-order independence, assert+retract cancellation, CSV
+   round-trip) now canonicalize explicitly before comparing; the
+   buffered-vs-direct root-equality pin in `buffered.rs` is unchanged.
+3. **Repository-layer benchmark rows** (`repo_mem` / `repo_disk`): the
+   same workloads through dialog-repository's `Branch::commit` — the
+   surface applications actually write through — via a lean
+   operator/repository/branch stack in `dialog-baseline::repo`, branch
+   handle held across commits.
+
+Measurement notes, before the numbers: the container restarted between
+Group 2's runs and these, and the machine's run-to-run drift measured up
+to ±30% on identical code (a write-only rerun of the same binary moved
+`write_batch/dialog_mem` +30% while its SQLite controls moved +13-28%).
+The stored criterion baselines were therefore stale, so Group 2's branch
+(`claude/perf-3-weight-cache`) was RE-BENCHED on this container
+back-to-back with this branch, and the deltas below are that same-machine
+A/B. Deterministic callgrind instruction counts back up the wall-clock
+claims; anything inside ±30% without a callgrind confirmation is labeled
+accordingly.
+
+Criterion deltas (same-machine A/B; SQLite rows are the controls):
+
+| benchmark | dialog_mem | dialog_disk | control drift |
+|---|---|---|---|
+| se_replay_write (500 real txns) | **-64.6%** (442 → 156 ms; 885 → 313 µs/commit) | **-49.8%** (2.41 → 1.21 s) | sqlite ±5% |
+| write_small_txns (100 × 2 facts) | **-20.5%** (13.9 → 11.1 ms) | -21% printed, but disk runs swung 53↔161 ms across reruns → file-I/O noise, no claim | sqlite mixed ±7% |
+| write_batch (1000, 1 txn) | -18.3% printed (924 → 755 ms), but a same-code rerun moved +30% → within machine noise; callgrind says the true single-batch delta is ~-3% | same | sqlite -4 to -18% |
+| point_get | +4.9% (18.4 → 18.7 µs) | +13.4% (16.8 → 19.0 µs) | sqlite -9 to -15% → relative ~+15-25%, see below |
+| attr_scan / join | -10% / -13% | -5% / -7% | sqlite ±8% |
+| se_kind_lookup | +13.6% (263 → 291 µs) | +3.3% | sqlite_mem +4.9% |
+| se_title_get | +0.5% (8.13 → 8.17 µs) | -5.9% | sqlite ±4% |
+
+Callgrind instruction counts (deterministic, dev profile,
+`profile_commit`, `Artifacts::commit` only):
+
+| shape | Group 2 | Group 3 | delta |
+|---|---|---|---|
+| one batch, N=100 | 15.36M Ir | 51.48M Ir | **+235%** |
+| one batch, N=300 | 52.06M Ir | 112.5M Ir | +116% |
+| one batch, N=1000 | 7.769B Ir | 7.496B Ir | -3.5% |
+| 100 per-row txns (`profile_commit 100 small`, new mode) | 190.1M Ir | 152.2M Ir | **-19.9%** |
+| 500 per-row txns | 6.091B Ir | 1.645B Ir | **-73.0%** |
+
+Repository layer (`Branch::commit`), measured on this branch in the same
+session — the practical write budget an application pays:
+
+| workload | sqlite_mem | dialog_mem (raw store) | repo_mem | repo_disk |
+|---|---|---|---|---|
+| write_small_txns (100) | 0.83 ms | 11.0 ms | 33.7 ms (337 µs/commit) | 149 ms |
+| write_batch (1000) | 5.2 ms | 1.05 s | 1.54 s | 1.65 s |
+| se_replay_write (500 real txns) | 11.9 ms | 153 ms | 434 ms (868 µs/commit) | 1.30 s |
+
+Interpretation:
+
+- **The sequential-commit shape is the win, and it grows with the tree.**
+  One canonical edit per commit re-reshaped the touched leaves every
+  time; the buffered path appends to bounded node buffers and reshapes
+  only on overflow. Deterministically -20% at 100 commits, -73% at 500,
+  and -65% wall on the real 500-txn replay (controls flat). The
+  remaining se_replay gap vs sqlite_mem is 13× (was 43× at baseline,
+  after Groups 1-3 combined).
+- **A single one-shot batch does NOT benefit**: the hitchhiker layer
+  costs extra per-op bookkeeping (+235% Ir at N=100 — cheap in absolute
+  terms, ~36M Ir ≈ ms-scale in dev profile) and at N=1000 the batch
+  cascades into the same ceiling-regime merge machinery Group 2
+  profiled, so the superlinear write_batch curve stands (~-3%). The
+  audit's finding-8 batch entry point and the transient merge memcpy
+  complex (Group 2's "what remains") are untouched — that was this
+  group's optional item 3, skipped in favor of the repository rows.
+- **Reads pay a small, real price for buffered roots.** Point reads must
+  merge node buffers over stored entries on the descent: point_get and
+  the value-indexed kind_lookup drift +5-15% against controls moving the
+  other way. Scans moved -5 to -13% (probably tree-shape luck; within
+  machine noise). This is the deliberate trade of the non-canonical
+  policy; `canonicalize()` restores the compact form when a caller wants
+  it (e.g. after bulk load — `import` now does exactly that).
+- **The repository layer costs ~2.8-3.1× the raw store per commit**
+  (337 vs 110 µs synthetic small commits; 868 vs 306 µs real replay,
+  in-memory). The overhead is version tagging + history claims + the
+  signed revision record + head publication per commit. This row is the
+  honest "what an app pays" number: 36× sqlite_mem on the real replay.
+- **Roots are now path-dependent by default.** Two stores committing the
+  same facts in different batches converge on the same root only after
+  both canonicalize. Anything comparing commit-produced roots across
+  replicas must either canonicalize first or compare content.
+
+What to try next, in expected order of value:
+
+1. The repository layer's ~3× per-commit overhead: profile
+   `Branch::commit` — candidates are the per-commit Ed25519 signing, the
+   revision-record encode (a large CBOR value that usually spills), and
+   the head-publish round trip; some of these batch or cache naturally.
+2. The single-batch ceiling regime (audit #8, Group 2's memcpy 28% /
+   memo-table 18%): per-edit entry clones and the whole-frame re-merge in
+   `dialog-search-tree` `tree/transient.rs` — unchanged by this group,
+   still the write_batch wall.
+3. Read-side: teach point descent to skip empty buffers cheaply (or
+   background-canonicalize idle trees) to claw back the +5-15%.
+4. The buffered path's own per-op constant (+36M Ir per 100-key batch at
+   small N) — likely the per-write node clone in the hitchhiker layer.
