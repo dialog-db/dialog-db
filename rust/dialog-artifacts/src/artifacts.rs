@@ -73,7 +73,10 @@ use crate::tree::{
     ArtifactTree, ArtifactTreeExt, SpillCache, TreeStorageBridge, fetch_spilled_cached, spill_cache,
 };
 use crate::{
-    DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
+    DialogArtifactsError, HASH_SIZE, Key, State,
+    artifacts::selector::Constrained,
+    buffered::{BufferedBatch, apply_buffered},
+    make_reference,
 };
 
 /// An alias type that describes the search tree that is used for each
@@ -261,6 +264,12 @@ where
 
         ArtifactStoreMut::commit(self, instructions).await?;
 
+        // Bulk loads are where canonicalization pays: one explicit pass at
+        // the end of the import, rather than per commit (which the buffered
+        // path exists to amortize) or on sync (where buffered novelty near
+        // the root actually makes diffs exchange FEWER blocks).
+        self.canonicalize().await?;
+
         Ok(())
     }
 
@@ -398,6 +407,15 @@ where
     /// Data committed this way carries no [`Version`](crate::history::Version)
     /// tag and records no history — version-controlled writes go through the
     /// branch commit path in `dialog-repository` instead.
+    ///
+    /// Writes land through the buffered (hitchhiker) write path and the
+    /// published root is the BUFFERED form: valid and publishable (a node's
+    /// hash covers its buffered ops, so the root identifies the content
+    /// exactly), but not *canonical* — the same fact set hashes differently
+    /// depending on where its ops currently sit. Callers that need the
+    /// deterministic canonical root (e.g. for fast-forward convergence
+    /// detection by root equality) invoke [`Artifacts::canonicalize`]
+    /// explicitly. See the `buffered` module docs for the full contract.
     async fn commit_instructions<Instructions>(
         &mut self,
         instructions: Instructions,
@@ -412,52 +430,22 @@ where
 
             // The per-instruction EAV/AEV/VAE key writes (and
             // cardinality-one supersession) are the shared
-            // `ArtifactTreeExt::apply`. This method adds only
-            // the surrounding transaction bookkeeping — base-revision
-            // capture, revision persistence, pointer advance, and the
-            // rollback below.
+            // `write_instructions` loop, running against the buffered
+            // write target. This method adds only the surrounding
+            // transaction bookkeeping — base-revision capture, revision
+            // persistence, pointer advance, and the rollback below.
             let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
-            index
-                .apply(&mut self.storage, &mut delta, instructions)
-                .await?;
+            apply_buffered(
+                &mut index,
+                &mut self.storage,
+                &mut delta,
+                None,
+                instructions,
+                false,
+            )
+            .await?;
 
-            // Persist the tree's pending nodes before minting a revision;
-            // a revision must only reference durable blocks.
-            stream::iter(delta.flush().map(|(_, buffer)| buffer))
-                .map(|buffer| {
-                    let mut storage = self.storage.clone();
-                    async move {
-                        let digest = *buffer.blake3_hash().as_bytes();
-                        storage.set(digest, buffer.into_vec()).await
-                    }
-                })
-                .buffer_unordered(FLUSH_CONCURRENCY)
-                .try_collect::<()>()
-                .await?;
-
-            let root = index.root();
-            let next_revision = if root == NULL_BLAKE3_HASH {
-                None
-            } else {
-                Some(IndexRoot::new(root.as_bytes()))
-            };
-
-            let revision_hash = if let Some(revision) = &next_revision {
-                self.storage.write(&revision).await?;
-                revision.as_reference().await?
-            } else {
-                NULL_REVISION_HASH
-            };
-
-            // Advance the effective pointer to the latest version of this DB
-            self.storage
-                .set(
-                    make_reference(self.identifier.as_bytes()),
-                    revision_hash.to_vec(),
-                )
-                .await?;
-
-            Ok(revision_hash) as Result<Blake3Hash, DialogArtifactsError>
+            Self::publish_root(&mut self.storage, &self.identifier, index.root(), delta).await
         }
         .await;
 
@@ -468,6 +456,90 @@ where
                 Err(error)
             }
         }
+    }
+
+    /// Canonicalizes the indexes: flushes every buffered write down to the
+    /// leaves, so the resulting root is the deterministic canonical form of
+    /// the store's fact set, then publishes it as a new revision.
+    ///
+    /// Ordinary [`commit`](crate::ArtifactStoreMut::commit)s publish the
+    /// buffered form, whose root depends on where the buffered ops sit; two
+    /// stores holding identical facts therefore only hash identically after
+    /// both canonicalize. This is deliberately a separate, explicit operation:
+    /// canonicalizing per commit costs the full leaf rebuild the buffered path
+    /// exists to amortize, and canonicalizing on sync would HURT — buffered
+    /// novelty sits near the root, so two replicas differ in a few top blocks
+    /// instead of many leaf paths, and the diff exchanges fewer blocks. The
+    /// place to canonicalize is the end of a bulk load (see
+    /// [`Artifacts::import`]), or wherever a caller explicitly wants the
+    /// canonical root.
+    pub async fn canonicalize(&mut self) -> Result<Blake3Hash, DialogArtifactsError> {
+        let base_revision = self.revision().await?;
+
+        let transaction_result = async {
+            let mut index = self.index.write().await;
+
+            let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
+            let batch =
+                BufferedBatch::apply(&index, &mut self.storage, None, stream::empty()).await?;
+            *index = batch.seal(&self.storage, &mut delta, true).await?;
+
+            Self::publish_root(&mut self.storage, &self.identifier, index.root(), delta).await
+        }
+        .await;
+
+        match transaction_result {
+            Ok(revision) => Ok(revision),
+            Err(error) => {
+                self.reset(Some(base_revision)).await?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Persists `delta`'s pending nodes, mints a revision for `root`, and
+    /// advances the store's head pointer to it. The flush completes before the
+    /// revision is written: a revision must only reference durable blocks.
+    async fn publish_root(
+        storage: &mut Storage<CborEncoder, Backend>,
+        identifier: &str,
+        root: &NodeHash,
+        mut delta: Delta<NodeHash, TreeBuffer>,
+    ) -> Result<Blake3Hash, DialogArtifactsError> {
+        stream::iter(delta.flush().map(|(_, buffer)| buffer))
+            .map(|buffer| {
+                let mut storage = storage.clone();
+                async move {
+                    let digest = *buffer.blake3_hash().as_bytes();
+                    storage.set(digest, buffer.into_vec()).await
+                }
+            })
+            .buffer_unordered(FLUSH_CONCURRENCY)
+            .try_collect::<()>()
+            .await?;
+
+        let next_revision = if root == NULL_BLAKE3_HASH {
+            None
+        } else {
+            Some(IndexRoot::new(root.as_bytes()))
+        };
+
+        let revision_hash = if let Some(revision) = &next_revision {
+            storage.write(&revision).await?;
+            revision.as_reference().await?
+        } else {
+            NULL_REVISION_HASH
+        };
+
+        // Advance the effective pointer to the latest version of this DB
+        storage
+            .set(
+                make_reference(identifier.as_bytes()),
+                revision_hash.to_vec(),
+            )
+            .await?;
+
+        Ok(revision_hash)
     }
 }
 
@@ -1117,15 +1189,18 @@ mod tests {
 
     /// Assert + retract of a fact in the same batch, when that fact had **no
     /// prior committed value**, leaves nothing behind: the assert and retract
-    /// cancel at the tree, no tombstone is written, and the root is unchanged.
-    /// This is the transient-command shape (a concept asserted then retracted
-    /// in one commit) that used to churn the branch head on every occurrence.
+    /// cancel at the tree and no tombstone is written. This is the
+    /// transient-command shape (a concept asserted then retracted in one
+    /// commit) that used to churn the branch head on every occurrence.
+    ///
+    /// Commit roots are the buffered form and so path-dependent; the
+    /// "left no key" pin is on the CANONICAL root, reached explicitly.
     #[dialog_common::test]
     async fn it_leaves_no_key_when_assert_and_retract_a_novel_fact_in_one_batch() -> Result<()> {
         let (storage_backend, _temp) = make_target_storage().await?;
         let mut facts = Artifacts::anonymous(storage_backend).await?;
 
-        let base_root = facts
+        facts
             .commit(once(Instruction::Assert(Artifact {
                 the: Attribute::from_str("user/name")?,
                 of: Entity::new()?,
@@ -1133,6 +1208,7 @@ mod tests {
                 cause: None,
             })))
             .await?;
+        let base_root = facts.canonicalize().await?;
 
         let session = Attribute::from_str("user/session")?;
         let transient = Artifact {
@@ -1141,12 +1217,13 @@ mod tests {
             is: Value::String("ephemeral".into()),
             cause: None,
         };
-        let after_root = facts
+        facts
             .commit(vec![
                 Instruction::Assert(transient.clone()),
                 Instruction::Retract(transient.clone()),
             ])
             .await?;
+        let after_root = facts.canonicalize().await?;
 
         // No tree churn: the novel fact left no key at all.
         assert_eq!(
@@ -2004,6 +2081,10 @@ mod tests {
             artifacts
                 .commit(data.into_iter().map(Instruction::Assert))
                 .await?;
+            // `import` ends with an explicit canonicalization pass, so the
+            // round-trip pin below compares canonical revisions; reach the
+            // canonical form on the source side too.
+            artifacts.canonicalize().await?;
 
             let ids = artifacts
                 .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
@@ -2358,6 +2439,12 @@ mod tests {
         let mut facts_two = Artifacts::anonymous(storage_backend.clone()).await?;
 
         facts_two.commit(reordered_data).await?;
+
+        // Commit roots are the buffered form, whose hash depends on op order;
+        // insertion-order independence is a property of the CANONICAL form,
+        // reached explicitly.
+        facts_one.canonicalize().await?;
+        facts_two.canonicalize().await?;
 
         assert_eq!(facts_one.revision().await, facts_two.revision().await);
 

@@ -28,7 +28,13 @@
 //!
 //! Canonicality is therefore a property to reach for deliberately, via
 //! [`BufferedArtifactTree::canonicalize`] (surfaced on the commit path as
-//! `commit(..).canonicalize()`), rather than a precondition for publishing.
+//! `commit(..).canonicalize()` and on stores as
+//! [`Artifacts::canonicalize`](crate::Artifacts::canonicalize)), rather than a
+//! precondition for publishing. The policy across the stack: ordinary commits
+//! seal buffered; sync and publish do NOT canonicalize (buffered novelty sits
+//! near the root, so replicas differ in a few top blocks rather than many
+//! leaf paths, and the diff exchanges fewer blocks); bulk-load paths
+//! canonicalize once, explicitly, at the end of the import.
 
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;

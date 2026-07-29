@@ -46,7 +46,7 @@ use crate::{
     KeyViewMut, SelectorMatch, State, Value, ValueDataType, ValueKey, encode_bytes,
     encode_value_owned,
     key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
-    key::{artifact_index_keys, reproject_index_keys, value_spills},
+    key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
     match_selector_and_key_ref,
     selector::Constrained,
     value_predicates_admit,
@@ -131,8 +131,9 @@ where
 }
 
 /// Writes a spilling value's raw bytes as a content-addressed block into the
-/// raw archive block `store`, keyed by the value's 32-byte reference. A no-op
-/// for a value that stays inline (its bytes live in the key). Idempotent:
+/// raw archive block `store`, keyed by the value's 32-byte reference (both
+/// taken from the instruction's single [`EncodedValue`] pass). A no-op for a
+/// value that stays inline (its bytes live in the key). Idempotent:
 /// content-addressed, so the same value writes the same block.
 ///
 /// This uses the raw backend directly, NOT the tree's `ContentAddressedStorage`
@@ -140,15 +141,13 @@ where
 /// living in the same store the tree nodes do.
 async fn store_spilled_value<S>(
     store: &mut S,
-    artifact: &Artifact,
-    manifest: &Manifest,
+    spill: Option<(Blake3Hash, Vec<u8>)>,
 ) -> Result<(), DialogArtifactsError>
 where
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
 {
-    if value_spills(&artifact.is, manifest) {
-        let reference = artifact.is.to_reference();
-        store.set(reference, artifact.is.to_bytes()).await?;
+    if let Some((reference, raw)) = spill {
+        store.set(reference, raw).await?;
     }
     Ok(())
 }
@@ -1151,13 +1150,17 @@ where
         match instruction {
             Instruction::Assert(artifact) => {
                 changed = true;
+                // ONE value encode per instruction: the payload feeds all
+                // three index keys, and a spilling value's block bytes and
+                // reference come from the same pass.
+                let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys(&artifact, manifest);
+                    artifact_index_keys_with(&artifact, encoded.payload);
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact; the key holds only the
                 // 32-byte reference to it.
-                store_spilled_value(store, &artifact, manifest).await?;
+                store_spilled_value(store, encoded.spill).await?;
 
                 // A version-tagged assertion records its history: an
                 // assertion is purely additive, so it supersedes nothing.
@@ -1304,12 +1307,14 @@ where
                     continue;
                 }
 
+                // ONE value encode per instruction, exactly as in `Assert`.
+                let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys(&artifact, manifest);
+                    artifact_index_keys_with(&artifact, encoded.payload);
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact.
-                store_spilled_value(store, &artifact, manifest).await?;
+                store_spilled_value(store, encoded.spill).await?;
 
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
