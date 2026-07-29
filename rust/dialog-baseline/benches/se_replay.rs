@@ -20,6 +20,7 @@
 //! ```
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::SeLog;
 use dialog_baseline::{DialogFacts, DialogMode, SqliteFacts, SqliteMode};
 
@@ -88,6 +89,29 @@ fn bench_replay_write(c: &mut Criterion) {
             );
         });
     }
+
+    // The repository layer: the same replay through `Branch::commit`, the
+    // surface applications actually write through.
+    group.bench_with_input(BenchmarkId::new("repo_mem", size), &log, |b, log| {
+        b.iter_batched(
+            || rt.block_on(async { DialogRepo::volatile().await.expect("open repo") }),
+            |repo| {
+                rt.block_on(async { repo.replay_se(log).await.expect("replay") });
+                repo
+            },
+            BatchSize::PerIteration,
+        );
+    });
+    group.bench_with_input(BenchmarkId::new("repo_disk", size), &log, |b, log| {
+        b.iter_batched(
+            || rt.block_on(async { DialogRepo::temp().await.expect("open repo") }),
+            |repo| {
+                rt.block_on(async { repo.replay_se(log).await.expect("replay") });
+                repo
+            },
+            BatchSize::PerIteration,
+        );
+    });
     group.finish();
 }
 

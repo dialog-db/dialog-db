@@ -31,6 +31,7 @@
 //! production SQLite deployment would actually run, and is the number to
 //! beat once dialog has an explicit durability story.
 
+pub mod repo;
 pub mod se;
 
 use std::str::FromStr;
@@ -267,7 +268,7 @@ impl DialogFacts {
         }
     }
 
-    fn artifacts_for(row: &FactRow) -> Result<[Artifact; 2]> {
+    pub(crate) fn artifacts_for(row: &FactRow) -> Result<[Artifact; 2]> {
         let entity = Entity::from_str(&row.entity)?;
         Ok([
             Artifact {

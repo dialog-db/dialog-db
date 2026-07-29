@@ -24,6 +24,16 @@ rand_chacha = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+# The repository-layer write harness (`repo` module): real applications
+# write through `Branch::commit`, so the scoreboard measures that surface
+# too. Native-only, like everything else in this crate.
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-network = { workspace = true }
+dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-repository = { workspace = true }
+dialog-storage = { workspace = true, features = ["helpers"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

@@ -346,25 +346,35 @@ impl SqliteFacts {
     }
 }
 
+/// One transaction's worth of dialog instructions: cardinality-one writes
+/// are [`Instruction::Replace`]; tag writes are asserts. Shared by the
+/// fact-store replay below and the repository-layer replay
+/// ([`crate::repo::DialogRepo::replay_se`]), so both drive identical
+/// instruction streams.
+pub fn se_instructions(commit: &[SeFact]) -> Result<Vec<Instruction>> {
+    let mut instructions = Vec::with_capacity(commit.len());
+    for fact in commit {
+        let artifact = Artifact {
+            the: Attribute::from_str(&fact.the)?,
+            of: Entity::from_str(&fact.of)?,
+            is: fact.value.to_dialog()?,
+            cause: None,
+        };
+        instructions.push(if is_multi_valued(&fact.the) {
+            Instruction::Assert(artifact)
+        } else {
+            Instruction::Replace(artifact)
+        });
+    }
+    Ok(instructions)
+}
+
 impl DialogFacts {
     /// Replay the log, one dialog commit per transaction. Cardinality-one
     /// writes are [`Instruction::Replace`]; tag writes are asserts.
     pub async fn replay_se(&mut self, log: &SeLog) -> Result<()> {
         for commit in &log.transactions {
-            let mut instructions = Vec::with_capacity(commit.len());
-            for fact in commit {
-                let artifact = Artifact {
-                    the: Attribute::from_str(&fact.the)?,
-                    of: Entity::from_str(&fact.of)?,
-                    is: fact.value.to_dialog()?,
-                    cause: None,
-                };
-                instructions.push(if is_multi_valued(&fact.the) {
-                    Instruction::Assert(artifact)
-                } else {
-                    Instruction::Replace(artifact)
-                });
-            }
+            let instructions = se_instructions(commit)?;
             match self {
                 Self::Memory(artifacts) => {
                     artifacts.commit(stream::iter(instructions)).await?;
