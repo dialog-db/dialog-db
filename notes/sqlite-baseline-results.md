@@ -438,3 +438,12 @@ memcpy complex both layers share, largest where record values sit in
 root buffers); and revisit whether the head signature can cover the
 record signature's payload (one sign per commit) — a semantic change
 needing an owner decision.
+
+## Deferred decisions (owner-reviewed)
+
+- **Batch-signing commits** (2026-07-28): approved direction for the
+  two-Ed25519-per-commit cost (one signature over a small Merkle root of
+  the record + revision payloads; both stay standalone-verifiable via a
+  1-hash inclusion proof). Deliberately deferred until the larger costs
+  (storage I/O, DCAA outcome) are optimized away; revisit once the
+  repo-commit profile is no longer dominated by them.
