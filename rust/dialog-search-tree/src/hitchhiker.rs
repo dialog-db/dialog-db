@@ -267,40 +267,6 @@ where
         .await
     }
 
-    /// Buffers a batch of inserts (or value updates) in ONE enqueue pass.
-    ///
-    /// The ops are routed together and the flush trigger is evaluated once
-    /// for the whole batch, so a multi-entry write (a commit's per-fact index
-    /// entries, its revision-record entries) pays one root descent instead of
-    /// one per entry. The buffered content is identical to sequential
-    /// [`insert`](Self::insert)s of the same entries; only where an overflow
-    /// cascade lands mid-batch can the (non-canonical) buffered shape differ,
-    /// and [`canonicalize`](Self::canonicalize) erases that difference.
-    pub async fn insert_all<Backend>(
-        self,
-        entries: Vec<(Key, Value)>,
-        storage: &ContentAddressedStorage<Backend>,
-    ) -> Result<Self, DialogSearchTreeError>
-    where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
-    {
-        if entries.is_empty() {
-            return Ok(self);
-        }
-        self.write(
-            entries
-                .into_iter()
-                .map(|(key, value)| NoveltyEntry {
-                    key: key.as_ref().to_vec(),
-                    op: NoveltyOp::Assert(value),
-                })
-                .collect(),
-            storage,
-        )
-        .await
-    }
-
     /// Buffers a delete (tombstone) of `key` into the tree.
     pub async fn delete<Backend>(
         self,

@@ -313,3 +313,128 @@ What to try next, in expected order of value:
    background-canonicalize idle trees) to claw back the +5-15%.
 4. The buffered path's own per-op constant (+36M Ir per 100-key batch at
    small N) — likely the per-write node clone in the hitchhiker layer.
+
+## Group 4: read path and repository overhead (branch claude/perf-5-read-repo)
+
+Targets: (a) the read-side price of buffered roots that Group 3 introduced
+(point_get / se_kind_lookup drifted +5-15% against controls), and (b) the
+repository layer's ~2.8x per-commit overhead over the raw store.
+
+Changes that LANDED:
+
+1. **Range-restricted, slot-tracked buffered-read resolution**
+   (`dialog-search-tree`). The walker's `pending_for_leaf` previously
+   decoded every key of every ancestor buffer on the path (root buffers
+   hold up to 256 ops for the whole subtree), decoded values for every
+   run winner, deduplicated across levels with an O(k^2) membership scan,
+   and re-ran the O(n) buffer validation plus an O(at) polarity re-scan
+   inside every `op_at`. It now collects only ops inside the walk's own
+   range (an out-of-range op can never yield — for a point read that is
+   ~1 op instead of ~256), tracks each winner's value-table slot while
+   streaming (new `op_with_slot`; validation runs once per buffer in
+   `keys()`), merges the per-level winner lists with a linear sorted
+   merge, and decodes values only for ops that survive narrowing and
+   shadowing. `pending_for_key` resolves through a new one-pass
+   `ArchivedNoveltyBuffer::resolve`; the owned `NoveltyBuffer::resolve`
+   and the transient sealed-buffer range collection got the same slot
+   treatment. Resolution semantics (last-op-in-run wins within a buffer,
+   root-most layer wins across the path) are unchanged and remain pinned
+   by the existing buffered-vs-canonical equivalence sweeps.
+2. **Commit identity memoized per branch** (`dialog-repository`).
+   `branch_of` + `origin_of` (blake3, base58 render, URI parse) are pure
+   functions of (subject, name, profile, issuer) but ran on every
+   `Branch::commit`; a keyed memo on the branch handle now serves them.
+3. **History-record fold without redundant clones/keys**
+   (`dialog-artifacts`). `buffer_record` cloned the whole claim per
+   instruction just to compute its history key, and the flush loop
+   rebuilt the same key a second time via `into_entry`. `Record::key`
+   now borrows, and the fold map's own key is reused for the final write
+   (`Record::into_datum`).
+4. Profile targets `profile_read` and `profile_repo_commit` added to
+   `dialog-baseline` (callgrind without criterion in the way).
+
+Change that was tried and REVERTED (negative result, kept for the
+record): batching the commit path's key fan-out (3 index keys per
+instruction, folded history entries, the revision-record pair) into a
+single hitchhiker enqueue per group. Dev-profile callgrind loved it
+(-26% on 200 branch commits) — but that was mostly debug-assert work.
+Release callgrind told the truth: batching moves where the overflow
+cascade fires, and the resulting buffer shapes were consistently worse
+(repo 200 commits +11.3% Ir, raw 1000-commit seed +5.3% Ir; more
+regroup/memcpy/hash-memo work downstream). The `ArtifactWriter::write_all`
+convenience stayed, deliberately implemented as sequential writes, with
+the negative result documented on it.
+
+Measurement notes. Wall-clock on this container drifts: the base branch
+was RE-RUN in this session and the deltas below are that same-machine
+A/B (absolute medians, base run vs final run ~2h apart); sqlite rows are
+the drift controls, and `sqlite_disk` swung +54% between the two se runs,
+so no disk-row claims are made. Release-build callgrind (deterministic,
+no debug asserts — the dev-profile numbers earlier groups used overstate
+buffer-path costs via a debug re-encode assert in `into_buffers`) backs
+the wall numbers.
+
+Criterion medians (same-machine A/B; sqlite rows are the controls):
+
+| benchmark | dialog_mem | dialog_disk | control drift |
+|---|---|---|---|
+| attr_scan | **-7.2%** (1.299 -> 1.205 ms) | -0.7% | sqlite -2.0% / +2.7% |
+| join | **-5.3%** (3.081 -> 2.918 ms) | -1.7% | sqlite ~0% |
+| se_title_get | -1.5% (7.76 -> 7.64 us), ~-5% against a +4.3% control | -3.4% | sqlite_mem +4.3% |
+| point_get | -1.3% (18.43 -> 18.19 us) — flat in wall; **-12.2% instructions** (release callgrind: 175.8K -> 154.4K Ir/get, buffered store) | +1.3% | sqlite_mem -3.5% |
+| se_kind_lookup | +0.9% (flat; its cost is per-row Entity reconstruction — audit #5, untouched) | +5.7% (history says this row swings ±20%) | sqlite ±1% |
+| write_small_txns | +0.5% abs vs a +7.3% control (~-6% relative, but within drift) | noisy | sqlite_mem +7.3% |
+| write_batch | +3.5% abs vs a -2.8% control — same code on this path (batching was reverted), so this brackets the session's intra-run noise at ~±6% | +0.9% | sqlite mixed |
+| se_replay_write | -2.3% (145.9 -> 142.5 ms) | +3.7% | sqlite_mem -3.1%, sqlite_disk +54% (!) |
+| repo_mem (se replay) | +2.3% (813 -> 832 us/commit; CI -15%..+11%, p=0.69 — flat) | -2.4% | same |
+
+Release callgrind (deterministic; `profile_repo_commit 200 small`,
+`profile_read 1000 x 500 point gets`):
+
+| metric | base | batched attempt | final |
+|---|---|---|---|
+| point get, Ir/get | 175.8K | 154.6K | **154.4K (-12.2%)** |
+| repo commit, 200 small | 622.3M | 692.6M (+11.3%) | **604.7M (-2.8%)** |
+| raw commit, 200 small | 185.5M | 169.8M (-8.4%) | 185.0M (-0.3%) |
+| raw per-row seed, 1000 | 7,037M | 7,410M (+5.3%) | 7,014M (-0.3%) |
+
+Interpretation, honestly:
+
+- **The read regression is partially recovered, and where it lives is
+  now clear.** Scans and joins (which cross buffered ancestors per leaf)
+  got their -5..-7%; the point read halved its buffered-path
+  instructions (pending_for_leaf 29.6K -> 6.7K Ir/get, whole read -12%
+  Ir) but wall stayed flat — the remaining point-read wall is memory
+  stalls in search/pipeline setup, not the buffer merge. se_kind_lookup
+  never moved because its per-row cost is `Entity`/URL reconstruction
+  (audit finding 5), which this group did not touch.
+- **The repository overhead target (below 2x) was NOT reached: the
+  honest result is ~3% instruction reduction** (identity memo + record
+  fold fixes), with repo_mem wall flat within its noisy CI. The
+  remaining overhead decomposes (release Ir per commit, synthetic
+  2-assert shape): versioned instruction semantics inside
+  `write_instructions` (+0.82M — the standing-claim read probes and the
+  history/coverage writes riding the same tree), TWO Ed25519 signs
+  (0.50M — the record signature and the head signature; that alone is
+  54% of a whole raw commit), the revision-record append (0.22M), the
+  proportionally larger seal (0.21M), and skip/context/publish
+  bookkeeping (~0.35M). Under this group's constraints — recorded
+  history bytes and signature semantics unchanged — those are semantic
+  costs, not removable constants; the redundant work (claim clones,
+  double key builds, per-commit identity derivation) is what this group
+  removed, and it was small.
+- **The batching negative result is worth keeping in mind**: enqueue
+  granularity changes buffered tree shapes, and shape effects (where
+  cascades fire, what regroup touches) can swamp per-call savings in
+  either direction. Anything that changes write granularity on the
+  buffered path needs a release-build shape-sensitive measurement, not
+  a dev-profile one.
+
+What to try next for the repo gap, in expected order of value: cut the
+versioned probe/scan constants (they ride the same buffered read path,
+so audit findings 5 and 16 apply); stream sealed link buffers into the
+encoder at persist instead of decode-then-re-encode on lift (the
+memcpy complex both layers share, largest where record values sit in
+root buffers); and revisit whether the head signature can cover the
+record signature's payload (one sign per commit) — a semantic change
+needing an owner decision.

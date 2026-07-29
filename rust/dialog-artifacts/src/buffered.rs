@@ -82,12 +82,15 @@ pub trait ArtifactWriter: Sized {
         S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync;
 
-    /// Insert (or overwrite) a batch of entries.
+    /// Insert (or overwrite) a batch of entries, one write at a time.
     ///
-    /// Semantically identical to writing the entries one at a time; a target
-    /// that can enqueue them in one pass (the buffered tree) overrides this
-    /// so a commit's per-instruction key fan-out (three index orderings, the
-    /// revision-record pair) pays one descent instead of one per key.
+    /// A convenience over [`write`](Self::write) for the commit path's key
+    /// fan-out (three index orderings per instruction, the folded history
+    /// entries, the revision-record pair). Deliberately NOT specialized to a
+    /// one-pass batched enqueue on the buffered tree: batching moves where
+    /// the overflow cascade fires, and the resulting (still valid, still
+    /// non-canonical) buffer shapes measured consistently slower on the
+    /// commit-heavy workloads than the shapes sequential writes produce.
     async fn write_all<S>(
         mut self,
         entries: Vec<(Key, State<Datum>)>,
@@ -207,18 +210,6 @@ impl ArtifactWriter for BufferedArtifactTree {
             + ConditionalSync,
     {
         self.insert(key, value, storage).await
-    }
-
-    async fn write_all<S>(
-        self,
-        entries: Vec<(Key, State<Datum>)>,
-        storage: &ContentAddressedStorage<S>,
-    ) -> Result<Self, DialogSearchTreeError>
-    where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
-    {
-        self.insert_all(entries, storage).await
     }
 
     async fn erase<S>(
