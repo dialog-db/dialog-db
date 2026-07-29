@@ -15,6 +15,7 @@
 
 use std::error::Error;
 
+use crate::service::ServiceResponseError;
 pub use dialog_capability::{
     Attenuate, Attenuation, Capability, DialogCapabilityAuthorizationError,
     DialogCapabilityPerformError, Effect, Policy, StorageError, Subject, access::AuthorizeError,
@@ -253,9 +254,19 @@ pub enum ArchiveError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    /// A remote service returned a non-success HTTP response.
+    #[error("{0}")]
+    ServiceResponse(#[source] ServiceResponseError),
+
     /// IO error.
     #[error("IO error: {0}")]
     Io(String),
+}
+
+impl From<ServiceResponseError> for ArchiveError {
+    fn from(error: ServiceResponseError) -> Self {
+        Self::ServiceResponse(error)
+    }
 }
 
 impl From<StorageError> for ArchiveError {

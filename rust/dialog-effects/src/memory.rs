@@ -18,6 +18,7 @@ use std::fmt;
 use std::io;
 use std::str;
 
+use crate::service::ServiceResponseError;
 use base58::ToBase58;
 use dialog_capability::access::AuthorizeError;
 pub use dialog_capability::{
@@ -261,6 +262,10 @@ pub enum MemoryError {
     #[error("Storage error: {0}")]
     Storage(String),
 
+    /// A remote service returned a non-success HTTP response.
+    #[error("{0}")]
+    ServiceResponse(#[source] ServiceResponseError),
+
     /// Authorization error.
     #[error("Authorization error: {0}")]
     Authorization(String),
@@ -268,6 +273,12 @@ pub enum MemoryError {
     /// IO error.
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
+}
+
+impl From<ServiceResponseError> for MemoryError {
+    fn from(error: ServiceResponseError) -> Self {
+        Self::ServiceResponse(error)
+    }
 }
 
 impl From<StorageError> for MemoryError {
