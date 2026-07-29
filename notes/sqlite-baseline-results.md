@@ -439,6 +439,181 @@ root buffers); and revisit whether the head signature can cover the
 record signature's payload (one sign per commit) — a semantic change
 needing an owner decision.
 
+## Group 5 spike: DCAA single-file archive (branch `claude/perf-6-dcaa-spike`)
+
+What was built: the DCAA v1 single-file archive from `notes/dcaa.md`,
+implemented as a capability provider — another member of the archive
+provider family, a peer of the file-per-blob `FileSystem` archive on
+native and the IndexedDB/OPFS archive providers on the web, NOT a
+`StorageBackend` implementation. `dialog_storage::provider::dcaa::Dcaa`
+serves `archive::{Get, Put, Import}` from one append-only `.dialog` file
+per catalog, opens from a `Location` via `Resource` like the other
+providers, and a `Space` selects it by using it as its archive field
+(the bench harness composes `Space<TempDcaa, TempFileSystem, ...>`). It
+lives as a module inside dialog-storage rather than a new crate because
+that is where every other provider lives and where the
+`Resource`/`Space` composition machinery it plugs into is defined; the
+module is cfg'd off wasm32 (the engine needs file offsets, `set_len`,
+fdatasync).
+
+Both review-note amendments are implemented:
+
+1. **Per-commit index deltas** with a periodic fold (threshold 32 by
+   default, `DIALOG_DCAA_FOLD` overrides, 0 = merged index every commit).
+2. **Outboard policy**: `outboard_len = 0` at or below 64 KiB
+   (whole-blob BLAKE3 verification — every tree node in these workloads),
+   full BAO outboard above it (`bao-tree` 0.16 builds and verifies fine
+   in this environment; the plain-BLAKE3 fallback was not needed).
+
+Two fsync modes, so durability is a measured variable instead of an
+excuse: the default fsyncs once per commit (records + index delta +
+footer ride one buffered write, then one fdatasync);
+`Dcaa::configured(root, fold, durable=false)` — or `DIALOG_DCAA_NOSYNC=1`
+for `Location`-opened providers — skips the per-commit fdatasync.
+Relaxed mode writes the identical byte format and recovers through the
+identical footer scan; it only stops promising that a commit survives a
+crash the moment `commit` returns, which is exactly the (absent)
+guarantee the file-per-block archive provides, making
+`repo_dcaa_nosync` vs `repo_disk` apples-to-apples.
+
+Spec deviations, documented in the module docs: the footer is 72 bytes
+(delta-chain fields: base index location, previous footer offset, chain
+length), and the footer checksum covers the commit's whole appended
+payload, not just the footer bytes. The latter is what makes a SINGLE
+fsync per commit crash-safe: with no write barrier between payload and
+footer, the kernel may persist the footer page before the payload pages,
+and a footer-only checksum would validate that torn state. Covering the
+payload costs nothing at commit time (the bytes are in hand) and O(tail
+commit) at recovery. Tests cover torn-tail truncation, a
+footer-persisted/payload-torn commit, media corruption of durable
+commits (BAO and whole-blob paths), redaction semantics, dedup no-ops
+(a fully-duplicate transaction appends zero bytes), lookup correctness
+across an unfolded delta chain after reopen, and relaxed-mode
+round-trip + recovery.
+
+Commit granularity maps 1:1 onto effect granularity: the repository
+layer sends one `Import` per branch commit, and each `Import` is one
+DCAA transaction — so durable mode is one fsync per branch commit.
+
+### Measured: the durability triple (same run, criterion medians)
+
+This container's disk is shared and NOISY: identical code moved up to
+2.4× between runs an hour apart (dialog_disk measured 937 ms and then
+387 ms on consecutive runs of this same branch), so only same-run
+comparisons are quoted, and differences under ~±15% on disk rows are
+not claims. The triple that matters — repo_disk (file-per-block, never
+fsyncs) vs repo_dcaa_nosync (DCAA, fsync skipped: same durability as
+repo_disk) vs repo_dcaa (DCAA, fdatasync every commit) — comes from one
+run with its SQLite controls.
+
+SE replay, 500 real transactions (1,289 facts), fresh store per
+iteration:
+
+| config | median | per commit | durable? |
+|---|---|---|---|
+| sqlite_mem | 10.9 ms | 22 µs | no |
+| sqlite_disk (WAL, NORMAL) | 90.1 ms | 180 µs | checkpoint-deferred |
+| sqlite_disk_nosync | 20.6 ms | 41 µs | no |
+| dialog_mem (raw store) | 143 ms | 286 µs | no |
+| dialog_disk (raw store, file-per-block) | 387 ms | 774 µs | no |
+| repo_mem | 408 ms | 817 µs | no |
+| repo_disk (file-per-block) | 1.69 s | 3.4 ms | no |
+| **repo_dcaa_nosync** | **933 ms** | **1.9 ms** | no |
+| **repo_dcaa** | **2.74 s** | **5.5 ms** | **yes, per commit** |
+
+Synthetic writes (same run):
+
+| config | write_small_txns (100 × 1 txn) | write_batch (1000, 1 txn) |
+|---|---|---|
+| sqlite_mem | 0.74 ms | 4.94 ms |
+| sqlite_disk | 2.37 ms | 5.37 ms |
+| sqlite_disk_nosync | 2.31 ms | 5.53 ms |
+| dialog_mem | 10.5 ms | 1.15 s |
+| dialog_disk | 124 ms | 1.17 s |
+| repo_mem | 32.0 ms | 1.49 s |
+| repo_disk | 179 ms | 1.54 s |
+| **repo_dcaa_nosync** | **191 ms** | **1.77 s** |
+| **repo_dcaa** | **358 ms** | **1.60 s** |
+
+Reading the triple:
+
+- **The owner's observation was right and the original framing was
+  wrong-way-round: DCAA's machinery is not slower than file-per-block —
+  the fsync is.** At equal durability, DCAA is 1.8× FASTER than
+  file-per-block on the real replay (933 ms vs 1.69 s, far outside this
+  host's noise): one sequential append per commit replaces several
+  temp-file+rename creations, and node reads come off one open fd plus
+  an in-memory index instead of per-block `open`/`read`/`close`.
+- On the synthetic shapes the two no-fsync rows are statistically
+  indistinguishable: small_txns 191 vs 179 ms (+7%, inside noise;
+  commits here are 2 fresh facts — minimal blocks, no supersession
+  reads, so there is little file-per-block overhead to beat) and the
+  batch rows overlap outright (1.77 vs 1.54 s ranges touch; the durable
+  row even printed FASTER than nosync, which is mechanically impossible
+  and confirms these deltas are noise around a CPU-bound 1.5 s). No
+  profiling of "DCAA overhead" is warranted: at equal durability there
+  is no measured overhead to profile, only a large win on the workload
+  with real commit widths and read traffic.
+- **The price of actual durability is the fsync and nothing else**:
+  repo_dcaa minus repo_dcaa_nosync is ~3.6 ms/commit on the real replay
+  and ~1.7 ms/commit synthetic — this host's fdatasync latency. When
+  commits batch it collapses (write_batch: durable within noise of
+  everything else — one commit, one fsync).
+
+### Index amplification (review amendment 1, measured)
+
+`cargo run -p dialog-baseline --release --example dcaa_amplification`
+replays the SE log through the repo harness with the delta chain ON
+(fold 32) and OFF (`DIALOG_DCAA_FOLD=0`, a complete merged index every
+commit — the pre-amendment spec), plus the file-per-block control. The
+DCAA file is strictly append-only, so final file size == total bytes
+written, and byte counts (unlike wall times) are deterministic:
+
+| SE txns | fold 32 | fold 0 (merged every commit) | file-per-block control | total ratio | index-bytes ratio |
+|---|---|---|---|---|---|
+| 500 (835 blocks) | 53.7 MiB | 61.8 MiB | 51.5 MiB / 835 files | 1.15× | ~4.7× (2.2 vs 10.3 MiB) |
+| 2000 (5,043 blocks) | 403.0 MiB | 568.9 MiB | 378.7 MiB / 5,043 files | 1.41× | ~7.9× (24 vs 190 MiB) |
+
+(Index bytes = total minus the record bytes, which are identical across
+the two configs.) The amendment is validated and the effect grows with
+entry count exactly as predicted — at 835 entries the merged index is
+only 33 KiB so rewriting it per commit barely shows; at 5k entries the
+merged-per-commit config already spends a third of all bytes on index
+churn, and the spec's 100k-entry projection (~4 MB of index per 1-fact
+commit) makes the chain non-optional at scale.
+
+The bigger number in that table is neither config's index: ~379 MiB of
+RECORD bytes for 4,675 facts. The append-only prolly tree supersedes
+spine/leaf blocks on every commit and nothing ever reclaims them —
+file-per-block leaves the same dead bytes as 5,043 loose files. Any
+production adoption of DCAA needs the spec's compaction section
+implemented (and gets it much cheaper than a directory walk: one
+sequential rewrite + rename).
+
+### Verdict (revised after the durability control)
+
+Should DCAA replace file-per-block as the native store? **Yes, on these
+measurements — and the earlier hedged verdict understated it.** At
+equal durability DCAA is faster than file-per-block on the realistic
+workload (1.8× on the SE replay) and at parity on the synthetics, while
+also giving: one file instead of thousands, dedup no-op writes,
+self-verifying reads (whole-blob BLAKE3 under 64 KiB, BAO above),
+redaction, tested crash recovery, and an OPTIONAL true-durability mode
+(fdatasync per commit, ~2-4 ms/commit on this host) that file-per-block
+cannot offer at any reasonable price (it would need an fsync per block
+file plus directory fsyncs). The fsync default is a policy question,
+not an architecture question — the provider exposes both modes, and
+relaxed mode equals today's durability while being faster.
+
+Remaining gaps before flipping the default archive, none of which the
+numbers argue against: compaction (the append-only file grows without
+bound; dead tree blocks dominate it — 403 MiB for 4.7k facts — same
+bytes file-per-block leaves behind, but visible as one growing file),
+a concurrency story beyond the current single-process per-catalog
+mutex, and wiring a `NativeSpace` variant + real (non-temp) `Location`
+opening through app configuration.
+
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the

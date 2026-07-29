@@ -165,7 +165,10 @@ fn bench_writes(c: &mut Criterion) {
         });
         group.bench_with_input(BenchmarkId::new("repo_disk", size), &rows, |b, rows| {
             b.iter_batched(
-                || rt.block_on(async { DialogRepo::temp().await.expect("open repo") }),
+                || {
+                    dialog_baseline::repo::clean_temp_storage();
+                    rt.block_on(async { DialogRepo::temp().await.expect("open repo") })
+                },
                 |repo| {
                     rt.block_on(async {
                         if per_row {
@@ -181,6 +184,61 @@ fn bench_writes(c: &mut Criterion) {
                 BatchSize::PerIteration,
             );
         });
+        // DCAA single-file archive. Durability caveat for honest
+        // comparison: this row fsyncs once per commit, while repo_disk's
+        // file-per-block archive never fsyncs (sqlite_disk is the durable
+        // control there).
+        group.bench_with_input(BenchmarkId::new("repo_dcaa", size), &rows, |b, rows| {
+            b.iter_batched(
+                || {
+                    dialog_baseline::repo::clean_temp_storage();
+                    rt.block_on(async { DialogRepo::dcaa().await.expect("open repo") })
+                },
+                |repo| {
+                    rt.block_on(async {
+                        if per_row {
+                            repo.insert_per_row_transactions(rows)
+                                .await
+                                .expect("insert");
+                        } else {
+                            repo.insert_one_transaction(rows).await.expect("insert");
+                        }
+                    });
+                    repo
+                },
+                BatchSize::PerIteration,
+            );
+        });
+        // The durability control: DCAA with the per-commit fdatasync
+        // skipped, so this row and repo_disk make the same (lack of a)
+        // crash promise. repo_dcaa minus this row is the price of
+        // durability; this row minus repo_disk is DCAA's non-fsync
+        // overhead.
+        group.bench_with_input(
+            BenchmarkId::new("repo_dcaa_nosync", size),
+            &rows,
+            |b, rows| {
+                b.iter_batched(
+                    || {
+                        dialog_baseline::repo::clean_temp_storage();
+                        rt.block_on(async { DialogRepo::dcaa_nosync().await.expect("open repo") })
+                    },
+                    |repo| {
+                        rt.block_on(async {
+                            if per_row {
+                                repo.insert_per_row_transactions(rows)
+                                    .await
+                                    .expect("insert");
+                            } else {
+                                repo.insert_one_transaction(rows).await.expect("insert");
+                            }
+                        });
+                        repo
+                    },
+                    BatchSize::PerIteration,
+                );
+            },
+        );
         group.finish();
     }
 }

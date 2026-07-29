@@ -27,6 +27,14 @@
 pub mod fs;
 pub use fs::*;
 
+// The DCAA provider serves the archive effects from one append-only
+// `.dialog` file per catalog (`notes/dcaa.md`). Native-only: it needs
+// real file offsets and fdatasync.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod dcaa;
+#[cfg(not(target_arch = "wasm32"))]
+pub use dcaa::Dcaa;
+
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub mod indexeddb;
 
