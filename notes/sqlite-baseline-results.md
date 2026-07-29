@@ -614,6 +614,70 @@ mutex, and wiring a `NativeSpace` variant + real (non-temp) `Location`
 opening through app configuration.
 
 
+## Group 6: in-memory commit decomposition (branch `claude/perf-7-oplog-spike`)
+
+Question answered first (owner): do we have numbers showing that
+removing signing and disk writes alone reaches the desired profile? Yes
+— and they show it does NOT. `dialog_mem` (500 real SE txns, no
+signing, no history, no disk at all) measures 286 us/commit against
+sqlite_disk's 180 us durable WAL commits. The in-memory buffered commit
+itself is the remaining wall. The owner also rejected the operational
+log/memtable split (see `notes/operational-log-architecture.md`):
+commits must keep a stable content address and the per-commit push
+contract; the target is making the buffered commit cost what the
+root-novelty design intends.
+
+Decomposition of that 286 us (new `profile_se_replay` example, release
+callgrind, 500 real SE txns, 2.03M Ir/commit; wall re-measured at
+260-282 us/commit):
+
+| term (exclusive Ir) | share | per commit |
+|---|---|---|
+| memcpy | 29.3% | ~601K Ir |
+| blake3 kernels (AVX2 + SSE4.1 + drivers) | ~17-20% | ~350-400K Ir |
+| allocator (malloc/free/realloc family) | ~10.7% | ~215K Ir |
+| varkey scans (`value_payload_len` 5.5%, `split_components` 2.2%, parse/build ~1.6%) | ~9.3% | ~190K Ir |
+| memcmp | 2.8% | ~57K Ir |
+
+By phase (inclusive): `BufferedBatch::apply` (enqueue into the transient
+root) 56.9%; `BufferedBatch::seal` (persist: encode + hash + set) 35.9%.
+
+Byte volume (new `measure_se_replay` example, `MeasuredStorage` over the
+memory backend, 500 real SE txns averaging 2.6 facts / ~2 KB novelty per
+commit):
+
+| commits | bytes written per commit (window) |
+|---|---|
+| 1-50 | 28 KB |
+| 201-250 | 78 KB |
+| 451-500 | 91 KB |
+| average | **64 KB/commit, ~3.2 sets, ~30x byte amplification** |
+
+Reads mirror writes (31 MB read over the replay): every commit round-trips
+the full root frame persistent -> transient (clone all entries + buffered
+ops) -> apply -> re-encode -> re-hash -> set.
+
+Conclusion: per-commit cost is O(root frame bytes), not O(novelty
+bytes), because the novelty buffer is embedded inline in the root frame
+— appending 2 KB of ops forces the whole ~64-90 KB frame to be decoded,
+cloned, re-encoded, re-copied (memcpy 29%), and re-hashed (blake3 ~20%)
+every commit. rkyv is NOT the primary gap; swapping the encoding library
+would leave the O(frame) shape intact. Two directions follow:
+
+- **Copy elimination (no format change)**: remove the per-commit
+  persistent->transient->persistent round trip of untouched entries
+  (owner: cloning is waste). Caps at the full-frame hash, ~O(frame)
+  floor of roughly 30-60 us/commit.
+- **Chained novelty deltas (small format change, LMDB-style
+  touch-only-what-changed)**: the root frame stores its entry section
+  plus a digest link to this commit's small delta block (which links the
+  previous). Commit then hashes ~2 KB of new ops plus a small root
+  re-encode: O(novelty) floor, single-digit us. Bonus: a per-commit push
+  ships the ~2 KB delta block instead of the whole rewritten ~90 KB root
+  frame — a direct replication-bandwidth win consistent with
+  novelty-near-root sync. Flush folds the chain into children exactly as
+  the buffer flushes today.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
