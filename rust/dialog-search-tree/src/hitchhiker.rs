@@ -682,10 +682,43 @@ where
             // manifest; a tree born empty in this process has no stored header
             // yet and takes the default, which is exactly what its first
             // canonical write would stamp.
-            HitchhikerRoot::Loaded(node) => Ok(node
-                .persist(delta, &self.manifest.unwrap_or_default())?
-                .hash()
-                .clone()),
+            HitchhikerRoot::Loaded(node) => {
+                let node = node.persist(delta, &self.manifest.unwrap_or_default())?;
+                // Seed the shared node cache with the frame just produced:
+                // the very next read of this root (a manifest lookup, a
+                // query descent) otherwise misses, re-fetches the bytes
+                // from storage, and pays a full blake3 re-verification of
+                // a frame this process just hashed.
+                self.cache
+                    .insert(node.hash().clone(), node.buffer().clone());
+                Ok(node.hash().clone())
+            }
+        }
+    }
+
+    /// Serializes the buffered tree as-is (buffers intact) into `delta`
+    /// WITHOUT consuming it, returning its root hash.
+    ///
+    /// Byte- and hash-identical to [`persist`](Self::persist); the
+    /// difference is retention: the live spine survives, so the caller can
+    /// keep committing into it instead of re-opening the root frame from
+    /// bytes on every batch (see [`TransientNode::persist_mut`] for what is
+    /// kept live and what collapses back to links).
+    pub fn persist_mut(
+        &mut self,
+        delta: &mut Delta<Blake3Hash, Buffer>,
+    ) -> Result<Blake3Hash, DialogSearchTreeError> {
+        match &mut self.root {
+            HitchhikerRoot::Unloaded(hash) => Ok(hash.clone()),
+            HitchhikerRoot::Loaded(node) => {
+                let manifest = self.manifest.unwrap_or_default();
+                let node = node.persist_mut(delta, &manifest)?;
+                // Same cache seeding as `persist`: the frame this commit
+                // just produced is what the next read resolves the root to.
+                self.cache
+                    .insert(node.hash().clone(), node.buffer().clone());
+                Ok(node.hash().clone())
+            }
         }
     }
 }
@@ -1283,6 +1316,69 @@ mod tests {
             "the touched child's rewrite must reach the delta"
         );
 
+        Ok(())
+    }
+
+    /// A non-consuming persist must leave a spine that keeps producing
+    /// exactly the roots the persist-and-reopen cycle produces: byte
+    /// identity of the persisted frames is the whole contract behind
+    /// reusing the live spine across commits.
+    #[dialog_common::test]
+    async fn it_persists_identically_when_the_spine_stays_live() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // A canonical base wide enough for an index root with several
+        // children, so cascades touch subsets and re-sealed buffers mix
+        // with freshly encoded ones.
+        let keys: Vec<u32> = (0..1200).collect();
+        let base = sequential(&keys, &mut storage).await?;
+
+        // Live path: one spine held across every batch, serialized with
+        // `persist_mut` between batches. Oracle path: reopened from the
+        // persisted root before each batch, serialized with the consuming
+        // `persist`. The small buffer forces overflow cascades within the
+        // run, so both regimes (append and cascade) are covered.
+        let mut live = TestHitchhiker::open(&base).with_op_buf_size(8);
+        let mut oracle_root = base.root().clone();
+
+        for batch in 0..40u32 {
+            let batch_keys: Vec<u32> = (0..3).map(|i| (batch * 7 + i * 13) % 2000).collect();
+
+            let mut delta = Delta::zero();
+            for &k in &batch_keys {
+                live = live
+                    .insert(k.to_le_bytes(), vec![k as u8], &storage)
+                    .await?;
+            }
+            let live_root = live.persist_mut(&mut delta)?;
+            flush(&mut delta, &mut storage).await?;
+
+            let oracle_tree: TestTree = PersistentTree::seal(oracle_root, Cache::new());
+            let mut oracle = TestHitchhiker::open(&oracle_tree).with_op_buf_size(8);
+            for &k in &batch_keys {
+                oracle = oracle
+                    .insert(k.to_le_bytes(), vec![k as u8], &storage)
+                    .await?;
+            }
+            let mut delta = Delta::zero();
+            oracle_root = oracle.persist(&mut delta)?;
+            flush(&mut delta, &mut storage).await?;
+
+            assert_eq!(
+                live_root, oracle_root,
+                "live-spine persist diverged from persist-and-reopen at batch {batch}"
+            );
+        }
+
+        // The two paths must also agree on the canonical form.
+        let mut delta = Delta::zero();
+        let live_canonical = live.canonicalize(&storage, &mut delta).await?;
+        let oracle_tree: TestTree = PersistentTree::seal(oracle_root, Cache::new());
+        let mut delta = Delta::zero();
+        let oracle_canonical = TestHitchhiker::open(&oracle_tree)
+            .canonicalize(&storage, &mut delta)
+            .await?;
+        assert_eq!(live_canonical.root(), oracle_canonical.root());
         Ok(())
     }
 

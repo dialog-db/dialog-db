@@ -80,6 +80,18 @@ enum LinkNovelty<Value> {
     Sealed(NoveltyBuffer<Value>),
     /// Decoded ops, sorted by key with the newest op for a key last.
     Open(Vec<NoveltyEntry<Value>>),
+    /// Decoded ops WITH their current encoding alongside, the state a
+    /// non-consuming persist leaves an open link in: the next persist
+    /// re-embeds `buffer` verbatim (like a sealed link), while the next
+    /// mutation takes `entries` directly and drops the stale encoding (like
+    /// an open link) — so a link that ops keep landing in never re-decodes
+    /// its accumulated buffer, it only re-encodes it at each persist.
+    Cached {
+        /// The decoded ops, identical in content to `buffer`.
+        entries: Vec<NoveltyEntry<Value>>,
+        /// The encoding the last persist embedded.
+        buffer: NoveltyBuffer<Value>,
+    },
 }
 
 impl<Value> LinkNovelty<Value>
@@ -91,23 +103,30 @@ where
         match self {
             LinkNovelty::Sealed(buffer) => buffer.count as usize,
             LinkNovelty::Open(entries) => entries.len(),
+            LinkNovelty::Cached { entries, .. } => entries.len(),
         }
     }
 
     /// Lifts this link to its decoded entries for mutation, decoding a sealed
-    /// buffer. The sealed encoding is discarded: from here on this link's
-    /// buffer is re-encoded at persist, which is exactly the invalidation the
-    /// cache needs.
+    /// buffer. The encoding (sealed or cached) is discarded: from here on
+    /// this link's buffer is re-encoded at persist, which is exactly the
+    /// invalidation the cache needs.
     fn lift<K>(&mut self) -> Result<&mut Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
     where
         K: self::Key,
     {
-        if let LinkNovelty::Sealed(buffer) = self {
-            *self = LinkNovelty::Open(buffer.entries::<K>()?);
+        match self {
+            LinkNovelty::Sealed(buffer) => {
+                *self = LinkNovelty::Open(buffer.entries::<K>()?);
+            }
+            LinkNovelty::Cached { entries, .. } => {
+                *self = LinkNovelty::Open(std::mem::take(entries));
+            }
+            LinkNovelty::Open(_) => {}
         }
         match self {
             LinkNovelty::Open(entries) => Ok(entries),
-            LinkNovelty::Sealed(_) => unreachable!("sealed buffer was lifted above"),
+            _ => unreachable!("the buffer was lifted above"),
         }
     }
 
@@ -119,6 +138,7 @@ where
         match std::mem::replace(self, LinkNovelty::Open(Vec::new())) {
             LinkNovelty::Sealed(buffer) => buffer.entries::<K>(),
             LinkNovelty::Open(entries) => Ok(entries),
+            LinkNovelty::Cached { entries, .. } => Ok(entries),
         }
     }
 
@@ -130,7 +150,9 @@ where
     {
         match self {
             LinkNovelty::Sealed(buffer) => Ok(buffer.resolve::<K>(key)?.is_some()),
-            LinkNovelty::Open(entries) => Ok(resolve_pending(entries, key).is_some()),
+            LinkNovelty::Open(entries) | LinkNovelty::Cached { entries, .. } => {
+                Ok(resolve_pending(entries, key).is_some())
+            }
         }
     }
 }
@@ -274,7 +296,9 @@ where
         match self.links.get(at) {
             None => Ok(None),
             Some(LinkNovelty::Sealed(buffer)) => buffer.resolve::<K>(key),
-            Some(LinkNovelty::Open(entries)) => Ok(resolve_pending(entries, key).cloned()),
+            Some(LinkNovelty::Open(entries)) | Some(LinkNovelty::Cached { entries, .. }) => {
+                Ok(resolve_pending(entries, key).cloned())
+            }
         }
     }
 
@@ -341,7 +365,9 @@ where
         };
         let present = match link {
             LinkNovelty::Sealed(buffer) => buffer.resolve::<K>(key)?.is_some(),
-            LinkNovelty::Open(entries) => resolve_pending(entries, key).is_some(),
+            LinkNovelty::Open(entries) | LinkNovelty::Cached { entries, .. } => {
+                resolve_pending(entries, key).is_some()
+            }
         };
         if !present {
             return Ok(());
@@ -380,7 +406,7 @@ where
         // A risen bound: the leading ops of link `at` fall below it now.
         let strays_below = match self.links.get(at) {
             None => false,
-            Some(LinkNovelty::Open(entries)) => entries
+            Some(LinkNovelty::Open(entries)) | Some(LinkNovelty::Cached { entries, .. }) => entries
                 .first()
                 .is_some_and(|entry| entry.key.as_slice() < bound),
             Some(LinkNovelty::Sealed(buffer)) => match buffer.keys::<K>()?.next_key()? {
@@ -404,7 +430,7 @@ where
         // A dropped bound: the trailing ops of link `at - 1` reach it now.
         let strays_above = match self.links.get(at - 1) {
             None => false,
-            Some(LinkNovelty::Open(entries)) => entries
+            Some(LinkNovelty::Open(entries)) | Some(LinkNovelty::Cached { entries, .. }) => entries
                 .last()
                 .is_some_and(|entry| entry.key.as_slice() >= bound),
             Some(LinkNovelty::Sealed(buffer)) => {
@@ -445,7 +471,7 @@ where
     {
         for link in &self.links {
             match link {
-                LinkNovelty::Open(entries) => {
+                LinkNovelty::Open(entries) | LinkNovelty::Cached { entries, .. } => {
                     // Buffers are sorted by key, so the in-range ops are a
                     // contiguous run: seek to its start rather than walking
                     // the whole buffer.
@@ -564,7 +590,10 @@ where
                     }
                     NoveltyBuffer::from_entries::<K>(at as u32, entries)?
                 }
-                LinkNovelty::Sealed(mut sealed) => {
+                LinkNovelty::Cached {
+                    buffer: mut sealed, ..
+                }
+                | LinkNovelty::Sealed(mut sealed) => {
                     sealed.child = at as u32;
                     // The cache's whole contract: the sealed bytes must be
                     // exactly what a fresh encode of the same ops produces.
@@ -585,6 +614,97 @@ where
                         );
                     }
                     sealed
+                }
+            };
+            #[cfg(debug_assertions)]
+            debug_assert_grouped::<K, Value>(&buffer, at, links)?;
+            buffers.push(buffer);
+        }
+        Ok(buffers)
+    }
+
+    /// The stored per-link buffers for a NON-consuming persist, leaving the
+    /// set intact so the live spine survives the persist and keeps taking
+    /// writes.
+    ///
+    /// The borrowed twin of [`into_buffers`](Self::into_buffers), with one
+    /// addition: an open link is encoded once and then held as
+    /// [`LinkNovelty::Cached`] — the decoded ops stay live for the next
+    /// append (no re-decode of the accumulated buffer) while the encoding
+    /// is re-embedded verbatim by any persist that arrives before the next
+    /// mutation. Encoding is a pure function of the op list, so a cached
+    /// buffer is bit-identical to what a fresh open of the persisted node
+    /// would carry.
+    pub(crate) fn persist_buffers<K>(
+        &mut self,
+        links: &[Link],
+    ) -> Result<Vec<NoveltyBuffer<Value>>, DialogSearchTreeError>
+    where
+        K: self::Key,
+        Value: for<'a> Serialize<
+            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+        >,
+    {
+        let mut buffers = Vec::new();
+        for (at, link) in self.links.iter_mut().enumerate() {
+            if at >= links.len() {
+                if link.len() == 0 {
+                    continue;
+                }
+                return Err(DialogSearchTreeError::Node(
+                    "Novelty was buffered beyond the node's links".into(),
+                ));
+            }
+            let buffer = match link {
+                LinkNovelty::Open(entries) => {
+                    if entries.is_empty() {
+                        continue;
+                    }
+                    let buffer = NoveltyBuffer::from_entries_ref::<K>(at as u32, entries)?;
+                    let emitted = buffer.clone();
+                    *link = LinkNovelty::Cached {
+                        entries: std::mem::take(entries),
+                        buffer,
+                    };
+                    emitted
+                }
+                LinkNovelty::Cached { entries, buffer } => {
+                    // Siblings may have shifted this buffer's child index;
+                    // restamp the retained copy too so it stays in sync with
+                    // what was just persisted.
+                    buffer.child = at as u32;
+                    #[cfg(debug_assertions)]
+                    {
+                        let fresh = NoveltyBuffer::from_entries_ref::<K>(buffer.child, entries)?;
+                        let cached_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(buffer)
+                            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+                        let fresh_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fresh)
+                            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+                        debug_assert_eq!(
+                            cached_bytes.as_slice(),
+                            fresh_bytes.as_slice(),
+                            "a cached buffer must persist byte-identical to a fresh encode"
+                        );
+                    }
+                    buffer.clone()
+                }
+                LinkNovelty::Sealed(sealed) => {
+                    sealed.child = at as u32;
+                    #[cfg(debug_assertions)]
+                    {
+                        let fresh =
+                            NoveltyBuffer::from_entries::<K>(sealed.child, sealed.entries::<K>()?)?;
+                        let sealed_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(sealed)
+                            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+                        let fresh_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fresh)
+                            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+                        debug_assert_eq!(
+                            sealed_bytes.as_slice(),
+                            fresh_bytes.as_slice(),
+                            "a sealed buffer must persist byte-identical to a fresh encode"
+                        );
+                    }
+                    sealed.clone()
                 }
             };
             #[cfg(debug_assertions)]
@@ -1031,6 +1151,75 @@ where
                     .map(|child| child.into_link(delta, manifest))
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
                 let buffers = novelty.into_buffers::<Key>(&links)?;
+                PersistentNodeBody::index_from_buffers(links, buffers, *manifest)?
+            }
+        };
+
+        let node = PersistentNode::new(Buffer::from(body.as_bytes()?));
+        crate::distribution::audit::node(node.buffer().as_ref().len());
+        if let Some(kind) = audit_kind {
+            dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
+        }
+        delta.add(node.hash().clone(), node.buffer().clone());
+        Ok(node)
+    }
+
+    /// Serializes this transient node into a [`PersistentNode`] WITHOUT
+    /// consuming it, so the live spine survives the persist and the next
+    /// write appends to it instead of re-opening the frame from bytes.
+    ///
+    /// Semantically identical to [`persist`](Self::persist) — same codec,
+    /// same bytes, same hash — with two retention rules: transient CHILDREN
+    /// are persisted and collapsed back to [`Node::Persistent`] links
+    /// (children are touched only by amortized cascades, so keeping them
+    /// live would re-encode untouched frames on every subsequent persist),
+    /// and open novelty buffers are re-sealed in place with the encoding
+    /// they just produced (see [`Novelty::persist_buffers`]), so only links a
+    /// later write touches pay a fresh encode next time.
+    pub fn persist_mut(
+        &mut self,
+        delta: &mut Delta<Blake3Hash, Buffer>,
+        manifest: &Manifest,
+    ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
+        let audit_kind = if dialog_storage::dup_audit::enabled() {
+            Some(match &self {
+                TransientNode::Segment(_) => "segment",
+                TransientNode::Index(index) if index.novelty.is_empty() => "index-quiet",
+                TransientNode::Index(_) => "index-buffered",
+            })
+        } else {
+            None
+        };
+        let body = match self {
+            TransientNode::Segment(segment) => {
+                PersistentNodeBody::segment_from_entries(segment.entries().to_vec(), *manifest)?
+            }
+            TransientNode::Index(TransientIndex { children, novelty }) => {
+                // Collapse any live (cascade-touched) child back to its
+                // persisted link; an untouched persistent child passes
+                // through with no re-encode, exactly as in `persist`.
+                for child in children.iter_mut() {
+                    if matches!(child, Node::Transient(_)) {
+                        let lifted = std::mem::replace(
+                            child,
+                            Node::Transient(TransientNode::Segment(TransientSegment::new(
+                                Vec::new(),
+                                Vec::new(),
+                            ))),
+                        );
+                        *child = Node::Persistent(lifted.into_link(delta, manifest)?);
+                    }
+                }
+                let links = children
+                    .iter()
+                    .map(|child| match child {
+                        Node::Persistent(link) => Ok(link.clone()),
+                        Node::Transient(_) => Err(DialogSearchTreeError::Node(
+                            "A transient child survived link collapse".into(),
+                        )),
+                    })
+                    .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
+                let buffers = novelty.persist_buffers::<Key>(&links)?;
                 PersistentNodeBody::index_from_buffers(links, buffers, *manifest)?
             }
         };

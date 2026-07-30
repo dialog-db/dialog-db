@@ -46,6 +46,7 @@ use dialog_search_tree::{
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 use std::ops::RangeInclusive;
+use std::sync::{Arc, Mutex};
 
 use crate::history::Version;
 use crate::tree::{ArtifactTree, TreeStorageBridge, write_instructions};
@@ -276,6 +277,51 @@ pub struct BufferedBatch {
     cache: Cache<NodeHash, Buffer>,
     manifest: Manifest,
     changed: bool,
+    slot: Option<SpineSlot>,
+}
+
+/// A slot holding one live buffered spine between commits, keyed by the root
+/// hash it was persisted as.
+///
+/// Without it, every commit re-opens the root frame from bytes (decoding the
+/// frame, bulk-copying every sealed buffer) and re-drops the spine after the
+/// seal — the measured dominant cost of an in-memory commit. A caller that
+/// owns a sequence of commits holds one slot; [`BufferedBatch::apply_reusing`]
+/// takes the spine when its recorded root matches the tree being written
+/// (anything else — an external reset, a canonicalize, a concurrent writer —
+/// simply misses and falls back to a fresh open), and the non-canonicalizing
+/// [`seal`](BufferedBatch::seal) puts it back keyed by the new root.
+///
+/// Purely an in-process accelerator: the persisted bytes are identical with
+/// or without it (pinned by `it_persists_identically_when_the_spine_stays_live`
+/// in `dialog-search-tree` and `it_commits_identically_when_the_spine_is_reused`
+/// here), and dropping the slot at any point only costs the next commit a
+/// fresh open.
+#[derive(Clone, Default)]
+pub struct SpineSlot {
+    slot: Arc<Mutex<Option<(NodeHash, BufferedArtifactTree)>>>,
+}
+
+impl SpineSlot {
+    /// An empty slot.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Takes the held spine if it was persisted as `root`; a mismatch drops
+    /// the stale spine.
+    fn take(&self, root: &NodeHash) -> Option<BufferedArtifactTree> {
+        let mut slot = self.slot.lock().expect("spine slot lock");
+        match slot.take() {
+            Some((held_root, tree)) if &held_root == root => Some(tree),
+            _ => None,
+        }
+    }
+
+    /// Stores `tree` as the live spine for `root`.
+    fn put(&self, root: NodeHash, tree: BufferedArtifactTree) {
+        *self.slot.lock().expect("spine slot lock") = Some((root, tree));
+    }
 }
 
 impl BufferedBatch {
@@ -305,26 +351,67 @@ impl BufferedBatch {
             + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
+        Self::open_batch(tree, store, version, instructions, None).await
+    }
+
+    /// [`apply`](Self::apply) with a live spine carried across commits.
+    ///
+    /// When `slot` holds the spine persisted as `tree`'s root, the batch
+    /// writes into it directly — no root-frame decode, no sealed-buffer bulk
+    /// copies — and the non-canonicalizing [`seal`](Self::seal) puts it back
+    /// keyed by the root it produces, ready for the caller's next commit. A
+    /// slot miss (first commit, external root change, canonicalize) falls
+    /// back to exactly [`apply`](Self::apply)'s fresh open. The persisted
+    /// bytes are identical either way; the slot only removes the per-commit
+    /// round trip through them.
+    #[tracing::instrument(skip_all, name = "apply_batch_reusing")]
+    pub async fn apply_reusing<S, I>(
+        slot: &SpineSlot,
+        tree: &ArtifactTree,
+        store: &mut S,
+        version: Option<Version>,
+        instructions: I,
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+        I: Stream<Item = Instruction> + ConditionalSend,
+    {
+        Self::open_batch(tree, store, version, instructions, Some(slot.clone())).await
+    }
+
+    async fn open_batch<S, I>(
+        tree: &ArtifactTree,
+        store: &mut S,
+        version: Option<Version>,
+        instructions: I,
+        slot: Option<SpineSlot>,
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+        I: Stream<Item = Instruction> + ConditionalSend,
+    {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
         // Keys are built under the target tree's own format, read from the
         // manifest its root node carries. Writes preserve that format, so the
         // manifest captured here also governs the record entries appended
         // later and the root `seal` produces.
         let manifest = tree.manifest(&storage).await?;
-        let (buffered, changed) = write_instructions(
-            HitchhikerTree::open(tree),
-            store,
-            &storage,
-            version,
-            &manifest,
-            instructions,
-        )
-        .await?;
+        let spine = slot
+            .as_ref()
+            .and_then(|slot| slot.take(tree.root()))
+            .unwrap_or_else(|| HitchhikerTree::open(tree));
+        let (buffered, changed) =
+            write_instructions(spine, store, &storage, version, &manifest, instructions).await?;
         Ok(Self {
             tree: buffered,
             cache: tree.node_cache(),
             manifest,
             changed,
+            slot,
         })
     }
 
@@ -403,7 +490,19 @@ impl BufferedBatch {
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
         Ok(if canonicalize {
+            // Canonicalizing consumes the spine; a slot the batch carried
+            // stays empty and the next commit opens fresh from the canonical
+            // root.
             self.tree.canonicalize(&storage, delta).await?
+        } else if let Some(slot) = self.slot {
+            // Serialize the spine with its buffers intact and hand it back
+            // to the slot keyed by the root it just produced, so the
+            // caller's next commit appends to it instead of re-opening the
+            // frame from bytes.
+            let mut tree = self.tree;
+            let root = tree.persist_mut(delta)?;
+            slot.put(root.clone(), tree);
+            ArtifactTree::from_hash_with_cache(root, self.cache)
         } else {
             // Serialize the spine with its buffers intact and seal the
             // resulting root: the hash covers the buffered ops, so this is a
@@ -438,6 +537,30 @@ where
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     let batch = BufferedBatch::apply(tree, store, version, instructions).await?;
+    let changed = batch.changed();
+    *tree = batch.seal(store, delta, canonicalize).await?;
+    Ok(changed)
+}
+
+/// [`apply_buffered`] with a live spine carried across commits through
+/// `slot`: see [`BufferedBatch::apply_reusing`] for the reuse contract.
+#[tracing::instrument(skip_all, name = "apply_buffered_reusing")]
+pub async fn apply_buffered_reusing<S, I>(
+    slot: &SpineSlot,
+    tree: &mut ArtifactTree,
+    store: &mut S,
+    delta: &mut Delta<NodeHash, Buffer>,
+    version: Option<Version>,
+    instructions: I,
+    canonicalize: bool,
+) -> Result<bool, DialogArtifactsError>
+where
+    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + Clone
+        + ConditionalSync,
+    I: Stream<Item = Instruction> + ConditionalSend,
+{
+    let batch = BufferedBatch::apply_reusing(slot, tree, store, version, instructions).await?;
     let changed = batch.changed();
     *tree = batch.seal(store, delta, canonicalize).await?;
     Ok(changed)

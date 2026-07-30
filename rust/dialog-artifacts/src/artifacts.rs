@@ -75,7 +75,7 @@ use crate::tree::{
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State,
     artifacts::selector::Constrained,
-    buffered::{BufferedBatch, apply_buffered},
+    buffered::{BufferedBatch, SpineSlot, apply_buffered_reusing},
     make_reference,
 };
 
@@ -117,6 +117,11 @@ where
     /// same large value skips the store fetch. Content-addressed, so it never
     /// serves stale bytes.
     spill_cache: SpillCache,
+    /// Carries the live buffered spine between commits (keyed by root hash,
+    /// so any out-of-band root change simply misses), sparing every commit
+    /// the root-frame decode and sealed-buffer bulk copies of a fresh open.
+    /// Shared across clones, like the index it accelerates.
+    spine: SpineSlot,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -186,6 +191,7 @@ where
             storage,
             index: Arc::new(RwLock::new(index)),
             spill_cache: spill_cache(),
+            spine: SpineSlot::new(),
         })
     }
 
@@ -435,7 +441,8 @@ where
             // transaction bookkeeping — base-revision capture, revision
             // persistence, pointer advance, and the rollback below.
             let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
-            apply_buffered(
+            apply_buffered_reusing(
+                &self.spine,
                 &mut index,
                 &mut self.storage,
                 &mut delta,
@@ -480,8 +487,14 @@ where
             let mut index = self.index.write().await;
 
             let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
-            let batch =
-                BufferedBatch::apply(&index, &mut self.storage, None, stream::empty()).await?;
+            let batch = BufferedBatch::apply_reusing(
+                &self.spine,
+                &index,
+                &mut self.storage,
+                None,
+                stream::empty(),
+            )
+            .await?;
             *index = batch.seal(&self.storage, &mut delta, true).await?;
 
             Self::publish_root(&mut self.storage, &self.identifier, index.root(), delta).await
@@ -615,6 +628,54 @@ mod tests {
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A store that keeps its live spine across commits must publish exactly
+    /// the revisions a store that re-opens its root from bytes before every
+    /// commit publishes. This is the Artifacts-level pin of the spine-reuse
+    /// contract: same instruction batches, same revision hash after every
+    /// commit, and identical reads at the end.
+    #[dialog_common::test]
+    async fn it_commits_identically_when_the_spine_is_reused() -> Result<()> {
+        let reused_backend = MemoryStorageBackend::default();
+        let fresh_backend = MemoryStorageBackend::default();
+        let mut reused = Artifacts::open("spine-pin".into(), reused_backend.clone()).await?;
+
+        fn batch_instructions(batch: u32) -> Result<Vec<Instruction>> {
+            (0..3u32)
+                .map(|i| {
+                    let n = batch * 3 + i;
+                    Ok(Instruction::Assert(Artifact {
+                        the: Attribute::from_str("test/value")?,
+                        of: Entity::from_str(&format!(
+                            "entity:00000000-0000-0000-0000-{:012}",
+                            n % 40
+                        ))?,
+                        is: Value::String(format!("value {n}")),
+                        cause: None,
+                    }))
+                })
+                .collect()
+        }
+
+        for batch in 0..30u32 {
+            let live = reused.commit(batch_instructions(batch)?).await?;
+            // The oracle re-opens the store (and therefore the root frame)
+            // before every commit, so its spine slot never carries anything.
+            let mut fresh = Artifacts::open("spine-pin".into(), fresh_backend.clone()).await?;
+            let cold = fresh.commit(batch_instructions(batch)?).await?;
+            assert_eq!(
+                live, cold,
+                "spine reuse changed the published revision at batch {batch}"
+            );
+        }
+
+        let selector = ArtifactSelector::new().the(Attribute::from_str("test/value")?);
+        let reused_rows: Vec<Artifact> = reused.select(selector.clone()).try_collect().await?;
+        let fresh = Artifacts::open("spine-pin".into(), fresh_backend.clone()).await?;
+        let fresh_rows: Vec<Artifact> = fresh.select(selector).try_collect().await?;
+        assert_eq!(reused_rows.len(), fresh_rows.len());
+        Ok(())
+    }
 
     /// On-demand bug-tracker footprint: seeds the same 300 bugs the query
     /// benchmark uses (seven `squash.bug/*` facts each) into a disk-backed store
@@ -2165,8 +2226,10 @@ mod tests {
         // The threshold-based geometric distribution gives an exact 1/m
         // split at every level, so the tree is flatter than the bit-batch
         // distribution (whose upper levels averaged only 2-4 children) and a
-        // point query walks one fewer block to reach its leaf.
-        assert_eq!(net_reads, 2);
+        // point query walks one fewer block to reach its leaf. The root
+        // itself is served by the node cache the last persist seeded, so it
+        // costs no backend read at all.
+        assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -2226,8 +2289,10 @@ mod tests {
         // The threshold-based geometric distribution gives an exact 1/m
         // split at every level, so the tree is flatter than the bit-batch
         // distribution (whose upper levels averaged only 2-4 children) and a
-        // point query walks one fewer block to reach its leaf.
-        assert_eq!(net_reads, 2);
+        // point query walks one fewer block to reach its leaf. The root
+        // itself is served by the node cache the last persist seeded, so it
+        // costs no backend read at all.
+        assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -2322,8 +2387,9 @@ mod tests {
         // The threshold-based geometric distribution gives an exact 1/m
         // split at every level, so the tree is flatter than the bit-batch
         // distribution (whose upper levels averaged only 2-4 children) and
-        // reaching a leaf costs fewer block reads.
-        assert_eq!(net_reads, 2);
+        // reaching a leaf costs fewer block reads; the root is served by the
+        // node cache the last persist seeded.
+        assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
         let fact_stream =
@@ -2348,8 +2414,9 @@ mod tests {
         // reference, which changes leaf boundaries and the tree's shape, so the
         // scan's bounded descent touches a different set of blocks than the
         // reference layout did. Byte-paced boundaries (the default max_segment)
-        // pack this fixture's leaves so the descent lands on one fewer block.
-        assert_eq!(net_reads, 4);
+        // pack this fixture's leaves so the descent lands on one fewer block,
+        // and the cached root saves one more backend read.
+        assert_eq!(net_reads, 3);
         assert_eq!(net_writes, 0);
 
         Ok(())

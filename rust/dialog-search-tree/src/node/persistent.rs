@@ -347,6 +347,68 @@ where
         child: u32,
         entries: Vec<NoveltyEntry<Value>>,
     ) -> Result<Self, DialogSearchTreeError> {
+        let (count, layout, columns) = Self::key_columns::<Key>(&entries)?;
+
+        let mut polarity = Vec::with_capacity(entries.len());
+        let mut values = Vec::new();
+        for entry in entries {
+            match entry.op {
+                NoveltyOp::Assert(value) => {
+                    polarity.push(1);
+                    values.push(value);
+                }
+                NoveltyOp::Retract => polarity.push(0),
+            }
+        }
+
+        Ok(Self {
+            child,
+            count,
+            layout,
+            columns,
+            polarity,
+            values,
+        })
+    }
+
+    /// [`from_entries`](Self::from_entries) without consuming the op list:
+    /// the values are cloned into the buffer instead of moved. Exists for
+    /// the non-consuming persist, which must keep the decoded ops live for
+    /// later appends while embedding their encoding into the frame.
+    pub fn from_entries_ref<Key: self::Key>(
+        child: u32,
+        entries: &[NoveltyEntry<Value>],
+    ) -> Result<Self, DialogSearchTreeError> {
+        let (count, layout, columns) = Self::key_columns::<Key>(entries)?;
+
+        let mut polarity = Vec::with_capacity(entries.len());
+        let mut values = Vec::new();
+        for entry in entries {
+            match &entry.op {
+                NoveltyOp::Assert(value) => {
+                    polarity.push(1);
+                    values.push(value.clone());
+                }
+                NoveltyOp::Retract => polarity.push(0),
+            }
+        }
+
+        Ok(Self {
+            child,
+            count,
+            layout,
+            columns,
+            polarity,
+            values,
+        })
+    }
+
+    /// The key side of the buffer encoding, shared by the consuming and
+    /// borrowing constructors: layout classification plus the columnar
+    /// encode of every key.
+    fn key_columns<Key: self::Key>(
+        entries: &[NoveltyEntry<Value>],
+    ) -> Result<(u32, u8, Vec<ColumnData>), DialogSearchTreeError> {
         let count = entries.len() as u32;
         if entries.is_empty() {
             return Err(DialogSearchTreeError::Node(
@@ -393,26 +455,7 @@ where
             (MIXED_LAYOUT, vec![ColumnData::Arena { prefix, stream }])
         };
 
-        let mut polarity = Vec::with_capacity(entries.len());
-        let mut values = Vec::new();
-        for entry in entries {
-            match entry.op {
-                NoveltyOp::Assert(value) => {
-                    polarity.push(1);
-                    values.push(value);
-                }
-                NoveltyOp::Retract => polarity.push(0),
-            }
-        }
-
-        Ok(Self {
-            child,
-            count,
-            layout,
-            columns,
-            polarity,
-            values,
-        })
+        Ok((count, layout, columns))
     }
 
     /// The op count claimed by `count`, validated against the polarity and
