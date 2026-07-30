@@ -1341,6 +1341,70 @@ recommending a default change; these runs used the reshape-fixed
 small-S path (the old crash at max_segment <= 16K + 10K txns is gone
 on this branch).
 
+### Reshape attribution (2026-07-30): forced-run widening dominates at scale
+
+Stack sampling of the (32K, 32K) slow tail (gdb poor-man's profiler,
+50 samples) showed the canonical re-shape machinery dominating:
+`reshape_path` / `splice_and_regroup` / `regroup_children_reusing` /
+`carry_novelty` / `Novelty::route` / `index_frame_cut_positions` /
+`seam_rank`. Two code-level findings and two fixes landed:
+
+1. Every deferred edit that entered a re-shape paid `take_all` +
+   re-route + cached-encoding destruction of EVERY en-route index
+   node's buffered novelty, plus a full splice-and-regroup of each
+   ancestor's child list — even for interior edits that provably
+   cannot change the shape. Fixed: `reshape_path` now short-circuits
+   per level when the child re-cut to exactly one piece with an
+   unchanged separator (all index-level decisions read separators
+   only). Widened edits excluded — forced-run merges fuse pieces into
+   a window only the regroup re-splits. `edit_audit` (new) counts the
+   skips: 400-1,500 per 2,500-commit window across configs.
+2. The `edit_audit` tallies (new relaxed-atomic counters in the same
+   style as the distribution audit, printed per window by
+   write_attribution) attribute how each canonical edit resolves.
+
+The edit-mix data is the headline. Out of ~21K canonical edits per
+2,500-commit window:
+
+| config | fast (in-place) | leaf widened | index widened |
+|---|---|---|---|
+| 64K/64K (depth 2, root under ceiling) | 13.5-17.6K | 1.6-7.2K (8-35%) | 0 |
+| 32K/32K before depth 3 | ~15K | 4-6K | ~0 |
+| 32K/32K after depth 3 | ~600 | 3-7K | **14-17.7K (~80%)** |
+| 16K/16K (depth 3 throughout) | 3.8-14.4K | 2.7-5.6K | 4.6-11.9K |
+
+Reading: the design assumed force-split frames are rare ("the coin's
+e^(-ceiling/S) tail", and the merge machinery's own doc records that
+running it per over-target run was once a 7x regression). On real
+data they are NOT rare in edit-share terms: ~5% of frames exceed the
+ceiling with no natural cut, but those frames are by construction the
+FATTEST, so they attract a large share of edits — and every
+membership-changing edit into one merges the whole run, re-elects
+anchors, re-splits, and re-routes all buffered novelty through the
+window. Frequency is similar at every S; per-merge cost scales with
+S. That is exactly why (16K, 16K) measures fastest (small frames),
+why (32K, 32K) collapsed 3x after its root force-split into an
+~860-link frame (~80% of edits re-merging it), and why the (64K, 64K)
+default is only safe until its root crosses the 196KB index ceiling
+at roughly 2x the current 25K-txn scale — the catastrophe class
+reaches the default config at ~50K txns.
+
+**Policy fork (owner decision wanted).** The evidence points at the
+flat memoryless coin's tail + forced-anchor backstop combination as
+the structural cost at scale. The owner's originally recalled plan —
+"apply pressure once we pass some threshold until boundary is
+forced" — looks right on the measurements. Concretely: generalize the
+existing bank so a run's weight past a threshold (e.g. 2S) is added
+to every subsequent coin's weight argument. P(cut) then approaches 1
+before the run reaches the 3S ceiling, so forced anchors (and the
+per-edit widening they require) essentially vanish, leaf and index
+level alike. Locality is preserved: a run starts at an accepted cut,
+which is a stored leaf/node boundary, so the accumulated-weight
+context of any coin is local to the node the regroup already scans —
+this is NOT the dolt-style cross-boundary pressure step 4 rejected.
+Canonical shapes change (pre-ship acceptable). Plan: prototype behind
+an env flag, A/B the scale curve and edit mix, then decide.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
