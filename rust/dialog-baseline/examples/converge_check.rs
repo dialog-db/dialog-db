@@ -56,25 +56,51 @@ async fn replay_grouped(
         .await?
         .ok_or_else(|| anyhow::anyhow!("revision block missing"))?;
     let root: IndexRoot = CborEncoder.decode(&bytes).await?;
-    let mut stack = vec![*root.index()];
+    let mut stack: Vec<(Blake3Hash, Vec<u8>)> = vec![(*root.index(), Vec::new())];
     let mut keyroll: Vec<u8> = Vec::new();
     let mut entries = 0usize;
-    while let Some(hash) = stack.pop() {
+    let diff = std::env::var("DIALOG_CONVERGE_DIFF").is_ok();
+    while let Some((hash, separator)) = stack.pop() {
         let Some(bytes) = backend.get(&hash).await? else {
             anyhow::bail!("reachable node missing");
         };
+        let size = bytes.len();
         let node = TreeNode::new(TreeBuffer::from(bytes));
         match node.body()? {
             ArchivedNodeBody::Index(index) => {
                 for at in (0..index.len()).rev() {
-                    stack.push(*index.hash_at(at)?.as_bytes());
+                    stack.push((*index.hash_at(at)?.as_bytes(), index.separator(at)?));
                 }
             }
             ArchivedNodeBody::Segment(segment) => {
+                let mut leaf_entries = 0usize;
+                let mut first: Option<Vec<u8>> = None;
                 let mut keys = segment.keys::<Key>()?;
                 while let Some((_, key)) = keys.next_key()? {
+                    if first.is_none() {
+                        first = Some(key.to_vec());
+                    }
                     keyroll.extend_from_slice(key);
                     entries += 1;
+                    leaf_entries += 1;
+                }
+                if diff {
+                    // The leaf partition, one line per leaf: the stored
+                    // separator length marks forced pieces (longer than the
+                    // max_separator bound is the self-identifying forced
+                    // seam), the first-key prefix aligns the arms.
+                    println!(
+                        "  LEAF group={group} sep_len={} entries={leaf_entries} bytes={size} first={}",
+                        separator.len(),
+                        first
+                            .as_deref()
+                            .map(|key| key
+                                .iter()
+                                .take(12)
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>())
+                            .unwrap_or_default(),
+                    );
                 }
             }
         }
