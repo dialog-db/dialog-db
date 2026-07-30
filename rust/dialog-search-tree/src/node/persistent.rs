@@ -458,6 +458,26 @@ where
         Ok((count, layout, columns))
     }
 
+    /// The buffered weight this sealed buffer carries (key bytes plus value
+    /// payload weights, retracts charged at 16), for the byte-capped flush
+    /// trigger: computed by streaming the key columns, with no entry
+    /// materialization.
+    pub fn weight<Key: self::Key>(&self) -> Result<usize, DialogSearchTreeError> {
+        let mut weight = 0usize;
+        let mut keys = self.keys::<Key>()?;
+        while let Some((_, key)) = keys.next_key()? {
+            weight += key.len();
+        }
+        weight += self
+            .values
+            .iter()
+            .map(|value| value.payload_weight())
+            .sum::<usize>();
+        weight += 16 * self.polarity.iter().filter(|&&p| p == 0).count();
+        weight += crate::entry::ENTRY_ENCODING_OVERHEAD * self.count as usize;
+        Ok(weight)
+    }
+
     /// The op count claimed by `count`, validated against the polarity and
     /// value tables, mirroring [`ArchivedNoveltyBuffer::checked_count`] for a
     /// buffer held in its owned form (a sealed transient link buffer).

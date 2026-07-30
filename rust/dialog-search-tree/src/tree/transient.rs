@@ -5727,9 +5727,10 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let manifest = ceiling_manifest(2, 0);
 
-        // A small vetoed cluster (under the 512 stretch target, so the
-        // stretch backstop stays out of the picture) whose terminal seam
-        // coin is tails, found deterministically over cluster tags.
+        // A small vetoed cluster (under the 512 stretch target — three
+        // 34-byte keys at the calibrated per-entry weight, so the stretch
+        // backstop stays out of the picture) whose terminal seam coin is
+        // tails, found deterministically over cluster tags.
         let cluster = {
             let mut tag = b'a';
             loop {
@@ -5739,14 +5740,19 @@ mod tests {
                     bytes.extend(format!("{n:04}").into_bytes());
                     VarKey(bytes)
                 };
-                let keys: Vec<VarKey> = (0..5u32).map(make).collect();
+                let keys: Vec<VarKey> = (0..3u32).map(make).collect();
                 // The terminal coin's charge mirrors production: the vetoed
-                // stretch's bank plus the terminal entry's own full weight.
+                // stretch's bank plus the terminal entry's own full weight,
+                // both metered by `Entry::weight` (payload plus the
+                // calibrated encoding overhead on top of the key bytes).
                 let charge: usize = keys
                     .iter()
-                    .map(|key| distribution::cap::entry_weight(&key.0))
+                    .map(|key| {
+                        distribution::cap::entry_weight(&key.0)
+                            + crate::entry::ENTRY_ENCODING_OVERHEAD
+                    })
                     .sum();
-                let last = &keys[4];
+                let last = &keys[2];
                 if !<Geometric as Distribution>::leaf_cut(&last.0, charge, &manifest) {
                     break keys;
                 }

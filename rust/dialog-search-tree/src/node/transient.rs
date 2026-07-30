@@ -178,6 +178,27 @@ pub struct Novelty<Value> {
     /// Total buffered ops across every link, so capacity triggers read a
     /// number instead of scanning.
     total: usize,
+    /// Total buffered WEIGHT across every link (key bytes + value payload
+    /// weight per op, the same metering the frame ceiling uses), for the
+    /// byte-capped flush trigger. `None` until first asked for (a spine
+    /// opened from stored buffers computes it lazily by streaming the
+    /// sealed columns); once computed, every mutator keeps it exact.
+    weight: Option<usize>,
+}
+
+/// The weight one buffered op contributes toward the buffer byte cap: its
+/// key bytes plus its value's payload weight (a retract carries no value
+/// and is charged like [`State::Removed`]'s footprint).
+fn novelty_entry_weight<Value>(entry: &NoveltyEntry<Value>) -> usize
+where
+    Value: self::Value,
+{
+    entry.key.len()
+        + crate::entry::ENTRY_ENCODING_OVERHEAD
+        + match &entry.op {
+            NoveltyOp::Assert(value) => value.payload_weight(),
+            NoveltyOp::Retract => 16,
+        }
 }
 
 impl<Value> Default for Novelty<Value> {
@@ -192,6 +213,7 @@ impl<Value> Novelty<Value> {
         Self {
             links: Vec::new(),
             total: 0,
+            weight: Some(0),
         }
     }
 
@@ -275,6 +297,9 @@ where
         }
         for (at, bucket) in buckets {
             self.total += bucket.len();
+            if let Some(weight) = self.weight.as_mut() {
+                *weight += bucket.iter().map(novelty_entry_weight).sum::<usize>();
+            }
             let entries = self.link_mut(at).lift::<K>()?;
             entries.extend(bucket);
             entries.sort_by(|left, right| left.key.cmp(&right.key));
@@ -302,6 +327,30 @@ where
         }
     }
 
+    /// Total buffered weight across every link (the byte-cap trigger's
+    /// quantity), computed lazily on first ask — a spine opened from stored
+    /// buffers streams their sealed columns once — and kept exact by every
+    /// mutator afterwards.
+    pub(crate) fn weight<K>(&mut self) -> Result<usize, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        if let Some(weight) = self.weight {
+            return Ok(weight);
+        }
+        let mut weight = 0usize;
+        for link in &self.links {
+            weight += match link {
+                LinkNovelty::Sealed(buffer) => buffer.weight::<K>()?,
+                LinkNovelty::Open(entries) | LinkNovelty::Cached { entries, .. } => {
+                    entries.iter().map(novelty_entry_weight).sum()
+                }
+            };
+        }
+        self.weight = Some(weight);
+        Ok(weight)
+    }
+
     /// Takes link `at`'s ops, leaving that buffer empty: what a flush hands
     /// the child at `at`, verbatim: the grouping already happened at
     /// enqueue, so there is no partition step here.
@@ -317,6 +366,9 @@ where
             Some(link) => {
                 let taken = link.take::<K>()?;
                 self.total -= taken.len();
+                if let Some(weight) = self.weight.as_mut() {
+                    *weight -= taken.iter().map(novelty_entry_weight).sum::<usize>();
+                }
                 Ok(taken)
             }
         }
@@ -336,6 +388,7 @@ where
         }
         self.links.clear();
         self.total = 0;
+        self.weight = Some(0);
         Ok(out)
     }
 
@@ -374,8 +427,18 @@ where
         }
         let entries = link.lift::<K>()?;
         let before = entries.len();
-        entries.retain(|entry| entry.key.as_slice() != key);
+        let mut removed_weight = 0usize;
+        entries.retain(|entry| {
+            let keep = entry.key.as_slice() != key;
+            if !keep {
+                removed_weight += novelty_entry_weight(entry);
+            }
+            keep
+        });
         self.total -= before - entries.len();
+        if let Some(weight) = self.weight.as_mut() {
+            *weight -= removed_weight;
+        }
         Ok(())
     }
 
@@ -756,7 +819,11 @@ where
             }
             links[child] = LinkNovelty::Sealed(sealed);
         }
-        Ok(Self { links, total })
+        Ok(Self {
+            links,
+            total,
+            weight: None,
+        })
     }
 }
 

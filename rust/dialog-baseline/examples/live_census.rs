@@ -89,10 +89,19 @@ async fn census(
             }
             ArchivedNodeBody::Segment(segment) => {
                 let mut weight = 0usize;
+                let mut key_bytes = 0usize;
+                let mut payload = 0usize;
+                let mut entries = 0usize;
                 let mut keys = segment.keys::<Key>()?;
                 while let Some((at, key)) = keys.next_key()? {
                     let value: State<Datum> = into_owned(segment.value_at(at)?)?;
-                    weight += key.len() + value.payload_weight();
+                    key_bytes += key.len();
+                    payload += value.payload_weight();
+                    entries += 1;
+                }
+                weight += key_bytes + payload;
+                if std::env::var("DIALOG_CENSUS_DUMP").is_ok() {
+                    println!("LEAF {size} {weight} {entries} {key_bytes} {payload}");
                 }
                 weights.push((size, weight));
                 leaves.push(size);

@@ -70,6 +70,29 @@ pub const DEFAULT_OP_BUF_SIZE: usize = 256;
 /// the leaves) proportionally more often — so the optimum balances
 /// O(capacity) per commit against O(flush)/capacity amortized, and it is
 /// a measurement question, not a constant to guess.
+/// The op-buffer BYTE cap trees open under: unlimited unless
+/// `DIALOG_TREE_OP_BUF_BYTES` sets one (experiment plumbing, read once
+/// per process, native only; 0 or unset = off). The op-count cap bounds
+/// how many ops a buffer holds; this bounds their WEIGHT (key bytes +
+/// value payloads), which is what actually rides the root frame into
+/// every per-commit rewrite and every pushed operational block — a
+/// byte-heavy workload can pack ~200 KB into 256 ops.
+fn default_op_buf_bytes() -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *BYTES.get_or_init(|| {
+            std::env::var("DIALOG_TREE_OP_BUF_BYTES")
+                .ok()
+                .and_then(|raw| raw.parse().ok())
+                .filter(|&bytes| bytes > 0)
+                .unwrap_or(usize::MAX)
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    usize::MAX
+}
+
 fn default_op_buf_size() -> usize {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -194,6 +217,7 @@ where
     root: HitchhikerRoot<Key, Value>,
     cache: Cache<Blake3Hash, Buffer>,
     op_buf_size: usize,
+    op_buf_bytes: usize,
     policy: FlushPolicy,
     trigger: FlushTrigger,
     /// The tree's format header, captured from the root node the first time a
@@ -232,6 +256,7 @@ where
             root: HitchhikerRoot::Unloaded(tree.root().clone()),
             cache: tree.node_cache(),
             op_buf_size: default_op_buf_size(),
+            op_buf_bytes: default_op_buf_bytes(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
             manifest: None,
@@ -245,6 +270,7 @@ where
             root: HitchhikerRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
             cache: Cache::new(),
             op_buf_size: default_op_buf_size(),
+            op_buf_bytes: default_op_buf_bytes(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
             manifest: None,
@@ -255,6 +281,14 @@ where
     /// Sets the per-node novelty capacity (the write-amplification knob).
     pub fn with_op_buf_size(mut self, op_buf_size: usize) -> Self {
         self.op_buf_size = op_buf_size.max(1);
+        self
+    }
+
+    /// Sets the per-node novelty WEIGHT cap: the buffer flushes when its
+    /// buffered weight (key bytes + value payloads) exceeds this, whatever
+    /// the op count. `usize::MAX` (the default) disables the byte trigger.
+    pub fn with_op_buf_bytes(mut self, op_buf_bytes: usize) -> Self {
+        self.op_buf_bytes = op_buf_bytes.max(1);
         self
     }
 
@@ -452,6 +486,7 @@ where
                     msgs,
                     EnqueueConfig {
                         op_buf_size: self.op_buf_size,
+                        op_buf_bytes: self.op_buf_bytes,
                         policy: self.policy,
                         trigger: self.trigger,
                         settle,
@@ -844,6 +879,7 @@ where
 #[derive(Clone, Copy)]
 struct EnqueueConfig {
     op_buf_size: usize,
+    op_buf_bytes: usize,
     policy: FlushPolicy,
     trigger: FlushTrigger,
     settle: bool,
@@ -912,20 +948,28 @@ where
         // overflowed; `PerChild` asks whether any one child now has a batch
         // worth writing, which scales the decision to this node's own
         // fan-out. Both read lengths the grouped buffer already tracks.
-        let flushes = match config.trigger {
-            FlushTrigger::Capacity => index.novelty.len() > config.op_buf_size,
-            FlushTrigger::PerChild { floor } => {
-                // Never exceed the buffer's capacity, whatever the per-child
-                // threshold works out to.
-                if index.novelty.len() > config.op_buf_size {
-                    true
-                } else {
-                    let children = index.children.len().max(1);
-                    let threshold = (config.op_buf_size / children).max(floor).max(1);
-                    index.novelty.peak() >= threshold
+        // The byte cap fires regardless of the count trigger: op counts
+        // bound how many ops ride the frame, the weight cap bounds how many
+        // BYTES do (a value-heavy workload can pack ~200 KB into 256 ops,
+        // and buffered weight rides every per-commit root rewrite and every
+        // pushed operational block).
+        let over_bytes = config.op_buf_bytes != usize::MAX
+            && index.novelty.weight::<Key>()? > config.op_buf_bytes;
+        let flushes = over_bytes
+            || match config.trigger {
+                FlushTrigger::Capacity => index.novelty.len() > config.op_buf_size,
+                FlushTrigger::PerChild { floor } => {
+                    // Never exceed the buffer's capacity, whatever the
+                    // per-child threshold works out to.
+                    if index.novelty.len() > config.op_buf_size {
+                        true
+                    } else {
+                        let children = index.children.len().max(1);
+                        let threshold = (config.op_buf_size / children).max(floor).max(1);
+                        index.novelty.peak() >= threshold
+                    }
                 }
-            }
-        };
+            };
 
         // Room: the ops stay where routing put them.
         if !flushes {

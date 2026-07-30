@@ -1121,6 +1121,59 @@ locality. If factor-1/2 regroup cost matters at scale, the
 experiment's own noted lever — incremental segment-weight bookkeeping
 on the edit path — is the follow-up, not a new coin.
 
+### Buffer byte-cap + weight calibration landed, impact measured (2026-07-30)
+
+Owner sign-off on items 2-3 with "measure impact". Both landed on
+`claude/perf-7-oplog-spike`; all suites green (292/159/193), wasm32
+clean.
+
+**Item 2 — novelty buffer byte cap.** `Novelty` now carries exact
+weight bookkeeping (lazy for spines opened from stored buffers — the
+sealed columns stream once — exact under every mutator after), and the
+flush trigger fires on `ops > op_cap OR weight > byte_cap`. Knobs:
+`HitchhikerTree::with_op_buf_bytes` / `DIALOG_TREE_OP_BUF_BYTES`;
+DEFAULT OFF pending the owner's choice. Measured (10K real txns,
+replay us/txn; the cap bounds the operational root block, which
+otherwise sawtooths to ~200 KB+ of buffered ops riding every commit
+rewrite and every push):
+
+| byte cap | replay | operational root at snapshot |
+|---|---|---|
+| off | 1765 | 52 KB (sawtooths unbounded) |
+| 64 KiB | 2068 (+17%) | <= cap + one commit |
+| 32 KiB | 2618 (+48%) | <= cap + one commit |
+| 16 KiB | 3159 (+79%) | <= cap + one commit |
+
+Recommendation: 64 KiB (~S) as default — bounded push payloads and
+commit rewrites for +17%; workloads that prize commit latency can
+raise it.
+
+**Item 3 — weight-to-byte calibration.** Per-leaf component dump +
+least-squares fit found the drift is a flat ~64-72 bytes/entry of
+encoding overhead (columnar offsets, dictionary/value-table framing)
+that `Entry::weight` did not charge; key bytes track 1.01x and payload
+~flat. Landed as `ENTRY_ENCODING_OVERHEAD = 64` charged by
+`Entry::weight` (and the buffer cap's metering). Measured:
+
+| config | max leaf bytes vs byte ceiling | replay |
+|---|---|---|
+| factor 3, uncalibrated | 365 KB = 1.86x | ~1.8-2.2 ms/txn |
+| **factor 3, calibrated** | **198 KB = 1.007x** | 1735 us/txn (no cost) |
+| **factor 2, calibrated** | **134 KB = 1.03x** | 2052 (+18%) |
+
+The frame ceiling now denominates in effective bytes: blocks are hard-
+bounded at ~factor x S x 1.02. Combined with the byte-capped buffer,
+"blocks come out arbitrary sizes" is closed at both the canonical and
+operational layers; the (S, factor) pair is now an honest byte knob
+(e.g. factor 2 x S=32K ~ 66 KB hard bound for the ~50 KB network
+goal). CAVEAT: the calibration changes canonical shapes (boundary
+decisions move), so trees built before/after diverge byte-wise —
+fine pre-ship per the boundary note's "nothing has shipped", but it
+is a coordination point. One fixture updated for the new metering
+(`it_anchors_frames_only_at_accepted_seams`: its cluster crossed the
+stretch target under the calibrated weight, which made the stretch
+backstop fire — correctly — inside it).
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
