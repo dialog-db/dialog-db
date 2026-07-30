@@ -140,11 +140,18 @@ async fn execute_run(daemon: &Arc<Daemon>, request: RunRequest) -> Result<RunRep
         .map(|test| test.export.as_str())
         .collect();
 
+    // Assets live on one fixed origin regardless of the per-run page origin.
+    // Together with disabled cache partitioning in the browser (see
+    // browser.rs) this lets every tab share one HTTP-cache and compiled-code
+    // cache entry for the (large) wasm module instead of recompiling it per
+    // origin. The asset path embeds the binary fingerprint, so entries are
+    // immutable and cacheable forever.
+    let assets = format!("http://assets.localhost:{}", daemon.port);
     let run_id = daemon.run_counter.fetch_add(1, Ordering::SeqCst);
     let scripts = harness::generate(&harness::RunConfig {
         mode,
-        module_js: &format!("/a/{}/{}.js", binary.id, codegen::MODULE_NAME),
-        module_wasm: &format!("/a/{}/{}_bg.wasm", binary.id, codegen::MODULE_NAME),
+        module_js: &format!("{assets}/a/{}/{}.js", binary.id, codegen::MODULE_NAME),
+        module_wasm: &format!("{assets}/a/{}/{}_bg.wasm", binary.id, codegen::MODULE_NAME),
         exports: &exports,
         include_ignored: request.args.include_ignored,
         filtered_count: filtered.filtered,
@@ -324,5 +331,17 @@ async fn asset(
         Some("json") | Some("map") => "application/json",
         _ => "application/octet-stream",
     };
-    ([(header::CONTENT_TYPE, content_type)], bytes).into_response()
+    // Pages load these cross-origin (from their per-run origin) while under
+    // COEP: require-corp, which needs CORS plus an explicit CORP grant. The
+    // fingerprinted path makes aggressive caching safe.
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "*"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        [("Cross-Origin-Resource-Policy", "cross-origin")],
+        bytes,
+    )
+        .into_response()
 }

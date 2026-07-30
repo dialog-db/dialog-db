@@ -145,7 +145,21 @@ impl Browser {
             .arg("--no-default-browser-check")
             .arg("--disable-background-networking")
             .arg("--disable-gpu")
-            .arg("--disable-dev-shm-usage");
+            .arg("--disable-dev-shm-usage")
+            // Every run lives on its own origin, which would normally give
+            // each test its own partition of the HTTP cache and compiled-code
+            // cache and force the wasm module to be refetched and recompiled
+            // per test. Assets are served from one fixed origin
+            // (assets.localhost), and these flags let all test origins share
+            // its cache entries. Site-isolation origin locks also key the
+            // compiled-code cache, hence the last flag; test code is trusted,
+            // so relaxing cross-tab process isolation is an acceptable trade.
+            .arg("--disable-features=SplitCacheByNetworkIsolationKey,SplitCodeCacheByNetworkIsolationKey,SplitHttpCacheByNetworkIsolationKey")
+            .arg("--disable-site-isolation-trials")
+            // Only compile the wasm functions a test actually calls; a
+            // single test typically touches a small fraction of a large
+            // debug-build module.
+            .arg("--js-flags=--wasm-lazy-compilation");
 
         let is_root = unsafe { libc::geteuid() } == 0;
         if is_root || std::env::var_os("WBG_POOL_NO_SANDBOX").is_some() {

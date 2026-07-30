@@ -14,12 +14,14 @@ suite spend 84 minutes running tests whose actual bodies finish in seconds).
 `wbg-pool` keeps one headless Chrome alive in a background daemon and turns
 each runner invocation into a **fresh tab on a fresh origin**:
 
-- **Fast**: tab creation instead of browser boot, codegen cached per binary.
-  Warm per-test overhead is ~0.2s. A 76-test suite that took 214s under the
+- **Fast**: tab creation instead of browser boot, codegen cached per
+  binary, and one shared compiled-wasm cache across all test origins
+  (assets are served from a single fixed origin with cache partitioning
+  disabled, plus lazy wasm compilation). Warm per-test overhead is ~0.15s
+  even for a 200MB debug binary. A 76-test suite that took 214s under the
   stock runner + nextest takes ~12s; a 1,717-test workspace whose CI test
-  phase took 84 minutes finishes in ~16 (4 cores, debug builds — most of
-  the remaining overhead is per-tab wasm compilation of large debug
-  modules, a known future optimization).
+  phase took 84 minutes finishes in ~10 (4 cores, debug builds), at which
+  point actual test bodies dominate the wall clock.
 - **Isolated**: every test runs on its own `t-<n>.localhost` origin, with
   pristine IndexedDB, OPFS, localStorage, caches and service worker
   registrations. This is *stronger* isolation than sharing a page (what
@@ -82,6 +84,12 @@ cargo nextest ──spawns──▶ wbg-pool (shim, one per test)
 - Each run gets a unique loopback origin — Chrome resolves any
   `*.localhost` subdomain to 127.0.0.1, and such origins are secure
   contexts, so OPFS, service workers and friends all work.
+- Generated assets are served from one fixed origin
+  (`assets.localhost`, fingerprinted immutable paths, CORS +
+  `Cross-Origin-Resource-Policy` for COEP pages), and the browser is
+  launched with HTTP-cache/code-cache partitioning disabled and
+  `--wasm-lazy-compilation`, so all test origins share one fetch and one
+  compilation of each test module instead of recompiling per test.
 - The page (or worker harness) reports the libtest-formatted result back
   over `fetch`; the shim prints it and exits with the appropriate status,
   byte-compatible with the stock runner's output on both success and

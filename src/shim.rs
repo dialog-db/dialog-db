@@ -57,7 +57,14 @@ pub fn main(args: Vec<OsString>) -> Result<()> {
         let filtered = suite::filter(&suite.tests, &cli.filter_args());
         let mut stdout = std::io::stdout().lock();
         for test in filtered.to_run {
-            writeln!(stdout, "{}: test", test.name)?;
+            // A closed stdout (e.g. `wbg-pool foo.wasm --list | head`) is
+            // not an error worth reporting.
+            if let Err(error) = writeln!(stdout, "{}: test", test.name) {
+                if error.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
         }
         return Ok(());
     }
