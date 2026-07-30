@@ -36,6 +36,8 @@ fn main() -> anyhow::Result<()> {
         let mut store = Artifacts::anonymous(backend.clone()).await?;
         let mut committed = 0usize;
         let (mut last_writes, mut last_bytes) = (0usize, 0usize);
+        let (mut last_reads, mut last_read_bytes) = (0usize, 0usize);
+        let mut window_started = std::time::Instant::now();
         println!("commits  writes  set_bytes  (per-commit in window)");
         for commit in &log.transactions {
             store
@@ -44,12 +46,18 @@ fn main() -> anyhow::Result<()> {
             committed += 1;
             if committed.is_multiple_of(window) {
                 let (writes, bytes) = (backend.writes(), backend.write_bytes());
+                let (reads, read_bytes) = (backend.reads(), backend.read_bytes());
                 println!(
-                    "{committed:7}  {writes:6}  {bytes:9}  ({:.1} sets, {:.0} bytes per commit)",
+                    "{committed:7}  {:.1} sets / {:.0} B written, {:.1} gets / {:.0} B read, {:.0} us per commit",
                     (writes - last_writes) as f64 / window as f64,
                     (bytes - last_bytes) as f64 / window as f64,
+                    (reads - last_reads) as f64 / window as f64,
+                    (read_bytes - last_read_bytes) as f64 / window as f64,
+                    window_started.elapsed().as_micros() as f64 / window as f64,
                 );
                 (last_writes, last_bytes) = (writes, bytes);
+                (last_reads, last_read_bytes) = (reads, read_bytes);
+                window_started = std::time::Instant::now();
             }
         }
         println!(

@@ -1223,6 +1223,35 @@ the smaller leaves. SQLite control rows drifted with the machine, so
 the relative standing (dialog_mem ~ parity with durable sqlite_disk at
 small scale) is unchanged.
 
+### Byte cap adopted as the default (2026-07-30)
+
+Owner call: "sounds like we should adopt it and continue chasing
+things to improve performance." `DEFAULT_OP_BUF_BYTES = 64 KiB` is now
+what trees open under (`DIALOG_TREE_OP_BUF_BYTES` still overrides;
+explicit 0 disables the byte trigger). With the default on, the
+500-txn SE replay lands at 241-246 us/txn — the expected ~+17% over
+the uncapped 202-210, buying a bounded operational root block (the
+thing every commit rewrites and every push ships).
+
+What the cap does NOT do: flatten the scale curve. `scale_curve 25000
+2500` with the default on still climbs 703 -> ~4,100-5,400 us/txn
+(27-53x sqlite_mem), same shape as uncapped. The earlier attribution
+of the scaling term to buffer bytes was wrong; the windowed byte-volume
+measurement (measure_se_replay, now reporting per-window reads and
+wall time too) isolates the real signal — bytes moved per commit grows
+~3.5x across the run:
+
+| window (25K txns, 2.5K window) | sets/commit | write B/commit | gets/commit | read B/commit | us/commit |
+|---|---|---|---|---|---|
+| first | 3.8 | 100K | 0.8 | 63K | 730 |
+| last | 5.5 | 346K | 2.4 | 223K | 4,400-5,600 |
+
+Per-commit time tracks bytes-moved almost linearly. The growth is in
+block sizes and touch counts, not buffer size — candidate mechanisms
+(unattributed as of this entry): flush write-amp into ceiling-sized
+leaves at depth, supersession-scan read volume, root frame growing
+toward S. Attribution is the active thread.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the

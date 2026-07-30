@@ -70,27 +70,40 @@ pub const DEFAULT_OP_BUF_SIZE: usize = 256;
 /// the leaves) proportionally more often — so the optimum balances
 /// O(capacity) per commit against O(flush)/capacity amortized, and it is
 /// a measurement question, not a constant to guess.
-/// The op-buffer BYTE cap trees open under: unlimited unless
-/// `DIALOG_TREE_OP_BUF_BYTES` sets one (experiment plumbing, read once
-/// per process, native only; 0 or unset = off). The op-count cap bounds
-/// how many ops a buffer holds; this bounds their WEIGHT (key bytes +
-/// value payloads), which is what actually rides the root frame into
-/// every per-commit rewrite and every pushed operational block — a
-/// byte-heavy workload can pack ~200 KB into 256 ops.
+/// Default op-buffer WEIGHT cap: the buffer flushes when its buffered
+/// weight (key bytes + value payloads + per-entry encoding overhead, the
+/// calibrated byte metering) exceeds this, whatever the op count. The
+/// count cap bounds how many ops a buffer holds; this bounds their BYTES,
+/// which is what actually rides the root frame into every per-commit
+/// rewrite and every pushed operational block — a byte-heavy workload can
+/// pack ~200 KB into 256 ops. 64 KiB (the pacing target's scale) bounds
+/// the operational root block for a measured +17% replay cost on the
+/// byte-heavy real workload; the metering's per-op overhead charge means
+/// this cap also implies a hard op-count bound, so it is the primary
+/// knob and the count cap is secondary.
+pub const DEFAULT_OP_BUF_BYTES: usize = 64 * 1024;
+
+/// The op-buffer byte cap trees open under: [`DEFAULT_OP_BUF_BYTES`]
+/// unless `DIALOG_TREE_OP_BUF_BYTES` overrides it (experiment plumbing,
+/// read once per process, native only; explicit 0 disables the byte
+/// trigger).
 fn default_op_buf_bytes() -> usize {
     #[cfg(not(target_arch = "wasm32"))]
     {
         static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         *BYTES.get_or_init(|| {
-            std::env::var("DIALOG_TREE_OP_BUF_BYTES")
+            match std::env::var("DIALOG_TREE_OP_BUF_BYTES")
                 .ok()
                 .and_then(|raw| raw.parse().ok())
-                .filter(|&bytes| bytes > 0)
-                .unwrap_or(usize::MAX)
+            {
+                Some(0) => usize::MAX,
+                Some(bytes) => bytes,
+                None => DEFAULT_OP_BUF_BYTES,
+            }
         })
     }
     #[cfg(target_arch = "wasm32")]
-    usize::MAX
+    DEFAULT_OP_BUF_BYTES
 }
 
 fn default_op_buf_size() -> usize {
