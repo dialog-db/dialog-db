@@ -1514,6 +1514,152 @@ mod tests {
             .canonicalize(&storage, &mut delta)
             .await?;
         assert_eq!(live_canonical.root(), oracle_canonical.root());
+
+    /// A variable-length opaque key for the small-frame reshape fixture:
+    /// long shared prefixes past the separator bound are what veto seams
+    /// and push frames into the forced-split regime, which fixed-width
+    /// `[u8; 4]` keys can never reach.
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct VarKey(Vec<u8>);
+
+    impl AsRef<[u8]> for VarKey {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    impl crate::Key for VarKey {
+        fn try_from_bytes(bytes: &[u8]) -> Result<Self, crate::DialogSearchTreeError> {
+            Ok(VarKey(bytes.to_vec()))
+        }
+        fn min() -> Self {
+            VarKey(Vec::new())
+        }
+        fn max() -> Self {
+            VarKey(vec![u8::MAX; 64])
+        }
+    }
+
+    type VarHitchhiker = HitchhikerTree<VarKey, Vec<u8>>;
+    type VarPersistent = PersistentTree<VarKey, Vec<u8>>;
+
+    /// One deterministic pseudo-random op for the small-frame fixture: keys
+    /// come from three long-prefix clusters (34 bytes sharing a 30-byte
+    /// prefix, past the 24-byte separator bound, so in-cluster seams are
+    /// vetoed and frames grow toward the forced-split ceiling) plus a short
+    /// tail; a slice of the writes are deletes of previously written keys
+    /// and the rest overwrite freely (the supersession shape).
+    fn cluster_key(cluster: u32, n: u32) -> VarKey {
+        // Forty distinct cluster labels: each head's left seam carries a
+        // distinct short separator, so across the labels the seam ranks
+        // vary — some punch index-level cuts, and those heads are where a
+        // delete can dissolve one.
+        let mut bytes = vec![b'L', b'A' + (cluster % 40) as u8];
+        bytes.extend(vec![b'p'; 40]);
+        bytes.extend(format!("{n:04}").into_bytes());
+        VarKey(bytes)
+    }
+
+    fn small_frame_op(rng: &mut Rng) -> (VarKey, Option<Vec<u8>>) {
+        let roll = rng.next_u32();
+        // Cluster HEADS churn hardest: a head's separator is short (the
+        // cluster's own long shared prefix starts at its successor), so the
+        // head is where index-level cuts punch — and deleting it re-derives
+        // the seam from the long vetoed successor, which is what DISSOLVES
+        // a punched cut and forces the leftward fusion under test.
+        if roll % 8 == 2 {
+            return (cluster_key(roll / 8, 0), None);
+        }
+        if roll % 8 == 6 {
+            let value = vec![b'v'; 8 + (rng.next_u32() % 64) as usize];
+            return (cluster_key(roll / 8, 0), Some(value));
+        }
+        let key = if roll % 4 == 3 {
+            VarKey(format!("s{:03}", roll % 96).into_bytes())
+        } else {
+            cluster_key(roll % 40, (roll / 8) % 24)
+        };
+        // A quarter of the remaining ops delete: supersession churn drives
+        // boundary deletes into the vetoed clusters, where the forced-run
+        // widenings cross the main path.
+        if roll % 4 == 1 {
+            (key, None)
+        } else {
+            let value = vec![b'v'; 8 + (rng.next_u32() % 64) as usize];
+            (key, Some(value))
+        }
+    }
+
+    /// Buffered commits over a small-frame manifest must keep every reshape
+    /// path consistent. This is the scaled-down deterministic form of a
+    /// field failure: replaying the real Stack Exchange log through the
+    /// buffered commit path with `max_segment = 16384` fails during a
+    /// commit with "Re-shape path child index out of range", and with
+    /// `max_segment = 8192` during canonicalize with "Re-shape path
+    /// descended into a node that was not lifted". Small frames make the
+    /// forced-split regime routine, and the buffered flush replays ops
+    /// through the canonical edit machinery against nodes carrying
+    /// novelty — the interaction under test.
+    #[dialog_common::test]
+    async fn it_survives_buffered_commits_under_a_small_frame_ceiling() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = Manifest {
+            fanout_n: 4,
+            max_separator: 24,
+            max_segment: 512,
+            // A tight ceiling makes FORCE-SPLIT INDEX frames routine: the
+            // field failure's stale path crossed an index-level forced-run
+            // merge, which needs index frames that exceed the ceiling.
+            frame_ceiling_factor: 1,
+            ..Manifest::default()
+        };
+
+        // Seed a canonical base under the small manifest so every stored
+        // node carries it and the buffered path below runs under it.
+        let mut delta = Delta::zero();
+        let mut seed = TransientTree::<VarKey, Vec<u8>>::with_manifest(
+            NULL_BLAKE3_HASH.clone(),
+            Cache::new(),
+            manifest,
+        );
+        let mut rng = Rng::new(11);
+        for _ in 0..96 {
+            let (key, value) = small_frame_op(&mut rng);
+            let value = value.unwrap_or_default();
+            seed = seed.insert(key, value, &storage).await?;
+        }
+        let base = seed.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        // Buffered commits, exactly the store's commit lifecycle: open the
+        // buffered tree over the persisted root, apply a few ops, persist
+        // the buffered form, flush, reopen. The small op buffer makes the
+        // cascade (the flush into reshaping children) routine rather than
+        // rare.
+        let cache = Cache::new();
+        let mut root = base.root().clone();
+        for _ in 0..1500 {
+            let tree: VarPersistent = PersistentTree::seal(root.clone(), cache.clone());
+            let mut buffered = VarHitchhiker::open(&tree).with_op_buf_size(16);
+            for _ in 0..8 {
+                let (key, value) = small_frame_op(&mut rng);
+                buffered = match value {
+                    Some(value) => buffered.insert(key, value, &storage).await?,
+                    None => buffered.delete(key, &storage).await?,
+                };
+            }
+            let mut delta = Delta::zero();
+            root = buffered.persist(&mut delta)?;
+            flush(&mut delta, &mut storage).await?;
+        }
+
+        // The canonicalize half of the field failure: a full drain of every
+        // buffer through the same reshape machinery.
+        let tree: VarPersistent = PersistentTree::seal(root, cache);
+        let mut delta = Delta::zero();
+        VarHitchhiker::open(&tree)
+            .canonicalize(&storage, &mut delta)
+            .await?;
         Ok(())
     }
 
@@ -1744,7 +1890,7 @@ mod tests {
         for seed in 0..50u64 {
             let mut rng = Rng::new(seed);
             let mut ops: Vec<(bool, u32)> = Vec::new();
-            for _ in 0..400 {
+            for _ in 0..1500 {
                 let is_insert = !(rng.next_u32()).is_multiple_of(3);
                 let key = rng.next_u32() % 150;
                 ops.push((is_insert, key));
@@ -1804,7 +1950,7 @@ mod tests {
         for seed in 0..50u64 {
             let mut rng = Rng::new(seed);
             let mut ops: Vec<(bool, u32)> = Vec::new();
-            for _ in 0..400 {
+            for _ in 0..1500 {
                 let is_insert = !(rng.next_u32()).is_multiple_of(3);
                 let key = rng.next_u32() % 150;
                 ops.push((is_insert, key));
@@ -1868,7 +2014,7 @@ mod tests {
         for seed in 0..25u64 {
             let mut rng = Rng::new(seed);
             let mut ops: Vec<(bool, u32)> = Vec::new();
-            for _ in 0..400 {
+            for _ in 0..1500 {
                 let is_insert = !(rng.next_u32()).is_multiple_of(3);
                 ops.push((is_insert, rng.next_u32() % 150));
             }
