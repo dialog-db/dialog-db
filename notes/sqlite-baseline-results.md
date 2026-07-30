@@ -1311,6 +1311,36 @@ carry. Open threads from the same data:
   A byte-budgeted, larger cache would convert most R leaf into hits;
   ties into the owner's cache-injectability thread.
 
+### (S, cap) sweep at scale (2026-07-30): smaller nodes flatten the curve
+
+Clean scale_curve runs (25K txns, quiet machine, selective flush in),
+late-window dialog us/txn:
+
+| S = max_segment | cap = op_buf_bytes | late windows | last | ratio |
+|---|---|---|---|---|
+| 64K | 64K (adopted default) | 3,300-5,200 | 4,248 | 30-55x |
+| 16K | 64K | 2,060-3,563 | 3,563 | 24-29x |
+| 16K | 16K | 1,885-3,079 | 3,079 | 18-27x |
+| 32K | 32K | 7,386-11,135 | 11,135 | 66-87x |
+
+(16K, 16K) is the best measured config (~-27% vs the default at 25K
+txns) — smaller leaves make each flush touch cheap, the tree deepens
+sooner (fanout ~ S/link_weight ~ 150, so a stable mid level appears
+early and buffers the scatter), and the root block a commit rewrites
+is links (~3 KB) + a 16K-bounded buffer instead of 78K + 64K. The
+(32K, 32K) blowup (2.6x WORSE than baseline; sqlite control moved
+only ~10%) is real and under attribution — suspected depth-transition
+boundary zone (fanout ~300 vs ~1,750 leaves keeps the top of the tree
+near its split point, where cuts rest on single separators and
+dissolve under head churn).
+
+Caveat for adoption: S also sets CANONICAL block sizes, and the
+owner's network target is ~50 KB reads — a (S=16K) tree serves ~20 KB
+canonical leaves. Needs the network-model measurement re-run before
+recommending a default change; these runs used the reshape-fixed
+small-S path (the old crash at max_segment <= 16K + 10K txns is gone
+on this branch).
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
