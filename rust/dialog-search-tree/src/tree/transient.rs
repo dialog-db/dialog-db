@@ -40,6 +40,98 @@ use std::{
     ops::{Bound, RangeBounds, RangeInclusive},
 };
 
+/// Tallies of how canonical edits resolve, in the same relaxed-atomic
+/// style as [`crate::distribution::audit`]: the measurement harness reads
+/// these per window to attribute reshape cost. An edit lands in exactly
+/// one bucket — the in-place fast path, the first reshape gate that
+/// tripped, or `uncanonical` when the gates all passed but the leaf-local
+/// canonicality check failed. `reshape_identity` counts separately: it is
+/// the number of ancestor levels a re-shape skipped because the child
+/// re-cut to itself (not a per-edit bucket).
+#[allow(missing_docs, clippy::missing_docs_in_private_items)]
+pub mod edit_audit {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub static FAST: AtomicU64 = AtomicU64::new(0);
+    pub static BOUNDARY_DELETE: AtomicU64 = AtomicU64::new(0);
+    pub static ORPHAN_APPEND: AtomicU64 = AtomicU64::new(0);
+    pub static DISSOLVES_TERMINAL: AtomicU64 = AtomicU64::new(0);
+    pub static DISSOLVES_LEFT: AtomicU64 = AtomicU64::new(0);
+    pub static RAISES_LEFT: AtomicU64 = AtomicU64::new(0);
+    pub static MOVES_SEAM: AtomicU64 = AtomicU64::new(0);
+    pub static WIDENED: AtomicU64 = AtomicU64::new(0);
+    pub static INDEX_WIDENED: AtomicU64 = AtomicU64::new(0);
+    pub static OVER_CEILING: AtomicU64 = AtomicU64::new(0);
+    pub static UNCANONICAL: AtomicU64 = AtomicU64::new(0);
+    pub static RESHAPE_IDENTITY: AtomicU64 = AtomicU64::new(0);
+
+    pub fn fast() {
+        FAST.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn identity() {
+        RESHAPE_IDENTITY.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Tallies a re-shaping edit under its first tripped gate, mirroring
+    /// the gate order in `Edit::apply`; none tripped means the leaf-local
+    /// canonicality check failed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reshape(
+        boundary_delete: bool,
+        orphan_append: bool,
+        dissolves_terminal: bool,
+        dissolves_left: bool,
+        raises_left: bool,
+        moves_seam: bool,
+        widened: bool,
+        index_widened: bool,
+        over_ceiling: bool,
+    ) {
+        let bucket = if boundary_delete {
+            &BOUNDARY_DELETE
+        } else if orphan_append {
+            &ORPHAN_APPEND
+        } else if dissolves_terminal {
+            &DISSOLVES_TERMINAL
+        } else if dissolves_left {
+            &DISSOLVES_LEFT
+        } else if raises_left {
+            &RAISES_LEFT
+        } else if moves_seam {
+            &MOVES_SEAM
+        } else if widened {
+            &WIDENED
+        } else if index_widened {
+            &INDEX_WIDENED
+        } else if over_ceiling {
+            &OVER_CEILING
+        } else {
+            &UNCANONICAL
+        };
+        bucket.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Snapshot-and-reset, formatted for the measurement harness.
+    pub fn report() -> String {
+        format!(
+            "fast={} boundary_del={} orphan={} terminal={} left_dissolve={} left_raise={} seam_move={} widened={} index_widened={} over_ceiling={} uncanonical={} identity_skips={}",
+            FAST.swap(0, Ordering::Relaxed),
+            BOUNDARY_DELETE.swap(0, Ordering::Relaxed),
+            ORPHAN_APPEND.swap(0, Ordering::Relaxed),
+            DISSOLVES_TERMINAL.swap(0, Ordering::Relaxed),
+            DISSOLVES_LEFT.swap(0, Ordering::Relaxed),
+            RAISES_LEFT.swap(0, Ordering::Relaxed),
+            MOVES_SEAM.swap(0, Ordering::Relaxed),
+            WIDENED.swap(0, Ordering::Relaxed),
+            INDEX_WIDENED.swap(0, Ordering::Relaxed),
+            OVER_CEILING.swap(0, Ordering::Relaxed),
+            UNCANONICAL.swap(0, Ordering::Relaxed),
+            RESHAPE_IDENTITY.swap(0, Ordering::Relaxed),
+        )
+    }
+}
+
 /// The root of a [`TransientTree`].
 ///
 /// An unedited root is just that hash (possibly `NULL_BLAKE3_HASH` for an
@@ -1217,9 +1309,21 @@ where
                 if min_move.is_some() {
                     reroute_moved_seam::<Key, Value>(&mut root, &path)?;
                 }
+                edit_audit::fast();
                 return Ok(Some(root));
             }
         }
+        edit_audit::reshape(
+            is_boundary_delete,
+            is_orphan_append,
+            dissolves_terminal_cut,
+            dissolves_left_cut,
+            raises_left_cut,
+            moves_seam_under_ceiling,
+            widened,
+            index_widened,
+            over_ceiling,
+        );
 
         let neighbor_path = if is_boundary_delete || is_orphan_append || dissolves_terminal_cut {
             lift_right_neighbor_spine(&mut root, &path, accessor).await?
@@ -1424,6 +1528,7 @@ where
                 &manifest,
                 piece_origins.as_deref().unwrap_or(&[]),
                 &index_origins,
+                widened || index_widened,
             )?,
         };
         seal_root::<Key, Value, D, _>(replacement, height, &manifest, accessor).await
@@ -2117,6 +2222,7 @@ fn reshape_path<Key, Value, D>(
     manifest: &Manifest,
     origins: &[PieceOrigin],
     index_origins: &[(usize, Vec<IndexPieceOrigin>)],
+    widened: bool,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -2197,6 +2303,7 @@ where
         }
         Some((&at, rest)) => {
             let child = node.child_mut(at)?;
+            let child_separator = child.separator()?.to_vec();
             let replacement = reshape_path::<Key, Value, D>(
                 child,
                 rest,
@@ -2206,7 +2313,46 @@ where
                 manifest,
                 origins,
                 index_origins,
+                widened,
             )?;
+            // Identity fast path: the child re-cut to exactly one piece whose
+            // left-edge separator is unchanged. This node's separator SET is
+            // then identical, and every index-level decision — seam ranks,
+            // link weights, frame ceilings, anchor elections — reads only
+            // separators, so the splice-and-regroup below would reproduce
+            // this node verbatim (regrouping is deterministic and this node
+            // is itself the output of a prior regroup over the same
+            // separators). Skip it: put the piece back and keep every
+            // buffered link — and its sealed or cached encoding — exactly
+            // where it is, instead of decoding, re-routing, and re-encoding
+            // the whole buffer for a shape that cannot change. (Measured:
+            // per-edit `take_all` of en-route buffers was the dominant term
+            // of the at-scale commit cost under fat caps.)
+            //
+            // A widened edit is excluded outright: the forced-run merges
+            // fused stored pieces into one deliberately oversized window
+            // that ONLY the regroup re-splits, so on those paths the
+            // regroup must run even when the child re-cut to itself.
+            if !widened
+                && left_fuse != Some(0)
+                && replacement.len() == 1
+                && replacement[0]
+                    .separator()
+                    .map(|separator| separator == child_separator.as_slice())
+                    .unwrap_or(false)
+            {
+                let index = node.as_index_mut()?;
+                index.children[at] = replacement
+                    .into_iter()
+                    .next()
+                    .expect("the replacement has exactly one piece");
+                let kept = std::mem::replace(
+                    node,
+                    TransientNode::Segment(TransientSegment::new(Vec::new(), Vec::new())),
+                );
+                edit_audit::identity();
+                return Ok(vec![Node::Transient(kept)]);
+            }
             // Regrouping replaces `node` with a run of new nodes, so the ops
             // buffered here have nowhere to live unless they are carried over:
             // they are pending against this subtree, and the run covers exactly

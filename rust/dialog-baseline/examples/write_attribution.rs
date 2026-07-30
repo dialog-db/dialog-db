@@ -218,6 +218,7 @@ fn main() -> anyhow::Result<()> {
                     depth,
                     elapsed,
                 );
+                println!("         edits: {}", dialog_search_tree::edit_audit::report());
                 window_started = std::time::Instant::now();
             }
         }
