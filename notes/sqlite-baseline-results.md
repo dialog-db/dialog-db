@@ -1429,6 +1429,38 @@ Canonical shapes change under (a) (pre-ship acceptable). Next step
 either way: prototype behind an env flag and A/B the scale curve +
 edit mix before deciding.
 
+### History-independence is ALREADY broken by the ceiling (2026-07-30)
+
+While preparing the ramp A/B, the new `converge_check` example
+(replay the same SE log per-txn / batched-by-5 / one-giant-commit,
+canonicalize, compare roots + an in-order key digest) found that the
+CURRENT design diverges with the ramp off:
+
+- per-txn and by-five agree; the single giant commit canonicalizes to
+  a DIFFERENT root over the exact same 29,976 keys (5K txns) —
+  shape-only divergence.
+- Not from this session's optimizations: reproduces with the identity
+  fast path disabled and at a104ebc (pre-session tree).
+- Localized by policy-layer toggles: `DIALOG_TREE_MAX_SEGMENT=0`
+  (pacing off) CONVERGES; `DIALOG_TREE_CEILING_FACTOR=0` (pacing on,
+  frame ceiling off) CONVERGES; ceiling on DIVERGES. The frame
+  ceiling's forced-anchor machinery is the break — the exact
+  machinery whose per-edit widening exists so that "differently
+  ordered edits would [not] anchor against different subsets and
+  diverge". It costs 25-50% of edit CPU and does not deliver the
+  property it exists for. (The reshape-path co-path bug fixed earlier
+  this week was in this same machinery; this is a further, subtler
+  incompleteness — mechanism not yet root-caused.)
+
+Consequence for the policy fork: the choice is no longer "confluent
+but slow" vs "fast but non-confluent". Both arms are non-confluent
+today. Either the ceiling machinery's convergence hole gets found and
+fixed (unknown depth, on top of its measured cost), or the ramp makes
+forced frames rare enough that the machinery — hole included — stops
+mattering in practice and can eventually be simplified away.
+`converge_check` should become a pinned regression harness either
+way.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
