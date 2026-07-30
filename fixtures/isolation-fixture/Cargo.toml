@@ -1,0 +1,17 @@
+[package]
+name = "isolation-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "=0.2.126"
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+wasm-bindgen-test = "=0.3.76"
+web-sys = { version = "0.3", features = ["Window", "Storage", "console"] }
+
+[workspace]
