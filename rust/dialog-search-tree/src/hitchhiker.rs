@@ -1514,6 +1514,8 @@ mod tests {
             .canonicalize(&storage, &mut delta)
             .await?;
         assert_eq!(live_canonical.root(), oracle_canonical.root());
+        Ok(())
+    }
 
     /// A variable-length opaque key for the small-frame reshape fixture:
     /// long shared prefixes past the separator bound are what veto seams

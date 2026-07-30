@@ -931,9 +931,15 @@ where
                 _ => true,
             }
         };
-        let piece_origins = if changes_membership {
-            merge_forced_run::<Key, Value, Backend>(&mut root, &mut path, accessor, &manifest)
-                .await?
+        let mut piece_origins = if changes_membership {
+            merge_forced_run::<Key, Value, Backend>(
+                &mut root,
+                &mut path,
+                &mut [],
+                accessor,
+                &manifest,
+            )
+            .await?
         } else {
             None
         };
@@ -948,14 +954,19 @@ where
         // fails the level threshold that grouped them (derived, no stored
         // mark); ordinary paths see two rank probes per level and merge
         // nothing.
-        let (index_widened, index_origins) = if changes_membership && manifest.frame_ceiling() > 0 {
-            merge_forced_index_runs::<Key, Value, D, Backend>(
-                &mut root, &mut path, accessor, &manifest,
-            )
-            .await?
-        } else {
-            (false, Vec::new())
-        };
+        let (index_widened, mut index_origins) =
+            if changes_membership && manifest.frame_ceiling() > 0 {
+                merge_forced_index_runs::<Key, Value, D, Backend>(
+                    &mut root,
+                    &mut path,
+                    &mut [],
+                    accessor,
+                    &manifest,
+                )
+                .await?
+            } else {
+                (false, Vec::new())
+            };
 
         // The frame ceiling's fast-path gate: a membership-changing edit
         // that leaves its segment over the ceiling must reach the regroup,
@@ -1223,23 +1234,32 @@ where
         // index frames alike — so the fusion regroups against complete
         // membership. For any non-cluster neighbor the scan reads one
         // separator length and joins nothing.
-        let neighbor_path = match neighbor_path {
+        let mut neighbor_path = match neighbor_path {
             Some(mut neighbor_path) if manifest.max_segment > 0 => {
-                merge_forced_run::<Key, Value, Backend>(
+                let merged_leaf = merge_forced_run::<Key, Value, Backend>(
                     &mut root,
                     &mut neighbor_path,
+                    &mut [&mut path],
                     accessor,
                     &manifest,
                 )
-                .await?;
+                .await?
+                .is_some();
+                let mut merged_index = false;
                 if manifest.frame_ceiling() > 0 {
-                    merge_forced_index_runs::<Key, Value, D, Backend>(
+                    merged_index = merge_forced_index_runs::<Key, Value, D, Backend>(
                         &mut root,
                         &mut neighbor_path,
+                        &mut [&mut path],
                         accessor,
                         &manifest,
                     )
-                    .await?;
+                    .await?
+                    .0;
+                }
+                if merged_leaf || merged_index {
+                    piece_origins = None;
+                    index_origins.clear();
                 }
                 Some(neighbor_path)
             }
@@ -1247,19 +1267,15 @@ where
         };
 
         // The right-LCA: the deepest level where the main and right-neighbor
-        // paths diverge (for a boundary delete).
-        let lca_depth = match &neighbor_path {
-            Some(neighbor_path) => Some(
-                path.iter()
-                    .zip(neighbor_path.iter())
-                    .position(|(a, b)| a != b)
-                    .ok_or_else(|| {
-                        DialogSearchTreeError::Node(
-                            "Boundary delete had no diverging neighbor path".into(),
-                        )
-                    })?,
-            ),
-            None => None,
+        // paths diverge (for a boundary delete). `None` with a neighbor
+        // present means a widening merged the two paths into the same nodes
+        // all the way down (the run swallowed the edited leaf); the fusion
+        // the neighbor existed for has then already happened structurally,
+        // and the edit falls back to the plain re-shape below.
+        let lca_of = |path: &[usize], neighbor: &Option<Vec<usize>>| {
+            neighbor
+                .as_ref()
+                .and_then(|neighbor| path.iter().zip(neighbor.iter()).position(|(a, b)| a != b))
         };
 
         // A single-entry boundary delete removes the whole segment, joining
@@ -1306,40 +1322,52 @@ where
                     // level, so any of them that is a force-split piece
                     // must first rejoin its run — leaf runs and index
                     // frames alike — or the fold regroups against
-                    // fragments. Forced seams between the left spine and
-                    // the main path were already dissolved by the main
-                    // path's own widening, so these scans stop before
-                    // touching path-tracked nodes.
+                    // fragments. These merges splice ancestors the MAIN
+                    // (and neighbor) paths share with the left spine —
+                    // merging pieces left of them shifts their child
+                    // indices, and a run can even absorb their own nodes —
+                    // so both ride along as co-paths and are remapped
+                    // through every splice.
                     if manifest.max_segment > 0 {
-                        merge_forced_run::<Key, Value, Backend>(
+                        let mut co_paths: Vec<&mut Vec<usize>> = Vec::new();
+                        co_paths.push(&mut path);
+                        if let Some(neighbor) = neighbor_path.as_mut() {
+                            co_paths.push(neighbor);
+                        }
+                        let merged_leaf = merge_forced_run::<Key, Value, Backend>(
                             &mut root,
                             &mut left_path,
+                            &mut co_paths,
                             accessor,
                             &manifest,
                         )
-                        .await?;
+                        .await?
+                        .is_some();
+                        let mut merged_index = false;
                         if manifest.frame_ceiling() > 0 {
-                            merge_forced_index_runs::<Key, Value, D, Backend>(
+                            merged_index = merge_forced_index_runs::<Key, Value, D, Backend>(
                                 &mut root,
                                 &mut left_path,
+                                &mut co_paths,
                                 accessor,
                                 &manifest,
                             )
-                            .await?;
+                            .await?
+                            .0;
+                        }
+                        if merged_leaf || merged_index {
+                            piece_origins = None;
+                            index_origins.clear();
                         }
                     }
-                    let depth = path
-                        .iter()
-                        .zip(left_path.iter())
-                        .position(|(a, b)| a != b)
-                        .ok_or_else(|| {
-                            DialogSearchTreeError::Node(
-                                "Left fusion had no diverging neighbor path".into(),
-                            )
-                        })?;
-                    match lca_depth {
-                        Some(lca) if depth > lca => None,
-                        _ => Some(depth),
+                    // `None` means the widenings merged the left spine and
+                    // the main path into the same nodes all the way down:
+                    // the leftward fusion has already happened structurally
+                    // and the regroup below re-derives the joined region.
+                    let depth = path.iter().zip(left_path.iter()).position(|(a, b)| a != b);
+                    match (depth, lca_of(&path, &neighbor_path)) {
+                        (Some(depth), Some(lca)) if depth > lca => None,
+                        (depth, _) => depth,
                     }
                 }
                 None => None,
@@ -1347,6 +1375,10 @@ where
         } else {
             None
         };
+
+        // The left widenings can remap both paths, so the LCA gating the
+        // fused re-shape below must be re-derived from their final values.
+        let lca_depth = lca_of(&path, &neighbor_path);
 
         // Phase two: synchronous re-shape. The whole touched region is transient, so
         // the re-shape needs no further loads and runs without any borrow spanning
@@ -1539,6 +1571,7 @@ where
 async fn merge_forced_index_runs<Key, Value, D, Backend>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
+    co_paths: &mut [&mut Vec<usize>],
     accessor: &Accessor<Backend>,
     manifest: &Manifest,
 ) -> Result<(bool, Vec<(usize, Vec<IndexPieceOrigin>)>), DialogSearchTreeError>
@@ -1615,6 +1648,7 @@ where
         let mut merged_children: Vec<Node<Key, Value>> = Vec::new();
         let mut carried: Vec<NoveltyEntry<Value>> = Vec::new();
         let mut origins: Vec<IndexPieceOrigin> = Vec::new();
+        let mut member_starts: Vec<usize> = Vec::new();
         let mut lead = 0usize;
         for (offset, member) in members.into_iter().enumerate() {
             let TransientNode::Index(mut piece) = member.into_transient()? else {
@@ -1624,6 +1658,7 @@ where
             };
             let piece_novelty = piece.novelty.take_all::<Key>()?;
             let start = merged_children.len();
+            member_starts.push(start);
             // A piece with a stored link and no buffered ops of its own can be
             // passed through if the regroup reproduces its exact child range:
             // draining a quiet piece takes nothing, so its stored bytes still
@@ -1663,6 +1698,12 @@ where
         }
         path[d - 1] = lo;
         path[d] += lead;
+        // Any other live path routed through the same parent recorded its
+        // index against the pre-splice child list; remap it through the
+        // merge, including into the merged node when the run absorbed it.
+        for co_path in co_paths.iter_mut() {
+            remap_through_merge(co_path, &parent_path, lo, hi, &member_starts);
+        }
         merged_any = true;
         // `reshape_path` regroups the merged node's children when it is the
         // recursion's current `node` — reached after consuming the `d` path
@@ -1706,6 +1747,7 @@ where
 async fn merge_forced_run<Key, Value, Backend>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
+    co_paths: &mut [&mut Vec<usize>],
     accessor: &Accessor<Backend>,
     manifest: &Manifest,
 ) -> Result<Option<Vec<PieceOrigin>>, DialogSearchTreeError>
@@ -1805,7 +1847,55 @@ where
     }
     let leaf = path.len() - 1;
     path[leaf] = lo;
+    // Any other live path routed through the same parent recorded its leaf
+    // index against the pre-splice child list; remap it through the merge
+    // (no member starts: a path cannot descend below a leaf).
+    for co_path in co_paths {
+        remap_through_merge(co_path, &parent_path, lo, hi, &[]);
+    }
     Ok(Some(origins))
+}
+
+/// Remaps a recorded descent path through a forced-run merge that just
+/// spliced the children `lo..=hi` of the node at `parent_path` into ONE
+/// merged node inserted back at `lo`.
+///
+/// The widenings splice ancestors that OTHER live paths (the main edit
+/// path, the right-neighbor path) may share with the path being widened;
+/// without this remap those paths keep indices recorded against the
+/// pre-splice child list and the later re-shape descends into the wrong —
+/// or a nonexistent — child ("Re-shape path child index out of range" /
+/// "descended into a node that was not lifted").
+///
+/// A path that does not route through `parent_path` is untouched. One
+/// whose child index at that level sits right of the merged range shifts
+/// left by the removed count. One inside the range now descends through
+/// the merged node: `member_starts[k]` gives the number of children the
+/// merged node had accumulated before absorbing member `lo + k`, which is
+/// the offset the path's next-deeper index moves by (empty for a leaf
+/// merge, where there is no deeper index to shift).
+fn remap_through_merge(
+    path: &mut [usize],
+    parent_path: &[usize],
+    lo: usize,
+    hi: usize,
+    member_starts: &[usize],
+) {
+    let depth = parent_path.len();
+    if path.len() <= depth || &path[..depth] != parent_path {
+        return;
+    }
+    let at = path[depth];
+    if at > hi {
+        path[depth] = at - (hi - lo);
+    } else if at >= lo {
+        path[depth] = lo;
+        if let Some(&start) = member_starts.get(at - lo)
+            && depth + 1 < path.len()
+        {
+            path[depth + 1] += start;
+        }
+    }
 }
 
 /// Walks `root` down the recorded child indices in `path`, lifting the node at
