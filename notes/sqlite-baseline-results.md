@@ -1201,6 +1201,28 @@ dozens of tests plus the wasm path — where the env plumbing does not
 exist — drive cascades through `with_op_buf_size`), but it stops being
 a tuning parameter.
 
+### Post-calibration scoreboard check (2026-07-30): held or improved
+
+Owner question: did the calibration (canonical shapes moved) improve
+or regress the numbers? Same-machine re-run vs the recorded post-6A
+figures:
+
+| metric | before | after calibration |
+|---|---|---|
+| SE replay wall (500 txns) | 204-213 us/txn | 202-210 us/txn |
+| SE replay callgrind Ir (500) | 745.7M | 751.0M (+0.7%) |
+| criterion dialog_mem write (500) | 103.9 ms | 99.5 ms (criterion self-delta -3.4%, p<0.05) |
+| se_kind_lookup dialog_mem | 258 us | 236 us (-8.5%; sqlite control also drifted -4-8%) |
+| se_title_get dialog_mem | 7.3 us | 7.8 us (wide CI, noise) |
+| 10K-txn replay (census tool) | 1765-2183 us/txn | 1735 us/txn |
+
+Verdict: flat to slightly improved everywhere — the byte-bounded
+shapes (198 KB max leaf at factor 3, was 365 KB) came at zero
+performance cost, and the value-indexed scan got a bit faster from
+the smaller leaves. SQLite control rows drifted with the machine, so
+the relative standing (dialog_mem ~ parity with durable sqlite_disk at
+small scale) is unchanged.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
