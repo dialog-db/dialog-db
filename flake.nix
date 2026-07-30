@@ -225,7 +225,12 @@
           }
         );
 
-        inherit (menuHelpers) makeMenu makeDevShellHook menuTestCommand;
+        inherit (menuHelpers)
+          makeMenu
+          makeDevShellHook
+          menuTestCommand
+          menuWebTestCommand
+          ;
 
         commands = {
           "bench" = {
@@ -261,14 +266,14 @@
             package = "tests-native-release";
           };
 
-          "test:web:debug" = menuTestCommand {
+          "test:web:debug" = menuWebTestCommand {
             description = "Unit and integration tests (wasm32-unknown-unknown, debug)";
             package = "tests-web-debug";
           };
 
-          "test:web:release" = menuTestCommand {
+          "test:web:release" = menuWebTestCommand {
             description = "Unit and integration tests (wasm32-unknown-unknown, release)";
-            package = "tests-web-debug";
+            package = "tests-web-release";
           };
 
           "test:cross:integration" = menuTestCommand {
@@ -325,7 +330,7 @@
           };
 
           tests-web-release = buildTestArchive {
-            name = "web-debug";
+            name = "web-release";
             target = "wasm32-unknown-unknown";
             args = "--release";
           };
