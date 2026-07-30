@@ -839,6 +839,67 @@ semantics (batch-signing), or a node-format change designed WITH the
 sync contract (the chained-delta form of that idea is rejected — see
 `notes/operational-log-architecture.md`).
 
+### Node-size sweep (2026-07-30): the ~50 KB target is not optimal, and small frames crash
+
+Owner: "my general goal was to have nodes that are roughly 50kb for
+optimal network reads but we never measured anything." New
+`node_size_sweep` example: per `DIALOG_TREE_MAX_SEGMENT` setting it
+builds the real SE dataset (buffered replay + one canonicalize),
+censuses the block-size distribution, and measures cold-read fetch
+profiles (freshly opened store, empty cache — the partial-replication
+shape) for a point get, an entity load, and a VAE lookup.
+
+2000 real txns (4675 facts), point get (24 queries averaged):
+
+| max_segment | write us/txn | cold point get | cumulative bytes written |
+|---|---|---|---|
+| 8 KiB | 292 | 3.0 fetches / 34 KB | 112 MiB |
+| 16 KiB | 514 | 2.0 / 64 KB | 161 MiB |
+| 32 KiB | 541 | 2.0 / 76 KB | 164 MiB |
+| 48 KiB (the stated goal) | 444 | 2.0 / 121 KB | 166 MiB |
+| 64 KiB (default) | 533 | 2.0 / 179 KB | 172 MiB |
+| 128 KiB | 607 | 2.0 / 272 KB | 176 MiB |
+| 256 KiB | 1932 | 2.0 / 763 KB | 193 MiB |
+
+Modeled network cost per cold point get (fetches x RTT + bytes / BW):
+broadband (30 ms, 20 Mbit): 16K 85 ms < 32K 90 < 8K 104 < 48K 108 <
+64K 132 < 128K 169. Mobile (80 ms, 5 Mbit): 16K 262 < 32K 281 < 8K
+295 < 48K 353 < 64K 447. 10,000-txn confirmation (24K facts): 32K
+beats the 64K default on every axis (write 1895 vs 2043 us/txn, point
+get 110 vs 136 KB at equal 2.1 fetches, canonicalize 25 vs 32 ms,
+cumulative bytes 1513 vs 1655 MiB).
+
+Also visible in the census: real block sizes run FAR past the pacing
+target (64K setting: p50 18.5 KB, p90 92 KB, p99 209 KB — the p99 is
+3.2x the target), so "roughly 50 KB nodes" is not what the current
+default produces anyway.
+
+**Bug found (pre-existing, exposed at small segments + volume):**
+`DIALOG_TREE_MAX_SEGMENT=16384` with 10,000 real txns fails during
+replay with "Re-shape path child index out of range"; 8192 fails during
+canonicalize with "Re-shape path descended into a node that was not
+lifted". Bisect: clean at `claude/perf-3-weight-cache` and at
+`f89cd32~1`; first failing commit is `f89cd32` ("commit through the
+buffered path", group 3) — i.e. the switch to buffered-by-default
+commits EXPOSED a latent reshape/buffered-flush interaction bug rather
+than any of the group-6A changes (HEAD, pre-deferred-flush `8065f34`,
+and pre-6A `b10807a` all reproduce identically). The default 64 KiB
+survives the full 50,553-txn log and 32 KiB survives 25,000 txns, so
+the default is not observed to hit it — but the invariant violation is
+shape-dependent, so this gates ANY move to smaller segments and needs a
+real fix in the reshape path.
+
+Also worth flagging from these runs: per-commit cost GROWS with
+dataset size (210 us at 500 txns -> ~1.9 ms at 10K -> 3.6 ms at 25K ->
+4.5 ms at 50K, default settings) — the scaling curve, not the small-DB
+constant, is the next performance question after the bug.
+
+Recommendation once the reshape bug is fixed: move the default toward
+32 KiB (dominates 64 KiB on writes, cold-read bytes, canonicalize, and
+write amplification at both measured scales), and revisit 16 KiB —
+best in every network model at small scale — only with the bug fixed
+and a deeper-tree fetch-count check at larger scales.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the

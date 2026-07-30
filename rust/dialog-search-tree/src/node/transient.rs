@@ -669,6 +669,10 @@ where
                     emitted
                 }
                 LinkNovelty::Cached { entries, buffer } => {
+                    // `entries` backs the debug-only identity check below;
+                    // release builds embed the cached encoding without it.
+                    #[cfg(not(debug_assertions))]
+                    let _ = entries;
                     // Siblings may have shifted this buffer's child index;
                     // restamp the retained copy too so it stays in sync with
                     // what was just persisted.
