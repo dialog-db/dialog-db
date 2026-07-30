@@ -712,6 +712,77 @@ O(novelty) restructuring shifts the profile:
   chain dependency — which is another argument for keeping the commit
   itself O(novelty).
 
+### Group 6A results: copy elimination landed (2026-07-30)
+
+Changes on `claude/perf-7-oplog-spike` (all persisted bytes pinned
+bit-identical by tests at the tree and store layers):
+
+1. **Live spine across commits** — `HitchhikerTree::persist_mut` (a
+   non-consuming persist), `LinkNovelty::Cached` (a persisted open link
+   keeps its decoded ops AND its encoding: appends skip the
+   accumulated-buffer decode, untouched links re-embed verbatim),
+   `BufferedBatch::apply_reusing` + `SpineSlot` on `Artifacts` and on
+   repository `Branch` (keyed by root hash, so out-of-band root changes
+   miss safely).
+2. **Persist seeds the node cache** with the frame it just produced —
+   the next read otherwise re-fetched it from storage and re-verified
+   the blake3 of bytes this process just hashed (point queries drop one
+   backend read; the pinned read-count tests moved 2 -> 1).
+3. **`terminated_len` via memchr** — the 0x00-terminator scan crossed
+   every value on every key parse/split byte-by-byte; now it leaps
+   between zeros with SIMD memchr (-8.4% alone). This is the measured
+   answer to "can SIMD help": not by compiling wider (-2%), but by
+   restructuring scalar scans around vector primitives.
+4. `Manifest::default()` reads its env overrides once per process
+   (was 4 getenv per persist), and the repo commit path reads through
+   the branch's shared node cache (`Index::from_hash_with_cache`)
+   instead of a fresh empty cache per commit.
+
+Instruction counts (callgrind, 500 real SE txns, collected Ir):
+
+| step | Ir | vs baseline |
+|---|---|---|
+| post-group-4 baseline | 1,028.6M | — |
+| + live spine | 1,057.4M | +2.8% (open-side copies became persist-side clones) |
+| + cache seeding | 930.1M | -9.6% |
+| + Cached links | 814.0M | -20.9% |
+| + memchr scan | 745.7M | **-27.5%** |
+
+Criterion scoreboard (same-run, 500 real SE txns; reads on a 2000-txn
+seed):
+
+| config | replay | per commit |
+|---|---|---|
+| sqlite_mem | 10.9 ms | 22 us |
+| sqlite_disk (WAL+NORMAL, durable) | 106.2 ms | 212 us |
+| sqlite_disk_nosync | 23.0 ms | 46 us |
+| dialog_mem | **103.9 ms** | **208 us** (was 286) |
+| dialog_disk | 508 ms | 1.02 ms (file-per-block I/O) |
+| repo_mem | 325.6 ms | 651 us (was 817) |
+| repo_dcaa_nosync | 932 ms | 1.9 ms |
+| repo_dcaa (fsync/commit) | 2.62 s | 5.2 ms |
+
+**dialog_mem now matches fully durable SQLite on the real workload**
+(103.9 vs 106.2 ms) while producing a stable content-addressed root and
+a pushable novelty-near-root block per commit. Remaining gap to
+sqlite_disk_nosync (46 us, the equal-durability comparison): 4.5x,
+almost entirely the O(frame) persist (memcpy 29.5% + blake3 13.8% of
+the remaining profile — ~3 passes plus one hash over a 28-91 KB frame
+per commit) — that is what the group-B chained-novelty format targets.
+Reads improved too: se_title_get 8.1 -> 7.3 us, se_kind_lookup
+291 -> 258 us (dialog_mem, cache-seeded root).
+
+Repo layer decomposition (callgrind, 200 synthetic per-row commits
+through `Branch::commit`, volatile space): **Ed25519 signing is now the
+largest single term at 26.6%** (two signs per commit via `Attest`,
+~250K Ir each); record writes ~27%, data instructions ~24%, persist
+~22%. The deferred batch-signing decision's trigger condition — "the
+profile is no longer dominated by storage I/O" — has arrived for the
+in-memory profile; one Merkle-pair signature per commit would cut the
+repo overhead by roughly an eighth immediately, and the
+curve25519-dalek IFMA backend (this class of host has avx512ifma) cuts
+the per-sign cost further.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the

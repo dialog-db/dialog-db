@@ -45,6 +45,7 @@ use dialog_search_tree::{
 };
 use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
@@ -299,7 +300,19 @@ pub struct BufferedBatch {
 /// fresh open.
 #[derive(Clone, Default)]
 pub struct SpineSlot {
+    #[allow(clippy::type_complexity)]
     slot: Arc<Mutex<Option<(NodeHash, BufferedArtifactTree)>>>,
+}
+
+impl Debug for SpineSlot {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let root = self
+            .slot
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|(root, _)| root.clone()));
+        f.debug_struct("SpineSlot").field("root", &root).finish()
+    }
 }
 
 impl SpineSlot {

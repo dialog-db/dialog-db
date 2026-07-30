@@ -169,7 +169,13 @@ where
             .map(|rev| *rev.tree.hash())
             .unwrap_or(EMPTY_TREE_HASH);
 
-        let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
+        // Read through the branch's shared node cache: the commit's
+        // supersession scans and history reads then hit blocks earlier
+        // commits and queries already fetched (and blocks the persist below
+        // seeds), instead of re-fetching everything into a cache that dies
+        // with this commit.
+        let mut tree =
+            Index::from_hash_with_cache(NodeHash::from(base_tree_hash), branch.node_cache());
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
         // cardinality-one supersession, retraction — and, because the
@@ -195,9 +201,14 @@ where
         // for callers that want the history-independent form (see
         // `Commit::canonicalize`).
         let mut delta = Delta::zero();
-        let batch =
-            dialog_artifacts::BufferedBatch::apply(&tree, &mut store, Some(version), changes)
-                .await?;
+        let batch = dialog_artifacts::BufferedBatch::apply_reusing(
+            branch.spine(),
+            &tree,
+            &mut store,
+            Some(version),
+            changes,
+        )
+        .await?;
         let changed = batch.changed();
 
         // A batch that left the indexes untouched (e.g. a transaction

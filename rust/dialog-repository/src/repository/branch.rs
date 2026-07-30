@@ -150,6 +150,12 @@ pub struct Branch {
     /// verification that otherwise run on every ancestry step (skip
     /// extension, context walks, causality).
     record_cache: dialog_search_tree::Cache<Version, RevisionRecord>,
+    /// Carries the live buffered spine between this branch's commits (keyed
+    /// by the tree root it was persisted as, so any out-of-band head change
+    /// safely misses), sparing every commit the root-frame decode and
+    /// sealed-buffer bulk copies of a fresh open. Shared across clones like
+    /// the caches.
+    spine: dialog_artifacts::SpineSlot,
     /// Memo of the commit identity derived for this branch. The branch
     /// entity and origin are pure functions of (subject, name, profile,
     /// issuer), but deriving them costs blake3 hashes, a base58 render,
@@ -300,6 +306,11 @@ impl Branch {
     /// A shared handle to this branch's node cache, for seeding a read tree.
     pub(crate) fn node_cache(&self) -> Cache<Blake3Hash, Buffer> {
         self.node_cache.clone()
+    }
+
+    /// The live-spine slot this branch's commits reuse.
+    pub(crate) fn spine(&self) -> &dialog_artifacts::SpineSlot {
+        &self.spine
     }
 
     /// A shared handle to this branch's spilled-value block cache, handed to
