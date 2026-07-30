@@ -1389,21 +1389,45 @@ default is only safe until its root crosses the 196KB index ceiling
 at roughly 2x the current 25K-txn scale — the catastrophe class
 reaches the default config at ~50K txns.
 
+Sizing the term: at 64K, window 17500 (widened 7,244) ran 5,706
+us/commit against window 20000 (widened 2,570) at 3,733 — about 1 ms
+PER WIDENED EDIT, putting the widening machinery at roughly half of
+total commit time at the default config even before its root
+force-splits.
+
 **Policy fork (owner decision wanted).** The evidence points at the
 flat memoryless coin's tail + forced-anchor backstop combination as
-the structural cost at scale. The owner's originally recalled plan —
-"apply pressure once we pass some threshold until boundary is
-forced" — looks right on the measurements. Concretely: generalize the
-existing bank so a run's weight past a threshold (e.g. 2S) is added
-to every subsequent coin's weight argument. P(cut) then approaches 1
-before the run reaches the 3S ceiling, so forced anchors (and the
-per-edit widening they require) essentially vanish, leaf and index
-level alike. Locality is preserved: a run starts at an accepted cut,
-which is a stored leaf/node boundary, so the accumulated-weight
-context of any coin is local to the node the regroup already scans —
-this is NOT the dolt-style cross-boundary pressure step 4 rejected.
-Canonical shapes change (pre-ship acceptable). Plan: prototype behind
-an env flag, A/B the scale curve and edit mix, then decide.
+the structural cost at scale, which matches the owner's originally
+recalled plan ("apply pressure once we pass some threshold until
+boundary is forced"). Being honest about the design space — the
+obvious ramp (add a run's weight past ~2S to every later coin) is
+weight-since-last-CUT context, exactly what the regroup's own bank
+comment rejects: cut-outcome-dependent decisions admit multiple
+locally-consistent fixed points, breaking the convergence argument.
+The candidate mechanisms are therefore:
+
+(a) **Ramp + rightward resync** (the dolt maintenance contract): cut
+    decisions become a left-to-right recurrence; an edit regroups
+    from its frame start and continues rightward until a produced
+    cut coincides with a stored one (with a ramp, expected resync is
+    within a frame or two). Confluent by construction; replaces the
+    widening machinery; abandons step 4's edit-locality argument —
+    which the measurements show is already illusory at scale, since
+    25%+ of edits pay whole-frame widening today and the worst case
+    is per-edit whole-root merges.
+(b) **Keep the policy, make widening cheap**: incremental or
+    hash-memoized anchor elections (per-piece summaries keyed by
+    piece hash), and spine-cached frames so the merge stops
+    re-loading and re-routing everything per edit. No shape change,
+    engineering-only, but keeps the O(frame) worst case in reduced
+    form.
+(c) **Retune the backstop**: raise frame_ceiling_factor so ceilings
+    are rarely hit — trades away the block-size bound the factor
+    exists to provide; probably not what we want alone.
+
+Canonical shapes change under (a) (pre-ship acceptable). Next step
+either way: prototype behind an env flag and A/B the scale curve +
+edit mix before deciding.
 
 ## Deferred decisions (owner-reviewed)
 
