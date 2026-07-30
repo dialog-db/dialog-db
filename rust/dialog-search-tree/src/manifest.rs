@@ -190,6 +190,45 @@ impl Manifest {
     pub fn frame_ceiling(&self) -> usize {
         self.frame_ceiling_factor as usize * self.max_segment as usize
     }
+
+    /// Pacing-pressure prototype (experiment plumbing, not a manifest
+    /// field): the frame weight past which every subsequent leaf coin gets
+    /// the excess added to its weight argument, driving P(cut) toward 1
+    /// before the frame reaches the ceiling so forced anchors — and the
+    /// per-edit widening they require — become rare. Zero (the default)
+    /// disables the ramp. Read from `DIALOG_TREE_PACING_RAMP` as a PERCENT
+    /// of `max_segment` (e.g. 200 = pressure past 2x the pacing target),
+    /// once per process; wasm has no environment and stays off.
+    ///
+    /// Deliberately not a stored [`Manifest`] field while this is an A/B
+    /// arm: adding one is a format change, and the measurement (see
+    /// notes/sqlite-baseline-results.md, "Reshape attribution") has to
+    /// justify it first. Ramped cut decisions depend on frame-prefix
+    /// weight — outcome-dependent context — so history-independence rests
+    /// on the edit path's rightward fusion re-deciding across any moved
+    /// boundary; the convergence check in dialog-baseline measures what
+    /// residue that one-hop resync leaves.
+    pub fn pacing_ramp_threshold(&self) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            static PERCENT: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+            let percent = *PERCENT.get_or_init(|| {
+                std::env::var("DIALOG_TREE_PACING_RAMP")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0)
+            });
+            if percent == 0 || self.max_segment == 0 {
+                0
+            } else {
+                self.max_segment as usize * percent as usize / 100
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            0
+        }
+    }
 }
 
 #[cfg(test)]

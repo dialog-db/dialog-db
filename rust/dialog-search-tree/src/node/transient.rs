@@ -1634,9 +1634,22 @@ where
     let mut vetoed = vec![false; count.saturating_sub(1)];
     let mut cut_after = vec![false; count];
     let mut bank = 0usize;
+    // The pacing-pressure ramp (prototype, see
+    // `Manifest::pacing_ramp_threshold`): the weight of the frame built so
+    // far — everything since the last coin-accepted cut — in excess of the
+    // threshold rides every subsequent coin, so P(cut) approaches 1 before
+    // the frame can reach the ceiling. This is deliberately
+    // outcome-dependent context (the frame resets at cuts), unlike the
+    // bank, which is seam-structural; the edit path's fusion machinery is
+    // what re-decides across a boundary this moves.
+    let ramp = manifest.pacing_ramp_threshold();
+    let mut frame_weight = 0usize;
     for at in 0..count.saturating_sub(1) {
         let key = entries[at].key.as_ref();
         vetoed[at] = D::vetoes(key, entries[at + 1].key.as_ref(), manifest);
+        if manifest.max_segment > 0 {
+            frame_weight += weights[at];
+        }
         if vetoed[at] {
             // The coin is skipped entirely for vetoed seams: the veto
             // overrides whatever it would say, and the weight moves into
@@ -1648,10 +1661,18 @@ where
             let weight = if manifest.max_segment == 0 {
                 0
             } else {
-                bank + weights[at]
+                let excess = if ramp > 0 {
+                    frame_weight.saturating_sub(ramp)
+                } else {
+                    0
+                };
+                bank + weights[at] + excess
             };
             cut_after[at] = D::leaf_cut(key, weight, manifest);
             bank = 0;
+            if cut_after[at] {
+                frame_weight = 0;
+            }
         }
     }
 

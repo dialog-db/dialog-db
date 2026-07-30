@@ -1083,6 +1083,33 @@ where
             }
         };
 
+        // Pacing-ramp prototype (`Manifest::pacing_ramp_threshold`): a leaf
+        // past the ramp threshold has ramped decisions in its tail, which
+        // read frame-prefix weight the in-place fast path does not model —
+        // any edit into the ramp zone re-shapes so the regroup re-derives
+        // them. Rare by construction: the ramp holds frames near the
+        // threshold, so leaves live below it. Every edit is gated (not just
+        // membership changes) because an upsert can change an entry's
+        // weight, and every ramped decision downstream of it shifts.
+        let ramp_zone = {
+            let threshold = manifest.pacing_ramp_threshold();
+            if threshold == 0 {
+                false
+            } else {
+                match follow(&mut root, &path)? {
+                    TransientNode::Segment(segment) => {
+                        let weight = segment.total_weight();
+                        let weight = match &self {
+                            Edit::Upsert(entry) => weight + entry.weight(),
+                            Edit::Delete(_) => weight,
+                        };
+                        weight > threshold
+                    }
+                    _ => false,
+                }
+            }
+        };
+
         // A boundary delete removes the segment's terminating boundary, so the
         // orphaned entries must fuse with the leftmost leaf of the right-adjacent
         // subtree. Detect it before anything else: a boundary key is always the
@@ -1138,6 +1165,16 @@ where
                 // Cheapest test first: only a key sorting past the segment's
                 // last entry can be an orphan append, so the coin hashes are
                 // paid only on true appends.
+                // Under the pacing ramp the appended key's decision also
+                // carries the frame's weight past the threshold: the frame
+                // is the whole leaf plus the newcomer, since a leaf starts
+                // at an accepted cut.
+                let ramp = manifest.pacing_ramp_threshold();
+                let excess = if ramp > 0 {
+                    (segment.total_weight() + entry.weight()).saturating_sub(ramp)
+                } else {
+                    0
+                };
                 match segment.entries().last() {
                     Some(last) if entry.key > last.key => {
                         if manifest.max_segment == 0 {
@@ -1148,9 +1185,13 @@ where
                                 segment.entries(),
                                 &manifest,
                             );
-                            !D::leaf_cut(entry.key.as_ref(), bank + entry.weight(), &manifest)
+                            !D::leaf_cut(
+                                entry.key.as_ref(),
+                                bank + entry.weight() + excess,
+                                &manifest,
+                            )
                         } else {
-                            !D::leaf_cut(entry.key.as_ref(), entry.weight(), &manifest)
+                            !D::leaf_cut(entry.key.as_ref(), entry.weight() + excess, &manifest)
                         }
                     }
                     _ => false,
@@ -1174,6 +1215,7 @@ where
         } else {
             match (&self, follow(&mut root, &path)?) {
                 (Edit::Delete(key), TransientNode::Segment(segment)) => {
+                    let total = segment.total_weight();
                     match segment.entries().binary_search_by(|e| e.key.cmp(key)) {
                         Ok(at) if at + 1 < segment.entries().len() => {
                             let entries = segment.entries();
@@ -1188,14 +1230,35 @@ where
                                     entries[at + 1].key.as_ref(),
                                     &manifest,
                                 );
-                            if beside_stretch {
-                                let bank = trailing_stretch_weight_skipping::<Key, Value, D>(
-                                    entries, at, &manifest,
-                                );
+                            // Under the pacing ramp the terminal decision
+                            // also carries the post-delete frame weight
+                            // past the threshold; a ramp-funded cut can be
+                            // defunded by a delete even beside no stretch,
+                            // so any delete from a leaf that WAS in the
+                            // ramp zone re-evaluates the terminal.
+                            let ramp = manifest.pacing_ramp_threshold();
+                            let was_ramped = ramp > 0 && total > ramp;
+                            let excess = if ramp > 0 {
+                                (total - entries[at].weight()).saturating_sub(ramp)
+                            } else {
+                                0
+                            };
+                            if beside_stretch || was_ramped {
+                                let bank = if beside_stretch {
+                                    trailing_stretch_weight_skipping::<Key, Value, D>(
+                                        entries, at, &manifest,
+                                    )
+                                } else {
+                                    0
+                                };
                                 let last = entries
                                     .last()
                                     .expect("segment with a found key is non-empty");
-                                !D::leaf_cut(last.key.as_ref(), bank + last.weight(), &manifest)
+                                !D::leaf_cut(
+                                    last.key.as_ref(),
+                                    bank + last.weight() + excess,
+                                    &manifest,
+                                )
                             } else {
                                 false
                             }
@@ -1283,6 +1346,7 @@ where
             && !widened
             && !index_widened
             && !over_ceiling
+            && !ramp_zone
         {
             let TransientNode::Segment(segment) = follow(&mut root, &path)? else {
                 return Err(DialogSearchTreeError::Node(
@@ -1322,7 +1386,9 @@ where
             moves_seam_under_ceiling,
             widened,
             index_widened,
-            over_ceiling,
+            // The ramp-zone gate (pacing-ramp prototype) shares the
+            // over-ceiling bucket: both are weight-bound bypasses.
+            over_ceiling || ramp_zone,
         );
 
         let neighbor_path = if is_boundary_delete || is_orphan_append || dissolves_terminal_cut {
