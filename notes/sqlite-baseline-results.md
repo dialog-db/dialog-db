@@ -1038,6 +1038,47 @@ mechanism:**
 4. Only then re-tune (S, factor) and re-run the scale curve and
    network models on bounded shapes.
 
+### Veto census (2026-07-30): the veto is inert on the real workload
+
+Owner question: does the vetoing cause issues? New `veto_census`
+example walks the canonical tree in key order and evaluates the actual
+`Geometric::vetoes` rule on every adjacent-key seam (10,000 real SE
+txns, shipped defaults: max_separator 512, max_segment 64 KiB):
+
+- **Zero vetoed seams out of 57,503** — across all three fact
+  orderings. The veto never fires on this data at all. The Phase-A
+  pathology the veto replaced came from the old DEMOTION rule (any key
+  longer than max_separator ranked 0 unconditionally — every body key);
+  the veto is pairwise (neighbors must SHARE a >512-byte prefix), and
+  under real supersession churn near-duplicate large values do not
+  coexist — the old revision is retracted before the new one lands. So
+  vetoed stretches, the weight bank, and stretch anchors all idle in
+  production shapes; they are insurance for coexisting near-duplicates
+  (multi-valued attributes with similar large values, import shapes
+  that assert revisions side by side).
+- **The 20 over-byte-ceiling leaves have 0.0% veto share** — they are
+  pure natural accepted-seam frames, confirming the oversize cause is
+  the weight-to-byte drift (previous entry), not vetoed stretches.
+- 13 forced links storing 7.6 KB of separators: the step-5 natural-
+  frame ceiling firing rarely, as designed.
+
+Issues assessment: the veto RULE causes no measurable shape, size, or
+edit-cost issues on real data — it is not the pathology and not a
+contributor. The veto/forced-run MACHINERY (window widenings, stretch
+merges, anchor elections) is a different matter: it is the complexity
+locus where the stale-path reshape bug lived, and real workloads
+exercise it only through the rare ceiling anchors (the field crash at
+max_segment 16 KiB came via ceiling-forced runs, not vetoes — smaller
+targets mint many more forced anchors). Standing complexity with
+near-zero production exercise argues for keeping the small-frame
+repro fixture as the permanent exerciser (done, on the fix branch) and
+for treating any future simplification of the widening machinery as
+low-risk to real shapes. Caveat: this census is the artifacts-level
+tree (no version-prefixed history region); repo trees add history keys
+whose 40-byte shared version prefixes still sit far under the 512
+bound, so the zero-veto finding should generalize, but a repo-level
+census would confirm.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
