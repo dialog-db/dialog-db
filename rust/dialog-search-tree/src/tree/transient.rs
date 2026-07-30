@@ -5773,6 +5773,106 @@ mod tests {
         Ok(())
     }
 
+    /// A force-split frame's pieces are self-identified by their long
+    /// forced separators, and every edit path must preserve that mark. A
+    /// weight-neutral value update into a piece rides the in-place fast
+    /// path, which re-derives the piece's separator unconditionally: the
+    /// long forced form is not a prefix of the piece's minimum, so
+    /// `reseparate` collapses it to the short natural prefix and silently
+    /// strips the mark. The orphaned piece then never rejoins its run,
+    /// and canonical shapes come to depend on edit history — caught on
+    /// the real workload as identical fact sets canonicalizing to
+    /// different roots under different commit groupings. Pinned at both
+    /// layers: the stored marks must survive the update byte-for-byte,
+    /// and the updated tree must match the sequential build that carried
+    /// the final value from the start.
+    #[dialog_common::test]
+    async fn it_keeps_forced_marks_through_fast_path_updates() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(2, 0);
+
+        // An all-tails run over the ceiling: no natural cut anywhere, so
+        // the frame machinery must force-split it at marked anchors.
+        let sorted: Vec<VarKey> = tails_keys("e", 40, &manifest);
+        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let bound = manifest.max_separator as usize;
+        let marked: Vec<(usize, Vec<u8>)> = leaf_piece_heads(tree.root(), &storage)
+            .await?
+            .into_iter()
+            .filter(|(separator, _)| *separator > bound)
+            .collect();
+        assert!(
+            !marked.is_empty(),
+            "the all-tails run exceeds the ceiling and must be force-split"
+        );
+
+        // Update a key inside a marked piece with a same-weight value:
+        // eligible for the in-place fast path, which must leave every
+        // stored mark in place.
+        let head = &marked[0].1;
+        let at = sorted
+            .iter()
+            .position(|key| &key.0 == head)
+            .expect("the marked head is one of the built keys");
+        let target = sorted.get(at + 1).unwrap_or(&sorted[at]).clone();
+        let mut delta = Delta::zero();
+        let updated = tree
+            .edit_with_manifest(&storage)
+            .await?
+            .insert(target.clone(), b"rewritten".to_vec(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (hash, buffer) in delta.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        let after: Vec<(usize, Vec<u8>)> = leaf_piece_heads(updated.root(), &storage)
+            .await?
+            .into_iter()
+            .filter(|(separator, _)| *separator > bound)
+            .collect();
+        assert_eq!(
+            marked, after,
+            "a weight-neutral update stripped a forced mark"
+        );
+
+        // History-independence: a sequential build carrying the final
+        // value from the start lands on the same root.
+        let mut fresh_storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut fresh: Option<VarTree> = None;
+        let mut delta = Delta::zero();
+        for key in &sorted {
+            let transient = match &fresh {
+                None => {
+                    TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Cache::new(), manifest)
+                }
+                Some(tree) => tree.edit_with_manifest(&fresh_storage).await?,
+            };
+            let value = if key == &target {
+                b"rewritten".to_vec()
+            } else {
+                key.0.clone()
+            };
+            let next = transient
+                .insert(key.clone(), value, &fresh_storage)
+                .await?
+                .persist(&mut delta)?;
+            for (hash, buffer) in delta.flush() {
+                fresh_storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            }
+            delta = Delta::zero();
+            fresh = Some(next);
+        }
+        let fresh = fresh.expect("the sequential build is non-empty");
+        assert_eq!(
+            updated.root(),
+            fresh.root(),
+            "the update's history leaked into the canonical shape"
+        );
+
+        Ok(())
+    }
+
     /// Every persisted index node's stats, by BFS depth: its summed link
     /// weight and child count. The shape probe the index-pacing tests read.
     async fn index_nodes(
