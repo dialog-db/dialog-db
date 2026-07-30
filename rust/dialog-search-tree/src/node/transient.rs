@@ -351,6 +351,32 @@ where
         Ok(weight)
     }
 
+    /// Per-link `(link, weight, ops)` for every non-empty link buffer, the
+    /// quantities a selective flush orders its shedding by. A sealed link
+    /// streams its encoded columns; nothing is lifted.
+    pub(crate) fn link_measures<K>(
+        &self,
+    ) -> Result<Vec<(usize, usize, usize)>, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        let mut measures = Vec::new();
+        for (at, link) in self.links.iter().enumerate() {
+            let ops = link.len();
+            if ops == 0 {
+                continue;
+            }
+            let weight = match link {
+                LinkNovelty::Sealed(buffer) => buffer.weight::<K>()?,
+                LinkNovelty::Open(entries) | LinkNovelty::Cached { entries, .. } => {
+                    entries.iter().map(novelty_entry_weight).sum()
+                }
+            };
+            measures.push((at, weight, ops));
+        }
+        Ok(measures)
+    }
+
     /// Takes link `at`'s ops, leaving that buffer empty: what a flush hands
     /// the child at `at`, verbatim: the grouping already happened at
     /// enqueue, so there is no partition step here.

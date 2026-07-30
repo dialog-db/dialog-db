@@ -1252,6 +1252,65 @@ block sizes and touch counts, not buffer size — candidate mechanisms
 leaves at depth, supersession-scan read volume, root frame growing
 toward S. Attribution is the active thread.
 
+### Attribution at scale (2026-07-30): leaf traffic, drained per flush
+
+New tool `write_attribution` classifies every block moved through
+storage (leaf / index / other, by decoding it) and reports per-commit
+volume by class per window, plus a per-window probe of the live root
+and depth. At 25K txns with the byte-cap default, per commit:
+
+- W leaf 2.5 x 226 KB and R leaf 2.3 x 218 KB — leaf traffic is ~80%
+  of all bytes moved, and every flushed-to leaf (~90 KB) is READ back
+  (cache miss) then rewritten.
+- W index 1.0 x 111 KB — the root, rewritten every commit, its entry
+  section growing with fanout (links 72 -> 865 across the run).
+- W other 2.1 x ~1 KB — revision block + head pointer, constant.
+- Depth is stuck at 2 (root -> 865 leaves): the weight-paced ladder
+  (fanout ~ S/link_weight ~ 850) is right at its split point, so 25K
+  txns sits at the worst spot — maximum scatter, no mid-level
+  buffering.
+
+Root cause of the leaf traffic: `enqueue`'s overflow branch drained
+EVERY non-empty link, paying a ~90 KB leaf read + rewrite to move a
+couple hundred bytes of ops wherever the ops had scattered. (The
+`Capacity` trigger's own doc admitted this failure mode.)
+
+### Selective flush (2026-07-30): shed heaviest links to a low-water mark
+
+Overflow now sheds link buffers heaviest-first (by buffered weight,
+via the new `Novelty::link_measures`) and stops once the buffer is
+back under HALF of whichever bound fired, leaving light buffers in
+place; under `PerChild`, any link at or over its threshold is shed
+regardless. Canonical form is untouched (canonicalize still drains
+everything); all 292/159/193 tests pass unchanged.
+
+Measured (write_attribution, 25K txns, deterministic block counts —
+the timing column of this run was contaminated by a concurrent build
+and is not cited):
+
+| at 25K txns, per commit | flush-all | selective |
+|---|---|---|
+| leaf writes | 2.5 x 226 KB | 1.8 x 166 KB (-27%) |
+| leaf reads | 2.3 x 218 KB | 1.7 x 161 KB (-26%) |
+| root index write | 1.0 x 111 KB | 1.0 x 148 KB (+33%) |
+| total bytes moved | ~555 KB | ~475 KB (-14%) |
+
+The root write grew because the buffer now rides at ~3/4 cap on
+average (hysteresis) and all of it re-encodes into every per-commit
+root rewrite — the low-water mark trades leaf touches against root
+carry. Open threads from the same data:
+
+- **Depth oscillation**: the two depth-3 windows are ~2x cheaper than
+  their depth-2 neighbors (window 15000: leaf 1.0 x 100 KB, root
+  rewrite 39 KB), but the root split keeps dissolving back to a flat
+  800+-link root (depth 3 at 12.5-15K, back to depth 2 at 17.5K).
+  Making the index-level cut stick (or fire earlier) looks like a ~2x
+  scale-cost lever; needs a measurement of why the cut dissolves.
+- Leaf reads are all cache misses: leaf revisit distance (~600
+  commits x ~3.5 seeded blocks) exceeds the 2048-entry node cache.
+  A byte-budgeted, larger cache would convert most R leaf into hits;
+  ties into the owner's cache-injectability thread.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the

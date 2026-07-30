@@ -968,42 +968,64 @@ where
         // pushed operational block).
         let over_bytes = config.op_buf_bytes != usize::MAX
             && index.novelty.weight::<Key>()? > config.op_buf_bytes;
-        let flushes = over_bytes
-            || match config.trigger {
-                FlushTrigger::Capacity => index.novelty.len() > config.op_buf_size,
-                FlushTrigger::PerChild { floor } => {
-                    // Never exceed the buffer's capacity, whatever the
-                    // per-child threshold works out to.
-                    if index.novelty.len() > config.op_buf_size {
-                        true
-                    } else {
-                        let children = index.children.len().max(1);
-                        let threshold = (config.op_buf_size / children).max(floor).max(1);
-                        index.novelty.peak() >= threshold
-                    }
-                }
-            };
+        let per_child_threshold = match config.trigger {
+            FlushTrigger::Capacity => None,
+            FlushTrigger::PerChild { floor } => {
+                let children = index.children.len().max(1);
+                Some((config.op_buf_size / children).max(floor).max(1))
+            }
+        };
+        let over_count = index.novelty.len() > config.op_buf_size
+            || per_child_threshold.is_some_and(|threshold| index.novelty.peak() >= threshold);
 
         // Room: the ops stay where routing put them.
-        if !flushes {
+        if !over_bytes && !over_count {
             return Ok(node);
         }
 
-        // Overflow: cascade one level into the children — lifting ON
-        // DEMAND, only where a non-empty buffer actually descends. A child
-        // with nothing to take stays `Node::Persistent`: at persist,
-        // `into_link` passes its link through with no decode, no re-encode,
-        // no re-hash, and no delta entry, where lifting every child up
-        // front turned each untouched sibling into a byte-identical
-        // re-store (the measured 24-26% duplicate-block share of sealed
-        // bytes; see bead dialog-db-59). Provenance is the cheap, exact
-        // signal here — store identity is not observable at persist time.
-        let child_count = index.children.len();
-        for at in 0..child_count {
-            let took = index.novelty.take_link::<Key>(at)?;
-            if took.is_empty() {
+        // Overflow: shed the HEAVIEST link buffers first and stop once the
+        // buffer is back under half of whichever bound fired, leaving the
+        // light buffers in place. Draining every non-empty link paid a
+        // child rewrite per couple of ops once the ops scattered across a
+        // wide node (measured on the real workload: ~2.3 leaf rewrites of
+        // ~90 KB per commit to move ~20 KB of ops); heaviest-first
+        // shedding concentrates each child touch on the fattest batch
+        // available, and the halfway low-water mark keeps the next few
+        // enqueues from re-firing immediately. Under `PerChild`, any link
+        // at or over its threshold holds a batch worth writing by that
+        // trigger's own definition and is shed regardless.
+        //
+        // Each shed link cascades one level into its child — lifting ON
+        // DEMAND, only where a buffer actually descends. A child with
+        // nothing to take stays `Node::Persistent`: at persist, `into_link`
+        // passes its link through with no decode, no re-encode, no re-hash,
+        // and no delta entry, where lifting every child up front turned
+        // each untouched sibling into a byte-identical re-store (the
+        // measured 24-26% duplicate-block share of sealed bytes; see bead
+        // dialog-db-59). Provenance is the cheap, exact signal here — store
+        // identity is not observable at persist time.
+        let mut measures = index.novelty.link_measures::<Key>()?;
+        measures.sort_by_key(|&(_, weight, ops)| std::cmp::Reverse((weight, ops)));
+        let mut buffered_weight = index.novelty.weight::<Key>()?;
+        let mut buffered_ops = index.novelty.len();
+        let weight_target = if over_bytes {
+            config.op_buf_bytes / 2
+        } else {
+            usize::MAX
+        };
+        let count_target = if over_count {
+            config.op_buf_size / 2
+        } else {
+            usize::MAX
+        };
+        for (at, link_weight, link_ops) in measures {
+            let batch_worth = per_child_threshold.is_some_and(|threshold| link_ops >= threshold);
+            if !batch_worth && buffered_weight <= weight_target && buffered_ops <= count_target {
                 continue;
             }
+            let took = index.novelty.take_link::<Key>(at)?;
+            buffered_weight -= link_weight;
+            buffered_ops -= link_ops;
             lift_child(&mut index.children[at], accessor).await?;
 
             let child = std::mem::replace(
