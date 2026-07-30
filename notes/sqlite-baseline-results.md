@@ -1461,6 +1461,42 @@ mattering in practice and can eventually be simplified away.
 `converge_check` should become a pinned regression harness either
 way.
 
+### Ramp A/B at the default config (2026-07-30): -30-35% at scale, free at 500
+
+`DIALOG_TREE_PACING_RAMP=200` vs off, S=64K, 25K real txns, same-day
+sequential runs:
+
+| | no ramp | ramp 200 |
+|---|---|---|
+| late-window us/txn | 2,636-6,228, climbing; last 4,909 | 2,392-3,475, FLAT; last 3,248 |
+| ratio vs sqlite_mem (tail) | 29-58x | 19-21x |
+| leaf widened / window | 1,600-7,200 | **0, every window** |
+| index widened / window | 0 (until the root crosses ~196KB) | **0** |
+| depth | oscillates 2<->3, fat root (61-154KB) | stable 3 from 12.5K, small root |
+| bytes moved / commit (tail) | ~475KB | ~270KB |
+| 500-txn headline (interleaved) | 313-356 us | 313-332 us (equal; byte-identical writes) |
+
+The ramp does exactly what it was built for: frames practically never
+reach the ceiling, so forced anchors stop forming and the widening
+machinery goes idle. Its edits surface instead as ramp-zone reshapes
+(2.5-4.4K/window in the over-ceiling audit bucket), which the
+identity fast path absorbs (2.6-9.2K skipped ancestor regroups per
+window). Terminal-defunding fusions (200-440/window, up from ~5) show
+the ramp-aware edit checks doing real work. Convergence at 5K txns
+still diverges with the ramp on — the pre-existing ceiling hole plus
+whatever residue the ramp's outcome-dependent context adds are not
+yet separable; with forced frames gone the remaining suspects narrow
+to the ramp-zone paths themselves plus the stretch backstop.
+
+Open for adoption (owner): make the ramp a real Manifest field (a
+format decision — the env knob deliberately is not one); whether the
+index ladder gets the same ramp (its forced runs are what killed
+(32K, 32K); at 64K the root crosses its ceiling around 50K txns even
+with leaf frames tamed); whether (S, factor) should be retuned with
+the ramp on (a near-unreachable ceiling could drop to factor 2 for
+tighter blocks); and the convergence strategy (root-cause the ceiling
+hole vs ramp-first + pin converge_check as the regression harness).
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
