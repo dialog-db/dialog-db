@@ -60,8 +60,27 @@ use rexie::{ObjectStore, Rexie, RexieBuilder, TransactionMode};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use tokio::sync::RwLock;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
+
+/// Render a `rexie::Error` including the exception underneath it.
+///
+/// `rexie::Error`'s own `Display` is the bare string "idb error" — the
+/// `idb::Error` it wraps, which carries the DOMException name that says
+/// *why* (`InvalidStateError` for a closed connection, `NotFoundError`
+/// for a missing store), is dropped. Walk the source chain instead, so a
+/// failure reports something a reader can act on.
+fn describe(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
 
 /// Convert bytes to a JS Uint8Array.
 fn to_uint8array(bytes: &[u8]) -> Uint8Array {
@@ -78,6 +97,9 @@ struct Connection {
     /// Shared via Rc so StoreSession can hold a clone across .await
     /// points without borrowing the Connection.
     db: Rc<Rexie>,
+    /// Held shared for the length of every transaction and exclusively
+    /// for the length of every schema upgrade. See [`IndexedDb::store`].
+    gate: Rc<RwLock<()>>,
 }
 
 impl Connection {
@@ -89,7 +111,7 @@ impl Connection {
 
         let version = db
             .version()
-            .map_err(|e| IndexedDbError::Database(e.to_string()))?;
+            .map_err(|e| IndexedDbError::Database(describe(&e)))?;
         let stores = db.store_names().into_iter().collect();
 
         Ok(Self {
@@ -97,6 +119,7 @@ impl Connection {
             version,
             stores,
             db: Rc::new(db),
+            gate: Rc::new(RwLock::new(())),
         })
     }
 
@@ -106,34 +129,47 @@ impl Connection {
     }
 }
 
-/// A handle to a named object store. Holds a shared `Rc<Rexie>` so it
-/// can be used freely across .await points.
+/// A handle to a named object store.
+///
+/// Holds the shared connection rather than a database handle, because an
+/// upgrade *replaces* that handle: a session that captured the old one
+/// would keep addressing a connection the browser has since closed. The
+/// handle is therefore read at transaction time, under `gate`.
 struct StoreSession {
-    db: Rc<Rexie>,
+    connection: Rc<RefCell<Connection>>,
+    gate: Rc<RwLock<()>>,
     store_name: String,
 }
 
 impl StoreSession {
+    /// The database handle as it stands now, not as it stood when this
+    /// session was handed out.
+    fn db(&self) -> Rc<Rexie> {
+        self.connection.borrow().db()
+    }
+
     async fn query<F, Fut, Output, E>(&self, select: F) -> Result<Output, E>
     where
         F: FnOnce(rexie::Store) -> Fut,
         Fut: std::future::Future<Output = Result<Output, E>>,
         E: From<IndexedDbError>,
     {
-        let tx = self
-            .db
+        let _open = self.gate.read().await;
+        let db = self.db();
+
+        let tx = db
             .transaction(&[&self.store_name], TransactionMode::ReadOnly)
-            .map_err(|e| IndexedDbError::Transaction(e.to_string()))?;
+            .map_err(|e| IndexedDbError::Transaction(describe(&e)))?;
 
         let object_store = tx
             .store(&self.store_name)
-            .map_err(|e| IndexedDbError::Store(e.to_string()))?;
+            .map_err(|e| IndexedDbError::Store(describe(&e)))?;
 
         let result = select(object_store).await?;
 
         tx.done()
             .await
-            .map_err(|e| IndexedDbError::Transaction(e.to_string()))?;
+            .map_err(|e| IndexedDbError::Transaction(describe(&e)))?;
 
         Ok(result)
     }
@@ -144,20 +180,22 @@ impl StoreSession {
         Fut: std::future::Future<Output = Result<Output, E>>,
         E: From<IndexedDbError>,
     {
-        let tx = self
-            .db
+        let _open = self.gate.read().await;
+        let db = self.db();
+
+        let tx = db
             .transaction(&[&self.store_name], TransactionMode::ReadWrite)
-            .map_err(|e| IndexedDbError::Transaction(e.to_string()))?;
+            .map_err(|e| IndexedDbError::Transaction(describe(&e)))?;
 
         let object_store = tx
             .store(&self.store_name)
-            .map_err(|e| IndexedDbError::Store(e.to_string()))?;
+            .map_err(|e| IndexedDbError::Store(describe(&e)))?;
 
         let result = mutate(object_store).await?;
 
         tx.done()
             .await
-            .map_err(|e| IndexedDbError::Transaction(e.to_string()))?;
+            .map_err(|e| IndexedDbError::Transaction(describe(&e)))?;
 
         Ok(result)
     }
@@ -209,50 +247,62 @@ impl IndexedDb {
     /// Gets a handle to the named object store. Upgrades the database
     /// schema if the store doesn't exist yet.
     ///
-    /// The returned StoreSession holds a shared `Rc<Rexie>` so it can
-    /// be used across .await points without holding a borrow on Connection.
+    /// An upgrade cannot happen alongside other work on the same database.
+    /// It opens a second connection at a higher version, and the browser
+    /// only lets that through once every other connection has closed —
+    /// which an application makes happen by closing on `versionchange`, as
+    /// browsers document and as the alternative is an upgrade that blocks
+    /// forever. Either way an upgrade raised mid-transaction is fatal to
+    /// that transaction: it is left addressing a connection that is closing
+    /// or already closed, and reports `InvalidStateError`.
     ///
-    /// During an upgrade, the old database connection remains valid for
-    /// any active StoreSession. The new connection is opened alongside it
-    /// and swapped in once ready. IndexedDB's `versionchange` mechanism
-    /// coordinates the transition.
+    /// So upgrades take `gate` exclusively and transactions take it shared.
+    /// An upgrade waits behind in-flight transactions, and transactions
+    /// started after it see the replacement handle rather than the closed
+    /// one.
     async fn store(&self, name: &str) -> Result<StoreSession, IndexedDbError> {
+        let gate = self.connection.borrow().gate.clone();
+
         // Check if upgrade is needed (brief borrow, dropped before .await).
-        let needs_upgrade = !self.connection.borrow().stores.contains(name);
+        if !self.connection.borrow().stores.contains(name) {
+            let _upgrade = gate.write().await;
 
-        if needs_upgrade {
-            // Gather what we need from the connection (brief borrow).
-            let (version, mut new_stores) = {
-                let conn = self.connection.borrow();
-                (conn.version, conn.stores.clone())
-            };
-            new_stores.insert(name.to_string());
+            // Re-check: another task may have added this very store while
+            // this one waited for the gate, and a redundant upgrade would
+            // bump the version for nothing.
+            if !self.connection.borrow().stores.contains(name) {
+                // Gather what we need from the connection (brief borrow).
+                let (version, mut new_stores) = {
+                    let conn = self.connection.borrow();
+                    (conn.version, conn.stores.clone())
+                };
+                new_stores.insert(name.to_string());
 
-            // Build the upgraded database. No RefCell borrow held here,
-            // so the old Rc<Rexie> remains valid for concurrent readers.
-            let new_version = version + 1;
-            let mut builder = RexieBuilder::new(&self.name).version(new_version);
-            for store in &new_stores {
-                builder = builder.add_object_store(ObjectStore::new(store).auto_increment(false));
+                // Build the upgraded database. No RefCell borrow held here.
+                let new_version = version + 1;
+                let mut builder = RexieBuilder::new(&self.name).version(new_version);
+                for store in &new_stores {
+                    builder =
+                        builder.add_object_store(ObjectStore::new(store).auto_increment(false));
+                }
+                let db = builder
+                    .build()
+                    .await
+                    .map_err(|e| IndexedDbError::Database(format!("{:?}", e)))?;
+
+                // Swap in the new connection (brief borrow).
+                let mut conn = self.connection.borrow_mut();
+                conn.version = db
+                    .version()
+                    .map_err(|e| IndexedDbError::Database(describe(&e)))?;
+                conn.stores = db.store_names().into_iter().collect();
+                conn.db = Rc::new(db);
             }
-            let db = builder
-                .build()
-                .await
-                .map_err(|e| IndexedDbError::Database(format!("{:?}", e)))?;
-
-            // Swap in the new connection (brief borrow). Any StoreSession
-            // holding the old Rc<Rexie> keeps it alive until they drop.
-            let mut conn = self.connection.borrow_mut();
-            conn.version = db
-                .version()
-                .map_err(|e| IndexedDbError::Database(e.to_string()))?;
-            conn.stores = db.store_names().into_iter().collect();
-            conn.db = Rc::new(db);
         }
 
-        let db = self.connection.borrow().db();
         Ok(StoreSession {
-            db,
+            connection: self.connection.clone(),
+            gate,
             store_name: name.to_string(),
         })
     }
@@ -440,6 +490,77 @@ mod tests {
         assert!(conn.stores.contains("new-store"));
         assert_eq!(conn.version, initial_version + 1);
 
+        Ok(())
+    }
+
+    /// Adding a store upgrades the database, and an upgrade replaces the
+    /// connection: the browser closes the old one so the higher version can
+    /// open. A store session handed out beforehand must keep working — its
+    /// holder has no way to know that some unrelated code path chose that
+    /// moment to grow the schema, and nothing about its own store changed.
+    #[dialog_common::test]
+    async fn it_keeps_a_store_session_usable_across_an_unrelated_upgrade() -> anyhow::Result<()> {
+        let db = IndexedDb::connect(unique_name("upgrade-session")).await?;
+        let store = db.store("memory").await?;
+
+        let key = JsValue::from_str("key");
+        let value = JsValue::from_str("value");
+        store
+            .transact(|object_store| {
+                let key = key.clone();
+                let value = value.clone();
+                async move {
+                    object_store
+                        .put(&value, Some(&key))
+                        .await
+                        .map_err(|e| IndexedDbError::Store(e.to_string()))
+                }
+            })
+            .await?;
+
+        // An unrelated store arrives, taking the database up a version.
+        db.store("archive/index").await?;
+
+        let result: Option<JsValue> = store
+            .query(|object_store| async move {
+                object_store
+                    .get(JsValue::from_str("key"))
+                    .await
+                    .map_err(|e| IndexedDbError::Store(e.to_string()))
+            })
+            .await?;
+
+        assert_eq!(
+            result.and_then(|value| value.as_string()).as_deref(),
+            Some("value")
+        );
+        Ok(())
+    }
+
+    /// Two upgrades asked for at once must both land. Each one opens the
+    /// database a version higher with the set of stores it knows about, so
+    /// unserialized they read the same starting version, build the same
+    /// next one, and whichever finishes last defines the schema — silently
+    /// dropping the other's store.
+    #[dialog_common::test]
+    async fn it_keeps_both_stores_when_two_upgrades_are_asked_for_at_once() -> anyhow::Result<()> {
+        let db = IndexedDb::connect(unique_name("upgrade-pair")).await?;
+
+        let (one, two) = (db.clone(), db.clone());
+        let (first, second) = futures_util::future::join(
+            async move { one.store("memory").await.map(|_| ()) },
+            async move { two.store("archive/index").await.map(|_| ()) },
+        )
+        .await;
+        first?;
+        second?;
+
+        let conn = db.connection.borrow();
+        assert!(
+            conn.stores.contains("memory") && conn.stores.contains("archive/index"),
+            "both stores survive, got: {:?}",
+            conn.stores
+        );
         Ok(())
     }
 
