@@ -814,6 +814,31 @@ replace transients if we avoid multiple child rebuilds") — recorded in
 `notes/tree-research-2026-07.md` as a follow-up direction alongside the
 g-tree and bijoux findings.
 
+### Buffer-capacity sweep (2026-07-30): 256 is at the optimum
+
+New `DIALOG_TREE_OP_BUF` override (read once, native only) sweeping the
+op-buffer capacity on the 500-txn real SE replay (dialog_mem, two runs
+per point):
+
+| capacity | per commit |
+|---|---|
+| 16 | 463 us |
+| 32 | 331-352 us |
+| 64 | 245-250 us |
+| 128 | 213-224 us |
+| **256 (default)** | **212-234 us** |
+| 512 | 243-254 us |
+
+The default sits at the measured minimum: smaller buffers make commits
+cheaper per frame but flush so much more often that the amortized cost
+rises steeply; larger buffers grow the frame past the flush savings.
+Conclusion: the ~210 us in-memory commit is the design's amortization
+EQUILIBRIUM, not a mistuned constant — further reduction requires
+either fewer byte-passes per persist (engineering), cheaper repo-layer
+semantics (batch-signing), or a node-format change designed WITH the
+sync contract (the chained-delta form of that idea is rejected — see
+`notes/operational-log-architecture.md`).
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the

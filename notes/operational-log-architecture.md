@@ -106,3 +106,25 @@ novelty-near-root block):
   write than a classic B+ tree; that amortization is what pays for
   hashing, three orderings, history, and signatures. The revised plan
   collects that dividend inside the tree instead of beside it.
+
+## Update (2026-07-30): chained novelty deltas rejected too
+
+The follow-up idea from the group-6A decomposition — root frame links a
+small per-commit delta block, deltas chain, flush folds the chain —
+was reviewed by the owner and rejected: it breaks the one-node-one-block
+invariant that sync, diff, partial replication, verification, and GC
+are built on (a cold reader would pay chain-length round trips per
+node; the differential and push would need a new block type). Any
+future attack on the O(frame) commit cost must be designed WITH the
+replication contract, not around it. The measured state after group 6A:
+in-memory commits sit at the buffer-capacity amortization equilibrium
+(~210 us; capacity sweep confirms the 256 default is optimal), at
+parity with durable SQLite; the remaining structural candidates are
+byte-pass reduction in persist, batch-signing at the repo layer, and a
+g-tree-style rank-cut canonical layer — which itself needs a byte-bound
+strategy before it can replace the frame-ceiling machinery (rank bounds
+item COUNT; oversized-value variance is what the election/force-split
+regime exists for; the likely shape is rank-cuts + the existing spill
+threshold bounding inline value bytes + a separator/key cap, giving a
+deterministic byte bound without boundary elections — design work, not
+a drop-in).

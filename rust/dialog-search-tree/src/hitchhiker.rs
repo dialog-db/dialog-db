@@ -62,6 +62,30 @@ use crate::{
 /// [`HitchhikerTree::with_op_buf_size`].
 pub const DEFAULT_OP_BUF_SIZE: usize = 256;
 
+/// The op-buffer capacity trees open under: [`DEFAULT_OP_BUF_SIZE`] unless
+/// `DIALOG_TREE_OP_BUF` overrides it (experiment plumbing, read once per
+/// process, native only). The capacity is the per-commit-cost knob: a
+/// commit re-encodes and re-hashes the root frame, whose size the buffer
+/// dominates, while a smaller buffer flushes (and pushes novelty toward
+/// the leaves) proportionally more often — so the optimum balances
+/// O(capacity) per commit against O(flush)/capacity amortized, and it is
+/// a measurement question, not a constant to guess.
+fn default_op_buf_size() -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *SIZE.get_or_init(|| {
+            std::env::var("DIALOG_TREE_OP_BUF")
+                .ok()
+                .and_then(|raw| raw.parse().ok())
+                .filter(|&size| size > 0)
+                .unwrap_or(DEFAULT_OP_BUF_SIZE)
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    DEFAULT_OP_BUF_SIZE
+}
+
 /// A boxed future returning an edited [`TransientNode`], the shape `enqueue`
 /// returns so its recursion can be expressed as a plain `async fn` body inside a
 /// `Box::pin`.
@@ -207,7 +231,7 @@ where
         Self {
             root: HitchhikerRoot::Unloaded(tree.root().clone()),
             cache: tree.node_cache(),
-            op_buf_size: DEFAULT_OP_BUF_SIZE,
+            op_buf_size: default_op_buf_size(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
             manifest: None,
@@ -220,7 +244,7 @@ where
         Self {
             root: HitchhikerRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
             cache: Cache::new(),
-            op_buf_size: DEFAULT_OP_BUF_SIZE,
+            op_buf_size: default_op_buf_size(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
             manifest: None,
