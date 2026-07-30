@@ -114,6 +114,7 @@ async fn run(state_dir: PathBuf, idle_timeout: u64) -> Result<()> {
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("failed to create state dir {}", state_dir.display()))?;
 
+    sweep_stale_work_dirs(&state_dir);
     let work_dir = state_dir.join(format!("work-{}", std::process::id()));
     std::fs::create_dir_all(&work_dir)?;
 
@@ -171,6 +172,27 @@ pub async fn shutdown(daemon: &Daemon) -> ! {
     remove_state_file_if_ours(&daemon.state_dir);
     let _ = std::fs::remove_dir_all(&daemon.work_dir);
     std::process::exit(0)
+}
+
+/// Removes work directories left behind by daemons that exited uncleanly
+/// (their pid no longer exists).
+fn sweep_stale_work_dirs(state_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(state_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("work-"))
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid != std::process::id() && !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 fn write_state_file(state_dir: &Path, port: u16) -> Result<()> {
