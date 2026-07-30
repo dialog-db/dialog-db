@@ -120,3 +120,99 @@ own — so an embedder can persist and recover them across sessions
 file so "cache warm" survives restart for free). Noted as design work
 for the group-B/DCAA integration round, where the mmap story makes it
 mostly structural.
+
+## Boundary-decision design space: tails, context, and where to pay (2026-07-30)
+
+Owner questions after the widening attribution and the mark fix: is
+dolt's approach history-dependent; can widening's cost be fixed while
+keeping history independence; and do the previously considered ideas
+(synthetic boundary entries, finer rank granularity, second-coin
+flips) reopen anything.
+
+### The structural fact all options answer to
+
+Any cut rule in which each seam's decision reads only a bounded local
+neighborhood of keys behaves like independent coins, so run lengths
+have an exponential tail: unbounded frames occur with positive
+probability. Bounding frame size DETERMINISTICALLY therefore requires
+reading unbounded context (the frame's membership) somewhere. The
+whole design space is where that context is read and how it is
+maintained:
+
+1. **At edit time, whole frame** — today's widening: anchors are a
+   pure function of frame membership (history-independent), and every
+   membership edit re-merges, re-elects, re-splits. Correct (now that
+   the marks survive), O(frame) per edit.
+2. **Left-to-right recurrence + rightward resync** — dolt's ramp and
+   ours: the decision reads run-so-far; maintenance must re-decide
+   from the frame start and continue until an emitted cut coincides
+   with a stored one. History-INDEPENDENT in structure — the
+   boundary set is a deterministic function of the key sequence —
+   PROVIDED resync runs to its fixed point. What it gives up is
+   worst-case edit locality: boundary shifts can cascade. With a ramp
+   the chain dies geometrically (a hop continues only through a frame
+   that ends in the ramp zone, ~e^-2 ≈ 13% at threshold 2S; expected
+   chain ~1.16 frames), which is exactly why dolt ramps too. Our
+   prototype implements the ramp WITHOUT full resync, which is why
+   its four adversarial order-convergence fixtures fail — multiple
+   locally consistent fixed points. Dolt's approach is not
+   history-dependent; half-implemented resync is.
+3. **Frame-scoped election + incremental summaries** — the overlooked
+   option: keep today's election semantics untouched (anchors remain
+   a pure function of membership → same canonical shapes, same
+   convergence argument), but maintain the election incrementally.
+   Each stored piece caches a summary derivable purely from its own
+   content — its election candidate (min hash + candidate class), its
+   weight, its count. An edit rebuilds one piece's summary (O(piece))
+   and re-runs the election over per-piece summaries (O(#pieces)),
+   touching no other piece unless an anchor actually moves (rare:
+   only when the argmin changes or weight crosses a spacing
+   threshold). Summaries can live in a hash-keyed cache (piece hash →
+   summary, recomputed on miss; no format change) or later as a tiny
+   stored header field (format change, saves the recompute).
+
+### Where the owner's earlier ideas sit
+
+- **Synthetic boundary entries** (insert a phantom key as boundary,
+  evict by policy): whether the phantom exists depends on when the
+  run crossed the threshold in that particular history — two replicas
+  diverge. Making placement deterministic-from-content turns it into
+  exactly the stored form of the anchor election; the min-hash
+  election was the right replacement, as concluded at the time.
+- **Finer rank granularity ×X** (round down normally, consult higher
+  resolution in long runs): "in long runs" is frame context, so the
+  refined decision is an election over the frame — and taking the
+  best higher-resolution candidate IS a min-hash election. Same
+  family as today; the deficiency was never the election's semantics
+  but its maintenance cost, which is what option 3 fixes.
+- **Second coin from the other end of the hash / deterministic salt
+  in long runs**: deciding WHEN to consult the second coin again
+  reads frame context; and composing per-key coins only changes the
+  rate, never removes the exponential tail. Collapses into the same
+  election family.
+
+### Cascade susceptibility, compared
+
+- Today's design: coin cuts are per-key (edits cannot move them);
+  the bank is seam-structural (an edit inside a vetoed stretch can
+  flip the next accepted seam's cut — one frame boundary); anchors
+  re-elect within the frame. Cascades stop at the frame edge BY
+  CONSTRUCTION. This is a real property, and it is exactly what the
+  widening buys.
+- The ramp: geometric cascade chains (short in expectation, unbounded
+  in the worst case), plus the resync machinery becomes
+  load-bearing for convergence.
+
+### Recommendation
+
+Keep the (now-correct) election design and pursue option 3 —
+incremental elections via per-piece summaries — as the widening cost
+fix: it removes the O(frame)-per-edit tax and the (32K, 32K)-class
+catastrophes while preserving every current invariant, including
+frame-bounded cascades and history independence, with no format
+change in the cache-keyed variant. Keep the ramp as an experiment arm
+only; adopting it means committing to full rightward resync and
+accepting dolt-class worst cases. Re-measure the widening share
+first: the mark fix means runs now REJOIN and can dissolve when
+content shrinks, so the standing pool of forced frames — and the
+25%+ edit share measured before the fix — may already be smaller.
