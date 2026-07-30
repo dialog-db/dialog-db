@@ -1190,10 +1190,21 @@ where
             if fast_path_keeps_canonical::<Key, Value, D>(&segment.entries, &self, &manifest) {
                 apply_to_segment(&mut segment.entries, self);
                 // The seam at the segment's left edge moves with its first
-                // key. Re-derive the separator from the new minimum against
-                // the old separator as the floor; the rule is idempotent
-                // when the minimum did not change.
-                if let Some(first) = segment.entries.first() {
+                // key: only a min-move re-derives the separator. Re-deriving
+                // unconditionally was NOT the no-op its idempotence argument
+                // assumed — a force-split piece stores the long forced form
+                // (left neighbor's key plus 0x00 padding), which is not a
+                // prefix of the minimum, so `reseparate` collapsed it to
+                // the short natural prefix and silently stripped the
+                // self-identifying mark. The orphaned piece then never
+                // rejoined its run, and whether its boundary existed at all
+                // depended on edit history. A min-move can never see a
+                // forced floor here: it changes membership, and membership
+                // changes into a forced piece are widened before the fast
+                // path is reachable.
+                if min_move.is_some()
+                    && let Some(first) = segment.entries.first()
+                {
                     segment.separator = D::reseparate(first.key.as_ref(), &segment.separator);
                 }
                 // A moved separator moves a link boundary in the deepest
