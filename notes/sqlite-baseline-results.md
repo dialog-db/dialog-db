@@ -678,6 +678,40 @@ would leave the O(frame) shape intact. Two directions follow:
   novelty-near-root sync. Flush folds the chain into children exactly as
   the buffer flushes today.
 
+### SIMD experiment (2026-07-30)
+
+Question (owner): can SIMD speed up the tree ops? Measured answer for
+the current commit path:
+
+- ~50% of commit instructions already run in SIMD kernels: memcpy 29%
+  (glibc AVX2/ERMS), blake3 ~17-20% (hand-written asm with runtime
+  dispatch; the binary carries the AVX-512 kernels and this host has
+  full AVX-512, so real runs hash at maximum width — callgrind showed
+  the AVX2 kernel only because valgrind masks AVX-512 from CPUID),
+  memcmp 2.8% (AVX2).
+- Rebuilding everything at `-C target-cpu=x86-64-v3` (lets rustc
+  autovectorize with AVX2/BMI2): collected Ir 1,028.6M -> 1,008.1M
+  (**-2.0%**), wall clock indistinguishable. The scalar half of the
+  commit is allocator traffic, varint decoding, and per-entry control
+  flow — sequential dependence, not vectorizable loops.
+
+Conclusion: the SIMD-friendly work (bulk copy + bulk hash) is exactly
+the O(frame) waste the group-6 work is about to eliminate; making the
+waste faster is not the lever. SIMD items worth revisiting AFTER the
+O(novelty) restructuring shifts the profile:
+
+- ed25519 signing (repo layer): curve25519-dalek's AVX-512/IFMA backend
+  — this host has `avx512ifma` — is a compile-time backend choice, part
+  of the already-deferred x86-64 baseline decision.
+- SIMD-decodable varints / columnar scans (stream-vbyte style) if
+  varint decode surfaces as a top term post-restructuring (today ~1.2%).
+- Cross-node parallelism (cores, not lanes): hashing/encoding
+  independent nodes fans out during flush, import, canonicalize, and
+  checkpointing (blake3 also parallelizes internally over large
+  inputs). It cannot help single-commit latency — one root node, hash
+  chain dependency — which is another argument for keeping the commit
+  itself O(novelty).
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
