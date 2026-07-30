@@ -1544,3 +1544,23 @@ hole vs ramp-first + pin converge_check as the regression harness).
   1-hash inclusion proof). Deliberately deferred until the larger costs
   (storage I/O, DCAA outcome) are optimized away; revisit once the
   repo-commit profile is no longer dominated by them.
+
+### Post-fix widened share (2026-07-30): the honest cost is HIGHER
+
+Re-measured the default config after the mark fix, since durable
+marks change the baseline. Result: the widened share did NOT shrink —
+2.6-7.7K edits per 2,500-commit window (vs 1.6-7.2K pre-fix) — and
+wall time rose well beyond the machine's drift (sqlite control +25%,
+dialog roughly +80%: tail windows 8.5-11.6 ms/txn, ratio 48-80x).
+Reading: pre-fix, stripped marks meant many forced runs were
+invisible to the widening — merges covered fragments, undercounting
+the design's true cost while silently breaking convergence. With
+marks durable, every membership edit into a forced run now pays the
+full merge-elect-resplit, which is the CORRECT design's honest price.
+Byte volumes are unchanged (the tax is CPU, not I/O). Caveat: the
+machine was degraded during this run; a quiet-machine A/B would firm
+the multiplier, but the qualitative conclusion is solid.
+
+Consequence: the case for the incremental summary election (option 3
+in the design-space note) got stronger, not weaker — it is now the
+main lever at the default config, ahead of any (S, cap) retune.
