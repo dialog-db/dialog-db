@@ -1174,6 +1174,33 @@ is a coordination point. One fixture updated for the new metering
 stretch target under the calibrated weight, which made the stretch
 backstop fire — correctly — inside it).
 
+### Op cap vs byte cap (2026-07-30): the byte cap subsumes the count cap
+
+Owner question: any point keeping `ops > cap` next to the byte cap?
+Measured (byte cap 64 KiB fixed, op cap swept):
+
+- Small-op synthetic (2000 per-row commits): op cap 256 / 384 / 512 /
+  1024 / 4096 / 1,000,000 all replay in 1.25-1.31 s — identical. The
+  byte cap binds at ~380 small ops and nothing downstream cares about
+  the count.
+- Real SE (10K txns): op cap 256 vs 1,000,000: 1553 vs 1629 us/txn —
+  within noise (the byte cap binds at ~70 of SE's ~900-byte ops, far
+  under 256 anyway).
+- A first A/B run showed a 6.4x slowdown and an OOM kill for the
+  no-op-cap arm; a clean-state rerun could not reproduce either — it
+  was machine-state contamination (the killed 10K run poisoned the
+  timings that followed). Recorded as a methodology reminder: A/B
+  arms interleaved on a dirty machine are not measurements.
+
+Analytically the subsumption is structural: the metering charges every
+op at least ENTRY_ENCODING_OVERHEAD (64) + key bytes, so a byte cap of
+B implies a hard count bound of ~B/64 (about 1000 at 64 KiB, typically
+far fewer). Recommendation: once the byte cap is the default, the byte
+cap is THE knob; keep the count check itself (one integer compare, and
+dozens of tests plus the wasm path — where the env plumbing does not
+exist — drive cascades through `with_op_buf_size`), but it stops being
+a tuning parameter.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
