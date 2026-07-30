@@ -70,6 +70,20 @@ fn main() -> anyhow::Result<()> {
             backend.reads(),
             backend.read_bytes(),
         );
+        {
+            use std::sync::atomic::Ordering;
+
+            use dialog_search_tree::audit;
+            println!(
+                "widen: {} checks, {} runs, {} skipped; rejects: {} novelty, {} interior, {} plan",
+                audit::WIDEN_CHECKS.load(Ordering::Relaxed),
+                audit::WIDEN_RUNS.load(Ordering::Relaxed),
+                audit::WIDEN_SKIPS.load(Ordering::Relaxed),
+                audit::WIDEN_NOVELTY_REJECTS.load(Ordering::Relaxed),
+                audit::WIDEN_INTERIOR_REJECTS.load(Ordering::Relaxed),
+                audit::WIDEN_PLAN_REJECTS.load(Ordering::Relaxed),
+            );
+        }
         Ok(())
     })
 }

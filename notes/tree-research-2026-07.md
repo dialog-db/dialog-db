@@ -258,3 +258,52 @@ recursive bisection). The deficiency is maintenance cost, which the
 incremental-summary work addresses; a FastCDC-style step within the
 candidate classes remains a cheap later knob if anchor churn ever
 measures high.
+
+## Forced-run quiet check: V1 measured (2026-07-30)
+
+Implemented the widening quiet check on this branch: `cut_plan`
+extracted from `regroup_entries_reusing` (single source of truth for
+the cut-decision pipeline), and `forced_run_quiet` in the edit path —
+before merging a forced run, stream the run's keys and weights
+read-only, simulate the edit, re-run `cut_plan`, and skip the
+widening when the predicted cuts land exactly on the current piece
+boundaries with their forced marks intact. Guards: edit strictly
+interior to its piece (boundary machinery must not engage), deletes
+not beside a vetoed seam, exact plan match. Buffered parent novelty
+does NOT block the skip: the merge path itself elects over stored
+keys only and re-routes buffers by link boundary, so an unchanged
+partition makes that re-route an identity.
+
+SE replay, default config, MeasuredStorage:
+
+- 2,000 txns: 16,252 checks / 7,895 real runs / 6,111 skipped (77%
+  of runs). Rejects: 1,617 interior, 167 plan, 0 novelty.
+- 6,000 txns: 49,586 checks / 11,905 runs / 7,150 skipped (60%).
+  Rejects: 4,524 interior (SE's per-region ascending IDs make
+  piece-tail inserts common), 231 plan.
+- Election stability on real data: only ~2% of full-run re-elections
+  move any anchor. The hybrid selector's anchors are as durable as
+  the manifest docs claim.
+- Bytes written and read are IDENTICAL with and without the skip
+  (961,035,972 B written either way at 6,000) — piece-origin reuse
+  was already eliminating the rebuild's writes, so the widening's
+  marginal cost is CPU only, and both paths pay the same O(run)
+  stream against a warm node cache. Wall time is a wash at 2k and
+  6k txns.
+- Convergence: per-txn vs by-five vs single-commit replays converge
+  at 200/1,000/3,000/10,000 txns with the check active; the full
+  suite (293 tests) passes.
+
+Conclusions. (1) V1 is structurally safe and byte-identical but
+buys no wall time at the default config — the merge was never the
+default-config bottleneck (it was at 32K/32K, unmeasured here).
+(2) The 98% election stability is the licence for V2: replace the
+O(run) stream with per-piece summaries (piece weight, entry count,
+interior-candidate minima per hybrid class, edge keys) combined in
+O(pieces), loading pieces only when a cut actually lands inside one.
+The quiet check's plan-comparison scaffold is exactly where the
+summary combiner plugs in. (3) Cold starts: summaries are pure
+functions of piece bytes, so they can be persisted keyed by piece
+hash, or — endgame — embedded per-link in the parent index node
+(format change), making re-election free even cold since the parent
+is already loaded for routing.

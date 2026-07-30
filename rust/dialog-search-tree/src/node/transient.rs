@@ -1588,49 +1588,30 @@ where
     regroup_entries_reusing::<Key, Value, D>(entries, floor, manifest, &[])
 }
 
-/// [`regroup_entries`] with piece provenance: any group that exactly
-/// reproduces an untouched origin piece — same entry range, same derived
-/// separator — is emitted as its original persistent link instead of a
-/// fresh transient segment. See [`PieceOrigin`].
-pub(crate) fn regroup_entries_reusing<Key, Value, D>(
-    entries: Vec<Entry<Key, Value>>,
-    floor: Vec<u8>,
+/// The regroup's complete cut-decision pipeline over a key sequence: the
+/// pair-aware coin pass (veto, bank, pacing ramp), the vetoed-stretch
+/// backstop, and the frame ceiling, in that order. Returns
+/// `(cut_after, forced_start)`: `cut_after[i]` cuts after key `i`, and
+/// `forced_start[i]` marks key `i` as opening a group whose stored
+/// separator takes the long forced form.
+///
+/// Factored out of [`regroup_entries_reusing`] so the edit path's
+/// forced-run quiet check evaluates EXACTLY the decisions the regroup
+/// would make — the two must never drift, or the check would skip
+/// widenings whose outcome differs from its prediction. `weights` must be
+/// per-entry [`Entry::weight`] values when `manifest.max_segment` is
+/// non-zero, and may be empty otherwise (the entry-counted coin reads no
+/// weights).
+pub(crate) fn cut_plan<Key, D>(
+    keys: &[&Key],
+    weights: &[usize],
     manifest: &Manifest,
-    origins: &[PieceOrigin],
-) -> Vec<Node<Key, Value>>
+) -> (Vec<bool>, Vec<bool>)
 where
     Key: self::Key,
-    Value: self::Value,
     D: Distribution,
 {
-    let mut groups: Vec<Node<Key, Value>> = vec![];
-    let mut pending: Vec<Entry<Key, Value>> = vec![];
-    // The last key of the previously sealed group; None while sealing the
-    // first group, whose separator comes from the floor instead.
-    let mut previous_last: Option<Key> = None;
-
-    // Pair-aware cuts, decided before the entries move: the coin proposes a
-    // boundary after an entry, and the veto rejects the proposal when the
-    // seam to the successor cannot be told apart within the separator
-    // bound. Both partner keys are needed, so the decisions are computed
-    // over the borrowed list first. The veto verdicts are kept: they
-    // delimit the stretches the backstop below scans.
-    //
-    // The weight bank rides the same walk: a vetoed seam banks its left
-    // key's weight (no cut is possible there), and every ACCEPTED seam
-    // spends the bank into its cut decision and resets it — reset on every
-    // accepted seam, cut or no cut, so the bank is "weight since the last
-    // accepted seam" (a structural property of the key sequence) and never
-    // "weight since the last cut" (which would cascade decisions off coin
-    // outcomes and break convergence). See `Distribution::leaf_cut`.
-    let count = entries.len();
-    // Every pacing decision below meters entries by their full weight (key
-    // bytes plus the value's payload weight), computed once per window.
-    let weights: Vec<usize> = if manifest.max_segment == 0 {
-        Vec::new()
-    } else {
-        entries.iter().map(Entry::weight).collect()
-    };
+    let count = keys.len();
     let mut vetoed = vec![false; count.saturating_sub(1)];
     let mut cut_after = vec![false; count];
     let mut bank = 0usize;
@@ -1645,8 +1626,8 @@ where
     let ramp = manifest.pacing_ramp_threshold();
     let mut frame_weight = 0usize;
     for at in 0..count.saturating_sub(1) {
-        let key = entries[at].key.as_ref();
-        vetoed[at] = D::vetoes(key, entries[at + 1].key.as_ref(), manifest);
+        let key = keys[at].as_ref();
+        vetoed[at] = D::vetoes(key, keys[at + 1].as_ref(), manifest);
         if manifest.max_segment > 0 {
             frame_weight += weights[at];
         }
@@ -1705,8 +1686,8 @@ where
             }
             // The stretch covers keys `start..=at` (the last vetoed seam
             // joins keys `at - 1` and `at`).
-            let keys: Vec<&Key> = entries[start..=at].iter().map(|entry| &entry.key).collect();
-            for cut in cap::forced_cut_positions(&keys, &weights[start..=at], manifest) {
+            for cut in cap::forced_cut_positions(&keys[start..=at], &weights[start..=at], manifest)
+            {
                 cut_after[start + cut - 1] = true;
                 forced_start[start + cut] = true;
             }
@@ -1727,12 +1708,13 @@ where
                 continue;
             }
             if end > start {
-                let keys: Vec<&Key> = entries[start..=end]
-                    .iter()
-                    .map(|entry| &entry.key)
-                    .collect();
                 let seams = &vetoed[start..end];
-                for cut in cap::frame_cut_positions(&keys, &weights[start..=end], seams, manifest) {
+                for cut in cap::frame_cut_positions(
+                    &keys[start..=end],
+                    &weights[start..=end],
+                    seams,
+                    manifest,
+                ) {
                     cut_after[start + cut - 1] = true;
                     forced_start[start + cut] = true;
                 }
@@ -1740,6 +1722,55 @@ where
             start = end + 1;
         }
     }
+
+    (cut_after, forced_start)
+}
+
+/// [`regroup_entries`] with piece provenance: any group that exactly
+/// reproduces an untouched origin piece — same entry range, same derived
+/// separator — is emitted as its original persistent link instead of a
+/// fresh transient segment. See [`PieceOrigin`].
+pub(crate) fn regroup_entries_reusing<Key, Value, D>(
+    entries: Vec<Entry<Key, Value>>,
+    floor: Vec<u8>,
+    manifest: &Manifest,
+    origins: &[PieceOrigin],
+) -> Vec<Node<Key, Value>>
+where
+    Key: self::Key,
+    Value: self::Value,
+    D: Distribution,
+{
+    let mut groups: Vec<Node<Key, Value>> = vec![];
+    let mut pending: Vec<Entry<Key, Value>> = vec![];
+    // The last key of the previously sealed group; None while sealing the
+    // first group, whose separator comes from the floor instead.
+    let mut previous_last: Option<Key> = None;
+
+    // Pair-aware cuts, decided before the entries move: the coin proposes a
+    // boundary after an entry, and the veto rejects the proposal when the
+    // seam to the successor cannot be told apart within the separator
+    // bound. Both partner keys are needed, so the decisions are computed
+    // over the borrowed list first. The veto verdicts are kept: they
+    // delimit the stretches the backstop below scans.
+    //
+    // The weight bank rides the same walk: a vetoed seam banks its left
+    // key's weight (no cut is possible there), and every ACCEPTED seam
+    // spends the bank into its cut decision and resets it — reset on every
+    // accepted seam, cut or no cut, so the bank is "weight since the last
+    // accepted seam" (a structural property of the key sequence) and never
+    // "weight since the last cut" (which would cascade decisions off coin
+    // outcomes and break convergence). See `Distribution::leaf_cut`.
+    let count = entries.len();
+    // Every pacing decision below meters entries by their full weight (key
+    // bytes plus the value's payload weight), computed once per window.
+    let weights: Vec<usize> = if manifest.max_segment == 0 {
+        Vec::new()
+    } else {
+        entries.iter().map(Entry::weight).collect()
+    };
+    let key_refs: Vec<&Key> = entries.iter().map(|entry| &entry.key).collect();
+    let (cut_after, forced_start) = cut_plan::<Key, D>(&key_refs, &weights, manifest);
 
     let origin_for = |start: usize, end: usize| -> Option<&Link> {
         origins

@@ -38,6 +38,36 @@ pub mod audit {
         MEMO_HITS.fetch_add(1, Ordering::Relaxed);
         MEMO_HIT_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
     }
+
+    /// Forced-run widening pressure: how often a membership edit reached
+    /// the quiet check, and how often the check proved the run's stored
+    /// partition unchanged so the widening was skipped outright.
+    pub static WIDEN_CHECKS: AtomicU64 = AtomicU64::new(0);
+    pub static WIDEN_SKIPS: AtomicU64 = AtomicU64::new(0);
+    /// Checks that found an actual multi-piece run, and the reasons the
+    /// ones that did were still rejected.
+    pub static WIDEN_RUNS: AtomicU64 = AtomicU64::new(0);
+    pub static WIDEN_NOVELTY_REJECTS: AtomicU64 = AtomicU64::new(0);
+    pub static WIDEN_INTERIOR_REJECTS: AtomicU64 = AtomicU64::new(0);
+    pub static WIDEN_PLAN_REJECTS: AtomicU64 = AtomicU64::new(0);
+    pub fn widen_check() {
+        WIDEN_CHECKS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn widen_skip() {
+        WIDEN_SKIPS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn widen_run() {
+        WIDEN_RUNS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn widen_novelty_reject() {
+        WIDEN_NOVELTY_REJECTS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn widen_interior_reject() {
+        WIDEN_INTERIOR_REJECTS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn widen_plan_reject() {
+        WIDEN_PLAN_REJECTS.fetch_add(1, Ordering::Relaxed);
+    }
     pub fn report() -> String {
         format!(
             "key_hashes={} key_bytes={} seam_hashes={} seam_bytes={} election_hashes={} election_bytes={} node_hashes={} node_bytes={}",

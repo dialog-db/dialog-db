@@ -1024,14 +1024,23 @@ where
             }
         };
         let mut piece_origins = if changes_membership {
-            merge_forced_run::<Key, Value, Backend>(
-                &mut root,
-                &mut path,
-                &mut [],
-                accessor,
-                &manifest,
+            if forced_run_quiet::<Key, Value, Backend, D>(
+                &mut root, &path, &self, accessor, &manifest,
             )
             .await?
+            {
+                crate::distribution::audit::widen_skip();
+                None
+            } else {
+                merge_forced_run::<Key, Value, Backend>(
+                    &mut root,
+                    &mut path,
+                    &mut [],
+                    accessor,
+                    &manifest,
+                )
+                .await?
+            }
         } else {
             None
         };
@@ -1948,6 +1957,229 @@ where
         }
     }
     Ok((merged_any, origins_by_remaining))
+}
+
+/// Whether a membership edit into a forced-run piece provably leaves the
+/// run's stored partition byte-identical, so the backstop widening can be
+/// skipped and the ordinary edit machinery applied to the edited piece
+/// alone.
+///
+/// The check re-evaluates the regroup's complete decision pipeline
+/// ([`cut_plan`](crate::node::transient::cut_plan)) over the run's
+/// post-edit key sequence — streamed read-only, without lifting any piece
+/// into the tree — and demands the predicted cuts land exactly on the
+/// current piece boundaries, each carrying the forced mark it carries
+/// today. On top of that exact-outcome test the edit must be strictly
+/// interior to its piece (no new minimum, no boundary or terminal-entry
+/// change, so none of the seam-rewriting gates downstream can fire), and
+/// a delete must not sit beside a vetoed seam (the terminal-cut fusion
+/// gates key off those). Any doubt returns `false`, which widens as
+/// before.
+///
+/// Buffered novelty on the parent does not block the skip: the widening
+/// itself elects anchors over STORED keys only — `merge_forced_run`
+/// re-routes buffered ops by link boundary without ever feeding them to
+/// the election — so when the plan check proves the boundaries
+/// unchanged, that re-route is an identity and the buffers may stay
+/// exactly where they are.
+///
+/// The point is cost: a passing check trades the merge's full
+/// rebuild-and-re-encode of every piece in the run — plus the new blocks
+/// that rebuild ships to every replica — for piece decodes and memoized
+/// key hashes, leaving the untouched pieces byte-identical in the store.
+async fn forced_run_quiet<Key, Value, Backend, D>(
+    root: &mut TransientNode<Key, Value>,
+    path: &[usize],
+    edit: &Edit<Key, Value>,
+    accessor: &Accessor<Backend>,
+    manifest: &Manifest,
+) -> Result<bool, DialogSearchTreeError>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+    D: Distribution,
+{
+    if path.is_empty() || manifest.max_segment == 0 {
+        return Ok(false);
+    }
+    crate::distribution::audit::widen_check();
+    let at = path[path.len() - 1];
+    let parent_path = &path[..path.len() - 1];
+    let bound = manifest.max_separator as usize;
+
+    // Run detection mirroring `merge_forced_run`, plus per-piece sources
+    // for the read-only stream below: transient siblings give up their
+    // keys and weights immediately, persistent ones contribute their link.
+    enum PieceSource<Key> {
+        Fetch(Link),
+        Ready(Vec<Key>, Vec<usize>),
+    }
+    let sources: Vec<PieceSource<Key>> = {
+        let parent = follow(root, parent_path)?.as_index()?;
+        let children = &parent.children;
+        let mut lo = at;
+        while lo > 0 && children[lo].separator()?.len() > bound {
+            lo -= 1;
+        }
+        let mut hi = at;
+        while hi + 1 < children.len() && children[hi + 1].separator()?.len() > bound {
+            hi += 1;
+        }
+        if lo == hi {
+            return Ok(false);
+        }
+        crate::distribution::audit::widen_run();
+        let mut sources = Vec::with_capacity(hi - lo + 1);
+        for child in children.iter().take(hi + 1).skip(lo) {
+            sources.push(match child {
+                Node::Persistent(link) => PieceSource::Fetch(link.clone()),
+                Node::Transient(TransientNode::Segment(segment)) => PieceSource::Ready(
+                    segment.entries().iter().map(|e| e.key.clone()).collect(),
+                    segment.entries().iter().map(Entry::weight).collect(),
+                ),
+                Node::Transient(_) => return Ok(false),
+            });
+        }
+        sources
+    };
+
+    // The edit must be strictly interior to its piece: a new minimum, a
+    // first/last-entry change, or an append would engage the boundary
+    // machinery (min-move separator rewrites, boundary-delete fusion,
+    // terminal-cut checks), which re-decides seams without the election.
+    {
+        let TransientNode::Segment(leaf) = follow(root, path)? else {
+            return Ok(false);
+        };
+        let entries = leaf.entries();
+        let interior = match edit {
+            Edit::Upsert(entry) => match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                Ok(i) => i >= 1 && i + 2 <= entries.len(),
+                Err(i) => i >= 1 && i < entries.len(),
+            },
+            Edit::Delete(key) => match entries.binary_search_by(|e| e.key.cmp(key)) {
+                Ok(i) => {
+                    i >= 1
+                        && i + 2 <= entries.len()
+                        && !D::vetoes(
+                            entries[i - 1].key.as_ref(),
+                            entries[i].key.as_ref(),
+                            manifest,
+                        )
+                        && !D::vetoes(
+                            entries[i].key.as_ref(),
+                            entries[i + 1].key.as_ref(),
+                            manifest,
+                        )
+                }
+                Err(_) => false,
+            },
+        };
+        if !interior {
+            crate::distribution::audit::widen_interior_reject();
+            return Ok(false);
+        }
+    }
+
+    // Stream the run's keys and weights in key order, remembering each
+    // piece's length so the current partition can be compared against the
+    // recomputed plan.
+    let mut keys: Vec<Key> = Vec::new();
+    let mut weights: Vec<usize> = Vec::new();
+    let mut piece_lens: Vec<usize> = Vec::with_capacity(sources.len());
+    for source in sources {
+        match source {
+            PieceSource::Ready(piece_keys, piece_weights) => {
+                piece_lens.push(piece_keys.len());
+                keys.extend(piece_keys);
+                weights.extend(piece_weights);
+            }
+            PieceSource::Fetch(link) => {
+                let persistent = accessor.get_node(&link.node).await?;
+                let TransientNode::Segment(segment) =
+                    TransientNode::<Key, Value>::open(&persistent, link.separator.clone())?
+                else {
+                    return Ok(false);
+                };
+                let entries = segment.entries();
+                piece_lens.push(entries.len());
+                keys.extend(entries.iter().map(|e| e.key.clone()));
+                weights.extend(entries.iter().map(Entry::weight));
+            }
+        }
+    }
+
+    // Simulate the edit on the streamed sequence. The strict-interior
+    // guard above pins the touched position strictly inside its piece's
+    // span, so the owning piece's length adjusts unambiguously.
+    match edit {
+        Edit::Upsert(entry) => match keys.binary_search(&entry.key) {
+            Ok(i) => weights[i] = entry.weight(),
+            Err(i) => {
+                let mut acc = 0usize;
+                for len in piece_lens.iter_mut() {
+                    if i <= acc + *len {
+                        *len += 1;
+                        break;
+                    }
+                    acc += *len;
+                }
+                keys.insert(i, entry.key.clone());
+                weights.insert(i, entry.weight());
+            }
+        },
+        Edit::Delete(key) => {
+            let Ok(i) = keys.binary_search(key) else {
+                return Ok(false);
+            };
+            let mut acc = 0usize;
+            for len in piece_lens.iter_mut() {
+                if i < acc + *len {
+                    *len -= 1;
+                    break;
+                }
+                acc += *len;
+            }
+            keys.remove(i);
+            weights.remove(i);
+        }
+    }
+
+    // Re-run the regroup's decision pipeline and demand the exact current
+    // partition: every predicted cut on a current boundary, every current
+    // boundary predicted, and every boundary still carrying its forced
+    // mark (a coin cut landing on a boundary would flip the stored
+    // separator to its natural form — different bytes, so widen).
+    let key_refs: Vec<&Key> = keys.iter().collect();
+    let (cut_after, forced_start) =
+        crate::node::transient::cut_plan::<Key, D>(&key_refs, &weights, manifest);
+    let count = keys.len();
+    let mut boundary = vec![false; count];
+    let mut acc = 0usize;
+    for len in &piece_lens[..piece_lens.len() - 1] {
+        acc += len;
+        if acc == 0 || acc > count {
+            return Ok(false);
+        }
+        boundary[acc - 1] = true;
+    }
+    for j in 0..count.saturating_sub(1) {
+        if cut_after[j] != boundary[j] {
+            crate::distribution::audit::widen_plan_reject();
+            return Ok(false);
+        }
+        if boundary[j] && !forced_start[j + 1] {
+            crate::distribution::audit::widen_plan_reject();
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Widens an edit's window to the whole force-split run around the leaf at
