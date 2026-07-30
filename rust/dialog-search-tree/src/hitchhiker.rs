@@ -287,6 +287,76 @@ where
         .await
     }
 
+    /// Buffers an insert WITHOUT evaluating the flush policy: the deferred
+    /// half of batch writing. The op is routed into the root's novelty and
+    /// left there however full the buffer gets; the caller runs
+    /// [`settle`](Self::settle) once after the whole batch, so a batch
+    /// cascades into any given child at most once instead of re-flushing it
+    /// on every overflow the batch crosses. Reads are novelty-aware wherever
+    /// ops sit, so a deferred tree reads exactly like a settled one.
+    pub async fn insert_deferred<Backend>(
+        self,
+        key: Key,
+        value: Value,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        self.write_with(
+            vec![NoveltyEntry {
+                key: key.as_ref().to_vec(),
+                op: NoveltyOp::Assert(value),
+            }],
+            storage,
+            false,
+        )
+        .await
+    }
+
+    /// Buffers a delete WITHOUT evaluating the flush policy; see
+    /// [`insert_deferred`](Self::insert_deferred).
+    pub async fn delete_deferred<Backend>(
+        self,
+        key: Key,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        self.write_with(
+            vec![NoveltyEntry {
+                key: key.as_ref().to_vec(),
+                op: NoveltyOp::Retract,
+            }],
+            storage,
+            false,
+        )
+        .await
+    }
+
+    /// Applies the flush policy once over everything the deferred writes
+    /// accumulated: the settle half of batch writing. Buffers that ended the
+    /// batch over their trigger cascade now, top-down, each child receiving
+    /// its whole accumulated share in one flush.
+    pub async fn settle<Backend>(
+        self,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        match self.root {
+            // Nothing buffered in memory: nothing to settle. (A persisted
+            // root's stored buffers settle when a write next loads it.)
+            HitchhikerRoot::Unloaded(_) => Ok(self),
+            HitchhikerRoot::Loaded(_) => self.write_with(Vec::new(), storage, true).await,
+        }
+    }
+
     /// Enqueues a batch of ops into the tree, cascading buffers one level on
     /// overflow.
     ///
@@ -296,9 +366,27 @@ where
     /// [`TransientTree`] insert/delete path so leaf landings reshape exactly as
     /// a sequential edit would.
     async fn write<Backend>(
+        self,
+        msgs: Vec<NoveltyEntry<Value>>,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        self.write_with(msgs, storage, true).await
+    }
+
+    /// [`write`](Self::write) with the flush policy made optional: `settle`
+    /// false routes the ops and returns (deferred batch writing), true is
+    /// the classic behavior. Leaf-bound ops (an empty or segment-rooted
+    /// tree, the `Immediate` policy) always go to the canonical edit path
+    /// immediately — a leaf has no buffer to defer into.
+    async fn write_with<Backend>(
         mut self,
         msgs: Vec<NoveltyEntry<Value>>,
         storage: &ContentAddressedStorage<Backend>,
+        settle: bool,
     ) -> Result<Self, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -338,9 +426,12 @@ where
                 enqueue::<Key, Value, D, Backend>(
                     node,
                     msgs,
-                    self.op_buf_size,
-                    self.policy,
-                    self.trigger,
+                    EnqueueConfig {
+                        op_buf_size: self.op_buf_size,
+                        policy: self.policy,
+                        trigger: self.trigger,
+                        settle,
+                    },
                     &mut deferred,
                     &accessor,
                 )
@@ -723,6 +814,17 @@ where
     }
 }
 
+/// The knobs one `enqueue` pass runs under: the buffer capacity, how far
+/// an overflow cascades, what makes it fire, and whether it is evaluated
+/// at all (`settle` false = deferred batch routing).
+#[derive(Clone, Copy)]
+struct EnqueueConfig {
+    op_buf_size: usize,
+    policy: FlushPolicy,
+    trigger: FlushTrigger,
+    settle: bool,
+}
+
 /// Routes `msgs` into the subtree rooted at `node`, cascading one level on
 /// overflow, collecting leaf-bound ops into `deferred`.
 ///
@@ -742,9 +844,7 @@ where
 fn enqueue<'a, Key, Value, D, Backend>(
     node: TransientNode<Key, Value>,
     msgs: Vec<NoveltyEntry<Value>>,
-    op_buf_size: usize,
-    policy: FlushPolicy,
-    trigger: FlushTrigger,
+    config: EnqueueConfig,
     deferred: &'a mut Vec<NoveltyEntry<Value>>,
     accessor: &'a Accessor<Backend>,
 ) -> NodeFuture<'a, Key, Value>
@@ -778,20 +878,26 @@ where
             index.novelty.route::<Key>(&bounds, msgs)?;
         }
 
+        // Deferred batch mode: the ops stay routed and the flush decision
+        // waits for the caller's single `settle` pass over the whole batch.
+        if !config.settle {
+            return Ok(node);
+        }
+
         // Does this node flush? `Capacity` asks whether the buffer
         // overflowed; `PerChild` asks whether any one child now has a batch
         // worth writing, which scales the decision to this node's own
         // fan-out. Both read lengths the grouped buffer already tracks.
-        let flushes = match trigger {
-            FlushTrigger::Capacity => index.novelty.len() > op_buf_size,
+        let flushes = match config.trigger {
+            FlushTrigger::Capacity => index.novelty.len() > config.op_buf_size,
             FlushTrigger::PerChild { floor } => {
                 // Never exceed the buffer's capacity, whatever the per-child
                 // threshold works out to.
-                if index.novelty.len() > op_buf_size {
+                if index.novelty.len() > config.op_buf_size {
                     true
                 } else {
                     let children = index.children.len().max(1);
-                    let threshold = (op_buf_size / children).max(floor).max(1);
+                    let threshold = (config.op_buf_size / children).max(floor).max(1);
                     index.novelty.peak() >= threshold
                 }
             }
@@ -831,16 +937,21 @@ where
             // flushes through to the leaves: the child gets a zero-size buffer so
             // it overflows immediately and keeps pushing down until the ops land
             // in leaves.
-            let child_buf_size = match policy {
+            let child_buf_size = match config.policy {
                 FlushPolicy::Recursive => 0,
-                _ => op_buf_size,
+                _ => config.op_buf_size,
             };
             let updated = enqueue::<Key, Value, D, Backend>(
                 child,
                 took,
-                child_buf_size,
-                policy,
-                trigger,
+                EnqueueConfig {
+                    op_buf_size: child_buf_size,
+                    // A cascade always settles the child it flushes into:
+                    // the deferral applies only to the arriving batch's
+                    // routing.
+                    settle: true,
+                    ..config
+                },
                 deferred,
                 accessor,
             )

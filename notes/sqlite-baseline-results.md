@@ -783,6 +783,37 @@ repo overhead by roughly an eighth immediately, and the
 curve25519-dalek IFMA backend (this class of host has avx512ifma) cuts
 the per-sign cost further.
 
+### Group 6A addendum: deferred flush (owner-designed, 2026-07-30)
+
+Owner design: "allow insert novelty without bothering with encode and
+once we are done inserting we apply flush policy — this way we avoid
+several flushes into the same node." Implemented as
+`HitchhikerTree::insert_deferred`/`delete_deferred` (route only, no
+trigger evaluation) + `HitchhikerTree::settle` (one top-down flush-policy
+pass), wired so a `BufferedBatch` defers through the whole instruction
+stream and settles once in `seal`. Reads are novelty-aware wherever ops
+sit, so the batch's own supersession scans are unaffected; buffered
+roots were already batching-dependent, so the (different, still valid)
+shapes this produces break no contract. All 643 tree/artifacts/repo
+tests pass, including the flush-policy equivalence oracle and both
+spine byte-identity pins.
+
+Measured (same machine, same run):
+
+| workload | before | after |
+|---|---|---|
+| write_batch dialog_mem (1000 entities, 1 txn) | ~755-820 ms | **377-387 ms** (-50%; campaign start: 1.833 s, -79% cumulative) |
+| write_batch sqlite_mem / sqlite_disk (controls) | 4.7 / 6.3 ms | 5.0 / 5.8 ms (flat) |
+| se_replay dialog_mem (small commits, rarely overflow) | 204-213 us/txn | 209-223 us/txn (unchanged) |
+
+The batch regime's remaining 66x vs sqlite is now dominated by the
+canonical leaf path the deferred ops land through (`replay_ops` ->
+per-edit reshape), which is exactly the layer the owner suggests the
+hitchhiker flush could subsume ("hitchhiker design could probably
+replace transients if we avoid multiple child rebuilds") — recorded in
+`notes/tree-research-2026-07.md` as a follow-up direction alongside the
+g-tree and bijoux findings.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the

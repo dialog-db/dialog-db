@@ -201,6 +201,12 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl ArtifactWriter for BufferedArtifactTree {
+    // Writes route into the buffers with the flush policy DEFERRED: the
+    // batch's single settle runs in `seal`, so one commit cascades into any
+    // given child at most once, instead of re-flushing the same child on
+    // every overflow a large batch crosses. Reads are novelty-aware
+    // wherever the ops sit, so the batch's own supersession scans see
+    // deferred writes exactly as settled ones.
     async fn write<S>(
         self,
         key: Key,
@@ -211,7 +217,7 @@ impl ArtifactWriter for BufferedArtifactTree {
         S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
-        self.insert(key, value, storage).await
+        self.insert_deferred(key, value, storage).await
     }
 
     async fn erase<S>(
@@ -223,7 +229,7 @@ impl ArtifactWriter for BufferedArtifactTree {
         S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
-        self.delete(key.clone(), storage).await
+        self.delete_deferred(key.clone(), storage).await
     }
 
     async fn read<S>(
@@ -503,24 +509,28 @@ impl BufferedBatch {
     {
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
         Ok(if canonicalize {
-            // Canonicalizing consumes the spine; a slot the batch carried
-            // stays empty and the next commit opens fresh from the canonical
-            // root.
+            // Canonicalizing consumes the spine (and drains every buffer, so
+            // the batch's deferred flush decision is moot); a slot the batch
+            // carried stays empty and the next commit opens fresh from the
+            // canonical root.
             self.tree.canonicalize(&storage, delta).await?
         } else if let Some(slot) = self.slot {
-            // Serialize the spine with its buffers intact and hand it back
-            // to the slot keyed by the root it just produced, so the
-            // caller's next commit appends to it instead of re-opening the
-            // frame from bytes.
-            let mut tree = self.tree;
+            // The batch's writes deferred the flush policy; apply it once
+            // over everything the batch accumulated, then serialize the
+            // spine with its buffers intact and hand it back to the slot
+            // keyed by the root it just produced, so the caller's next
+            // commit appends to it instead of re-opening the frame from
+            // bytes.
+            let mut tree = self.tree.settle(&storage).await?;
             let root = tree.persist_mut(delta)?;
             slot.put(root.clone(), tree);
             ArtifactTree::from_hash_with_cache(root, self.cache)
         } else {
-            // Serialize the spine with its buffers intact and seal the
-            // resulting root: the hash covers the buffered ops, so this is a
-            // complete identity for the tree's content.
-            let root = self.tree.persist(delta)?;
+            // Settle the batch's deferred writes, then serialize the spine
+            // with its buffers intact and seal the resulting root: the hash
+            // covers the buffered ops, so this is a complete identity for
+            // the tree's content.
+            let root = self.tree.settle(&storage).await?.persist(delta)?;
             ArtifactTree::from_hash_with_cache(root, self.cache)
         })
     }
