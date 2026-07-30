@@ -34,6 +34,7 @@ dialog-effects = { workspace = true }
 dialog-network = { workspace = true }
 dialog-operator = { workspace = true, features = ["helpers"] }
 dialog-repository = { workspace = true }
+dialog-search-tree = { workspace = true }
 dialog-storage = { workspace = true, features = ["helpers"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

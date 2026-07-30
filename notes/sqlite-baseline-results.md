@@ -900,6 +900,71 @@ write amplification at both measured scales), and revisit 16 KiB —
 best in every network model at small scale — only with the bug fixed
 and a deeper-tree fetch-count check at larger scales.
 
+### Live-tree census and scale curve (2026-07-30): three honest corrections
+
+Owner challenges: (1) the frame ceiling was believed to clamp blocks at
+3x — does it?; (2) 32 vs 64 KiB is unclear without the depth-growth
+scale; (3) are we anywhere near SQLite at scale? New tools:
+`live_census` (walks ONLY blocks reachable from the live root, split by
+node kind — the earlier sweep censused the whole backend graveyard,
+dead superseded roots included, which was misleading) and `scale_curve`
+(windowed per-commit cost as the dataset grows, sqlite_mem vs
+dialog_mem).
+
+**1. The clamp does NOT hold.** Canonical (post-canonicalize) leaf
+segments at 10,000 real txns, in bytes:
+
+| max_segment | p50 | p99 | max | share over 3x byte ceiling |
+|---|---|---|---|---|
+| 8 KiB | 7.5 KB | 35 KB (4.3x) | 47 KB (5.7x) | 5% |
+| 32 KiB | 32 KB | 145 KB (4.4x) | 171 KB (5.2x) | 6% |
+| 64 KiB | 60 KB | 268 KB (4.1x) | 365 KB (5.6x) | 7% |
+
+These are live canonical leaves, not graveyard: real blocks drift to
+~4-6x the pacing target, ceiling notwithstanding. (The ceiling clamps
+WEIGHT; encoded bytes exceed 3x max_segment far beyond any plausible
+weight/byte accounting slack, so either the weight accounting diverges
+badly from bytes or a write path skips the over-ceiling gate — the
+buffered flush's batch landings are the prime suspect. Diagnosis
+needed: extend the census to compute each fat leaf's WEIGHT and
+compare against the ceiling directly.) The owner's conclusion stands:
+with arbitrary block sizes, size-sensitive measurements (network
+models, fanout, pacing sweeps) sit on sand until this is pinned.
+
+**2. The tree is going FLAT, and that is the scaling story.** The
+census shows the canonical tree at 10K txns is ONE root index node
+holding 284 links (64 KiB setting) or 549 links (32 KiB) directly over
+the leaves. The geometric coin (m=256) simply failed to cut (P(no cut
+in 549 seams) ~ 12%), and the index-level frame ceiling in weight
+terms permits thousands of links before force-splitting. Every commit
+rewrites that root frame — links PLUS the novelty buffer — so the
+per-commit cost grows with the dataset (the root frame is
+O(leaf count) until the ceiling finally splits it). The 32-vs-64
+depth question is therefore not the binding issue; unbounded index
+fanout variance is.
+
+**3. Not close to SQLite at scale.** Windowed per-commit cost, real SE
+replay, both stores in memory:
+
+| txns | sqlite us/txn | dialog us/txn | ratio |
+|---|---|---|---|
+| 2,500 | 33 | 593 | 18x |
+| 10,000 | 59 | 1,941 | 33x |
+| 25,000 | 141 | 4,796 | 34x |
+
+SQLite grows 4.3x over the range (its own tree depth); dialog grows
+~8x and holds a ~30-40x ratio. The 500-txn parity with durable
+sqlite_disk was a small-database artifact. The growth term is the flat
+root above; fixing index fanout bounds is the prerequisite for every
+other number to mean anything at scale.
+
+Strategy implications, in order: (a) diagnose the leaf weight-vs-bytes
+clamp gap; (b) bound index fanout deterministically (count AND byte
+caps at every level — the g-tree critique made concrete by our own
+census; this changes canonical form and needs owner sign-off); (c)
+re-run every size/scale measurement after (a)+(b), since current
+numbers reflect pathological shapes.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
