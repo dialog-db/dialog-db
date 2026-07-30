@@ -1079,6 +1079,48 @@ whose 40-byte shared version prefixes still sit far under the 512
 bound, so the zero-veto finding should generalize, but a repo-level
 census would confirm.
 
+### Weight enforcement + ceiling-factor sweep (2026-07-30): variance is priced, not broken
+
+Extended `live_census` decodes every leaf's entries and sums the exact
+`Entry::weight` the ceiling meters, next to encoded bytes; ceiling
+factor swept via `DIALOG_TREE_CEILING_FACTOR` on current (group-6A)
+code, 10K real txns, S=64K:
+
+| factor | replay us/txn | leaves | byte p50 / p99 / max | max weight vs ceiling | over weight ceiling |
+|---|---|---|---|---|---|
+| 3 (default) | 2183 | 284 | 60K / 268K / 365K | 0.98x | **0** |
+| 2 | 2579 (+18%) | 333 | 57K / 208K / 216K | 0.9996x | **0** |
+| 1 | 3735 (+71%) | 568 | 36K / 106K / 125K | 0.9994x | **0** |
+
+**Enforcement is exact.** Zero leaves exceed the weight ceiling at any
+factor; the max sits at 0.98-0.9996x of it. The whole "clamp not
+holding" impression was DRIFT: encoded bytes / metered weight runs
+p50 1.15, p90 1.85, max 2.1-4.4 (the high ratios are value-heavy or
+tiny leaves). So the coin's variance is already hard-bounded — in
+weight — and the bytes bound is (factor x S x drift).
+
+**Tighter ceilings got cheap.** The boundary experiment measured
+factor 2 at 27-70% replay CPU; on current code it costs +18% (and
+factor 1 +71%) — the group-6A work (live spine, deferred flush,
+memchr) changed the regroup economics. Factor 1 at S=64K yields a
+125 KB hard byte max with 36 KB p50 today, no mechanism change.
+
+Conclusion for the owner's "rethink the coin?" question: the renewal
+coin does NOT need rethinking for the upper bound — determinism there
+comes from the ceiling, which provably holds; the lever is (a) close
+the weight-to-byte drift (recalibrate `payload_weight` against real
+rkyv encodings and charge column overhead, so the ceiling denominates
+in effective bytes), (b) choose (S, factor) for the byte target —
+e.g. S=32K x factor 2 bounds blocks at ~64K weight = ~120K bytes
+today, tighter after (a), and (c) the buffer byte-cap for operational
+blocks (unchanged, still #1). A dolt-style pressure coin remains the
+known alternative ONLY if a narrow two-sided size distribution ever
+becomes a goal in itself (uniform fetch sizes, dedup chunking); it
+buys nothing for the upper bound we actually need and costs edit
+locality. If factor-1/2 regroup cost matters at scale, the
+experiment's own noted lever — incremental segment-weight bookkeeping
+on the edit path — is the follow-up, not a new coin.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the

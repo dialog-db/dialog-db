@@ -18,7 +18,9 @@
 
 use dialog_artifacts::{ArtifactStoreMut as _, Artifacts, Datum, IndexRoot, Key, State};
 use dialog_baseline::se::{SeLog, se_instructions};
-use dialog_search_tree::{ArchivedNodeBody, Buffer as TreeBuffer, PersistentNode};
+use dialog_search_tree::{
+    ArchivedNodeBody, Buffer as TreeBuffer, PersistentNode, Value as TreeValue, into_owned,
+};
 use dialog_storage::{
     Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend as _,
 };
@@ -64,6 +66,10 @@ async fn census(
     let mut leaves = Vec::new();
     let mut quiet = Vec::new();
     let mut buffered = Vec::new();
+    // Per leaf: the summed `Entry::weight` (key bytes + value payload
+    // weight) the ceiling actually meters, so enforcement (weight vs
+    // ceiling) and drift (encoded bytes vs weight) separate cleanly.
+    let mut weights: Vec<(usize, usize)> = Vec::new();
     while let Some(hash) = stack.pop() {
         let Some(bytes) = inner.get(&hash).await? else {
             anyhow::bail!("reachable node missing from storage");
@@ -81,13 +87,43 @@ async fn census(
                     stack.push(*index.hash_at(at)?.as_bytes());
                 }
             }
-            ArchivedNodeBody::Segment(_) => leaves.push(size),
+            ArchivedNodeBody::Segment(segment) => {
+                let mut weight = 0usize;
+                let mut keys = segment.keys::<Key>()?;
+                while let Some((at, key)) = keys.next_key()? {
+                    let value: State<Datum> = into_owned(segment.value_at(at)?)?;
+                    weight += key.len() + value.payload_weight();
+                }
+                weights.push((size, weight));
+                leaves.push(size);
+            }
         }
     }
     println!("{label}:");
     stats("leaf segments", leaves, ceiling);
     stats("index (no novelty)", quiet, ceiling);
     stats("index (buffered)", buffered, 0);
+    if ceiling > 0 && !weights.is_empty() {
+        let over_weight = weights.iter().filter(|(_, w)| *w > ceiling).count();
+        let max_weight = weights.iter().map(|(_, w)| *w).max().unwrap_or(0);
+        let mut ratios: Vec<f64> = weights
+            .iter()
+            .filter(|(_, w)| *w > 0)
+            .map(|(bytes, w)| *bytes as f64 / *w as f64)
+            .collect();
+        ratios.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+        let pick = |p: f64| ratios[((ratios.len() - 1) as f64 * p).round() as usize];
+        println!(
+            "  weight enforcement: {} of {} leaves over the WEIGHT ceiling (max weight {} = {:.2}x ceiling); bytes/weight ratio p50 {:.2} p90 {:.2} max {:.2}",
+            over_weight,
+            weights.len(),
+            max_weight,
+            max_weight as f64 / ceiling as f64,
+            pick(0.50),
+            pick(0.90),
+            ratios.last().copied().unwrap_or(0.0),
+        );
+    }
     Ok(())
 }
 
@@ -111,9 +147,14 @@ fn main() -> anyhow::Result<()> {
     runtime.block_on(async {
         let inner = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
         let mut store = Artifacts::open("census".into(), inner.clone()).await?;
+        let build_started = std::time::Instant::now();
         for commit in &log.transactions {
             store.commit(stream::iter(se_instructions(commit)?)).await?;
         }
+        println!(
+            "replay: {:.0} us/txn",
+            build_started.elapsed().as_micros() as f64 / log.transactions.len() as f64
+        );
         println!(
             "max_segment={setting} txns={} facts={} (byte ceiling reference: {ceiling})",
             log.transactions.len(),
