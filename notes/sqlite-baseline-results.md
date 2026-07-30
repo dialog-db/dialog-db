@@ -1461,6 +1461,45 @@ mattering in practice and can eventually be simplified away.
 `converge_check` should become a pinned regression harness either
 way.
 
+### The convergence break: root-caused, pinned, fixed (2026-07-30)
+
+Owner directive: "I want convergence bug pinned via test and fixed."
+Done. The hunt (divergence at just 200 txns; leaf-partition diff;
+per-commit invariant scans; per-edit gate tracing; forced-mark
+lifecycle tracing) landed on a one-line root cause:
+
+**The in-place fast path re-derived the edited leaf's separator on
+EVERY fast edit** (`segment.separator = reseparate(min, old)`), under
+an idempotence claim that is false for force-split pieces: the long
+forced separator (left neighbor's key + 0x00 padding, 513 bytes) is
+not a prefix of the leaf's minimum, so `reseparate` collapsed it to
+the short natural prefix. One ordinary interior insert into a marked
+piece silently stripped the self-identifying mark; the widening could
+then never rejoin the run (the mark IS the run detection), the
+boundary could never re-derive, and whether it existed at all became
+a function of which history happened to cross the ceiling. Traced
+live: `seal` set marks 49 times in a 200-txn replay and not one
+survived to a stored node.
+
+Fix, two sites:
+- the fast path re-derives the separator only on an actual min-move
+  (a min-move changes membership, and membership changes into a
+  forced piece are widened before the fast path is reachable, so a
+  min-move can never see a forced floor there);
+- `seal`'s window-start branch preserves an over-bound floor verbatim
+  (reachable when a non-membership value update re-shapes a forced
+  piece locally — unreachable on the anonymous SE workload but real
+  for versioned ones).
+
+Pinned by `it_keeps_forced_marks_through_fast_path_updates` (fails on
+the pre-fix code at exactly the stripped mark) and validated on the
+real workload: converge_check now CONVERGES at 200 / 1K / 5K / 10K
+txns with the ceiling on, all three commit groupings byte-identical.
+All 293/159/193 suite tests green; wasm clean. Note the ramp arm's
+four adversarial order-convergence fixtures still fail with the ramp
+ON — that residue is the ramp's own outcome-dependent context, now
+cleanly separable from this (fixed) mainline bug.
+
 ### Ramp A/B at the default config (2026-07-30): -30-35% at scale, free at 500
 
 `DIALOG_TREE_PACING_RAMP=200` vs off, S=64K, 25K real txns, same-day

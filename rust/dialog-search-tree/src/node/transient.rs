@@ -1824,6 +1824,16 @@ fn seal<Key, Value, D>(
         .key
         .clone();
     let separator = match previous_last.as_ref() {
+        // A window-start floor that is itself a forced mark (longer than
+        // the separator bound) is preserved verbatim: it is a valid
+        // separator for any minimum the window can hold (routing keeps
+        // `min >= floor`), and re-deriving through `reseparate` would
+        // collapse it to the short natural prefix — stripping the
+        // self-identifying mark that lets an edit rejoin the force-split
+        // run. Reachable when a non-membership edit (a value update)
+        // re-shapes a forced piece locally, which the widening does not
+        // intercept.
+        None if floor.len() > manifest.max_separator as usize => floor.to_vec(),
         None => D::reseparate(first.as_ref(), floor),
         Some(previous) if forced => {
             cap::forced_seam_separator(previous.as_ref(), first.as_ref(), manifest)

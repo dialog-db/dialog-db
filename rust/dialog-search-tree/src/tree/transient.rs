@@ -1266,6 +1266,57 @@ where
                         _ => false,
                     }
                 }
+                // A value UPDATE of the segment's terminal boundary entry can
+                // defund its cut just like a stretch-member delete: the coin
+                // charges the entry's payload weight, and payload weight
+                // moves with content (collapsed claims, causes, versions).
+                // Without this arm the stale boundary survives — the local
+                // re-shape has no right neighbor to fuse into, which is
+                // exactly the history-divergence converge_check caught (a
+                // stored leaf whose terminal coin no longer funds its cut).
+                (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
+                    let total = segment.total_weight();
+                    let entries = segment.entries();
+                    match entries.last() {
+                        Some(last)
+                            if last.key == entry.key
+                                && last.value.payload_weight() != entry.value.payload_weight() =>
+                        {
+                            // The bank the terminal coin sees: the summed
+                            // weight of the vetoed stretch immediately
+                            // before the terminal entry (weights of every
+                            // left partner of a vetoed seam), mirroring the
+                            // regroup's walk.
+                            let mut bank = 0usize;
+                            let mut at = entries.len() - 1;
+                            while at > 0
+                                && D::vetoes(
+                                    entries[at - 1].key.as_ref(),
+                                    entries[at].key.as_ref(),
+                                    &manifest,
+                                )
+                            {
+                                at -= 1;
+                                bank += entries[at].weight();
+                            }
+                            // Pacing-ramp prototype: the terminal decision
+                            // also carries the post-update frame weight past
+                            // the threshold.
+                            let ramp = manifest.pacing_ramp_threshold();
+                            let excess = if ramp > 0 {
+                                (total - last.weight() + entry.weight()).saturating_sub(ramp)
+                            } else {
+                                0
+                            };
+                            !D::leaf_cut(
+                                entry.key.as_ref(),
+                                bank + entry.weight() + excess,
+                                &manifest,
+                            )
+                        }
+                        _ => false,
+                    }
+                }
                 _ => false,
             }
         };
@@ -1356,10 +1407,21 @@ where
             if fast_path_keeps_canonical::<Key, Value, D>(segment.entries(), &self, &manifest) {
                 apply_to_segment(segment, self);
                 // The seam at the segment's left edge moves with its first
-                // key. Re-derive the separator from the new minimum against
-                // the old separator as the floor; the rule is idempotent
-                // when the minimum did not change.
-                if let Some(first) = segment.entries().first() {
+                // key: only a min-move re-derives the separator. Re-deriving
+                // unconditionally was NOT the no-op its idempotence argument
+                // assumed — a force-split piece stores the long forced form
+                // (left neighbor's key plus 0x00 padding), which is not a
+                // prefix of the minimum, so `reseparate` collapsed it to
+                // the short natural prefix and silently stripped the
+                // self-identifying mark. The orphaned piece then never
+                // rejoined its run, and whether its boundary existed at all
+                // depended on edit history (the converge_check divergence).
+                // A min-move can never see a forced floor here: it changes
+                // membership, and membership changes into a forced piece
+                // are widened before the fast path is reachable.
+                if min_move.is_some()
+                    && let Some(first) = segment.entries().first()
+                {
                     let separator = D::reseparate(first.key.as_ref(), &segment.separator);
                     segment.separator = separator;
                 }
@@ -5998,6 +6060,106 @@ mod tests {
                 String::from_utf8_lossy(anchor)
             );
         }
+
+        Ok(())
+    }
+
+    /// A force-split frame's pieces are self-identified by their long
+    /// forced separators, and every edit path must preserve that mark. A
+    /// weight-neutral value update into a piece rides the in-place fast
+    /// path, which used to re-derive the piece's separator
+    /// unconditionally: the long forced form is not a prefix of the
+    /// piece's minimum, so `reseparate` collapsed it to the short natural
+    /// prefix and silently stripped the mark. The orphaned piece then
+    /// never rejoined its run, and canonical shapes came to depend on
+    /// edit history — the real-workload converge harness caught it as
+    /// same-facts-different-roots. Pinned at both layers: the stored
+    /// marks survive the update byte-for-byte, and the updated tree
+    /// matches the sequential build that carried the final value from
+    /// the start.
+    #[dialog_common::test]
+    async fn it_keeps_forced_marks_through_fast_path_updates() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(2, 0);
+
+        // An all-tails run over the ceiling: no natural cut anywhere, so
+        // the frame machinery must force-split it at marked anchors.
+        let sorted: Vec<VarKey> = tails_keys("e", 24, &manifest);
+        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let bound = manifest.max_separator as usize;
+        let marked: Vec<(usize, Vec<u8>)> = leaf_piece_heads(tree.root(), &storage)
+            .await?
+            .into_iter()
+            .filter(|(separator, _)| *separator > bound)
+            .collect();
+        assert!(
+            !marked.is_empty(),
+            "the all-tails run exceeds the ceiling and must be force-split"
+        );
+
+        // Update a key inside a marked piece with a same-weight value:
+        // eligible for the in-place fast path, which must leave every
+        // stored mark in place.
+        let head = &marked[0].1;
+        let at = sorted
+            .iter()
+            .position(|key| &key.0 == head)
+            .expect("the marked head is one of the built keys");
+        let target = sorted.get(at + 1).unwrap_or(&sorted[at]).clone();
+        let mut delta = Delta::zero();
+        let updated = tree
+            .edit_with_manifest(&storage)
+            .await?
+            .insert(target.clone(), b"rewritten".to_vec(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (hash, buffer) in delta.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        let after: Vec<(usize, Vec<u8>)> = leaf_piece_heads(updated.root(), &storage)
+            .await?
+            .into_iter()
+            .filter(|(separator, _)| *separator > bound)
+            .collect();
+        assert_eq!(
+            marked, after,
+            "a weight-neutral update stripped a forced mark"
+        );
+
+        // History-independence: a sequential build carrying the final
+        // value from the start lands on the same root.
+        let mut fresh_storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut fresh: Option<VarTree> = None;
+        let mut delta = Delta::zero();
+        for key in &sorted {
+            let transient = match &fresh {
+                None => {
+                    TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Cache::new(), manifest)
+                }
+                Some(tree) => tree.edit_with_manifest(&fresh_storage).await?,
+            };
+            let value = if key == &target {
+                b"rewritten".to_vec()
+            } else {
+                key.0.clone()
+            };
+            let next = transient
+                .insert(key.clone(), value, &fresh_storage)
+                .await?
+                .persist(&mut delta)?;
+            for (hash, buffer) in delta.flush() {
+                fresh_storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            }
+            delta = Delta::zero();
+            fresh = Some(next);
+        }
+        let fresh = fresh.expect("the sequential build is non-empty");
+        assert_eq!(
+            updated.root(),
+            fresh.root(),
+            "the update's history leaked into the canonical shape"
+        );
 
         Ok(())
     }
