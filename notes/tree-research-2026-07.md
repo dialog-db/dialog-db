@@ -216,3 +216,45 @@ accepting dolt-class worst cases. Re-measure the widening share
 first: the mark fix means runs now REJOIN and can dissolve when
 content shrinks, so the standing pool of forced frames — and the
 25%+ edit share measured before the fix — may already be smaller.
+
+## Long-run boundary ideas, unified (2026-07-30 discussion)
+
+Owner raised Carson's (g-tree co-author) nested-g-tree idea for long
+runs, the earlier finer-ranks and reverse-hash-flip proposals, keying
+on "most distinct" natural boundaries, CDC-within-runs / FastCDC, and
+Merkle Search Trees. Where each lands:
+
+- **Nested g-trees / finer ranks**: the limit of finer rank
+  granularity is the key's raw hash as a continuous rank; dividing a
+  run at the highest refined ranks, recursively until pieces fit, IS
+  the recursive min-hash election `choose_cuts` ships. Threshold-k
+  selection (cut at the k smallest hashes) is the less stable
+  sibling: k changes with run size and can re-derive every anchor,
+  where recursive bisection is hierarchically stable.
+- **Natural / most-distinct boundaries**: already shipped as the
+  hybrid anchor selector (default): shortest-separator class first,
+  hash only as tiebreak. Field evidence from the convergence hunt:
+  the elected anchors were exactly the region-tag seams. Inserts
+  never move them; only deleting the anchor or dropping the class
+  floor does.
+- **FastCDC**: its normalized chunking is a two-step ramp (stricter
+  mask before target, looser after) — evidence a coarse step captures
+  most of a continuous ramp's variance win, relevant only to the ramp
+  arm. Its max-size hard cut is position-based and strictly worse
+  than the election (any upstream insert shifts it — FastCDC's known
+  dedup weakness). CDC scoped to runs is still a bounded-window rule
+  and re-inherits the exponential tail.
+- **Merkle Search Trees**: layer = leading zero digits of hash(key);
+  perfectly edit-local (a key's layer is intrinsic) and history
+  independent, but NO backstop: a stretch with no layered keys is one
+  unbounded leaf. Our coin without the safety net — same pathology,
+  fewer defenses. Nothing to borrow for long runs.
+
+Conclusion: every proposal converges on the three-family map
+(per-key intrinsic / run-position recurrence / membership election),
+and the owner's and Carson's ideas all land in the election family —
+whose boundary rule is already what ships (hybrid selector over
+recursive bisection). The deficiency is maintenance cost, which the
+incremental-summary work addresses; a FastCDC-style step within the
+candidate classes remains a cheap later knob if anchor churn ever
+measures high.
