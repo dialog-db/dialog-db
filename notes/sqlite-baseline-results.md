@@ -965,6 +965,79 @@ census; this changes canonical form and needs owner sign-off); (c)
 re-run every size/scale measurement after (a)+(b), since current
 numbers reflect pathological shapes.
 
+### Boundary-policy review (2026-07-30): why the pathology persists
+
+Reviewed `notes/boundary-policy-experiment.md` (steps 1-5, all landed,
+plus #399's weight-paced index ladder) against the census. Answer to
+the owner's question — and one correction to the previous entry.
+
+**What landed vs what is remembered.** The remembered design — "apply
+pressure once past a threshold until the boundary is forced" — landed
+as the step-4 WEIGHT BANK, but deliberately scoped: the bank
+accumulates only across VETOED (provably uncuttable) seams and resets
+at every accepted seam. Dolt-style pressure ("weight since the last
+CUT", probability rising until forced) was explicitly rejected in the
+step-4 note of record because a cut-outcome-fed coin cascades
+downstream boundary decisions (edit locality lost). Natural runs are
+therefore memoryless per-key renewal (expected leaf = S, tail e^-W/S)
+with the 3x frame ceiling as the only hard bound. Pressure-until-
+forced exists for vetoed atoms; it never applied to natural runs.
+
+**Correction: the flat root is DESIGNED, not a coin failure.** The
+previous entry blamed the 549-link root on the geometric coin failing
+to cut. Wrong: #399's `weight_paced_seam_rank` paces index fanout at
+`max_segment / link weight` — ~550-600 links at the defaults is the
+INTENDED fanout, and the root frame is byte-bounded at ~S as the tree
+grows. Consequence for the scale curve: the per-commit root rewrite
+grows toward ~S and then plateaus; the equilibrium commit rewrites
+roughly (root ~S) + (novelty buffer bytes) per commit — a structural
+~(S + buffer)/commit-size ratio vs SQLite, which is the properly
+attributed scaling term.
+
+**Why blocks still exceed the clamp — four scope gaps, no broken
+mechanism:**
+
+1. **The bound unit is WEIGHT, not BYTES.** The ceiling holds in
+   weight terms; encoded bytes drift ~1.9x past it (census max 5.6xS
+   vs the 3xS weight ceiling — matching step 5's own caveat that "the
+   byte tail lands near 2x the weight-implied figure"). Weight is a
+   calibrated estimate (`cap::entry_weight` = key+32 for the coin;
+   `Entry::weight` = key + `payload_weight` for budgets). For the
+   network goal — bytes on the wire — the bound that exists is
+   therefore ~6xS bytes (~390 KB at defaults), which does invalidate
+   +-50 KB block sizing, exactly the owner's concern.
+2. **The natural-run tail is a soft cap by design**: P(leaf > 2S) =
+   e^-2 = 13.5%, hard-stopped only at the 3x weight ceiling. Factor 2
+   exists as the tighter knob (measured 27-70% replay CPU in the
+   experiment).
+3. **The novelty buffer is byte-unbounded.** Buffers cap at 256 OPS
+   with no byte cap; the census shows buffered index frames at 222 KB
+   (8 KiB setting!) — buffer bytes ride every operational root block
+   and every per-commit rewrite entirely outside the pacing policy,
+   which predates buffered-by-default commits (group 3). For the
+   per-commit push payload and the commit cost, buffer bytes DOMINATE.
+4. **History rides the same tree**: each fact contributes multiple
+   value-carrying keys across orderings and history records, so
+   value-heavy bands recur across key regions.
+
+**Follow-ups in value order** (owner sign-off wanted on 2-3):
+
+1. Extend `live_census` to sum per-leaf `Entry::weight` and report
+   weight-vs-ceiling next to bytes-vs-ceiling: separates estimate
+   drift from enforcement in one run (expected: enforcement clean,
+   drift ~1.7-2x).
+2. **Byte-cap the novelty buffer** (trigger = min(op cap, byte cap)):
+   bounds operational block sizes, per-commit rewrite cost, and push
+   payloads. Local, cheap, and NO canonical-form change — buffers do
+   not affect canonical shape. Likely the single highest-value item
+   for both the size story and the scale curve.
+3. Re-base the ceiling (or the weight calibration) on encoded bytes —
+   persist knows exact bytes; a byte-informed calibration pass (or a
+   persist-time byte check feeding the next regroup) closes the
+   weight-to-byte drift without abandoning pure-function pacing.
+4. Only then re-tune (S, factor) and re-run the scale curve and
+   network models on bounded shapes.
+
 ## Deferred decisions (owner-reviewed)
 
 - **Batch-signing commits** (2026-07-28): approved direction for the
