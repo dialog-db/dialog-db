@@ -16,7 +16,10 @@ each runner invocation into a **fresh tab on a fresh origin**:
 
 - **Fast**: tab creation instead of browser boot, codegen cached per binary.
   Warm per-test overhead is ~0.2s. A 76-test suite that took 214s under the
-  stock runner + nextest takes ~12s.
+  stock runner + nextest takes ~12s; a 1,717-test workspace whose CI test
+  phase took 84 minutes finishes in ~16 (4 cores, debug builds — most of
+  the remaining overhead is per-tab wasm compilation of large debug
+  modules, a known future optimization).
 - **Isolated**: every test runs on its own `t-<n>.localhost` origin, with
   pristine IndexedDB, OPFS, localStorage, caches and service worker
   registrations. This is *stronger* isolation than sharing a page (what
