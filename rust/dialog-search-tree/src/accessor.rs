@@ -73,3 +73,52 @@ where
             .and_then(PersistentNode::try_from)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(unexpected_cfgs)]
+
+    use anyhow::Result;
+    use futures_util::future::join_all;
+
+    use crate::{
+        Accessor, Cache, ContentAddressedStorage, Delta, PersistentNode, PersistentTree,
+        helpers::ObservingBackend,
+    };
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    #[dialog_common::test]
+    async fn it_deduplicates_concurrent_fetches_of_one_node() -> Result<()> {
+        let backend = ObservingBackend::new();
+        let mut storage = ContentAddressedStorage::new(backend.clone());
+
+        // A node can only be built from bytes that survive validation, so
+        // the stored bytes must be a genuinely persisted node.
+        let mut delta = Delta::zero();
+        let tree = PersistentTree::<[u8; 4], Vec<u8>>::empty()
+            .edit()
+            .insert(1u32.to_be_bytes(), vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+        let hash = tree.root().clone();
+
+        let accessor = Accessor::new(Cache::new(), storage);
+        backend.reset();
+
+        let reads = join_all((0..8).map(|_| accessor.get_node(&hash))).await;
+
+        for read in reads {
+            let _: PersistentNode<[u8; 4], Vec<u8>> = read?;
+        }
+        assert_eq!(backend.read_log(), vec![hash]);
+
+        Ok(())
+    }
+}

@@ -33,6 +33,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
+    sync::Arc,
 };
 
 use async_stream::try_stream;
@@ -40,6 +41,7 @@ use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HA
 use dialog_storage::{DialogStorageError, JournaledStorage, MemoryStorageBackend, StorageBackend};
 use futures_core::Stream;
 use futures_util::StreamExt;
+use parking_lot::Mutex;
 use rkyv::{
     Deserialize, Serialize,
     bytecheck::CheckBytes,
@@ -277,6 +279,96 @@ pub type TestTree = PersistentTree<SpecKey, Vec<u8>, DistributionSimulator>;
 /// Creates an empty journaled [`TestStorage`].
 pub fn test_storage() -> TestStorage {
     ContentAddressedStorage::new(JournaledStorage::new(MemoryStorageBackend::default()))
+}
+
+/// Yields to the executor exactly once, giving work polled alongside the
+/// caller a chance to run before the caller resumes.
+pub async fn yield_once() {
+    let mut yielded = false;
+
+    std::future::poll_fn(move |context| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+/// A storage backend that records the reads that reach it, in order, and how
+/// many of them were in flight at once.
+///
+/// Every read yields once before it is answered, so reads issued by work that
+/// is polled concurrently are genuinely in flight together and their overlap
+/// shows up in [`peak_reads_in_flight`](Self::peak_reads_in_flight). The
+/// ordered log in [`read_log`](Self::read_log) says which nodes a read path
+/// touched, in the order it touched them, and how often.
+#[derive(Clone, Default)]
+pub struct ObservingBackend {
+    backend: MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+    reads: Arc<Mutex<Reads>>,
+}
+
+#[derive(Default)]
+struct Reads {
+    log: Vec<Blake3Hash>,
+    in_flight: usize,
+    peak_in_flight: usize,
+}
+
+impl ObservingBackend {
+    /// An empty backend, observing from the first read.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Forgets everything observed so far, keeping the stored values.
+    pub fn reset(&self) {
+        *self.reads.lock() = Reads::default();
+    }
+
+    /// The keys read since the last [`reset`](Self::reset), in the order the
+    /// reads were issued. A key read twice appears twice.
+    pub fn read_log(&self) -> Vec<Blake3Hash> {
+        self.reads.lock().log.clone()
+    }
+
+    /// The greatest number of reads that were ever in flight at once since
+    /// the last [`reset`](Self::reset).
+    pub fn peak_reads_in_flight(&self) -> usize {
+        self.reads.lock().peak_in_flight
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl StorageBackend for ObservingBackend {
+    type Key = Blake3Hash;
+    type Value = Vec<u8>;
+    type Error = DialogStorageError;
+
+    async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
+        self.backend.set(key, value).await
+    }
+
+    async fn get(&self, key: &Self::Key) -> Result<Option<Self::Value>, Self::Error> {
+        {
+            let mut reads = self.reads.lock();
+            reads.log.push(key.clone());
+            reads.in_flight += 1;
+            reads.peak_in_flight = reads.peak_in_flight.max(reads.in_flight);
+        }
+
+        yield_once().await;
+        let value = self.backend.get(key).await;
+
+        self.reads.lock().in_flight -= 1;
+
+        value
+    }
 }
 
 /// A distribution that reads ranks directly from keys.
