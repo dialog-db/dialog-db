@@ -930,8 +930,9 @@ window 3, 914-1,433 → 339 ms at window 2. Per commit: window 2
 **4.1 → 2.5 ms**, window 3 **5.8 → 4.4 ms**. Cumulative campaign at
 window 3: **12.3 → 4.4 ms (2.8x)**; window 2: 9.5 → 2.5 ms (3.8x).
 Suites green (293 + 159), release converge_check CONVERGED at
-200/1000/3000 with canonical roots byte-identical to the pre-change
-build (2bb2ee93 / 97d0d796 / 87dd1526); 10K in flight.
+200/1000/3000/10000 with canonical roots byte-identical to the
+pre-change build at every scale (2bb2ee93 / 97d0d796 / 87dd1526 /
+f5e466b7).
 
 Remaining at window 3 (per 1000): merge_run 1.12 s + reshape 1.73 s
 — the 840 semantically-required merges still materialize the whole
