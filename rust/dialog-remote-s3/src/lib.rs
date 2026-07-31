@@ -42,6 +42,7 @@
 //! # }
 //! ```
 
+mod client;
 mod error;
 pub mod request;
 pub mod s3;
@@ -49,6 +50,7 @@ pub mod s3;
 #[cfg(feature = "helpers")]
 pub mod helpers;
 
+pub use client::http_client;
 pub use error::{AuthorizationFormatError, PermitRejection, S3Error};
 pub use request::{IntoRequest, Precondition, RequestMethod, S3Request};
 pub use request::{archive, memory};

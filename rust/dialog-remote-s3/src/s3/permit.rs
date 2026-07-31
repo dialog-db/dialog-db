@@ -55,7 +55,7 @@ impl Permit {
 
 impl From<Permit> for reqwest::RequestBuilder {
     fn from(permit: Permit) -> reqwest::RequestBuilder {
-        let client = reqwest::Client::new();
+        let client = crate::http_client();
         let mut builder = match permit.method.as_str() {
             "GET" => client.get(permit.url),
             "PUT" => client.put(permit.url),
