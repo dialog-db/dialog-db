@@ -5,11 +5,14 @@
 mod access;
 mod builder;
 mod fork;
+mod memo;
 mod space;
 #[cfg(test)]
 mod test;
 
 pub use builder::{OperatorBuilder, OperatorError};
+
+use memo::ProofMemo;
 
 use crate::Authority;
 use dialog_capability::{Capability, Provider};
@@ -58,6 +61,10 @@ pub struct Operator<S: Clone> {
 
     /// Network dispatch for fork invocations.
     network: Network,
+
+    /// Chains already proven against `storage`, so that repeated
+    /// authorizations do not walk the certificate store again.
+    memo: ProofMemo,
 }
 
 impl<S: Clone> Operator<S> {
