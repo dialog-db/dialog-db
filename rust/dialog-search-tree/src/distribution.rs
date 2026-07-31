@@ -68,6 +68,61 @@ pub mod audit {
     pub fn widen_plan_reject() {
         WIDEN_PLAN_REJECTS.fetch_add(1, Ordering::Relaxed);
     }
+    /// Wall-time phase attribution for the commit path (nanoseconds,
+    /// accumulated across commits; snapshot-and-reset from the harness).
+    /// `PERSIST_NS` covers the whole spine persist (assembly + hash +
+    /// delta recording); within it `SERIALIZE_NS` is the node-body
+    /// serialize (`as_bytes`) and `NODE_HASH_NS` the blake3 over the
+    /// frame bytes. `SETTLE_NS` covers the pre-persist settle pass.
+    pub static PERSIST_NS: AtomicU64 = AtomicU64::new(0);
+    pub static SERIALIZE_NS: AtomicU64 = AtomicU64::new(0);
+    pub static NODE_HASH_NS: AtomicU64 = AtomicU64::new(0);
+    pub static SETTLE_NS: AtomicU64 = AtomicU64::new(0);
+    /// Inside a write pass: the buffer routing/cascade half (`enqueue`,
+    /// including child-frame opens) vs the canonical leaf-edit half
+    /// (`replay_ops` over the deferred ops).
+    pub static ENQUEUE_NS: AtomicU64 = AtomicU64::new(0);
+    pub static REPLAY_NS: AtomicU64 = AtomicU64::new(0);
+    /// Frame opens: decoding a persistent node into its transient (owned)
+    /// form, the per-touch cost a collapsed spine child pays again on the
+    /// next commit that reaches it.
+    pub static OPEN_NS: AtomicU64 = AtomicU64::new(0);
+    pub static OPENS: AtomicU64 = AtomicU64::new(0);
+    pub static OPEN_BYTES: AtomicU64 = AtomicU64::new(0);
+
+    /// Times `work` and adds the elapsed nanoseconds to `counter`. On
+    /// wasm (no monotonic clock in `std`) the work runs untimed.
+    pub fn timed<T>(counter: &AtomicU64, work: impl FnOnce() -> T) -> T {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let started = std::time::Instant::now();
+            let out = work();
+            counter.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            out
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = counter;
+            work()
+        }
+    }
+
+    /// Snapshot-and-reset of the phase timers, in milliseconds.
+    pub fn phase_report() -> String {
+        format!(
+            "settle={:.1}ms (enqueue={:.1}ms replay={:.1}ms) persist={:.1}ms (serialize={:.1}ms node_hash={:.1}ms) opens={} open={:.1}ms open_bytes={}",
+            SETTLE_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            ENQUEUE_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            REPLAY_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            PERSIST_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            SERIALIZE_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            NODE_HASH_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            OPENS.swap(0, Ordering::Relaxed),
+            OPEN_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            OPEN_BYTES.swap(0, Ordering::Relaxed),
+        )
+    }
+
     pub fn report() -> String {
         format!(
             "key_hashes={} key_bytes={} seam_hashes={} seam_bytes={} election_hashes={} election_bytes={} node_hashes={} node_bytes={}",

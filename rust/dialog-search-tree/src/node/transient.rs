@@ -1178,7 +1178,11 @@ where
         node: &PersistentNode<Key, Value>,
         separator: Vec<u8>,
     ) -> Result<Self, DialogSearchTreeError> {
-        match node.body()? {
+        use crate::distribution::audit;
+        use std::sync::atomic::Ordering;
+        audit::OPENS.fetch_add(1, Ordering::Relaxed);
+        audit::OPEN_BYTES.fetch_add(node.buffer().as_ref().len() as u64, Ordering::Relaxed);
+        audit::timed(&audit::OPEN_NS, || match node.body()? {
             ArchivedNodeBody::Index(_) => {
                 Ok(TransientNode::Index(TransientNode::open_index(node)?))
             }
@@ -1195,7 +1199,7 @@ where
                     entries, separator,
                 )))
             }
-        }
+        })
     }
 }
 
@@ -1252,8 +1256,15 @@ where
             }
         };
 
-        let node = PersistentNode::new(Buffer::from(body.as_bytes()?));
+        let bytes =
+            crate::distribution::audit::timed(&crate::distribution::audit::SERIALIZE_NS, || {
+                body.as_bytes()
+            })?;
+        let node = PersistentNode::new(Buffer::from(bytes));
         crate::distribution::audit::node(node.buffer().as_ref().len());
+        crate::distribution::audit::timed(&crate::distribution::audit::NODE_HASH_NS, || {
+            node.hash()
+        });
         if let Some(kind) = audit_kind {
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
         }
@@ -1321,8 +1332,15 @@ where
             }
         };
 
-        let node = PersistentNode::new(Buffer::from(body.as_bytes()?));
+        let bytes =
+            crate::distribution::audit::timed(&crate::distribution::audit::SERIALIZE_NS, || {
+                body.as_bytes()
+            })?;
+        let node = PersistentNode::new(Buffer::from(bytes));
         crate::distribution::audit::node(node.buffer().as_ref().len());
+        crate::distribution::audit::timed(&crate::distribution::audit::NODE_HASH_NS, || {
+            node.hash()
+        });
         if let Some(kind) = audit_kind {
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
         }

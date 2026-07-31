@@ -420,12 +420,20 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
-        match self.root {
+        #[cfg(not(target_arch = "wasm32"))]
+        let started = std::time::Instant::now();
+        let settled = match self.root {
             // Nothing buffered in memory: nothing to settle. (A persisted
             // root's stored buffers settle when a write next loads it.)
             HitchhikerRoot::Unloaded(_) => Ok(self),
             HitchhikerRoot::Loaded(_) => self.write_with(Vec::new(), storage, true).await,
-        }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::distribution::audit::SETTLE_NS.fetch_add(
+            started.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        settled
     }
 
     /// Enqueues a batch of ops into the tree, cascading buffers one level on
@@ -493,8 +501,10 @@ where
                 deferred = msgs;
                 Some(node)
             }
-            Some(node) => Some(
-                enqueue::<Key, Value, D, Backend>(
+            Some(node) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                let started = std::time::Instant::now();
+                let node = enqueue::<Key, Value, D, Backend>(
                     node,
                     msgs,
                     EnqueueConfig {
@@ -507,8 +517,14 @@ where
                     &mut deferred,
                     &accessor,
                 )
-                .await?,
-            ),
+                .await?;
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::distribution::audit::ENQUEUE_NS.fetch_add(
+                    started.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                Some(node)
+            }
             None => {
                 // No spine to buffer into yet: defer everything to the leaf path.
                 deferred = msgs;
@@ -530,7 +546,14 @@ where
                 TransientTree::<Key, Value, D>::new(NULL_BLAKE3_HASH.clone(), self.cache.clone())
             }
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let replay_started = std::time::Instant::now();
         let edit = replay_ops(edit, deferred, storage).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::distribution::audit::REPLAY_NS.fetch_add(
+            replay_started.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.root = match edit.into_root() {
             TransientRootParts::Loaded(node) => HitchhikerRoot::Loaded(node),
             TransientRootParts::Unloaded(hash) => HitchhikerRoot::Unloaded(hash),
@@ -846,7 +869,11 @@ where
             // yet and takes the default, which is exactly what its first
             // canonical write would stamp.
             HitchhikerRoot::Loaded(node) => {
-                let node = node.persist(delta, &self.manifest.unwrap_or_default())?;
+                let manifest = self.manifest.unwrap_or_default();
+                let node = crate::distribution::audit::timed(
+                    &crate::distribution::audit::PERSIST_NS,
+                    || node.persist(delta, &manifest),
+                )?;
                 // Seed the shared node cache with the frame just produced:
                 // the very next read of this root (a manifest lookup, a
                 // query descent) otherwise misses, re-fetches the bytes
@@ -875,7 +902,10 @@ where
             HitchhikerRoot::Unloaded(hash) => Ok(hash.clone()),
             HitchhikerRoot::Loaded(node) => {
                 let manifest = self.manifest.unwrap_or_default();
-                let node = node.persist_mut(delta, &manifest)?;
+                let node = crate::distribution::audit::timed(
+                    &crate::distribution::audit::PERSIST_NS,
+                    || node.persist_mut(delta, &manifest),
+                )?;
                 // Same cache seeding as `persist`: the frame this commit
                 // just produced is what the next read resolves the root to.
                 self.cache

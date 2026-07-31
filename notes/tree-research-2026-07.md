@@ -600,3 +600,85 @@ it cannot cost sync anything.
 - Read paths that consume `index.novelty` (walker, differential,
   flush, `buffer_for`, `all_novelty`) move behind accessors that
   resolve regions through the trailer.
+
+### Owner amendment: deterministic order, head/tail split (2026-07-31)
+
+Owner prefers determinism over hottest-last ordering — try it and
+measure. Amended layout, per the owner's sketch:
+
+    [head: core (links table, sans novelty)]
+    [tail: length-encoded buffer regions, ascending child order]
+    [footer: region table + format tag]
+
+- The head is byte-stable until a flush/cascade moves a child hash
+  or scale; the tail's regions are reusable up to the first touched
+  child.
+- The determinism cost lands only on the HASH resume (prefix-bound:
+  an early touched child re-hashes most of the tail), NOT on the
+  serialize reuse: memcpy-reuse of an unchanged region's bytes
+  works wherever the region sits, so the clone/re-serialize
+  elimination — likely the larger term, since blake3 is
+  instruction-heavy but SIMD-fast while rkyv serialize is
+  allocator-bound — is position-independent and keeps its full
+  value. Cross-history byte determinism of the stored form is
+  preserved: bytes are a pure function of the buffered state.
+- If prefix-bound hash reuse measures poor (SE touches all three
+  key regions per commit, so the root's first touched child is
+  often early), the escalation path is CV-level middle-region reuse
+  (blake3 chunk-counter surgery), not a return to touch-ordering.
+
+Before the refactor: instrument the seal path (settle vs persist
+wall time) — the callgrind 60% is instruction counts; the wall-time
+prize needs sizing so the A/B has a denominator.
+
+## Wall-time phase attribution: the persist premise fails (2026-07-31)
+
+Added phase timers (audit counters, this branch): `SETTLE_NS` /
+`ENQUEUE_NS` / `REPLAY_NS` around the write halves, `PERSIST_NS` /
+`SERIALIZE_NS` / `NODE_HASH_NS` around the spine persist, and
+`OPENS` / `OPEN_NS` / `OPEN_BYTES` around `TransientNode::open`.
+`measure_se_replay` prints them per window. Results at 3000/1000,
+default config (window totals per 1000 commits; ratios stable
+across three runs, absolutes noisy ±30%):
+
+- settle 2.2-14.5 s, of which **replay_ops (canonical leaf edits)
+  2.1-11.4 s — 73-92% of commit wall time**.
+- enqueue (routing + cascade decision): 0.11-0.24 s (~1-2%).
+- persist (assembly + hash + delta): 0.3-4.1 s (3-21%, the high
+  end observed only in noisy runs; typically ~0.3-0.5 s ≈ 3-5%),
+  of which serialize 0.07-1.8 s and **node blake3 30-56 ms — about
+  40-50 us per commit, ~0.3-1.5% of wall time**.
+- opens: 140-395 frame opens PER COMMIT, average block 2.4 KB,
+  340-800 KB decoded per commit — but only 0.3-0.9 s per window
+  (~10-15% of replay). These are forced-run piece frames opened as
+  widening/regroup context, not big leaves.
+
+Conclusions:
+
+1. The callgrind "memcpy + blake3 + allocator = 60% of commit
+   instructions" was instruction-weighted and mis-attributed:
+   SIMD blake3 is instruction-dense but wall-cheap, and the
+   memcpy/alloc mass lives in the EDIT path (piece opens, entry
+   materialization, regroup context), not the root-frame persist.
+2. The incremental-frame campaign (container + prefix-resume
+   hashing) has a measured wall-time ceiling of ~5-15% at default
+   config: serialize is 1-10% and the hash it would incrementalize
+   is ~1%. Bytes written stay O(frame) under the single-block
+   constraint by design. The design (v2, amended) is recorded and
+   remains valid, but it is not the higher-price ticket.
+3. The higher-price ticket at default config is the canonical edit
+   machinery inside replay_ops: per-op elections/regroups and the
+   widened/forced-run context work (140+ piece opens per commit and
+   the O(run) streams — a share of which is this branch's own quiet
+   check, which runs ~8 times per commit here; the 32K A/B already
+   measured it at 6-9% and the notes call for it not to merge).
+   The known levers aim exactly there: the pacing ramp (measured
+   -30-35% per-commit time at scale), per-piece summaries (the V2
+   licenced by 98% election stability), and keeping hot leaves/
+   pieces decoded across commits instead of re-opening them
+   (Cached-style retention for children, format-unchanged).
+
+Decision needed from the owner: proceed with the containerized
+frame anyway (modest, bounded win, format change), or pivot the
+campaign to the edit path with this attribution as the new
+baseline.
