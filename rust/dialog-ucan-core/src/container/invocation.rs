@@ -137,7 +137,7 @@ where
 {
     /// Serialize to DAG-CBOR bytes (UCAN container format).
     pub fn to_bytes(&self) -> Result<Vec<u8>, ContainerError> {
-        Container::from(self).to_bytes()
+        Container::from(self).into_bytes()
     }
 }
 
@@ -204,10 +204,8 @@ where
 
         // Add delegations in the order they appear in the invocation's proofs
         for cid in chain.invocation.proofs() {
-            if let Some(delegation) = chain.delegations.get(cid)
-                && let Ok(delegation_bytes) = serde_ipld_dagcbor::to_vec(delegation.as_ref())
-            {
-                tokens.push(delegation_bytes);
+            if let Some(delegation) = chain.delegations.get(cid) {
+                tokens.push(delegation.encoded().to_vec());
             }
         }
 

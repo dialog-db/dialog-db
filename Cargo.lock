@@ -1280,7 +1280,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "ipld-core",
- "reqwest",
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",
