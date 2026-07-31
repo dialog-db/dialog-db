@@ -100,6 +100,22 @@ pub mod audit {
     pub static MERGE_INDEX_NS: AtomicU64 = AtomicU64::new(0);
     pub static ELECTION_NS: AtomicU64 = AtomicU64::new(0);
     pub static RESHAPE_NS: AtomicU64 = AtomicU64::new(0);
+    /// The share of `RESHAPE_NS` spent on widened (forced-run or
+    /// forced-index) windows — the part a summary-based quiet skip could
+    /// avoid on plan-stable edits.
+    pub static RESHAPE_WIDENED_NS: AtomicU64 = AtomicU64::new(0);
+    /// Widened-window census for the skip-rate estimate: windows merged and
+    /// pieces materialized per merge, plus how many regroup output groups
+    /// inside widened windows were emitted as reused origin links (plan
+    /// stood still for that piece) versus built fresh.
+    pub static MERGE_RUN_WINDOWS: AtomicU64 = AtomicU64::new(0);
+    pub static MERGE_RUN_PIECES: AtomicU64 = AtomicU64::new(0);
+    pub static MERGE_INDEX_WINDOWS: AtomicU64 = AtomicU64::new(0);
+    pub static MERGE_INDEX_PIECES: AtomicU64 = AtomicU64::new(0);
+    pub static LEAF_GROUPS_REUSED: AtomicU64 = AtomicU64::new(0);
+    pub static LEAF_GROUPS_TOTAL: AtomicU64 = AtomicU64::new(0);
+    pub static INDEX_GROUPS_REUSED: AtomicU64 = AtomicU64::new(0);
+    pub static INDEX_GROUPS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
     /// Adds elapsed nanoseconds since `started` to `counter` (async-friendly
     /// twin of [`timed`]). No-op cost on wasm via the caller's cfg.
@@ -139,14 +155,23 @@ pub mod audit {
             OPEN_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
             OPEN_BYTES.swap(0, Ordering::Relaxed),
         ) + &format!(
-            "\n         apply: {} ops {:.1}ms (quiet={:.1}ms merge_run={:.1}ms merge_index={:.1}ms reshape={:.1}ms election={:.1}ms)",
+            "\n         apply: {} ops {:.1}ms (quiet={:.1}ms merge_run={:.1}ms merge_index={:.1}ms reshape={:.1}ms/widened={:.1}ms election={:.1}ms)\n         widen census: run {} windows / {} pieces, index {} windows / {} pieces; groups reused leaf {}/{} index {}/{}",
             APPLY_OPS.swap(0, Ordering::Relaxed),
             APPLY_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
             QUIET_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
             MERGE_RUN_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
             MERGE_INDEX_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
             RESHAPE_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            RESHAPE_WIDENED_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
             ELECTION_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            MERGE_RUN_WINDOWS.swap(0, Ordering::Relaxed),
+            MERGE_RUN_PIECES.swap(0, Ordering::Relaxed),
+            MERGE_INDEX_WINDOWS.swap(0, Ordering::Relaxed),
+            MERGE_INDEX_PIECES.swap(0, Ordering::Relaxed),
+            LEAF_GROUPS_REUSED.swap(0, Ordering::Relaxed),
+            LEAF_GROUPS_TOTAL.swap(0, Ordering::Relaxed),
+            INDEX_GROUPS_REUSED.swap(0, Ordering::Relaxed),
+            INDEX_GROUPS_TOTAL.swap(0, Ordering::Relaxed),
         )
     }
 

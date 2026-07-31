@@ -1543,6 +1543,17 @@ where
         seal(group_start, end, pending);
     }
 
+    if !origins.is_empty() {
+        use std::sync::atomic::Ordering;
+        let reused = groups
+            .iter()
+            .filter(|group| matches!(group, Node::Persistent(_)))
+            .count() as u64;
+        crate::distribution::audit::INDEX_GROUPS_REUSED.fetch_add(reused, Ordering::Relaxed);
+        crate::distribution::audit::INDEX_GROUPS_TOTAL
+            .fetch_add(groups.len() as u64, Ordering::Relaxed);
+    }
+
     Ok(groups)
 }
 
@@ -1832,6 +1843,17 @@ where
             origin_for(group_start, count),
             group_weight(group_start, count),
         );
+    }
+
+    if !origins.is_empty() {
+        use std::sync::atomic::Ordering;
+        let reused = groups
+            .iter()
+            .filter(|group| matches!(group, Node::Persistent(_)))
+            .count() as u64;
+        crate::distribution::audit::LEAF_GROUPS_REUSED.fetch_add(reused, Ordering::Relaxed);
+        crate::distribution::audit::LEAF_GROUPS_TOTAL
+            .fetch_add(groups.len() as u64, Ordering::Relaxed);
     }
 
     groups

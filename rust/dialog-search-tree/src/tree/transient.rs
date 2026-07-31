@@ -1054,6 +1054,12 @@ where
                     &crate::distribution::audit::MERGE_RUN_NS,
                     merge_started,
                 );
+                if let Some(origins) = &origins {
+                    use std::sync::atomic::Ordering;
+                    crate::distribution::audit::MERGE_RUN_WINDOWS.fetch_add(1, Ordering::Relaxed);
+                    crate::distribution::audit::MERGE_RUN_PIECES
+                        .fetch_add(origins.len() as u64, Ordering::Relaxed);
+                }
                 origins
             }
         } else {
@@ -1087,6 +1093,12 @@ where
                     &crate::distribution::audit::MERGE_INDEX_NS,
                     merge_started,
                 );
+                if merged.0 {
+                    use std::sync::atomic::Ordering;
+                    crate::distribution::audit::MERGE_INDEX_WINDOWS.fetch_add(1, Ordering::Relaxed);
+                    crate::distribution::audit::MERGE_INDEX_PIECES
+                        .fetch_add(merged.1.len() as u64, Ordering::Relaxed);
+                }
                 merged
             } else {
                 (false, Vec::new())
@@ -1708,10 +1720,18 @@ where
             )?,
         };
         #[cfg(not(target_arch = "wasm32"))]
-        crate::distribution::audit::add_elapsed(
-            &crate::distribution::audit::RESHAPE_NS,
-            reshape_started,
-        );
+        {
+            crate::distribution::audit::add_elapsed(
+                &crate::distribution::audit::RESHAPE_NS,
+                reshape_started,
+            );
+            if widened || index_widened {
+                crate::distribution::audit::add_elapsed(
+                    &crate::distribution::audit::RESHAPE_WIDENED_NS,
+                    reshape_started,
+                );
+            }
+        }
         seal_root::<Key, Value, D, _>(replacement, height, &manifest, accessor).await
     }
 }

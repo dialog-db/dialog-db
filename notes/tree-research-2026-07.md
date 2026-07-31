@@ -744,3 +744,75 @@ bounded by the true plan-change rate. Next: design the summary
 shapes and the skip conditions precisely (the existing `cut_plan`
 extraction is the plug point), with converge_check as the oracle
 at every step.
+
+## Widen census and the optimized landing zone (2026-07-31)
+
+Census counters added: merge windows and pieces materialized per
+level, origin-reuse ratios inside widened regroups (a direct proxy
+for "the plan stood still for this piece"), and the widened share
+of reshape time. 3000/1000 default config, per 1000 commits:
+
+| window | leaf windows | leaf pieces | leaf reuse | index windows | index reuse | reshape widened |
+|--------|-------------|-------------|-----------|---------------|-------------|-----------------|
+| 1 | 719 | 66,866 (93/win) | 66,314/73,296 = 90.5% | 743 | 698/2,558 = 27% | 432/462 ms |
+| 2 | 793 | 193,494 (244/win) | 89.7% | 8,083 | 18% | 4,373/4,372 ms |
+| 3 | 840 | 375,295 (**447/win**) | **93.6%** | 9,033 | 22.6% | 6,655/6,654 ms |
+
+What the census says:
+
+1. **Leaf forced runs are ~450 pieces long at 3K txns and growing
+   linearly** (93 → 244 → 447 pieces/window). Every membership
+   edit that fails the quiet check merges and regroups the whole
+   run — this linear growth is the growth term in the 3.3 → 12.7
+   ms/commit curve. 93.6% of regroup output groups come back
+   byte-identical (reused verbatim); the plan-reject rate says 97%
+   of windows have no plan movement at all.
+2. **Index widening fires on essentially every op at scale**
+   (9,033 windows per 1000 commits ≈ one per op). Reuse there is
+   only ~22%, but NOT because plans move: origin provenance is
+   sparse (0.44 eligible origins/window) because only QUIET pieces
+   (empty novelty) are eligible, and level-2 pieces carry buffers.
+   So today's merge rebuilds, re-encodes, re-hashes, and re-stores
+   the buffered pieces nearly every op — this is also a large
+   slice of the 72-162 KB/commit index write volume. A skip
+   avoids the merge entirely, so the buffered pieces stay stored
+   and untouched — the wall AND byte cost both vanish on the
+   quiet path.
+3. Reshape time is ~100% widened-window regrouping at scale.
+4. Index anchors need no stored mark (pure function of separators
+   + weights), so the index-level quiet check is STRUCTURALLY
+   EASIER than the leaf one: per-piece summaries (child count,
+   summed link weight, per-class candidate minima, edge
+   separators) decide the plan without opening any piece.
+
+### Landing-zone model (window 3, per 1000 commits, apply = 11.4 s)
+
+Assume a summary-based quiet skip at both levels with the measured
+plan-stability rates (97% leaf windows quiet; index assumed
+similar, to be validated), local piece edits on the skipped path at
+the non-widened reshape rate (~58 us/op, from window 1), and
+summary combines at O(pieces) numbers rather than O(run) entries:
+
+- quiet check: 444 ms → ~50 ms (O(pieces) combine, no streams)
+- merge_run: 1,182 ms → ~70 ms (3% residual full merges)
+- merge_index: 2,974 ms → ~150 ms (5% residual assumed)
+- reshape: 6,654 ms → ~800 ms (residual full regroups on plan
+  changes + local piece edits on the quiet path)
+- election: 293 ms → ~15 ms (only on true changes)
+- descent/other: ~160 ms unchanged
+
+Projected apply ≈ 1.2-1.5 s vs 11.4 s (**~8x on apply**); total
+commit ≈ 12.3 - 11.4 + 1.4 ≈ **2.3 ms/commit vs 12.3 (~5x)** at
+window 3, ≈ 1.2 vs 2.8 ms (~2.4x) at window 1 — and the growth
+term flattens: per-op cost stops scaling with run length except in
+the O(pieces) summary combine (100x+ cheaper per piece than entry
+streams; itself incrementalizable later if runs keep growing).
+Secondary effect, unmodeled: index bytes/commit should drop
+substantially since buffered level-2 pieces stop being rebuilt on
+quiet edits.
+
+Validation gates for the implementation: converge_check at
+200/1000/3000/10000 per-txn vs by-five vs single (the skip must
+prove the plan identical, forced marks included); byte-identical
+stored form (skips produce no new bytes at all on quiet paths);
+full suite; A/B measure_se_replay against a pre-change rebuild.
