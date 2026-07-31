@@ -1319,10 +1319,21 @@ where
         // typed key, so reconstruct it here (the same round trip a leaf read
         // makes).
         let key = Key::try_from_bytes(&entry.key)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let apply_started = std::time::Instant::now();
         edit = match entry.op {
             NoveltyOp::Assert(value) => edit.insert(key, value, storage).await?,
             NoveltyOp::Retract => edit.delete(&key, storage).await?,
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::distribution::audit::add_elapsed(
+                &crate::distribution::audit::APPLY_NS,
+                apply_started,
+            );
+            crate::distribution::audit::APPLY_OPS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     Ok(edit)
 }

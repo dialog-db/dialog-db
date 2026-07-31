@@ -1024,22 +1024,37 @@ where
             }
         };
         let mut piece_origins = if changes_membership {
-            if forced_run_quiet::<Key, Value, Backend, D>(
+            #[cfg(not(target_arch = "wasm32"))]
+            let quiet_started = std::time::Instant::now();
+            let quiet = forced_run_quiet::<Key, Value, Backend, D>(
                 &mut root, &path, &self, accessor, &manifest,
             )
-            .await?
-            {
+            .await?;
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::distribution::audit::add_elapsed(
+                &crate::distribution::audit::QUIET_NS,
+                quiet_started,
+            );
+            if quiet {
                 crate::distribution::audit::widen_skip();
                 None
             } else {
-                merge_forced_run::<Key, Value, Backend>(
+                #[cfg(not(target_arch = "wasm32"))]
+                let merge_started = std::time::Instant::now();
+                let origins = merge_forced_run::<Key, Value, Backend>(
                     &mut root,
                     &mut path,
                     &mut [],
                     accessor,
                     &manifest,
                 )
-                .await?
+                .await?;
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::distribution::audit::add_elapsed(
+                    &crate::distribution::audit::MERGE_RUN_NS,
+                    merge_started,
+                );
+                origins
             }
         } else {
             None
@@ -1057,14 +1072,22 @@ where
         // nothing.
         let (index_widened, mut index_origins) =
             if changes_membership && manifest.frame_ceiling() > 0 {
-                merge_forced_index_runs::<Key, Value, D, Backend>(
+                #[cfg(not(target_arch = "wasm32"))]
+                let merge_started = std::time::Instant::now();
+                let merged = merge_forced_index_runs::<Key, Value, D, Backend>(
                     &mut root,
                     &mut path,
                     &mut [],
                     accessor,
                     &manifest,
                 )
-                .await?
+                .await?;
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::distribution::audit::add_elapsed(
+                    &crate::distribution::audit::MERGE_INDEX_NS,
+                    merge_started,
+                );
+                merged
             } else {
                 (false, Vec::new())
             };
@@ -1477,6 +1500,8 @@ where
         // separator length and joins nothing.
         let mut neighbor_path = match neighbor_path {
             Some(mut neighbor_path) if manifest.max_segment > 0 => {
+                #[cfg(not(target_arch = "wasm32"))]
+                let merge_started = std::time::Instant::now();
                 let merged_leaf = merge_forced_run::<Key, Value, Backend>(
                     &mut root,
                     &mut neighbor_path,
@@ -1486,8 +1511,15 @@ where
                 )
                 .await?
                 .is_some();
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::distribution::audit::add_elapsed(
+                    &crate::distribution::audit::MERGE_RUN_NS,
+                    merge_started,
+                );
                 let mut merged_index = false;
                 if manifest.frame_ceiling() > 0 {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let merge_started = std::time::Instant::now();
                     merged_index = merge_forced_index_runs::<Key, Value, D, Backend>(
                         &mut root,
                         &mut neighbor_path,
@@ -1497,6 +1529,11 @@ where
                     )
                     .await?
                     .0;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    crate::distribution::audit::add_elapsed(
+                        &crate::distribution::audit::MERGE_INDEX_NS,
+                        merge_started,
+                    );
                 }
                 if merged_leaf || merged_index {
                     piece_origins = None;
@@ -1624,6 +1661,8 @@ where
         // Phase two: synchronous re-shape. The whole touched region is transient, so
         // the re-shape needs no further loads and runs without any borrow spanning
         // an await.
+        #[cfg(not(target_arch = "wasm32"))]
+        let reshape_started = std::time::Instant::now();
         let replacement = match (&neighbor_path, lca_depth) {
             (Some(neighbor_path), Some(lca_depth)) => {
                 // A rightward fusion: re-shape the shared prefix down to the
@@ -1668,6 +1707,11 @@ where
                 widened || index_widened,
             )?,
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::distribution::audit::add_elapsed(
+            &crate::distribution::audit::RESHAPE_NS,
+            reshape_started,
+        );
         seal_root::<Key, Value, D, _>(replacement, height, &manifest, accessor).await
     }
 }

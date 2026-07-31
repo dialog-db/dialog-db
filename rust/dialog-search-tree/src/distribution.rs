@@ -89,6 +89,24 @@ pub mod audit {
     pub static OPEN_NS: AtomicU64 = AtomicU64::new(0);
     pub static OPENS: AtomicU64 = AtomicU64::new(0);
     pub static OPEN_BYTES: AtomicU64 = AtomicU64::new(0);
+    /// Inside the canonical edit path: per-op apply total and its widening
+    /// seams — the forced-run quiet check, the forced-run merge (context
+    /// assembly), the forced-index merge — plus the election core
+    /// (`choose_cuts`), which nests inside the others.
+    pub static APPLY_NS: AtomicU64 = AtomicU64::new(0);
+    pub static APPLY_OPS: AtomicU64 = AtomicU64::new(0);
+    pub static QUIET_NS: AtomicU64 = AtomicU64::new(0);
+    pub static MERGE_RUN_NS: AtomicU64 = AtomicU64::new(0);
+    pub static MERGE_INDEX_NS: AtomicU64 = AtomicU64::new(0);
+    pub static ELECTION_NS: AtomicU64 = AtomicU64::new(0);
+    pub static RESHAPE_NS: AtomicU64 = AtomicU64::new(0);
+
+    /// Adds elapsed nanoseconds since `started` to `counter` (async-friendly
+    /// twin of [`timed`]). No-op cost on wasm via the caller's cfg.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn add_elapsed(counter: &AtomicU64, started: std::time::Instant) {
+        counter.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
     /// Times `work` and adds the elapsed nanoseconds to `counter`. On
     /// wasm (no monotonic clock in `std`) the work runs untimed.
@@ -120,6 +138,15 @@ pub mod audit {
             OPENS.swap(0, Ordering::Relaxed),
             OPEN_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
             OPEN_BYTES.swap(0, Ordering::Relaxed),
+        ) + &format!(
+            "\n         apply: {} ops {:.1}ms (quiet={:.1}ms merge_run={:.1}ms merge_index={:.1}ms reshape={:.1}ms election={:.1}ms)",
+            APPLY_OPS.swap(0, Ordering::Relaxed),
+            APPLY_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            QUIET_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            MERGE_RUN_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            MERGE_INDEX_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            RESHAPE_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
+            ELECTION_NS.swap(0, Ordering::Relaxed) as f64 / 1e6,
         )
     }
 
@@ -898,6 +925,18 @@ pub mod cap {
     /// trajectory-dependent rule would break the byte-identity independent
     /// imports and canonicalize promise.
     fn choose_cuts(
+        weights: &[usize],
+        candidates: &[Anchor],
+        threshold: usize,
+        selector: AnchorSelector,
+    ) -> Vec<usize> {
+        super::audit::timed(&super::audit::ELECTION_NS, || {
+            choose_cuts_untimed(weights, candidates, threshold, selector)
+        })
+    }
+
+    /// [`choose_cuts`](Self::choose_cuts) without the audit timer wrapper.
+    fn choose_cuts_untimed(
         weights: &[usize],
         candidates: &[Anchor],
         threshold: usize,

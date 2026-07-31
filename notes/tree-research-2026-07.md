@@ -682,3 +682,65 @@ Decision needed from the owner: proceed with the containerized
 frame anyway (modest, bounded win, format change), or pivot the
 campaign to the edit path with this attribution as the new
 baseline.
+
+Owner's call (2026-07-31): the container's added complexity is not
+worth a 1-7% wall win — pivot to what has impact. The containerized
+frame design stays recorded for if the economics change.
+
+## Replay interior attribution: widening is the ticket (2026-07-31)
+
+Added edit-path timers: per-op `APPLY_NS`/`APPLY_OPS`, the widening
+seams (`QUIET_NS`, `MERGE_RUN_NS` for `merge_forced_run` including
+the neighbor-side call, `MERGE_INDEX_NS` for
+`merge_forced_index_runs` likewise), the phase-two synchronous
+`RESHAPE_NS`, and `ELECTION_NS` inside `choose_cuts` (nested in the
+others). Accounting closes: quiet + merges + reshape ≈ 99% of
+apply, and apply ≈ 99% of replay.
+
+3000/1000 default config, window totals per 1000 commits (~8-9
+leaf-bound ops per commit):
+
+- Window 1 (2-level tree, root = one big frame): apply 2.13 s —
+  **quiet check 1.30 s (61%)**, reshape 0.47 s, merge_run 0.22 s.
+  In the early epoch the quiet check's own O(run) streams are the
+  single largest cost in the whole commit path (~45% of total
+  commit time), while saving nothing measurable.
+- Window 2 (3 levels): apply 9.30 s — reshape 4.54 s (49%),
+  merge_index 2.66 s (29%), quiet 1.43 s (15%), merge_run 0.56 s.
+- Window 3: apply 11.85 s — **reshape 6.84 s (58%), merge_index
+  3.05 s (26%), merge_run 1.33 s (11%)**, quiet 0.47 s, election
+  0.29 s. ~750 us per op on average.
+
+Mechanism: at scale the level-2 frames are force-split (over the
+frame ceiling), so nearly every membership edit descending through
+them fires `merge_forced_index_runs` (index_widened ≈ 8/commit ≈
+one per op) — the merge opens and lifts the WHOLE frame run (the
+140-395 small piece opens per commit), and the phase-two reshape
+then regroups the whole merged window. Same at the leaf level for
+forced runs (`merge_forced_run` + regroup). Every edit into a
+forced run pays O(run), and the SE workload lives inside forced
+runs at scale. The elections themselves are trivial (2.5%) — the
+cost is materializing and regrouping run-sized windows per op.
+
+The ticket, therefore: **skip the run-sized materialization when
+the boundary plan provably stands still** — the V2 per-piece
+summary design the quiet-check conclusions already licensed
+(election moves anchors in ~2% of full-run recomputes):
+
+1. Replace the leaf quiet check's O(run) stream with O(pieces)
+   summary combination (piece weight, entry count, per-class
+   interior candidate minima, edge keys) — this also kills the
+   window-1 anomaly where the check itself dominates.
+2. Add the MISSING index-level twin: a quiet check for
+   `merge_forced_index_runs`, which today merges unconditionally
+   on every membership edit through a force-split frame and is
+   26-29% of apply at scale.
+3. Only when a cut genuinely lands inside a piece (measured ~2%)
+   pay today's full merge + regroup.
+
+Ceiling if quiet edits skip both merges and their reshape share:
+most of the 85-95% of apply that the widening paths consume,
+bounded by the true plan-change rate. Next: design the summary
+shapes and the skip conditions precisely (the existing `cut_plan`
+extraction is the plug point), with converge_check as the oracle
+at every step.
