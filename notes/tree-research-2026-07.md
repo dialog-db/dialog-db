@@ -976,9 +976,9 @@ restructure 1-2 pieces; no skip condition can save them. Sep-length
 failures: zero (the length argument holds universally).
 
 Verdict: v0 is exact (suite green; converge_check CONVERGED at
-200/1000/3000/10000; canonical roots byte-identical to the
-pre-campaign baseline at all scales; debug pins held) but its hit
-rate caps at ~10%. The real phase-two ticket is now precisely
+200/1000/3000/10000 on the final build; canonical roots
+byte-identical to the pre-campaign baseline at all scales; debug
+pins held) but its hit rate caps at ~10%. The real phase-two ticket is now precisely
 characterized: **the narrow merge** — the streamed check already
 computes the exact post-edit plan; extend it to return the plan
 DIFF, and when the changed boundaries confine to the edited piece's
@@ -989,3 +989,58 @@ materializing it. That converts the 840 O(run)-materializing merges
 per 1000 commits into O(changed-span) rebuilds, and is where the
 remaining merge_run (1.0-1.1 s) + reshape (1.7 s) per 1000 and the
 linear growth term live.
+
+## Full stats: SQLite vs main vs this branch (2026-07-31)
+
+Closing scoreboard for the campaign, same 4-core x86_64 container,
+same day, criterion medians (`--warm-up-time 1 --measurement-time
+3`). "main" is `origin/main` @ 534bf48 (pre-campaign) with the
+`dialog-baseline` harness grafted in (repo arms cut — main predates
+the provider architecture); "branch" is
+`claude/root-frame-write-amp-6wb1z8` @ b467707. SQLite arms are the
+usual faithful EAV model (three orderings, WAL+NORMAL for
+`sqlite_disk`, `synchronous=OFF` for `_nosync`), measured fresh on
+the same machine.
+
+### Synthetic `stuff` workloads
+
+| workload | sqlite_mem | sqlite_disk | dialog main | dialog branch | branch vs main | branch vs sqlite_mem |
+|---|---|---|---|---|---|---|
+| write_small_txns (100 x 1-entity txns), mem | 0.635 ms | 2.30 ms | 10.97 ms | **7.94 ms** | 1.4x | 12.5x behind |
+| write_small_txns, disk | — | — | 85.9 ms | **41.9 ms** | 2.0x | — |
+| write_batch (1000 entities, 1 txn), mem | 4.38 ms | 4.57 ms | 2.010 s | **289 ms** | **7.0x** | 66x behind |
+| write_batch, disk | — | — | 1.945 s | **313 ms** | 6.2x | — |
+| point_get | 0.72 us | 1.63 us | 20.8 us | **13.4 us** | 1.55x | 18.6x behind |
+| attr_scan (1000 rows) | 144 us | 150 us | 1.159 ms | **1.084 ms** | 1.07x | 7.5x behind |
+| join (1000 rows) | 478 us | 477 us | 2.657 ms | **2.551 ms** | 1.04x | 5.3x behind |
+
+Against the first captured SQLite baseline (2026-07-28, notes in
+sqlite-baseline-results.md): the small-commit gap has closed from
+19x to 12.5x in memory, the batch gap from ~430x to 66x, and
+point reads from 29x to 18.6x. Scans and joins were never this
+campaign's target and moved only marginally.
+
+### SE replay (the campaign metric): 3000 txns, windows of 1000
+
+| build | window 1 | window 2 | window 3 | bytes/commit | sets/commit (w3) | reads/commit (w3) |
+|---|---|---|---|---|---|---|
+| main | 5.03 ms | 7.41 ms | 11.27 ms | **592 KB** | 13.1 | 745 KB |
+| branch | 1.81 ms | 2.31 ms | 4.10 ms | **135.5 KB** | 6.0 | 88 KB |
+| ratio | 2.8x | 3.2x | **2.7x** | **4.4x** | 2.2x | 8.5x |
+
+Main's numbers are WORSE than the spike baseline this campaign
+started from (12.3 ms / 136 KB at window 3): the spike lineage
+already carried the earlier campaigns' work (piece-origin reuse,
+the boundary machinery, distribution rebalance), so against
+shipping main the cumulative effect of the perf line is ~2.7x on
+commit latency, 4.4x on bytes written per commit, and 8.5x on
+bytes read per commit — with convergence verified at every step
+and canonical roots byte-identical throughout this session's
+changes.
+
+Caveats for honest reading: dialog_disk arms compare different
+storage backends across builds (main predates the provider
+architecture), so treat the disk rows as end-to-end product
+comparisons, not like-for-like backend measurements; SQLite arms
+were measured on the main-graft build but the SQLite code is
+identical in both.
