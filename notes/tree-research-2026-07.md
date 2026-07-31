@@ -341,3 +341,134 @@ which remains the licence for parent-embedded summaries if widening
 ever becomes the bottleneck at scale), but it should NOT merge to
 main as-is: it is a measured 6-9% regression at 32K and neutral at
 default.
+
+## Spine-frame write amplification: baseline and design sketch (2026-07-31)
+
+### Measured baseline (default config, SE replay)
+
+`measure_se_replay 3000 1000`, MeasuredStorage over the memory
+backend: 3,000 commits carrying 6,991 facts (2.33/commit) write
+407,855,156 B total — **135,952 B/commit**, ~58 KB per fact.
+Windowed: 167K / 100K / 141K B per commit, 4.7-6.0 sets/commit,
+3.3 / 9.9 / 12.7 ms per commit.
+
+`write_attribution 3000 500` splits that volume by block class and
+corrects the campaign's framing. Per-commit averages by window:
+
+- **Index frames dominate**: 1.0-2.1 index blocks totalling
+  72-162 KB per commit. Leaf writes are 11-60 KB (flush/cascade
+  traffic, amortized), revision + pointer blocks ~1 KB.
+- **It is the spine, not just the root.** Through txn ~1000 the
+  tree is 2 levels and the root IS the big frame (probe: 148 KiB,
+  119 links). From ~txn 1000 the tree is 3 levels: the root shrinks
+  to 27-42 KiB with 6-17 links, and the dominant term becomes the
+  level-2 index frames (~100 KiB each, holding the pushed-down
+  novelty), rewritten on most commits (~0.7-1.1 non-root index
+  writes/commit). Any fix scoped literally to the root node would
+  miss the larger share.
+- Root novelty holds 76-167 buffered ops at the probe points; a
+  commit adds ~7 ops (2.33 facts x 3 key regions). So a frame
+  rewrite moves ~20x more ops than the commit adds, and ~250x more
+  bytes than the commit's payload.
+
+Where the cost sits in code (all in `persist_mut` /
+`TransientNode::persist_mut`, `node/transient.rs`):
+
+1. `Novelty::persist_buffers` already skips the columnar re-encode
+   for Sealed/Cached links — but it **clones** every buffer
+   (columns + polarity + values) into the body it hands rkyv.
+2. `PersistentIndex::from_links` rebuilds the whole separator/
+   hash/scale tables per persist.
+3. `body.as_bytes()` = `rkyv::to_bytes` serializes the entire node
+   into a fresh AlignedVec — full memcpy of every column and value.
+4. `Buffer::from` blake3-hashes the whole frame; `delta.add` →
+   `publish_root` writes the whole frame as a new block.
+
+Steps 3-4 are the callgrind 60% (memcpy + blake3 + allocator).
+
+### The structural constraint
+
+Content addressing makes the frame's byte count a floor: any change
+to a node's content is a new hash, and a one-block node must then be
+written in full. **Within the current format, bytes-written per
+commit cannot drop below the frame size** — only CPU can be saved.
+Cutting bytes requires the frame to stop containing the novelty
+payload: the ops must live in blocks that survive across commits
+unchanged (Merkle indirection), which is a deliberate format change.
+
+### Design sketch: per-node novelty delta chunks (the oplog form)
+
+Move a buffered index node's novelty out of its frame into
+content-addressed **chunk blocks**, referenced by hash:
+
+- Node body (v-next): links table (prefix/suffixes/ends/hashes/
+  scales — the small part, ~1-3 KiB at observed fanouts) plus an
+  ordered list of **chunk references** replacing the inline
+  `novelty: Vec<NoveltyBuffer>`.
+- A chunk is one commit's ops for that node, grouped per link in
+  the existing `NoveltyBuffer` encoding (one block per touched
+  spine node per commit, NOT per link — keeps block count at ~1-2
+  new blocks/commit). Chunks are immutable and shared by every
+  subsequent root until compaction/flush.
+- Commit writes: new chunk (~7 ops, roughly 0.3-1 KB) + the small
+  node frame + revision blocks. Estimated 5-10 KB/commit against
+  the measured 136 KB — order 15-25x on the index share; leaf
+  flush traffic (11-60 KB/commit, amortized) is untouched and
+  becomes the next-largest term.
+- Read path: per-link resolve overlays chunks in list order (later
+  chunk wins for equal keys — same newest-last rule as today, with
+  chunk order as the tiebreak above entry order). `all_novelty` =
+  stable merge by key across chunks. Chunks are tiny and cache-hot;
+  cold opens pay 1 + C block reads per spine node.
+- **Compaction bounds read-amp**: when a node's chunk count exceeds
+  C (or the existing weight cap triggers a flush), merge the chunk
+  list into one chunk (or drain via the existing cascade). Today's
+  every-commit whole-buffer rewrite becomes a 1/C-amortized event.
+  C in the 8-32 range; measure.
+- Flush interaction: a cascade that drains link k's ops must drop
+  them from the chunk set — that persist rewrites the chunk list
+  (compact the survivors into one chunk). Cascade commits pay
+  roughly today's cost; quiet commits (the vast majority) pay the
+  append.
+
+Both spine levels get this: the level-2 frames carry more novelty
+bytes than the root at depth 3, and the transient plumbing
+(`Novelty`, `LinkNovelty`) is shared, so scoping to the root only
+would strand most of the win.
+
+Correctness and discipline:
+
+- The root hash still covers everything (chunk hashes are in the
+  frame; chunk bytes are reachable blocks) — replication, diff, and
+  pinning keep working once the reachability walker learns to
+  traverse chunk refs. The novelty-aware differential must load
+  chunks where it read inline buffers.
+- Canonical form is untouched: canonicalize drains all novelty, so
+  `converge_check` (which compares canonicalized roots) is
+  unaffected. The BUFFERED stored form becomes batching-dependent —
+  it already is (buffered roots were never canonical).
+- Deliberate format change: `Manifest.version` bump; decide
+  read-old/write-new migration vs a hard break on the spike branch.
+
+### The byte-identical alternative (rejected as primary)
+
+An incremental assembler — cache the previous frame's bytes, splice
+only the touched link buffer's region, resume blake3 from cached
+chunk chaining values for the stable prefix — keeps the stored form
+byte-identical. But rkyv's layout shifts every byte after a grown
+buffer (relative pointers), positional shifts invalidate blake3
+chunk CVs even for identical content, and a random touched link
+leaves ~half the frame stable in expectation. Complexity high,
+savings capped well under the 60%, and **zero** bytes-written
+savings. Worth keeping only as: (a) eliminate the per-persist buffer
+clones in `persist_buffers` (serialize from borrowed refs — small,
+safe, byte-identical), which the chunk design subsumes anyway by
+making frames small.
+
+### Measurement plan for the implementation
+
+A/B `measure_se_replay` at 3000/1000 (bytes + us per commit, from a
+real pre-change rebuild), `converge_check` at 200/1000/3000/10000,
+full suite, plus new counters: chunks written, chunk reads per
+resolve, compactions, chunk count at probe. Record the cold-open
+read-amp explicitly.
