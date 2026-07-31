@@ -83,3 +83,41 @@ where
             .map(|buffer| PersistentNode::new(buffer))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(unexpected_cfgs)]
+
+    use anyhow::Result;
+    use dialog_common::Blake3Hash;
+    use futures_util::future::join_all;
+
+    use crate::{
+        Accessor, Cache, ContentAddressedStorage, PersistentNode, helpers::ObservingBackend,
+    };
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    #[dialog_common::test]
+    async fn it_deduplicates_concurrent_fetches_of_one_node() -> Result<()> {
+        let backend = ObservingBackend::new();
+        let mut storage = ContentAddressedStorage::new(backend.clone());
+
+        let bytes = b"the bytes of one node".to_vec();
+        let hash = Blake3Hash::hash(&bytes);
+        storage.store(bytes, &hash).await?;
+
+        let accessor = Accessor::new(Cache::new(), storage);
+        backend.reset();
+
+        let reads = join_all((0..8).map(|_| accessor.get_node(&hash))).await;
+
+        for read in reads {
+            let _: PersistentNode<[u8; 4], Vec<u8>> = read?;
+        }
+        assert_eq!(backend.read_log(), vec![hash]);
+
+        Ok(())
+    }
+}
