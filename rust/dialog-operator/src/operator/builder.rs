@@ -1,6 +1,6 @@
 //! Builder for constructing an Operator from a Profile.
 
-use super::Operator;
+use super::{Operator, ProofMemo};
 use crate::Authority;
 use crate::profile::Profile;
 use crate::profile::access::Access as ProfileAccess;
@@ -84,6 +84,7 @@ impl OperatorBuilder {
             storage,
             directory: self.directory,
             network: self.network,
+            memo: ProofMemo::default(),
         };
 
         // Create delegations for allowed capabilities
