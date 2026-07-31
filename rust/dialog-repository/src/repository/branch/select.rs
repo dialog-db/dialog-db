@@ -4,7 +4,7 @@ use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_artifacts::{Artifact, ArtifactSelector, DialogArtifactsError};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::ConditionalSync;
+use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_effects::memory::Resolve;
@@ -106,17 +106,33 @@ impl Select<'_> {
         // through the stream, so probe the root block eagerly. Through a
         // `NetworkedIndex` this also replicates and caches the root
         // locally, so the scan's own root read stays local.
+        //
+        // The probe goes through the branch's node cache rather than
+        // straight to the store: queries that start together on a cold
+        // branch all probe the same root, and the cache is where they meet
+        // to replicate it once between them instead of once each.
         let tree_hash = self.tree_hash();
+        let root = NodeHash::from(tree_hash);
+        let node_cache = self.branch.node_cache();
+
         if tree_hash != EMPTY_TREE_HASH {
-            store.get(&tree_hash).await?.ok_or_else(|| {
-                DialogSearchTreeError::Node(format!(
-                    "Blob not found in storage: {}",
-                    tree_hash.to_base58(),
-                ))
-            })?;
+            node_cache
+                .get_or_fetch(&root, async |hash| {
+                    store
+                        .get(hash.as_bytes())
+                        .await
+                        .map(|bytes| bytes.map(Buffer::from))
+                })
+                .await?
+                .ok_or_else(|| {
+                    DialogSearchTreeError::Node(format!(
+                        "Blob not found in storage: {}",
+                        tree_hash.to_base58(),
+                    ))
+                })?;
         }
 
-        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), self.branch.node_cache());
+        let tree = Index::from_hash_with_cache(root, node_cache);
 
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
