@@ -472,3 +472,131 @@ real pre-change rebuild), `converge_check` at 200/1000/3000/10000,
 full suite, plus new counters: chunks written, chunk reads per
 resolve, compactions, chunk count at probe. Record the cold-open
 read-amp explicitly.
+
+### Owner verdict on chunks: rejected (2026-07-31)
+
+Chunking multiplies network read count and degrades sync: the whole
+point of inlining novelty in the root frame is that two replicas
+that have not diverged much exchange a SINGLE block. Novelty stays
+inline; a spine node stays one block. The accepted direction is
+incremental hashing/assembly of that one block, with padding or
+alignment changes on the table if they make it work.
+
+## Design v2: containerized frame, incremental assembly + hash (2026-07-31)
+
+Sync constraint restated: one block per spine node, novelty inline.
+The costs that remain attackable are then CPU-side only — the
+full-frame rkyv re-serialize (memcpy of every column/value), the
+full-frame blake3, the per-persist buffer clones, and the allocator
+traffic under all three. Bytes written to storage stay O(frame) by
+design; that is the price of single-block sync and is accepted.
+
+### Why not splice raw rkyv bytes
+
+The no-format-change variant — keep `rkyv::to_bytes` layout, cache
+the previous frame, splice the changed range — fails structurally:
+rkyv serializes out-of-line data in field/element order with
+relative pointers, so a grown buffer shifts every later byte AND
+rewrites the (late-positioned) struct tables' relative offsets;
+the stable prefix ends at the first touched buffer, which is
+positionally random, so expected savings cap near half the hash and
+none of the serialize. Fragile and small. Rejected.
+
+### The container layout
+
+A spine node's block becomes an explicitly-assembled container of
+independently-serialized regions (a deliberate format change;
+`Manifest.version` bump; still exactly one block):
+
+    [buffer region 0][pad][buffer region 1][pad]...
+    [core region][pad][trailer]
+
+- **Buffer region** = one link's `NoveltyBuffer`, serialized on its
+  own via rkyv (own little archive), padded to 16-byte alignment so
+  in-place archived access works per region.
+- **Core region** = the node body minus novelty (header, prefix,
+  suffixes, ends, hashes, scales) — the small part (~1-3 KiB at
+  observed fanouts), also its own rkyv archive.
+- **Trailer** = region table (child id + offset + length per
+  buffer region, core offset, format tag). Fixed-size-ish, last.
+- **Region order is mutation-coldness order, hottest last**:
+  untouched buffer regions first IN THEIR PREVIOUS STORED ORDER,
+  then the buffers this commit touched, then core (root cores
+  change on most commits — child hashes move under cascades — so
+  core sits behind the cold bulk), then the trailer. Child identity
+  lives in the trailer, so decode is order-independent; the strict
+  ascending-child-order validation moves from the novelty vec to
+  the region table (each child at most once, ids in range).
+
+### Incremental assembly
+
+The live spine already holds per-link `Sealed`/`Cached` encodings;
+they now hold the region BYTES (the little rkyv archive), not the
+struct — killing the per-persist clone of columns/polarity/values
+outright. Persist becomes:
+
+1. Unchanged regions: one bulk memcpy each from the previous
+   frame's bytes (~10 us for 100 KiB at memcpy speed; unavoidable,
+   the block must be materialized — the previous Buffer is
+   Arc-shared with cache/delta/storage and cannot be mutated).
+2. Touched buffers: columnar re-encode as today (the remaining
+   O(accumulated buffer) term — see phase 2), serialized into
+   fresh region bytes, appended after the cold bulk.
+3. Core: re-serialized only when links/scales/hashes changed;
+   memcpy'd otherwise.
+4. Trailer: rebuilt (tiny).
+
+### Incremental hash
+
+`blake3::Hasher` is `Clone` (blake3 1.x public API): cloning
+snapshots the CV stack (~1.9 KB). While absorbing frame N, snapshot
+the hasher at every region boundary (~20 clones, negligible). For
+frame N+1, find the longest prefix of regions that is byte- and
+order-identical to frame N, resume from that boundary's snapshot,
+absorb only the tail (touched buffers + core + trailer). Snapshots
+are valid at arbitrary byte offsets (the hasher buffers partial
+blocks), so region padding is for rkyv alignment only, not for the
+hash. No hazmat/CV-level API needed. Positional reuse of MIDDLE
+regions (slot-padded, power-of-two capacities) would need CV-tree
+surgery — explicitly deferred unless prefix reuse measures short.
+
+Expected quiet-commit cost: touched-buffer re-encode + tail hash
+(tens of KiB) + one full-frame memcpy + storage copy, against
+today's full re-serialize + full hash + clones of ~100-160 KiB.
+The callgrind 60% (memcpy + blake3 + allocator) shrinks toward the
+memcpy floor.
+
+### Phase 2 (only if phase 1 measures short): in-frame append runs
+
+The remaining O(buffer) term is the touched buffer's columnar
+re-encode — ops insert by key into a sorted run, so front-coding
+cannot append. If it matters: a touched link's region becomes a
+base sorted run plus small append runs (still INSIDE the single
+block — no extra network reads), readers merge runs newest-last,
+and the existing weight cap compacts runs back into one on
+overflow. This is the oplog idea relocated inside the frame, where
+it cannot cost sync anything.
+
+### Semantics, determinism, discipline
+
+- One block per node, novelty inline: sync exchange count is
+  unchanged; block grows only by padding + trailer (~1%).
+- Stored bytes become a pure function of (region order, contents),
+  and region order is carried in the trailer, so fresh-open →
+  re-persist reproduces bytes exactly (the existing byte-identity
+  debug pins keep their meaning). Cross-HISTORY byte determinism
+  of the buffered form is relaxed — two replicas reaching the same
+  buffered state through different touch orders may differ in
+  bytes. The buffered form was already batching-dependent and
+  non-canonical; recorded here as deliberate.
+- The canonical (empty-novelty) form also moves to the container
+  (zero buffer regions), so canonical bytes change vs v0: a format
+  version bump, hard break on the spike branch (no read-old
+  migration until the design proves out).
+- `converge_check` compares canonicalized roots within one build —
+  unaffected as an oracle. Byte-identity A/B vs pre-change builds
+  is void by definition; the oracle for the new format is
+  fresh-open/re-persist identity plus cross-grouping convergence.
+- Read paths that consume `index.novelty` (walker, differential,
+  flush, `buffer_for`, `all_novelty`) move behind accessors that
+  resolve regions through the trailer.
