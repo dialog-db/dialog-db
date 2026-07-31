@@ -44,6 +44,26 @@ where
         Self { cache, storage }
     }
 
+    /// Loads the node at `hash` into the cache, without decoding it or
+    /// reporting what happened.
+    ///
+    /// This is a read nobody is waiting on: it makes the node local so that a
+    /// later [`get_node`](Self::get_node) is served from the cache, and it is
+    /// deduplicated against any read of the same node already in flight.
+    /// Nothing observes its outcome, so a node that is missing or fails to
+    /// load is left to the read that actually needs it.
+    pub(crate) async fn warm(&self, hash: Blake3Hash) {
+        let _ = self
+            .cache
+            .get_or_fetch(&hash, async |key| {
+                self.storage
+                    .retrieve(key)
+                    .await
+                    .map(|maybe_bytes| maybe_bytes.map(Buffer::from))
+            })
+            .await;
+    }
+
     /// Retrieves a node by its content hash.
     ///
     /// Checks the cache first, then the storage backend. Returns an error if the
