@@ -1,12 +1,15 @@
 use std::{
+    future::Future,
     marker::PhantomData,
     ops::{Bound, RangeBounds},
+    task::Poll,
 };
 
 use async_stream::try_stream;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
+use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use nonempty::NonEmpty;
 use rkyv::{
     Deserialize,
@@ -20,6 +23,14 @@ use crate::{
     Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, PersistentNode,
     SymmetryWith, Value, into_owned,
 };
+
+/// How many sibling reads a range scan keeps in flight while it walks.
+///
+/// A scan reads a whole run of siblings, one after another, and each read that
+/// misses locally can cost a round trip. Reading ahead of the walk turns a run
+/// of round trips into an overlapping few, and bounding it keeps a scan that
+/// stops early from having fetched much it never looked at.
+const PREFETCH_CONCURRENCY: usize = 16;
 
 /// A traversal mechanism for walking through a tree structure.
 pub struct TreeWalker<Key, Value>
@@ -100,6 +111,7 @@ where
             };
             let mut search_path = search_result.into_indexed();
             let mut entered_range = false;
+            let mut warming = FuturesUnordered::new();
 
             while let Some((node, maybe_index)) = search_path.pop() {
                 match node.body()? {
@@ -112,7 +124,21 @@ where
 
                         match index.links.get(child_index) {
                             Some(link) => {
-                                let next_node = accessor.get_node(<&Blake3Hash>::from(&link.node)).await?;
+                                // The scan will walk this node's remaining
+                                // children in turn, so start reading them now
+                                // and let them land in the cache while the
+                                // walk descends into the first of them.
+                                for sibling in index.links.iter().skip(child_index + 1) {
+                                    if warming.len() >= PREFETCH_CONCURRENCY {
+                                        break;
+                                    }
+                                    warming.push(accessor.warm(<&Blake3Hash>::from(&sibling.node).clone()));
+                                }
+
+                                let next_node = while_warming(
+                                    accessor.get_node(<&Blake3Hash>::from(&link.node)),
+                                    &mut warming,
+                                ).await?;
                                 search_path.push((node, Some(child_index)));
                                 search_path.push((next_node, None));
                             }
@@ -204,6 +230,32 @@ where
             }
         }
     }
+}
+
+/// Polls `read` to completion, making progress on queued cache-warming reads
+/// whenever it is not ready.
+///
+/// The queued reads only populate the cache; nothing waits on them and their
+/// outcomes are discarded, so this changes neither what `read` resolves to nor
+/// when its caller observes it. Reads still queued when the caller is dropped
+/// are dropped with it.
+async fn while_warming<Read, Warm>(read: Read, warming: &mut FuturesUnordered<Warm>) -> Read::Output
+where
+    Read: Future,
+    Warm: Future<Output = ()>,
+{
+    let mut read = std::pin::pin!(read);
+
+    std::future::poll_fn(move |context| {
+        if let Poll::Ready(output) = read.as_mut().poll(context) {
+            return Poll::Ready(output);
+        }
+
+        while let Poll::Ready(Some(())) = warming.poll_next_unpin(context) {}
+
+        Poll::Pending
+    })
+    .await
 }
 
 /// Walks the narrow "overflow" path for [`RightNeighbor`] prefetching.
@@ -491,5 +543,134 @@ where
 
         path.reverse();
         path
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(unexpected_cfgs)]
+
+    use std::collections::HashSet;
+
+    use anyhow::Result;
+    use dialog_common::Blake3Hash;
+    use futures_util::TryStreamExt as _;
+
+    use crate::{
+        ArchivedNodeBody, Buffer, ContentAddressedStorage, Delta, PersistentNode, PersistentTree,
+        helpers::ObservingBackend,
+    };
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    type Tree = PersistentTree<[u8; 4], Vec<u8>>;
+    type Storage = ContentAddressedStorage<ObservingBackend>;
+
+    const ENTRIES: u32 = 512;
+
+    /// Builds a tree of [`ENTRIES`] entries and hands back a handle to it whose
+    /// node cache is cold, so that reads reach the backend.
+    async fn built_tree(storage: &mut Storage) -> Result<Tree> {
+        let mut delta = Delta::zero();
+        let mut edit = Tree::empty().edit();
+
+        for entry in 0..ENTRIES {
+            edit = edit
+                .insert(entry.to_be_bytes(), entry.to_be_bytes().to_vec(), storage)
+                .await?;
+        }
+
+        let tree = edit.persist(&mut delta)?;
+        for (_, buffer) in delta.flush() {
+            storage
+                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                .await?;
+        }
+
+        Ok(Tree::from_hash(tree.root().clone()))
+    }
+
+    async fn load(
+        storage: &Storage,
+        hash: &Blake3Hash,
+    ) -> Result<PersistentNode<[u8; 4], Vec<u8>>> {
+        let bytes = storage
+            .retrieve(hash)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Node not stored"))?;
+
+        Ok(PersistentNode::new(Buffer::from(bytes)))
+    }
+
+    #[dialog_common::test]
+    async fn it_warms_sibling_nodes_during_a_range_scan() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let tree = built_tree(&mut storage).await?;
+        let backend = storage.backend().clone();
+        backend.reset();
+
+        let entries: Vec<_> = tree.stream(&storage).try_collect().await?;
+
+        assert_eq!(entries.len() as u32, ENTRIES);
+        assert!(
+            entries.windows(2).all(|pair| pair[0].key < pair[1].key),
+            "the scan yields entries in key order"
+        );
+
+        let reads = backend.read_log();
+        let distinct = reads.iter().collect::<HashSet<_>>();
+
+        assert!(reads.len() > 1, "the scan reads more than the root");
+        assert_eq!(
+            reads.len(),
+            distinct.len(),
+            "no node was read from the backend twice"
+        );
+        assert!(
+            backend.peak_reads_in_flight() > 1,
+            "sibling reads overlap the read the scan is waiting on"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_does_not_prefetch_on_point_lookups() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let tree = built_tree(&mut storage).await?;
+        let backend = storage.backend().clone();
+        backend.reset();
+
+        let found = tree.get(&257u32.to_be_bytes(), &storage).await?;
+
+        assert_eq!(found, Some(257u32.to_be_bytes().to_vec()));
+
+        let path = backend.read_log();
+        assert!(path.len() > 1, "the tree has at least one index level");
+        assert_eq!(path.first(), Some(tree.root()));
+        assert_eq!(backend.peak_reads_in_flight(), 1);
+
+        // Every read but the last is an index node holding the read that
+        // follows it: the lookup descended a single root-to-leaf path and
+        // read nothing beside it.
+        for step in path.windows(2) {
+            let node = load(&storage, &step[0]).await?;
+            match node.body()? {
+                ArchivedNodeBody::Index(index) => assert!(
+                    index
+                        .links
+                        .iter()
+                        .any(|link| <&Blake3Hash>::from(&link.node) == &step[1]),
+                    "a read that is not a child of the read before it"
+                ),
+                ArchivedNodeBody::Segment(_) => panic!("a segment cannot hold a further read"),
+            }
+        }
+
+        let leaf = load(&storage, path.last().expect("a read")).await?;
+        assert!(matches!(leaf.body()?, ArchivedNodeBody::Segment(_)));
+
+        Ok(())
     }
 }

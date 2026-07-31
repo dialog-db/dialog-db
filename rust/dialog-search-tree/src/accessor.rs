@@ -47,6 +47,26 @@ where
         Self { cache, storage }
     }
 
+    /// Loads the node at `hash` into the cache, without decoding it or
+    /// reporting what happened.
+    ///
+    /// This is a read nobody is waiting on: it makes the node local so that a
+    /// later [`get_node`](Self::get_node) is served from the cache, and it is
+    /// deduplicated against any read of the same node already in flight.
+    /// Nothing observes its outcome, so a node that is missing or fails to
+    /// load is left to the read that actually needs it.
+    pub(crate) async fn warm(&self, hash: Blake3Hash) {
+        let _ = self
+            .cache
+            .get_or_fetch(&hash, async |key| {
+                self.storage
+                    .retrieve(key)
+                    .await
+                    .map(|maybe_bytes| maybe_bytes.map(Buffer::from))
+            })
+            .await;
+    }
+
     /// Retrieves a node by its content hash.
     ///
     /// Checks the cache first, then the storage backend. Returns an error if the
@@ -81,5 +101,43 @@ where
                 DialogSearchTreeError::Node(format!("Blob not found in storage: {}", hash))
             })
             .map(|buffer| PersistentNode::new(buffer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(unexpected_cfgs)]
+
+    use anyhow::Result;
+    use dialog_common::Blake3Hash;
+    use futures_util::future::join_all;
+
+    use crate::{
+        Accessor, Cache, ContentAddressedStorage, PersistentNode, helpers::ObservingBackend,
+    };
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    #[dialog_common::test]
+    async fn it_deduplicates_concurrent_fetches_of_one_node() -> Result<()> {
+        let backend = ObservingBackend::new();
+        let mut storage = ContentAddressedStorage::new(backend.clone());
+
+        let bytes = b"the bytes of one node".to_vec();
+        let hash = Blake3Hash::hash(&bytes);
+        storage.store(bytes, &hash).await?;
+
+        let accessor = Accessor::new(Cache::new(), storage);
+        backend.reset();
+
+        let reads = join_all((0..8).map(|_| accessor.get_node(&hash))).await;
+
+        for read in reads {
+            let _: PersistentNode<[u8; 4], Vec<u8>> = read?;
+        }
+        assert_eq!(backend.read_log(), vec![hash]);
+
+        Ok(())
     }
 }
