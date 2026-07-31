@@ -50,6 +50,14 @@ pub mod audit {
     pub static WIDEN_NOVELTY_REJECTS: AtomicU64 = AtomicU64::new(0);
     pub static WIDEN_INTERIOR_REJECTS: AtomicU64 = AtomicU64::new(0);
     pub static WIDEN_PLAN_REJECTS: AtomicU64 = AtomicU64::new(0);
+    /// The interior-guard rejects split by boundary case, for ranking the
+    /// surgical extensions: a new minimum (or delete of it), an append past
+    /// the piece's last entry, an edit AT the last entry, and a delete
+    /// beside a vetoed seam (or of an absent key).
+    pub static WIDEN_REJECT_MIN: AtomicU64 = AtomicU64::new(0);
+    pub static WIDEN_REJECT_TAIL: AtomicU64 = AtomicU64::new(0);
+    pub static WIDEN_REJECT_LAST: AtomicU64 = AtomicU64::new(0);
+    pub static WIDEN_REJECT_VETO_DELETE: AtomicU64 = AtomicU64::new(0);
     pub fn widen_check() {
         WIDEN_CHECKS.fetch_add(1, Ordering::Relaxed);
     }

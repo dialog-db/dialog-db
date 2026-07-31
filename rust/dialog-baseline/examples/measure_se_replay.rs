@@ -76,12 +76,16 @@ fn main() -> anyhow::Result<()> {
 
             use dialog_search_tree::audit;
             println!(
-                "widen: {} checks, {} runs, {} skipped; rejects: {} novelty, {} interior, {} plan",
+                "widen: {} checks, {} runs, {} skipped; rejects: {} novelty, {} interior (min {} / tail {} / last {} / veto-del {}), {} plan",
                 audit::WIDEN_CHECKS.load(Ordering::Relaxed),
                 audit::WIDEN_RUNS.load(Ordering::Relaxed),
                 audit::WIDEN_SKIPS.load(Ordering::Relaxed),
                 audit::WIDEN_NOVELTY_REJECTS.load(Ordering::Relaxed),
                 audit::WIDEN_INTERIOR_REJECTS.load(Ordering::Relaxed),
+                audit::WIDEN_REJECT_MIN.load(Ordering::Relaxed),
+                audit::WIDEN_REJECT_TAIL.load(Ordering::Relaxed),
+                audit::WIDEN_REJECT_LAST.load(Ordering::Relaxed),
+                audit::WIDEN_REJECT_VETO_DELETE.load(Ordering::Relaxed),
                 audit::WIDEN_PLAN_REJECTS.load(Ordering::Relaxed),
             );
         }

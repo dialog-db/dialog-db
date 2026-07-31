@@ -816,3 +816,70 @@ Validation gates for the implementation: converge_check at
 prove the plan identical, forced marks included); byte-identical
 stored form (skips produce no new bytes at all on quiet paths);
 full suite; A/B measure_se_replay against a pre-change rebuild.
+
+## Stage A shipped: fast path hoisted above the index merge (2026-07-31)
+
+The one-structural-change version of the index-level quiet check:
+`merge_forced_index_runs` moved from before the gate computation to
+AFTER the fast-path attempt, and `index_widened` dropped from the
+fast-path gate. Soundness: the fast-path gates together prove the
+edit changes no separator and no membership anywhere (min-move
+either absent or byte-identical, `moves_seam_under_ceiling` covers
+byte changes under a ceiling), and every index-level plan — seam
+ranks, link weights, frame elections — is a pure function of child
+separators, so no index merge can be needed for a fast-path edit.
+Before this, index widening fired once per op at scale and its
+`index_widened` flag blocked the fast path for essentially every
+edit — silently cancelling the leaf quiet check's skips (which is
+why V1 measured as saving nothing).
+
+Measured (3000/1000, default config, per commit):
+
+- window 2: 9.5 → 4.1 ms; window 3: **12.3 → 5.8 ms (2.1x)**
+- index merge windows: 9,033 → 1,224 per 1000 commits (-86%);
+  merge_index 2,974 → 509 ms; reshape 6,654 → 2,235 ms
+- bytes/commit unchanged (135.5 KB — the rebuilt pieces were
+  already byte-identical dup stores)
+
+Validation: full suite (293); converge_check CONVERGED at
+200/1000/3000/10000; canonical roots at 200/1000/3000 byte-identical
+to the pre-change build (87dd1526... at 3000 on both) — the change
+skips redundant work without altering any canonical outcome.
+
+## Min-insert quiet skip: tried, sound, unprofitable — reverted (2026-07-31)
+
+The reject census said min-position inserts are 83% of the interior
+guard rejects (1,752/2,120 at 3000 txns), so the quiet check was
+extended to them: accept an `Err(0)` insert into a non-first run
+piece, verify the stored forced separator is byte-stable under the
+new minimum (`frame_separator(prev_last, new_key) == stored`), and
+apply in place with the min-move machinery suppressed (the
+separator rewrite provably a no-op; re-deriving it would strip the
+forced mark).
+
+Measured: only **17 of ~1,150** qualifying inserts passed the
+stability check. SE keys are long, so the stored forced separators
+take the RIGHT-PREFIX form, whose bytes genuinely change with a new
+minimum — those edits must rewrite the boundary and the widening is
+semantically required. The failures paid the full O(run) stream
+before merging anyway: window 3 regressed 5.8 → 6.7 ms. The
+converge oracle passed at 10K even with the skip active (the logic
+was sound), but the economics are upside-down: REVERTED, keeping
+the reject classification counters and the piece-attribution fix
+(the simulation now credits the edit to the descent piece directly
+instead of a boundary-index heuristic).
+
+Lesson recorded: at leaf level the remaining widenings are mostly
+SEMANTICALLY REQUIRED boundary rewrites (separator bytes change),
+not skippable identities. The remaining cost at window 3
+(merge_run 1.33 s + reshape 2.15 s + quiet 0.44 s per 1000) is the
+O(run) MATERIALIZATION around a 1-2 piece rewrite: ~450 pieces
+streamed/lifted per merge so the plan can be re-derived, then 93.6%
+of the output reused verbatim. The follow-up ticket is therefore
+not more skip conditions but a COMPRESSED widening: evaluate
+cut_plan's elections over per-piece summaries (weights, edge keys,
+best-interior anchor per piece — memoizable by piece hash), open
+only the pieces the verified plan actually rewrites, and emit the
+rest as origins without ever materializing their entries. Same
+verification-not-decision safety shape: any doubt falls back to the
+full merge.

@@ -1067,43 +1067,6 @@ where
         };
         let widened = piece_origins.is_some();
 
-        // The same widening, per INDEX level: a force-split index frame's
-        // pieces are separate stored nodes, and this level's regroup window
-        // is one node's children — so an edit descending through a piece
-        // must merge the frame's pieces first, or elections would re-derive
-        // anchors over a fragment and orders would diverge. A seam between
-        // siblings is a forced one exactly when its separator's seam rank
-        // fails the level threshold that grouped them (derived, no stored
-        // mark); ordinary paths see two rank probes per level and merge
-        // nothing.
-        let (index_widened, mut index_origins) =
-            if changes_membership && manifest.frame_ceiling() > 0 {
-                #[cfg(not(target_arch = "wasm32"))]
-                let merge_started = std::time::Instant::now();
-                let merged = merge_forced_index_runs::<Key, Value, D, Backend>(
-                    &mut root,
-                    &mut path,
-                    &mut [],
-                    accessor,
-                    &manifest,
-                )
-                .await?;
-                #[cfg(not(target_arch = "wasm32"))]
-                crate::distribution::audit::add_elapsed(
-                    &crate::distribution::audit::MERGE_INDEX_NS,
-                    merge_started,
-                );
-                if merged.0 {
-                    use std::sync::atomic::Ordering;
-                    crate::distribution::audit::MERGE_INDEX_WINDOWS.fetch_add(1, Ordering::Relaxed);
-                    crate::distribution::audit::MERGE_INDEX_PIECES
-                        .fetch_add(merged.1.len() as u64, Ordering::Relaxed);
-                }
-                merged
-            } else {
-                (false, Vec::new())
-            };
-
         // The frame ceiling's fast-path gate: a membership-changing edit
         // that leaves its segment over the ceiling must reach the regroup,
         // which force-splits the frame — the in-place fast path would let
@@ -1432,6 +1395,18 @@ where
         // Anything not provably canonical falls through to the re-shaping
         // paths. A widened window always re-shapes: the merge left the
         // stretch as one oversized segment that only the regroup re-splits.
+        //
+        // The forced-INDEX widening is deliberately NOT part of this gate:
+        // it is decided after the fast path, because a fast-path edit
+        // cannot need it. Index-level plans — seam ranks, link weights,
+        // frame elections — are pure functions of child SEPARATORS, and
+        // every gate here together proves the edit changes no separator
+        // and no membership anywhere (an in-place leaf edit with the
+        // minimum either untouched or re-deriving to identical bytes).
+        // Unchanged separators mean every level's stored partition is
+        // already the one a merged re-election would re-derive, so merging
+        // the frame's pieces would rebuild byte-identical nodes for
+        // nothing — which the widen census measured at once per op.
         if !is_boundary_delete
             && !is_orphan_append
             && !dissolves_terminal_cut
@@ -1439,7 +1414,6 @@ where
             && !raises_left_cut
             && !moves_seam_under_ceiling
             && !widened
-            && !index_widened
             && !over_ceiling
             && !ramp_zone
         {
@@ -1483,6 +1457,46 @@ where
                 return Ok(Some(root));
             }
         }
+
+        // The same widening as the leaf backstop, per INDEX level: a
+        // force-split index frame's pieces are separate stored nodes, and
+        // this level's regroup window is one node's children — so an edit
+        // descending through a piece must merge the frame's pieces first,
+        // or elections would re-derive anchors over a fragment and orders
+        // would diverge. A seam between siblings is a forced one exactly
+        // when its separator's seam rank fails the level threshold that
+        // grouped them (derived, no stored mark); ordinary paths see two
+        // rank probes per level and merge nothing. Runs only when the edit
+        // fell through the fast path above: an in-place edit changes no
+        // separator, so no index-level plan can move and the merge would
+        // be an identity rebuild.
+        let (index_widened, mut index_origins) =
+            if changes_membership && manifest.frame_ceiling() > 0 {
+                #[cfg(not(target_arch = "wasm32"))]
+                let merge_started = std::time::Instant::now();
+                let merged = merge_forced_index_runs::<Key, Value, D, Backend>(
+                    &mut root,
+                    &mut path,
+                    &mut [],
+                    accessor,
+                    &manifest,
+                )
+                .await?;
+                #[cfg(not(target_arch = "wasm32"))]
+                crate::distribution::audit::add_elapsed(
+                    &crate::distribution::audit::MERGE_INDEX_NS,
+                    merge_started,
+                );
+                if merged.0 {
+                    use std::sync::atomic::Ordering;
+                    crate::distribution::audit::MERGE_INDEX_WINDOWS.fetch_add(1, Ordering::Relaxed);
+                    crate::distribution::audit::MERGE_INDEX_PIECES
+                        .fetch_add(merged.1.len() as u64, Ordering::Relaxed);
+                }
+                merged
+            } else {
+                (false, Vec::new())
+            };
         edit_audit::reshape(
             is_boundary_delete,
             is_orphan_append,
@@ -2080,11 +2094,13 @@ where
     // Run detection mirroring `merge_forced_run`, plus per-piece sources
     // for the read-only stream below: transient siblings give up their
     // keys and weights immediately, persistent ones contribute their link.
+    // `run_at` is the edited piece's index within the run, for attributing
+    // the simulated edit to the right piece.
     enum PieceSource<Key> {
         Fetch(Link),
         Ready(Vec<Key>, Vec<usize>),
     }
-    let sources: Vec<PieceSource<Key>> = {
+    let (sources, run_at): (Vec<PieceSource<Key>>, usize) = {
         let parent = follow(root, parent_path)?.as_index()?;
         let children = &parent.children;
         let mut lo = at;
@@ -2110,42 +2126,66 @@ where
                 Node::Transient(_) => return Ok(false),
             });
         }
-        sources
+        (sources, at - lo)
     };
 
     // The edit must be strictly interior to its piece: a new minimum, a
     // first/last-entry change, or an append would engage the boundary
     // machinery (min-move separator rewrites, boundary-delete fusion,
     // terminal-cut checks), which re-decides seams without the election.
+    //
+    // The new-minimum insert was tried as a skippable shape (2026-07-31):
+    // the padded-left forced separator is byte-stable under a new minimum,
+    // so an in-place apply with the min-move machinery suppressed is sound
+    // there — but measured on the SE replay only 17 of ~1,150 qualifying
+    // inserts had the padded-left form; the rest store the right-prefix
+    // form (long keys), whose bytes genuinely change with the minimum, so
+    // they failed the stability check after paying the full run stream and
+    // merged anyway — a net regression. Rejected up front instead.
     {
         let TransientNode::Segment(leaf) = follow(root, path)? else {
             return Ok(false);
         };
         let entries = leaf.entries();
-        let interior = match edit {
+        // Classified for the census: which boundary case rejected, so the
+        // surgical-extension candidates can be ranked by measured share.
+        let reject = match edit {
             Edit::Upsert(entry) => match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
-                Ok(i) => i >= 1 && i + 2 <= entries.len(),
-                Err(i) => i >= 1 && i < entries.len(),
+                Ok(0) => Some(&crate::distribution::audit::WIDEN_REJECT_MIN),
+                Ok(i) if i + 1 >= entries.len() => {
+                    Some(&crate::distribution::audit::WIDEN_REJECT_LAST)
+                }
+                Ok(_) => None,
+                Err(0) => Some(&crate::distribution::audit::WIDEN_REJECT_MIN),
+                Err(i) if i >= entries.len() => {
+                    Some(&crate::distribution::audit::WIDEN_REJECT_TAIL)
+                }
+                Err(_) => None,
             },
             Edit::Delete(key) => match entries.binary_search_by(|e| e.key.cmp(key)) {
-                Ok(i) => {
-                    i >= 1
-                        && i + 2 <= entries.len()
-                        && !D::vetoes(
-                            entries[i - 1].key.as_ref(),
-                            entries[i].key.as_ref(),
-                            manifest,
-                        )
-                        && !D::vetoes(
-                            entries[i].key.as_ref(),
-                            entries[i + 1].key.as_ref(),
-                            manifest,
-                        )
+                Ok(0) => Some(&crate::distribution::audit::WIDEN_REJECT_MIN),
+                Ok(i) if i + 1 >= entries.len() => {
+                    Some(&crate::distribution::audit::WIDEN_REJECT_LAST)
                 }
-                Err(_) => false,
+                Ok(i)
+                    if D::vetoes(
+                        entries[i - 1].key.as_ref(),
+                        entries[i].key.as_ref(),
+                        manifest,
+                    ) || D::vetoes(
+                        entries[i].key.as_ref(),
+                        entries[i + 1].key.as_ref(),
+                        manifest,
+                    ) =>
+                {
+                    Some(&crate::distribution::audit::WIDEN_REJECT_VETO_DELETE)
+                }
+                Ok(_) => None,
+                Err(_) => Some(&crate::distribution::audit::WIDEN_REJECT_VETO_DELETE),
             },
         };
-        if !interior {
+        if let Some(counter) = reject {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::distribution::audit::widen_interior_reject();
             return Ok(false);
         }
@@ -2179,21 +2219,14 @@ where
         }
     }
 
-    // Simulate the edit on the streamed sequence. The strict-interior
-    // guard above pins the touched position strictly inside its piece's
-    // span, so the owning piece's length adjusts unambiguously.
+    // Simulate the edit on the streamed sequence. The edit always lands in
+    // the descent piece (`run_at`) — routing put it there — so that
+    // piece's length adjusts directly.
     match edit {
         Edit::Upsert(entry) => match keys.binary_search(&entry.key) {
             Ok(i) => weights[i] = entry.weight(),
             Err(i) => {
-                let mut acc = 0usize;
-                for len in piece_lens.iter_mut() {
-                    if i <= acc + *len {
-                        *len += 1;
-                        break;
-                    }
-                    acc += *len;
-                }
+                piece_lens[run_at] += 1;
                 keys.insert(i, entry.key.clone());
                 weights.insert(i, entry.weight());
             }
@@ -2202,14 +2235,7 @@ where
             let Ok(i) = keys.binary_search(key) else {
                 return Ok(false);
             };
-            let mut acc = 0usize;
-            for len in piece_lens.iter_mut() {
-                if i < acc + *len {
-                    *len -= 1;
-                    break;
-                }
-                acc += *len;
-            }
+            piece_lens[run_at] -= 1;
             keys.remove(i);
             weights.remove(i);
         }
