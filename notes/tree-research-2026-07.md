@@ -883,3 +883,60 @@ only the pieces the verified plan actually rewrites, and emit the
 rest as origins without ever materializing their entries. Same
 verification-not-decision safety shape: any doubt falls back to the
 full merge.
+
+## Compressed quiet check shipped (2026-07-31)
+
+Phase one of the compressed widening: the quiet check's plan
+verification now runs at piece granularity over memoized per-piece
+summaries, streaming no untouched piece.
+
+- `distribution/summary.rs`: `PieceSummary` — count, weight, edge
+  keys, last-entry weight, all-vetoed flag, piece-local coin
+  verdicts (`interior_coin_cut`), trailing bank, heaviest interior
+  vetoed stretch, and the best interior candidate of each backstop
+  kind — memoized per node hash (thread-local, bounded, keyed with
+  `max_separator` + `anchor_selector`). Piece-local coin evaluation
+  is exact because banks reset at accepted seams, so an accepted
+  left boundary means bank-in = 0.
+- `cap::election_matches_boundaries`: `choose_cuts`'s recursive
+  bisection mirrored at piece granularity — exact while every
+  elected cut is a piece boundary (ranges stay whole-piece unions),
+  bailing with a definitive "plan changed" the moment an interior
+  candidate wins, a range with no candidate spans a boundary, or an
+  under-threshold range spans one. Ties resolve by entry position,
+  matching `min_by`'s first-minimum over the ascending scan.
+- `compressed_run_quiet`: two exact regimes selected by the
+  boundary seams' veto status. All-vetoed boundaries = the stretch
+  regime (election at `max_segment` over `is_forced_candidate`
+  seams). All-accepted = the CEILING regime — which the first
+  measurement proved is the dominant one on SE (max_separator=512
+  means region seams are almost never vetoed; the first cut of this
+  check targeted only the stretch regime and delivered 0 verdicts
+  in 5,449 attempts): summaries must show no interior coin cut and
+  interior stretches under `max_segment`, each boundary's own coin
+  verdict (`leaf_cut(last key, trailing bank + last weight)`) must
+  be no-cut, and the election runs at `frame_ceiling` over
+  `is_frame_candidate` seams. Mixed boundaries, over-weight interior
+  stretches, transient index siblings, or an armed pacing ramp fall
+  back to the full stream.
+- Safety: in debug builds EVERY compressed verdict is pinned
+  against the full streamed check (`debug_assert_eq`). The pin held
+  across the whole suite and debug converge_check replays at 300
+  and 1000 txns (~4,000 live verdicts).
+
+Measured (3000/1000 release, per 1000 commits): verdicts 3,968
+quiet + 44 widen with 1,437 fallbacks; QUIET_NS 440 → 122 ms at
+window 3, 914-1,433 → 339 ms at window 2. Per commit: window 2
+**4.1 → 2.5 ms**, window 3 **5.8 → 4.4 ms**. Cumulative campaign at
+window 3: **12.3 → 4.4 ms (2.8x)**; window 2: 9.5 → 2.5 ms (3.8x).
+Suites green (293 + 159), release converge_check CONVERGED at
+200/1000/3000 with canonical roots byte-identical to the pre-change
+build (2bb2ee93 / 97d0d796 / 87dd1526); 10K in flight.
+
+Remaining at window 3 (per 1000): merge_run 1.12 s + reshape 1.73 s
+— the 840 semantically-required merges still materialize the whole
+run to rewrite 1-2 pieces. Phase two (compressed merge/regroup:
+derive the post-edit plan from summaries, open only the rewritten
+pieces, emit the rest as origins) is designed but unbuilt; it is
+also where the remaining growth term lives, since runs lengthen
+linearly with the dataset.

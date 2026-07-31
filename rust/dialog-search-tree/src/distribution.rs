@@ -58,6 +58,12 @@ pub mod audit {
     pub static WIDEN_REJECT_TAIL: AtomicU64 = AtomicU64::new(0);
     pub static WIDEN_REJECT_LAST: AtomicU64 = AtomicU64::new(0);
     pub static WIDEN_REJECT_VETO_DELETE: AtomicU64 = AtomicU64::new(0);
+    /// The compressed quiet check's outcomes: verdicts delivered at piece
+    /// granularity (split by direction) and structural fallbacks to the
+    /// full entry stream.
+    pub static WIDEN_COMPRESSED_QUIET: AtomicU64 = AtomicU64::new(0);
+    pub static WIDEN_COMPRESSED_WIDEN: AtomicU64 = AtomicU64::new(0);
+    pub static WIDEN_COMPRESSED_FALLBACK: AtomicU64 = AtomicU64::new(0);
     pub fn widen_check() {
         WIDEN_CHECKS.fetch_add(1, Ordering::Relaxed);
     }
@@ -1016,7 +1022,7 @@ pub mod cap {
     /// The shortest distinguishing separator length of the seam between
     /// adjacent keys `left < right`: `min(lcp + 1, len(right))`, the
     /// semantic-distance metric of the hybrid selector.
-    fn shortest_separator_len(left: &[u8], right: &[u8]) -> usize {
+    pub(crate) fn shortest_separator_len(left: &[u8], right: &[u8]) -> usize {
         (lcp(left, right) + 1).min(right.len())
     }
 
@@ -1215,6 +1221,161 @@ pub mod cap {
             AnchorSelector::from_manifest(manifest),
         )
     }
+
+    /// Whether candidate `a` beats candidate `b` in an election under
+    /// `selector`. Candidates are `(separator_len, right-key hash, entry
+    /// position)`; equal order resolves to the smaller position, matching
+    /// [`choose_cuts`]'s `min_by` over the ascending candidate scan (the
+    /// first minimum wins).
+    pub(crate) fn anchor_precedes(
+        selector: AnchorSelector,
+        a: (usize, &Blake3Hash, usize),
+        b: (usize, &Blake3Hash, usize),
+    ) -> bool {
+        let order = match selector {
+            AnchorSelector::Rendezvous => anchor_order(a.1).cmp(anchor_order(b.1)),
+            AnchorSelector::Hybrid => {
+                a.0.cmp(&b.0)
+                    .then_with(|| anchor_order(a.1).cmp(anchor_order(b.1)))
+            }
+        };
+        match order {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Greater => false,
+            std::cmp::Ordering::Equal => a.2 < b.2,
+        }
+    }
+
+    /// One run piece in compressed form for
+    /// [`election_matches_boundaries`]: its entry count and summed
+    /// entry weight, plus its best INTERIOR forced-anchor candidate under
+    /// the manifest's selector — `(separator_len, right-key hash, entry
+    /// offset of the right key within the piece)` — or `None` when no
+    /// interior seam qualifies.
+    pub(crate) struct CompressedPiece {
+        /// Number of entries in the piece.
+        pub count: usize,
+        /// Summed entry weight of the piece.
+        pub weight: usize,
+        /// Best interior candidate seam, if any.
+        pub interior: Option<(usize, Blake3Hash, usize)>,
+    }
+
+    /// Whether a backstop election over a whole forced run reproduces
+    /// exactly the current piece boundaries, evaluated over per-piece
+    /// summaries without materializing any entry. One evaluation serves
+    /// both backstops — the caller passes the stretch backstop's
+    /// `max_segment` or the frame ceiling as `threshold`, with each
+    /// piece's `interior` filtered to the matching candidate kind
+    /// ([`is_forced_candidate`] seams for the stretch,
+    /// [`is_frame_candidate`] seams for the ceiling), and must have
+    /// verified every boundary seam is itself a candidate of that kind.
+    /// `boundaries[i]` carries the anchor identity of the seam between
+    /// pieces `i` and `i + 1`: its shortest-separator length and its
+    /// right key's hash.
+    ///
+    /// The verification mirrors [`choose_cuts`]'s recursive bisection at
+    /// piece granularity, which is exact: as long as every elected cut is
+    /// a piece boundary, every recursion range is a whole-piece union, so
+    /// prefix weights at boundaries suffice and the best interior
+    /// candidate of a range is the minimum of its member pieces' interior
+    /// minima. It returns `false` the moment the full election would
+    /// deviate from the stored partition: an interior candidate winning a
+    /// range (a cut would land inside a piece), an over-threshold
+    /// multi-piece range with no candidate at all, or an under-threshold
+    /// range still spanning a stored boundary (a cut would dissolve). A
+    /// `false` is therefore an exact "the plan changed", not a
+    /// "don't know".
+    pub(crate) fn election_matches_boundaries(
+        pieces: &[CompressedPiece],
+        boundaries: &[(usize, Blake3Hash)],
+        threshold: usize,
+        manifest: &Manifest,
+    ) -> bool {
+        let cap = threshold;
+        if cap == 0 || pieces.len() < 2 || boundaries.len() + 1 != pieces.len() {
+            return false;
+        }
+        let mut prefix_weight = Vec::with_capacity(pieces.len() + 1);
+        let mut prefix_count = Vec::with_capacity(pieces.len() + 1);
+        prefix_weight.push(0usize);
+        prefix_count.push(0usize);
+        for piece in pieces {
+            prefix_weight.push(prefix_weight.last().expect("seeded") + piece.weight);
+            prefix_count.push(prefix_count.last().expect("seeded") + piece.count);
+        }
+        if prefix_weight[pieces.len()] <= cap {
+            // The full election would place no cuts at all, dissolving
+            // every stored boundary.
+            return false;
+        }
+        let selector = AnchorSelector::from_manifest(manifest);
+
+        // Recursive bisection over piece-index ranges `[plo, phi)`.
+        let mut stack = vec![(0usize, pieces.len())];
+        while let Some((plo, phi)) = stack.pop() {
+            if prefix_weight[phi] - prefix_weight[plo] <= cap {
+                if phi - plo > 1 {
+                    // The election stops here, but stored boundaries exist
+                    // inside the range: they would dissolve.
+                    return false;
+                }
+                continue;
+            }
+            // The range's best candidate: boundary seams strictly inside,
+            // and every member piece's best interior seam (interior
+            // positions are strictly inside their piece, so strictly
+            // inside the range). Interior positions can never equal a
+            // boundary position, so the winner's kind is unambiguous.
+            let mut best: Option<(usize, &Blake3Hash, usize)> = None;
+            let mut best_boundary: Option<usize> = None;
+            for boundary in plo..phi.saturating_sub(1) {
+                let (separator_len, hash) = &boundaries[boundary];
+                let candidate = (*separator_len, hash, prefix_count[boundary + 1]);
+                if best.is_none_or(|current| anchor_precedes(selector, candidate, current)) {
+                    best = Some(candidate);
+                    best_boundary = Some(boundary);
+                }
+            }
+            for piece in plo..phi {
+                if let Some((separator_len, hash, offset)) = &pieces[piece].interior {
+                    let candidate = (*separator_len, hash, prefix_count[piece] + offset);
+                    if best.is_none_or(|current| anchor_precedes(selector, candidate, current)) {
+                        best = Some(candidate);
+                        best_boundary = None;
+                    }
+                }
+            }
+            match (best, best_boundary) {
+                // Over threshold with no candidate: the full election
+                // leaves the range whole, which matches the stored state
+                // only if it is a single piece.
+                (None, _) => {
+                    if phi - plo > 1 {
+                        return false;
+                    }
+                }
+                // An interior candidate wins: the full election would cut
+                // inside a piece the stored partition keeps whole.
+                (Some(_), None) => return false,
+                // A boundary wins: exactly the stored cut. Recurse.
+                (Some(_), Some(boundary)) => {
+                    stack.push((plo, boundary + 1));
+                    stack.push((boundary + 1, phi));
+                }
+            }
+        }
+        true
+    }
+}
+
+pub(crate) mod summary;
+
+/// The memoized anchor hash of a key — the same hash the elections use
+/// for candidate ordering — exposed for the compressed quiet check, whose
+/// boundary anchors are built outside this module.
+pub(crate) fn anchor_hash(key: &[u8]) -> dialog_common::Blake3Hash {
+    hash_memo::hash(key)
 }
 
 /// Geometric distribution for computing node ranks.

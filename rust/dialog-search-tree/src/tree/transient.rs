@@ -2091,18 +2091,11 @@ where
     let parent_path = &path[..path.len() - 1];
     let bound = manifest.max_separator as usize;
 
-    // Run detection mirroring `merge_forced_run`, plus per-piece sources
-    // for the read-only stream below: transient siblings give up their
-    // keys and weights immediately, persistent ones contribute their link.
-    // `run_at` is the edited piece's index within the run, for attributing
-    // the simulated edit to the right piece.
-    enum PieceSource<Key> {
-        Fetch(Link),
-        Ready(Vec<Key>, Vec<usize>),
-    }
-    let (sources, run_at): (Vec<PieceSource<Key>>, usize) = {
-        let parent = follow(root, parent_path)?.as_index()?;
-        let children = &parent.children;
+    // Run detection mirroring `merge_forced_run`: the maximal stretch of
+    // children joined by forced (over-bound) separators around the edited
+    // child.
+    let (lo, hi) = {
+        let children = &follow(root, parent_path)?.as_index()?.children;
         let mut lo = at;
         while lo > 0 && children[lo].separator()?.len() > bound {
             lo -= 1;
@@ -2111,23 +2104,12 @@ where
         while hi + 1 < children.len() && children[hi + 1].separator()?.len() > bound {
             hi += 1;
         }
-        if lo == hi {
-            return Ok(false);
-        }
-        crate::distribution::audit::widen_run();
-        let mut sources = Vec::with_capacity(hi - lo + 1);
-        for child in children.iter().take(hi + 1).skip(lo) {
-            sources.push(match child {
-                Node::Persistent(link) => PieceSource::Fetch(link.clone()),
-                Node::Transient(TransientNode::Segment(segment)) => PieceSource::Ready(
-                    segment.entries().iter().map(|e| e.key.clone()).collect(),
-                    segment.entries().iter().map(Entry::weight).collect(),
-                ),
-                Node::Transient(_) => return Ok(false),
-            });
-        }
-        (sources, at - lo)
+        (lo, hi)
     };
+    if lo == hi {
+        return Ok(false);
+    }
+    crate::distribution::audit::widen_run();
 
     // The edit must be strictly interior to its piece: a new minimum, a
     // first/last-entry change, or an append would engage the boundary
@@ -2190,6 +2172,94 @@ where
             return Ok(false);
         }
     }
+
+    // The compressed evaluation: verify the post-edit plan at piece
+    // granularity over memoized summaries, streaming no untouched piece.
+    // Exact within the fully-vetoed regime; `None` (regime not met) falls
+    // back to the full entry stream below. In debug builds every
+    // compressed verdict is pinned against the full stream's.
+    if let Some(verdict) =
+        compressed_run_quiet::<Key, Value, Backend, D>(root, path, lo, hi, edit, accessor, manifest)
+            .await?
+    {
+        {
+            use std::sync::atomic::Ordering;
+            if verdict {
+                crate::distribution::audit::WIDEN_COMPRESSED_QUIET.fetch_add(1, Ordering::Relaxed);
+            } else {
+                crate::distribution::audit::WIDEN_COMPRESSED_WIDEN.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            let full = streamed_run_quiet::<Key, Value, Backend, D>(
+                root, path, lo, hi, edit, accessor, manifest,
+            )
+            .await?;
+            debug_assert_eq!(
+                verdict, full,
+                "the compressed quiet verdict must match the full streamed plan check"
+            );
+        }
+        return Ok(verdict);
+    }
+    crate::distribution::audit::WIDEN_COMPRESSED_FALLBACK
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    streamed_run_quiet::<Key, Value, Backend, D>(root, path, lo, hi, edit, accessor, manifest).await
+}
+
+/// The full entry-streamed forced-run plan check: streams every piece's
+/// keys and weights, simulates the edit, re-runs `cut_plan` and demands
+/// the exact stored partition. The authoritative fallback (and debug
+/// oracle) for `compressed_run_quiet`.
+#[allow(clippy::too_many_arguments)]
+async fn streamed_run_quiet<Key, Value, Backend, D>(
+    root: &mut TransientNode<Key, Value>,
+    path: &[usize],
+    lo: usize,
+    hi: usize,
+    edit: &Edit<Key, Value>,
+    accessor: &Accessor<Backend>,
+    manifest: &Manifest,
+) -> Result<bool, DialogSearchTreeError>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+    D: Distribution,
+{
+    let at = path[path.len() - 1];
+    let parent_path = &path[..path.len() - 1];
+    let run_at = at - lo;
+
+    // Per-piece sources for the read-only stream: transient siblings give
+    // up their keys and weights immediately, persistent ones contribute
+    // their link.
+    enum PieceSource<Key> {
+        Fetch(Link),
+        Ready(Vec<Key>, Vec<usize>),
+    }
+    let sources: Vec<PieceSource<Key>> = {
+        let children = &follow(root, parent_path)?.as_index()?.children;
+        let mut sources = Vec::with_capacity(hi - lo + 1);
+        for child in children.iter().take(hi + 1).skip(lo) {
+            sources.push(match child {
+                Node::Persistent(link) => PieceSource::Fetch(link.clone()),
+                Node::Transient(TransientNode::Segment(segment)) => PieceSource::Ready(
+                    segment.entries().iter().map(|e| e.key.clone()).collect(),
+                    segment.entries().iter().map(Entry::weight).collect(),
+                ),
+                Node::Transient(_) => return Ok(false),
+            });
+        }
+        sources
+    };
 
     // Stream the run's keys and weights in key order, remembering each
     // piece's length so the current partition can be compared against the
@@ -2270,6 +2340,260 @@ where
         }
     }
     Ok(true)
+}
+
+/// The compressed forced-run plan check: verifies the post-edit plan at
+/// piece granularity over memoized `PieceSummary` data
+/// (`distribution::summary`), streaming no untouched piece.
+///
+/// Exact within two regimes, selected by the boundary seams' veto status:
+///
+/// - **Stretch** (every boundary vetoed): with every piece fully vetoed
+///   inside, the window is one maximal stretch — no coin verdicts, no
+///   ceiling candidates — and the plan reduces to the stretch backstop's
+///   election at `max_segment`.
+/// - **Ceiling** (every boundary accepted): banks reset at every
+///   boundary, so coin verdicts are piece-local and carried by the
+///   summaries (`interior_coin_cut` must be clear, and each boundary's
+///   own verdict — `leaf_cut(last key, trailing bank + last weight)` —
+///   must be no-cut); interior vetoed stretches must stay under
+///   `max_segment` (the summary bounds them), and the plan reduces to the
+///   frame ceiling's election over the window's single frame.
+///
+/// Both elections are evaluated by `cap::election_matches_boundaries` at
+/// piece granularity. The edited piece's post-edit summary is built live
+/// from the open leaf with the edit applied (its edge keys are unchanged
+/// by the strict-interior guard, so the boundary seams stand).
+///
+/// Returns `Some(verdict)` — an EXACT quiet/widen answer — or `None` when
+/// the run falls outside both regimes (mixed boundaries, a non-candidate
+/// boundary, an over-weight interior stretch, a transient index sibling,
+/// the pacing ramp armed), in which case the full entry stream decides.
+#[allow(clippy::too_many_arguments)]
+async fn compressed_run_quiet<Key, Value, Backend, D>(
+    root: &mut TransientNode<Key, Value>,
+    path: &[usize],
+    lo: usize,
+    hi: usize,
+    edit: &Edit<Key, Value>,
+    accessor: &Accessor<Backend>,
+    manifest: &Manifest,
+) -> Result<Option<bool>, DialogSearchTreeError>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+    D: Distribution,
+{
+    use crate::distribution::summary::{self, PieceSummary};
+    use crate::distribution::{anchor_hash, cap};
+    use std::sync::Arc;
+
+    // The pacing ramp reads frame-prefix weight, which the piece-granular
+    // evaluation does not model.
+    if manifest.pacing_ramp_threshold() != 0 {
+        return Ok(None);
+    }
+    let at = path[path.len() - 1];
+    let parent_path = &path[..path.len() - 1];
+
+    // Pass 1 (sync, under the tree borrow): per piece, either a ready
+    // summary — transient segments and the edited piece, summarized in
+    // place — or the stored link to resolve against the memo. The edited
+    // piece gets its POST-EDIT summary, built from the open leaf with the
+    // edit applied, mirroring the full check's simulation.
+    enum Pending {
+        Ready(Arc<PieceSummary>),
+        Fetch(Link),
+    }
+    let mut pieces: Vec<Pending> = Vec::with_capacity(hi - lo + 1);
+    {
+        let children = &follow(root, parent_path)?.as_index()?.children;
+        for (index, child) in children.iter().enumerate().take(hi + 1).skip(lo) {
+            if index == at {
+                let Node::Transient(TransientNode::Segment(leaf)) = child else {
+                    return Ok(None);
+                };
+                let entries = leaf.entries();
+                let mut keys: Vec<&[u8]> = Vec::with_capacity(entries.len() + 1);
+                let mut weights: Vec<usize> = Vec::with_capacity(entries.len() + 1);
+                for entry in entries {
+                    keys.push(entry.key.as_ref());
+                    weights.push(entry.weight());
+                }
+                match edit {
+                    Edit::Upsert(entry) => {
+                        match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                            Ok(i) => weights[i] = entry.weight(),
+                            Err(i) => {
+                                keys.insert(i, entry.key.as_ref());
+                                weights.insert(i, entry.weight());
+                            }
+                        }
+                    }
+                    Edit::Delete(key) => match entries.binary_search_by(|e| e.key.cmp(key)) {
+                        Ok(i) => {
+                            keys.remove(i);
+                            weights.remove(i);
+                        }
+                        Err(_) => return Ok(None),
+                    },
+                }
+                pieces.push(Pending::Ready(Arc::new(PieceSummary::build::<D>(
+                    &keys, &weights, manifest,
+                ))));
+            } else {
+                match child {
+                    Node::Persistent(link) => match summary::memoized(&link.node, manifest) {
+                        Some(ready) => pieces.push(Pending::Ready(ready)),
+                        None => pieces.push(Pending::Fetch(link.clone())),
+                    },
+                    Node::Transient(TransientNode::Segment(segment)) => {
+                        let entries = segment.entries();
+                        let keys: Vec<&[u8]> =
+                            entries.iter().map(|entry| entry.key.as_ref()).collect();
+                        let weights: Vec<usize> = entries.iter().map(Entry::weight).collect();
+                        pieces.push(Pending::Ready(Arc::new(PieceSummary::build::<D>(
+                            &keys, &weights, manifest,
+                        ))));
+                    }
+                    Node::Transient(_) => return Ok(None),
+                }
+            }
+        }
+    }
+
+    // Pass 2 (async): resolve stored pieces through the memo, streaming a
+    // piece only on its first touch per content change.
+    let mut summaries: Vec<Arc<PieceSummary>> = Vec::with_capacity(pieces.len());
+    for pending in pieces {
+        summaries.push(match pending {
+            Pending::Ready(summary) => summary,
+            Pending::Fetch(link) => {
+                let persistent = accessor.get_node(&link.node).await?;
+                let TransientNode::Segment(segment) =
+                    TransientNode::<Key, Value>::open(&persistent, link.separator.clone())?
+                else {
+                    return Ok(None);
+                };
+                let entries = segment.entries();
+                let keys: Vec<&[u8]> = entries.iter().map(|entry| entry.key.as_ref()).collect();
+                let weights: Vec<usize> = entries.iter().map(Entry::weight).collect();
+                summary::memoize(
+                    &link.node,
+                    manifest,
+                    PieceSummary::build::<D>(&keys, &weights, manifest),
+                )
+            }
+        });
+    }
+
+    // Regime selection by the boundary seams' veto status: all vetoed is
+    // the stretch regime, all accepted the ceiling regime, and a mix
+    // falls back to the full stream.
+    if summaries.iter().any(|summary| summary.count == 0) {
+        return Ok(None);
+    }
+    let mut vetoed_boundaries = 0usize;
+    for pair in summaries.windows(2) {
+        if D::vetoes(
+            pair[0].last_key.as_slice(),
+            pair[1].first_key.as_slice(),
+            manifest,
+        ) {
+            vetoed_boundaries += 1;
+        }
+    }
+
+    let (threshold, boundaries) = if vetoed_boundaries == summaries.len() - 1 {
+        // Stretch regime: every piece fully vetoed inside, every boundary
+        // a forced candidate; the plan is the stretch election alone.
+        if summaries.iter().any(|summary| !summary.all_vetoed) {
+            return Ok(None);
+        }
+        let mut boundaries = Vec::with_capacity(summaries.len() - 1);
+        for pair in summaries.windows(2) {
+            let left = pair[0].last_key.as_slice();
+            let right = pair[1].first_key.as_slice();
+            if !cap::is_forced_candidate(left, right, manifest) {
+                return Ok(None);
+            }
+            boundaries.push((cap::shortest_separator_len(left, right), anchor_hash(right)));
+        }
+        let compressed: Vec<cap::CompressedPiece> = summaries
+            .iter()
+            .map(|summary| cap::CompressedPiece {
+                count: summary.count,
+                weight: summary.weight,
+                interior: summary.stretch_interior.clone(),
+            })
+            .collect();
+        return Ok(Some(cap::election_matches_boundaries(
+            &compressed,
+            &boundaries,
+            manifest.max_segment as usize,
+            manifest,
+        )));
+    } else if vetoed_boundaries == 0 {
+        // Ceiling regime: banks reset at every (accepted) boundary, so
+        // the summaries' piece-local coin verdicts are exact. A stored
+        // piece is whole, so any interior coin cut means the plan does
+        // not reproduce the stored partition — but only for verdicts the
+        // edit cannot have changed; the edited piece's summary is
+        // post-edit, so the claim holds uniformly. Interior vetoed
+        // stretches over `max_segment` could hide stretch-backstop cuts
+        // the summary cannot decide: fall back.
+        if manifest.frame_ceiling() == 0 {
+            return Ok(None);
+        }
+        if summaries
+            .iter()
+            .any(|summary| summary.max_stretch_weight > manifest.max_segment as usize)
+        {
+            return Ok(None);
+        }
+        if summaries.iter().any(|summary| summary.interior_coin_cut) {
+            return Ok(Some(false));
+        }
+        let mut boundaries = Vec::with_capacity(summaries.len() - 1);
+        for pair in summaries.windows(2) {
+            let left = pair[0].last_key.as_slice();
+            let right = pair[1].first_key.as_slice();
+            if !cap::is_frame_candidate(left, right, manifest) {
+                return Ok(None);
+            }
+            // The boundary seam's own coin verdict must be no-cut: a
+            // natural cut here would store the short separator, not the
+            // long forced form the stored partition carries.
+            if D::leaf_cut(left, pair[0].trailing_bank + pair[0].last_weight, manifest) {
+                return Ok(Some(false));
+            }
+            boundaries.push((cap::shortest_separator_len(left, right), anchor_hash(right)));
+        }
+        (manifest.frame_ceiling(), boundaries)
+    } else {
+        return Ok(None);
+    };
+
+    let compressed: Vec<cap::CompressedPiece> = summaries
+        .iter()
+        .map(|summary| cap::CompressedPiece {
+            count: summary.count,
+            weight: summary.weight,
+            interior: summary.frame_interior.clone(),
+        })
+        .collect();
+    Ok(Some(cap::election_matches_boundaries(
+        &compressed,
+        &boundaries,
+        threshold,
+        manifest,
+    )))
 }
 
 /// Widens an edit's window to the whole force-split run around the leaf at

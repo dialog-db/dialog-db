@@ -88,6 +88,12 @@ fn main() -> anyhow::Result<()> {
                 audit::WIDEN_REJECT_VETO_DELETE.load(Ordering::Relaxed),
                 audit::WIDEN_PLAN_REJECTS.load(Ordering::Relaxed),
             );
+            println!(
+                "widen compressed: {} quiet, {} widen, {} fallback",
+                audit::WIDEN_COMPRESSED_QUIET.load(Ordering::Relaxed),
+                audit::WIDEN_COMPRESSED_WIDEN.load(Ordering::Relaxed),
+                audit::WIDEN_COMPRESSED_FALLBACK.load(Ordering::Relaxed),
+            );
         }
         Ok(())
     })
