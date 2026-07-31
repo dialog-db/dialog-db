@@ -307,3 +307,37 @@ functions of piece bytes, so they can be persisted keyed by piece
 hash, or — endgame — embedded per-link in the parent index node
 (format change), making re-election free even cold since the parent
 is already loaded for routing.
+
+## V1 verdict: negative; pivot to the root-frame re-encode (2026-07-31)
+
+Corrected A/B at DIALOG_TREE_MAX_SEGMENT=32768 (3,000 txns; the
+earlier same-build comparison was invalid): baseline 2416/5475/9061
+us per commit windowed vs 2958/5962/9656 with the quiet check — the
+check costs a consistent 6-9% and saves nothing, because the O(run)
+stream it adds on every membership edit exceeds what the skips
+avoid, and the widening's writes were already elided by piece-origin
+reuse at this config too. Owner's call: win is negligible, aim for
+the higher-price ticket.
+
+The measured higher ticket (from the callgrind decomposition that
+motivated measure_se_replay): the commit path re-encodes, re-copies,
+and re-hashes the whole root frame — entries plus the full novelty
+buffer — on every commit: ~118-160 KB written per commit carrying
+~2.3 facts, with memcpy + blake3 + allocator at ~60% of commit
+instructions. That is orders of magnitude of write amplification per
+fact, dwarfing anything widening-related at any measured config.
+
+Next campaign: incremental root-frame maintenance — keep the sealed
+column encoding of the unchanged prefix/suffix and re-encode only
+the touched region (or chunk the novelty buffer so a commit appends
+instead of rewriting), with the same convergence discipline as this
+spike: byte-identical stored form, per-txn vs batched replay roots
+equal at every scale.
+
+The quiet check stays on this spike branch as measurement
+infrastructure (its audit counters produced the election-stability
+numbers; election moved anchors in only ~2% of full-run recomputes,
+which remains the licence for parent-embedded summaries if widening
+ever becomes the bottleneck at scale), but it should NOT merge to
+main as-is: it is a measured 6-9% regression at 32K and neutral at
+default.
