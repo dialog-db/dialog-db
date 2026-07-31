@@ -89,10 +89,18 @@ fn main() -> anyhow::Result<()> {
                 audit::WIDEN_PLAN_REJECTS.load(Ordering::Relaxed),
             );
             println!(
-                "widen compressed: {} quiet, {} widen, {} fallback",
+                "widen compressed: {} quiet, {} widen, {} fallback, {} surgical-min",
                 audit::WIDEN_COMPRESSED_QUIET.load(Ordering::Relaxed),
                 audit::WIDEN_COMPRESSED_WIDEN.load(Ordering::Relaxed),
                 audit::WIDEN_COMPRESSED_FALLBACK.load(Ordering::Relaxed),
+                audit::WIDEN_SURGICAL_MIN.load(Ordering::Relaxed),
+            );
+            println!(
+                "surgical-min fails: {} edge, {} regime, {} plan, {} sep",
+                audit::SURGICAL_MIN_EDGE.load(Ordering::Relaxed),
+                audit::SURGICAL_MIN_REGIME.load(Ordering::Relaxed),
+                audit::SURGICAL_MIN_PLAN.load(Ordering::Relaxed),
+                audit::SURGICAL_MIN_SEP.load(Ordering::Relaxed),
             );
         }
         Ok(())

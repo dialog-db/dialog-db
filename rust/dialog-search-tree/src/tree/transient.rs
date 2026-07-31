@@ -64,9 +64,15 @@ pub mod edit_audit {
     pub static OVER_CEILING: AtomicU64 = AtomicU64::new(0);
     pub static UNCANONICAL: AtomicU64 = AtomicU64::new(0);
     pub static RESHAPE_IDENTITY: AtomicU64 = AtomicU64::new(0);
+    pub static SURGICAL: AtomicU64 = AtomicU64::new(0);
 
     pub fn fast() {
         FAST.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Tallies a verified surgical boundary edit applied in place.
+    pub fn surgical() {
+        SURGICAL.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn identity() {
@@ -115,8 +121,9 @@ pub mod edit_audit {
     /// Snapshot-and-reset, formatted for the measurement harness.
     pub fn report() -> String {
         format!(
-            "fast={} boundary_del={} orphan={} terminal={} left_dissolve={} left_raise={} seam_move={} widened={} index_widened={} over_ceiling={} uncanonical={} identity_skips={}",
+            "fast={} surgical={} boundary_del={} orphan={} terminal={} left_dissolve={} left_raise={} seam_move={} widened={} index_widened={} over_ceiling={} uncanonical={} identity_skips={}",
             FAST.swap(0, Ordering::Relaxed),
+            SURGICAL.swap(0, Ordering::Relaxed),
             BOUNDARY_DELETE.swap(0, Ordering::Relaxed),
             ORPHAN_APPEND.swap(0, Ordering::Relaxed),
             DISSOLVES_TERMINAL.swap(0, Ordering::Relaxed),
@@ -1026,7 +1033,7 @@ where
         let mut piece_origins = if changes_membership {
             #[cfg(not(target_arch = "wasm32"))]
             let quiet_started = std::time::Instant::now();
-            let quiet = forced_run_quiet::<Key, Value, Backend, D>(
+            let verdict = forced_run_quiet::<Key, Value, Backend, D>(
                 &mut root, &path, &self, accessor, &manifest,
             )
             .await?;
@@ -1035,7 +1042,27 @@ where
                 &crate::distribution::audit::QUIET_NS,
                 quiet_started,
             );
-            if quiet {
+            if let RunVerdict::SurgicalMin { separator } = verdict {
+                // A verified surgical min-insert: the run's post-edit plan
+                // reproduces every stored boundary and the piece's forced
+                // separator re-derives at the same length, so no election
+                // input changes at any level. Apply in place, swap the
+                // separator (the exact bytes a merged regroup's seal would
+                // store), and re-home the parent's buffered ops across the
+                // moved boundary — then the tree is byte-for-byte what the
+                // full merge-and-regroup path would have produced.
+                let TransientNode::Segment(leaf) = follow(&mut root, &path)? else {
+                    return Err(DialogSearchTreeError::Node(
+                        "Path did not reach a segment".into(),
+                    ));
+                };
+                apply_to_segment(leaf, self);
+                leaf.separator = separator;
+                reroute_moved_seam::<Key, Value>(&mut root, &path)?;
+                edit_audit::surgical();
+                return Ok(Some(root));
+            }
+            if matches!(verdict, RunVerdict::Quiet) {
                 crate::distribution::audit::widen_skip();
                 None
             } else {
@@ -2037,6 +2064,29 @@ where
     Ok((merged_any, origins_by_remaining))
 }
 
+/// The forced-run check's verdict.
+enum RunVerdict {
+    /// The run's post-edit plan is byte-identical to the stored partition:
+    /// skip the widening, the ordinary edit machinery handles the piece.
+    Quiet,
+    /// Not provably quiet: widen as before.
+    Widen,
+    /// A verified surgical min-insert: the run's election reproduces every
+    /// stored boundary with the new minimum applied, and the edited
+    /// piece's forced separator re-derives to `separator` — the SAME
+    /// LENGTH as the stored one. Forced-long separators are never index
+    /// anchors (`index_frame_cut_positions` excludes over-bound seams) and
+    /// a link's weight reads only its separator's length, so a
+    /// length-preserving rewrite changes no index-level election input at
+    /// any ancestor — the edit may apply in place with the separator
+    /// swapped and the parent's buffered ops re-homed, and every level
+    /// above stays exactly as a full merge-and-regroup would leave it.
+    SurgicalMin {
+        /// The re-derived forced separator for the edited piece.
+        separator: Vec<u8>,
+    },
+}
+
 /// Whether a membership edit into a forced-run piece provably leaves the
 /// run's stored partition byte-identical, so the backstop widening can be
 /// skipped and the ordinary edit machinery applied to the edited piece
@@ -2071,7 +2121,7 @@ async fn forced_run_quiet<Key, Value, Backend, D>(
     edit: &Edit<Key, Value>,
     accessor: &Accessor<Backend>,
     manifest: &Manifest,
-) -> Result<bool, DialogSearchTreeError>
+) -> Result<RunVerdict, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
     Value: self::Value + ConditionalSync + 'static,
@@ -2084,7 +2134,7 @@ where
     D: Distribution,
 {
     if path.is_empty() || manifest.max_segment == 0 {
-        return Ok(false);
+        return Ok(RunVerdict::Widen);
     }
     crate::distribution::audit::widen_check();
     let at = path[path.len() - 1];
@@ -2107,7 +2157,7 @@ where
         (lo, hi)
     };
     if lo == hi {
-        return Ok(false);
+        return Ok(RunVerdict::Widen);
     }
     crate::distribution::audit::widen_run();
 
@@ -2116,17 +2166,21 @@ where
     // machinery (min-move separator rewrites, boundary-delete fusion,
     // terminal-cut checks), which re-decides seams without the election.
     //
-    // The new-minimum insert was tried as a skippable shape (2026-07-31):
-    // the padded-left forced separator is byte-stable under a new minimum,
-    // so an in-place apply with the min-move machinery suppressed is sound
-    // there — but measured on the SE replay only 17 of ~1,150 qualifying
-    // inserts had the padded-left form; the rest store the right-prefix
-    // form (long keys), whose bytes genuinely change with the minimum, so
-    // they failed the stability check after paying the full run stream and
-    // merged anyway — a net regression. Rejected up front instead.
+    // ONE boundary shape gets a verified escape hatch instead of an
+    // instant reject: an insert of a new minimum into a non-first piece
+    // (`Err(0)`, the dominant reject on the SE replay at 83%). Its plan is
+    // evaluated by the same compressed election — the simulation handles
+    // any position — and on a full boundary match the piece's forced
+    // separator is re-derived; if the new form has the SAME LENGTH as the
+    // stored one, the edit is a `SurgicalMin`: forced-long separators are
+    // never index anchors and link weights read only separator length, so
+    // nothing above the parent's link bytes changes, exactly as a full
+    // merge-and-regroup would leave it (which rebuilds the piece with the
+    // same entries and this same separator, reusing everything else).
+    let mut min_insert = false;
     {
         let TransientNode::Segment(leaf) = follow(root, path)? else {
-            return Ok(false);
+            return Ok(RunVerdict::Widen);
         };
         let entries = leaf.entries();
         // Classified for the census: which boundary case rejected, so the
@@ -2138,7 +2192,10 @@ where
                     Some(&crate::distribution::audit::WIDEN_REJECT_LAST)
                 }
                 Ok(_) => None,
-                Err(0) => Some(&crate::distribution::audit::WIDEN_REJECT_MIN),
+                Err(0) => {
+                    min_insert = true;
+                    None
+                }
                 Err(i) if i >= entries.len() => {
                     Some(&crate::distribution::audit::WIDEN_REJECT_TAIL)
                 }
@@ -2169,19 +2226,116 @@ where
         if let Some(counter) = reject {
             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             crate::distribution::audit::widen_interior_reject();
-            return Ok(false);
+            return Ok(RunVerdict::Widen);
         }
+    }
+    if min_insert && at == lo {
+        // The run's first piece carries a NATURAL (short) separator whose
+        // rewrite is rank-relevant: no surgical escape.
+        crate::distribution::audit::SURGICAL_MIN_EDGE
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::distribution::audit::WIDEN_REJECT_MIN
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::distribution::audit::widen_interior_reject();
+        return Ok(RunVerdict::Widen);
     }
 
     // The compressed evaluation: verify the post-edit plan at piece
     // granularity over memoized summaries, streaming no untouched piece.
-    // Exact within the fully-vetoed regime; `None` (regime not met) falls
-    // back to the full entry stream below. In debug builds every
-    // compressed verdict is pinned against the full stream's.
-    if let Some(verdict) =
-        compressed_run_quiet::<Key, Value, Backend, D>(root, path, lo, hi, edit, accessor, manifest)
-            .await?
-    {
+    // `None` (regime not met) falls back to the full entry stream for
+    // interior edits, and widens for the min-insert shape (the stream
+    // cannot license a surgical apply). In debug builds every compressed
+    // interior verdict is pinned against the full stream's.
+    let compressed = compressed_run_quiet::<Key, Value, Backend, D>(
+        root, path, lo, hi, edit, accessor, manifest,
+    )
+    .await?;
+
+    if min_insert {
+        #[cfg(debug_assertions)]
+        if let Some(verdict) = compressed {
+            let full = streamed_run_quiet::<Key, Value, Backend, D>(
+                root, path, lo, hi, edit, accessor, manifest,
+            )
+            .await?;
+            debug_assert_eq!(
+                verdict, full,
+                "the compressed min-insert verdict must match the full streamed plan check"
+            );
+        }
+        // A new minimum often flips its boundary seam's veto status (it
+        // shares a longer prefix with the left neighbor than the old first
+        // key did), putting the run outside the compressed regimes — the
+        // measured dominant case. The full stream handles any regime and
+        // gives the identical plan-and-marks guarantee, so it licenses the
+        // surgical apply whenever the compressed evaluation cannot.
+        let verdict = match compressed {
+            Some(verdict) => verdict,
+            None => {
+                crate::distribution::audit::SURGICAL_MIN_REGIME
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                streamed_run_quiet::<Key, Value, Backend, D>(
+                    root, path, lo, hi, edit, accessor, manifest,
+                )
+                .await?
+            }
+        };
+        if !verdict {
+            crate::distribution::audit::SURGICAL_MIN_PLAN
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::distribution::audit::WIDEN_REJECT_MIN
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::distribution::audit::widen_interior_reject();
+            return Ok(RunVerdict::Widen);
+        }
+        let Edit::Upsert(entry) = edit else {
+            return Ok(RunVerdict::Widen);
+        };
+        // The boundary's re-derived forced separator: previous piece's
+        // last key (its summary is in hand after the compressed pass)
+        // against the new minimum, exactly as the regroup's seal would
+        // derive it. Only a LENGTH-preserving rewrite is surgical.
+        let (previous_last, stored_len) = {
+            let children = &follow(root, parent_path)?.as_index()?.children;
+            let previous_last = match &children[at - 1] {
+                Node::Transient(TransientNode::Segment(segment)) => segment
+                    .entries()
+                    .last()
+                    .map(|entry| entry.key.as_ref().to_vec()),
+                Node::Persistent(link) => {
+                    crate::distribution::summary::memoized(&link.node, manifest)
+                        .map(|summary| summary.last_key.clone())
+                }
+                Node::Transient(_) => None,
+            };
+            (previous_last, children[at].separator()?.len())
+        };
+        let Some(previous_last) = previous_last else {
+            crate::distribution::audit::WIDEN_REJECT_MIN
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::distribution::audit::widen_interior_reject();
+            return Ok(RunVerdict::Widen);
+        };
+        let separator =
+            crate::distribution::cap::frame_separator(&previous_last, entry.key.as_ref(), manifest);
+        return Ok(match separator {
+            Some(separator) if separator.len() == stored_len => {
+                crate::distribution::audit::WIDEN_SURGICAL_MIN
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                RunVerdict::SurgicalMin { separator }
+            }
+            _ => {
+                crate::distribution::audit::SURGICAL_MIN_SEP
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                crate::distribution::audit::WIDEN_REJECT_MIN
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                crate::distribution::audit::widen_interior_reject();
+                RunVerdict::Widen
+            }
+        });
+    }
+
+    if let Some(verdict) = compressed {
         {
             use std::sync::atomic::Ordering;
             if verdict {
@@ -2201,12 +2355,26 @@ where
                 "the compressed quiet verdict must match the full streamed plan check"
             );
         }
-        return Ok(verdict);
+        return Ok(if verdict {
+            RunVerdict::Quiet
+        } else {
+            RunVerdict::Widen
+        });
     }
     crate::distribution::audit::WIDEN_COMPRESSED_FALLBACK
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    streamed_run_quiet::<Key, Value, Backend, D>(root, path, lo, hi, edit, accessor, manifest).await
+    Ok(
+        if streamed_run_quiet::<Key, Value, Backend, D>(
+            root, path, lo, hi, edit, accessor, manifest,
+        )
+        .await?
+        {
+            RunVerdict::Quiet
+        } else {
+            RunVerdict::Widen
+        },
+    )
 }
 
 /// The full entry-streamed forced-run plan check: streams every piece's

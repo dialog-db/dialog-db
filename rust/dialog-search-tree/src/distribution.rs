@@ -64,6 +64,17 @@ pub mod audit {
     pub static WIDEN_COMPRESSED_QUIET: AtomicU64 = AtomicU64::new(0);
     pub static WIDEN_COMPRESSED_WIDEN: AtomicU64 = AtomicU64::new(0);
     pub static WIDEN_COMPRESSED_FALLBACK: AtomicU64 = AtomicU64::new(0);
+    /// Surgical min-inserts: a new-minimum insert whose run plan the
+    /// compressed election verified boundary-exact and whose forced
+    /// separator re-derived at the same length, applied in place with no
+    /// merge at any level.
+    pub static WIDEN_SURGICAL_MIN: AtomicU64 = AtomicU64::new(0);
+    /// Why min-insert surgical attempts failed: run-edge piece, compressed
+    /// regime fallback, plan mismatch, or separator length change.
+    pub static SURGICAL_MIN_EDGE: AtomicU64 = AtomicU64::new(0);
+    pub static SURGICAL_MIN_REGIME: AtomicU64 = AtomicU64::new(0);
+    pub static SURGICAL_MIN_PLAN: AtomicU64 = AtomicU64::new(0);
+    pub static SURGICAL_MIN_SEP: AtomicU64 = AtomicU64::new(0);
     pub fn widen_check() {
         WIDEN_CHECKS.fetch_add(1, Ordering::Relaxed);
     }

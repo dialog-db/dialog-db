@@ -941,3 +941,51 @@ derive the post-edit plan from summaries, open only the rewritten
 pieces, emit the rest as origins) is designed but unbuilt; it is
 also where the remaining growth term lives, since runs lengthen
 linearly with the dataset.
+
+## Phase two v0: the surgical min-insert (2026-07-31)
+
+The structural key, from `index_frame_cut_positions`: forced-long
+separators are NEVER index anchors (over-bound seams are excluded
+from candidacy) and a link's election weight reads only its
+separator's LENGTH. So a boundary rewrite that keeps the separator
+length changes no index-level election input at any ancestor — the
+`moves_seam_under_ceiling` concern that sank the earlier B1 attempt
+evaporates when the length is preserved (`max(bound+1, lcp+1)` is
+constant 513 for SE keys; B1 had demanded byte-stability and found
+17/1150, where length-stability holds essentially always).
+
+Shipped as `RunVerdict::SurgicalMin`: for an `Err(0)` insert into a
+non-first run piece, the run's post-edit plan is verified boundary-
+and mark-exact (compressed election where the regimes apply, the
+full stream otherwise — the min insert usually flips its boundary
+seam to vetoed, putting the run outside the two compressed regimes,
+so the stream licenses most attempts), the forced separator is
+re-derived and must keep its stored length; then the edit applies
+in place, the separator is swapped, and `reroute_moved_seam`
+re-homes the parent's buffered ops. No merge at any level; the
+stored state is byte-for-byte what the full merge-and-regroup
+would have produced.
+
+Measured (3000/1000): only **107 of ~1,150 min-inserts qualify** —
+the failure census says 1,144 fall outside the compressed regimes
+(boundary flips to vetoed) and, decisive, **1,037 of those fail
+the PLAN comparison**: the flipped seam joins the two pieces'
+stretches, the stretch election re-runs over the joined stretch,
+and the boundary genuinely moves or dissolves. These edits MUST
+restructure 1-2 pieces; no skip condition can save them. Sep-length
+failures: zero (the length argument holds universally).
+
+Verdict: v0 is exact (suite green; converge_check CONVERGED at
+200/1000/3000/10000; canonical roots byte-identical to the
+pre-campaign baseline at all scales; debug pins held) but its hit
+rate caps at ~10%. The real phase-two ticket is now precisely
+characterized: **the narrow merge** — the streamed check already
+computes the exact post-edit plan; extend it to return the plan
+DIFF, and when the changed boundaries confine to the edited piece's
+neighborhood (the measured common case: the flip is local), merge
+and regroup ONLY that span with the verified plan as an override,
+emitting every other piece as its stored link without
+materializing it. That converts the 840 O(run)-materializing merges
+per 1000 commits into O(changed-span) rebuilds, and is where the
+remaining merge_run (1.0-1.1 s) + reshape (1.7 s) per 1000 and the
+linear growth term live.
