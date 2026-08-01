@@ -12,30 +12,35 @@ use crate::source::SelectRules;
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
-use dialog_artifacts::{Artifact, Cause, Select};
+use dialog_artifacts::{ArtifactView, Cause, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 
-/// Given two artifacts for the same `(attribute, entity)` pair, return the
-/// winner. The winner is the artifact with the higher cause; when causes are
-/// equal (including both `None`), the fact hash (`Cause::from`) breaks the tie.
-fn choose(current: Artifact, challenger: Artifact) -> Artifact {
-    match (&current.cause, &challenger.cause) {
+/// Given two fact rows for the same `(attribute, entity)` pair, return the
+/// winner. The winner is the row with the higher cause; when causes are
+/// equal (including both `None`), the fact hash (`Cause::from`) breaks the
+/// tie. Causes read straight off the rows; only a genuine tie pays for the
+/// materialization the fact hash needs.
+fn choose(
+    current: ArtifactView,
+    challenger: ArtifactView,
+) -> Result<ArtifactView, dialog_artifacts::DialogArtifactsError> {
+    Ok(match (current.cause(), challenger.cause()) {
         (Some(a), Some(b)) if a > b => current,
         (Some(a), Some(b)) if a < b => challenger,
         (Some(_), None) => current,
         (None, Some(_)) => challenger,
         _ => {
             // Causes are equal: use the fact hash as a deterministic tiebreaker.
-            if Cause::from(&current) >= Cause::from(&challenger) {
+            if Cause::from(&current.to_owned()?) >= Cause::from(&challenger.to_owned()?) {
                 current
             } else {
                 challenger
             }
         }
-    }
+    })
 }
 
 /// Winner verification.
@@ -73,19 +78,21 @@ where
             .the(attribute)
             .of(entity)).await?;
 
-        let mut winner: Option<Artifact> = None;
+        let mut winner: Option<ArtifactView> = None;
         for await each in challengers {
             let challenger = each?;
             winner = Some(match winner {
                 None => challenger,
-                Some(winner) => choose(winner, challenger),
+                Some(winner) => choose(winner, challenger)?,
             });
         }
 
+        // Only the surviving winner decodes its value; the losing
+        // challengers never materialized anything.
         if let Some(winner) = winner
-            && winner.is == value
+            && winner.value()? == value
         {
-            let winner_cause = winner.cause.unwrap_or(Cause([0; 32]));
+            let winner_cause = winner.cause().cloned().unwrap_or(Cause([0; 32]));
             if cause.is_none() || cause == Some(winner_cause) {
                 yield candidate;
             }
@@ -231,38 +238,50 @@ impl AttributeQueryOnly {
                         resolved.cause().clone(),
                     );
 
-                    let mut candidate: Option<Artifact> = None;
+                    let mut candidate: Option<ArtifactView> = None;
 
                     let stream = Provider::<Select<'_>>::execute(env, (&scan).try_into()?).await?;
                     for await artifact in stream {
                         let artifact = artifact?;
 
                         candidate = Some(match candidate.take() {
-                            Some(current) if current.the == artifact.the && current.of == artifact.of => {
-                                choose(current, artifact)
-                            }
-                            Some(winner) => {
-                                if (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
-                                    && selector.admits(&winner.is)
+                            Some(current) => {
+                                // Group membership compares the raw key
+                                // bytes; nothing materializes while the
+                                // window slides within a group.
+                                if current.the_bytes()? == artifact.the_bytes()?
+                                    && current.of_bytes()? == artifact.of_bytes()?
                                 {
-                                    let mut extension = base.clone();
-                                    selector.merge(&mut extension, &winner)?;
-                                    yield extension;
+                                    choose(current, artifact)?
+                                } else {
+                                    // Group closed: only its winner pays
+                                    // for materialization, and only if it
+                                    // clears the value checks.
+                                    let winner = current.to_owned()?;
+                                    if (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
+                                        && selector.admits(&winner.is)
+                                    {
+                                        let mut extension = base.clone();
+                                        selector.merge(&mut extension, &winner)?;
+                                        yield extension;
+                                    }
+                                    artifact
                                 }
-                                artifact
                             }
                             None => artifact,
                         });
                     }
 
                     // Yield the final group's winner.
-                    if let Some(winner) = candidate.take()
-                        && (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
-                        && selector.admits(&winner.is)
-                    {
-                        let mut extension = base.clone();
-                        selector.merge(&mut extension, &winner)?;
-                        yield extension;
+                    if let Some(winner) = candidate.take() {
+                        let winner = winner.to_owned()?;
+                        if (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
+                            && selector.admits(&winner.is)
+                        {
+                            let mut extension = base.clone();
+                            selector.merge(&mut extension, &winner)?;
+                            yield extension;
+                        }
                     }
                 } else {
                     // Secondary lookup path (Box::pin to avoid stack overflow).
@@ -740,12 +759,16 @@ mod tests {
             cause: Some(Cause([2u8; 32])),
         };
 
-        let winner = choose(older.clone(), newer.clone());
-        assert_eq!(winner.cause, newer.cause, "Higher cause should win");
+        let winner = choose(older.clone().into(), newer.clone().into()).unwrap();
+        assert_eq!(
+            winner.cause().cloned(),
+            newer.cause,
+            "Higher cause should win"
+        );
 
         // Reversed argument order should produce the same winner.
-        let winner2 = choose(newer.clone(), older.clone());
-        assert_eq!(winner2.cause, newer.cause);
+        let winner2 = choose(newer.clone().into(), older.clone().into()).unwrap();
+        assert_eq!(winner2.cause().cloned(), newer.cause);
     }
 
     #[dialog_common::test]
@@ -767,13 +790,13 @@ mod tests {
             cause: Some(Cause([1u8; 32])),
         };
 
-        let winner_ab = choose(a.clone(), b.clone());
-        let winner_ba = choose(b.clone(), a.clone());
+        let winner_ab = choose(a.clone().into(), b.clone().into()).unwrap();
+        let winner_ba = choose(b.clone().into(), a.clone().into()).unwrap();
 
         // The winner should be deterministic regardless of argument order.
         assert_eq!(
-            Cause::from(&winner_ab),
-            Cause::from(&winner_ba),
+            Cause::from(&winner_ab.to_owned().unwrap()),
+            Cause::from(&winner_ba.to_owned().unwrap()),
             "Tiebreaker should be deterministic"
         );
     }

@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Entity, Select,
-    SortKey, Statement,
+    Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
+    DialogArtifactsError, Entity, Select, SortKey, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -362,9 +362,7 @@ where
         + 'static,
 {
     Box::pin(async_stream::try_stream! {
-        // `ArtifactStream` (and the merge/overlay pipeline it feeds) still
-        // traffics in owned `Artifact`s, so ingest through the owned form.
-        let select = branch.claims().select(input).to_owned();
+        let select = branch.claims().select(input);
 
         let remote = match branch.upstream() {
             Some(Upstream::Remote { remote: name, .. }) => {
@@ -457,7 +455,10 @@ where
         if let Some(demand) = &self.demand {
             demand.record_rules(&selector);
         }
+        // Rule bodies are hydrated from the full artifact, so this read
+        // genuinely needs owned rows; it is head-cached, not per-query hot.
         select_from_branch(branch.clone(), self.env, selector)
+            .owned()
             .try_collect()
             .await
     }

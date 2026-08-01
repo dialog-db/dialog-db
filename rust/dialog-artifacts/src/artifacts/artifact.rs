@@ -5,6 +5,7 @@
 //! units of data storage and retrieval.
 
 use std::{
+    borrow::Cow,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
     str::{FromStr, from_utf8},
 };
@@ -173,29 +174,60 @@ impl Artifact {
     }
 }
 
-/// A scanned fact row that has NOT been materialized into an owned
-/// [`Artifact`]: the index key, its stored [`Datum`] payload, and (for a
-/// spilled value) the fetched block bytes, exactly as the scan produced them.
+/// A fact row that has NOT been materialized into an owned [`Artifact`].
 ///
 /// Scans yield these instead of owned [`Artifact`]s because full
 /// materialization is the dominant per-row cost of a scan — an entity URI
 /// parse, an attribute alloc, a value decode with its allocs, and a cause
 /// clone, per row — and many consumers never need most of it (a count, a
-/// filter on one field, a re-encode). The key already carries the entity,
-/// attribute, and value losslessly, so accessors borrow straight from the key
-/// bytes on demand:
+/// filter on one field, a re-encode). A scanned row holds the index key, its
+/// stored [`Datum`] payload, and (for a spilled value) the fetched block
+/// bytes, exactly as the scan produced them; the key already carries the
+/// entity, attribute, and value losslessly, so accessors borrow straight from
+/// the key bytes on demand:
 ///
 /// - [`parts`](Self::parts) parses the key once into borrowed components —
 ///   the right call when reading several fields of the same row.
+/// - [`the_bytes`](Self::the_bytes) / [`of_bytes`](Self::of_bytes) read one
+///   field's raw bytes.
 /// - [`value`](Self::value) decodes just the value.
 /// - [`cause`](Self::cause) reads the payload's cause without any key walk.
+/// - [`sort_key`](Self::sort_key) derives the query layer's merge order
+///   straight from the stored key bytes, with no value decode or re-encode.
 /// - [`to_owned`](Self::to_owned) materializes the full [`Artifact`] for
 ///   consumers that genuinely need ownership.
+///
+/// A view can also back onto an owned [`Artifact`] (via `From<Artifact>`):
+/// that is how sources with no stored key — the in-memory `Changes` overlay a
+/// query unions with branch scans — travel the same streams. The borrowed
+/// accessors all work on both backings; only [`key`](Self::key),
+/// [`datum`](Self::datum), [`spilled`](Self::spilled), and
+/// [`parts`](Self::parts) are scanned-only.
 #[derive(Clone, Debug)]
 pub struct ArtifactView {
-    key: Key,
-    datum: Datum,
-    spilled: Option<Vec<u8>>,
+    backing: Backing,
+}
+
+#[derive(Clone, Debug)]
+enum Backing {
+    /// A row as the tree scan holds it: key + payload + fetched spill block.
+    Scanned {
+        key: Key,
+        datum: Datum,
+        spilled: Option<Vec<u8>>,
+    },
+    /// A row synthesized without a stored key (e.g. an uncommitted overlay
+    /// fact), carried as the owned [`Artifact`] it was made from. Boxed so
+    /// the common scanned row doesn't pay the owned form's footprint.
+    Owned(Box<Artifact>),
+}
+
+impl From<Artifact> for ArtifactView {
+    fn from(artifact: Artifact) -> Self {
+        Self {
+            backing: Backing::Owned(Box::new(artifact)),
+        }
+    }
 }
 
 impl ArtifactView {
@@ -203,55 +235,137 @@ impl ArtifactView {
     /// spilled value) the fetched block bytes.
     pub(crate) fn new(key: Key, datum: Datum, spilled: Option<Vec<u8>>) -> Self {
         Self {
-            key,
-            datum,
-            spilled,
+            backing: Backing::Scanned {
+                key,
+                datum,
+                spilled,
+            },
         }
     }
 
-    /// The index key this row was scanned at.
-    pub fn key(&self) -> &Key {
-        &self.key
+    /// The index key this row was scanned at, or `None` for a row backed by
+    /// an owned [`Artifact`] (no stored key exists).
+    pub fn key(&self) -> Option<&Key> {
+        match &self.backing {
+            Backing::Scanned { key, .. } => Some(key),
+            Backing::Owned(_) => None,
+        }
     }
 
     /// The stored payload of this row (the parts of the fact the key does not
-    /// carry).
-    pub fn datum(&self) -> &Datum {
-        &self.datum
+    /// carry), or `None` for a row backed by an owned [`Artifact`].
+    pub fn datum(&self) -> Option<&Datum> {
+        match &self.backing {
+            Backing::Scanned { datum, .. } => Some(datum),
+            Backing::Owned(_) => None,
+        }
     }
 
     /// The [`Cause`] of this fact, if any, without touching the key.
     pub fn cause(&self) -> Option<&Cause> {
-        self.datum.cause.as_ref()
+        match &self.backing {
+            Backing::Scanned { datum, .. } => datum.cause.as_ref(),
+            Backing::Owned(artifact) => artifact.cause.as_ref(),
+        }
     }
 
     /// The raw bytes of this row's spilled value block, when the value
-    /// spilled (`None` for an inline value).
+    /// spilled (`None` for an inline value or an owned-backed row).
     pub fn spilled(&self) -> Option<&[u8]> {
-        self.spilled.as_deref()
+        match &self.backing {
+            Backing::Scanned { spilled, .. } => spilled.as_deref(),
+            Backing::Owned(_) => None,
+        }
     }
 
     /// Parses the key into borrowed components: entity, attribute, value
     /// type, and value payload, borrowing from the key bytes (owning only an
     /// escaped entity/attribute). One walk of the key; call this once and
-    /// read every field a consumer needs off the result.
+    /// read every field a consumer needs off the result. Errors for a row
+    /// backed by an owned [`Artifact`], which has no stored key — the
+    /// field accessors below work on both backings.
     pub fn parts(&self) -> Result<KeyRef<'_>, DialogArtifactsError> {
-        varkey::parse_key_ref(self.key.as_ref()).ok_or_else(|| {
-            DialogArtifactsError::InvalidKey("key did not parse into components".to_string())
-        })
+        match &self.backing {
+            Backing::Scanned { key, .. } => varkey::parse_key_ref(key.as_ref()).ok_or_else(|| {
+                DialogArtifactsError::InvalidKey("key did not parse into components".to_string())
+            }),
+            Backing::Owned(_) => Err(DialogArtifactsError::InvalidKey(
+                "owned-backed view has no index key to parse".to_string(),
+            )),
+        }
+    }
+
+    /// The raw attribute bytes of this row (`namespace/predicate`, no alloc
+    /// unless the stored key carried an escape).
+    pub fn the_bytes(&self) -> Result<Cow<'_, [u8]>, DialogArtifactsError> {
+        match &self.backing {
+            Backing::Scanned { .. } => Ok(self.parts()?.attribute),
+            Backing::Owned(artifact) => Ok(Cow::Borrowed(artifact.the.as_str().as_bytes())),
+        }
+    }
+
+    /// The raw entity bytes of this row (the full URI, no alloc unless the
+    /// stored key carried an escape).
+    pub fn of_bytes(&self) -> Result<Cow<'_, [u8]>, DialogArtifactsError> {
+        match &self.backing {
+            Backing::Scanned { .. } => Ok(self.parts()?.entity),
+            Backing::Owned(artifact) => Ok(Cow::Borrowed(artifact.of.as_str().as_bytes())),
+        }
     }
 
     /// Decodes just this row's [`Value`], from the key's inline payload or
     /// from the spilled block fetched at scan time.
     pub fn value(&self) -> Result<Value, DialogArtifactsError> {
-        decode_value_parts(&self.parts()?, self.spilled.clone())
+        match &self.backing {
+            Backing::Scanned { spilled, .. } => decode_value_parts(&self.parts()?, spilled.clone()),
+            Backing::Owned(artifact) => Ok(artifact.is.clone()),
+        }
+    }
+
+    /// The [`SortKey`](crate::SortKey) of this row — the query layer's
+    /// cross-index merge order (see the `SortKey` docs).
+    ///
+    /// For a scanned row every component comes straight from the stored key
+    /// bytes: the attribute and entity columns, and the value tail exactly as
+    /// the key carries it (type byte, value slot, spilled hash) — no value
+    /// decode, no re-encode. That reproduces
+    /// [`sort_key`](crate::sort_key) under the manifest the row was WRITTEN
+    /// with, which is the tree's own order by construction. An owned-backed
+    /// row derives the same key from its fields under the default manifest
+    /// ([`default_sort_key`](crate::default_sort_key)); the two agree
+    /// wherever the tree's manifest is the default — see `default_sort_key`'s
+    /// soundness note.
+    pub fn sort_key(&self) -> Result<crate::SortKey, DialogArtifactsError> {
+        match &self.backing {
+            Backing::Scanned { .. } => {
+                let parts = self.parts()?;
+                let slot = parts.value.slot_bytes();
+                let mut tail = Vec::with_capacity(1 + slot.len() + 32);
+                tail.push(u8::from(parts.value_type));
+                tail.extend_from_slice(slot);
+                if let ValueRef::Spilled { hash, .. } = &parts.value {
+                    tail.extend_from_slice(hash);
+                }
+                Ok((
+                    parts.attribute.into_owned(),
+                    parts.entity.into_owned(),
+                    tail,
+                ))
+            }
+            Backing::Owned(artifact) => Ok(crate::default_sort_key(artifact)),
+        }
     }
 
     /// Materializes the full owned [`Artifact`]: entity, attribute, value,
     /// and cause. This is the whole per-row cost scans stopped paying by
     /// default — reach for it only when ownership is genuinely needed.
     pub fn to_owned(&self) -> Result<Artifact, DialogArtifactsError> {
-        reconstruct(&self.parts()?, &self.datum, self.spilled.clone())
+        match &self.backing {
+            Backing::Scanned { datum, spilled, .. } => {
+                reconstruct(&self.parts()?, datum, spilled.clone())
+            }
+            Backing::Owned(artifact) => Ok(artifact.as_ref().clone()),
+        }
     }
 }
 

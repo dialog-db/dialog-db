@@ -393,7 +393,9 @@ impl<'a> Provider<Select<'a>> for Changes {
         // and the comparison never touches stored key bytes, so the default
         // threshold is sound here (see `default_sort_key`).
         matched.sort_by_key(default_sort_key);
-        Ok(Box::pin(stream::iter(matched.into_iter().map(Ok))))
+        Ok(Box::pin(stream::iter(
+            matched.into_iter().map(|artifact| Ok(artifact.into())),
+        )))
     }
 }
 
@@ -520,6 +522,7 @@ mod tests {
             .collect::<Vec<_>>()
             .await
             .into_iter()
+            .map(|row| row.and_then(|view| view.to_owned()))
             .collect::<Result<Vec<_>, _>>()
             .expect("collect")
     }

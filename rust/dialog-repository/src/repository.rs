@@ -1951,7 +1951,7 @@ mod tests {
             use dialog_artifacts::selector::Constrained;
             use dialog_artifacts::{
                 ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey,
-                Update as _, Value, default_sort_key,
+                Update as _, Value,
             };
             use dialog_capability::Provider;
             use futures_util::StreamExt as _;
@@ -2046,7 +2046,10 @@ mod tests {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>, DialogArtifactsError>>()?;
-                Ok(items.iter().map(default_sort_key).collect())
+                Ok(items
+                    .iter()
+                    .map(|view| view.sort_key())
+                    .collect::<Result<Vec<_>, _>>()?)
             }
 
             let scan_modes: &[(&str, ArtifactSelector<Constrained>)] = &[
@@ -2066,7 +2069,7 @@ mod tests {
                 // Raw branch scan — bypass the QuerySession overlay so
                 // we see tree-order output without auto-metadata noise.
                 // The branch's prolly tree is the order ground truth.
-                let select = branch.claims().select(sel.clone()).to_owned();
+                let select = branch.claims().select(sel.clone());
                 let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
                 let branch_stream: ArtifactStream<'_> = Box::pin(select.execute(store).await?);
                 let branch_order = keys_from_stream(branch_stream).await?;

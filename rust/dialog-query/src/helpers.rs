@@ -422,7 +422,7 @@ where
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        let select = self.branch.claims().select(input).to_owned();
+        let select = self.branch.claims().select(input);
         let store = NetworkedIndex::new(self.operator, select.catalog(), None);
         let counting = CountingStore::new(store, self.journal.clone());
         let stream = select.execute(counting).await?;

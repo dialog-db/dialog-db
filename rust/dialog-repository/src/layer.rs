@@ -1,9 +1,13 @@
 //! Streaming merge + tombstone helpers for query-time source composition.
 //!
-//! Everything here works on `Stream<Item = Result<Artifact, _>>` —
+//! Everything here works on `Stream<Item = Result<ArtifactView, _>>` —
 //! [`ArtifactStream`]s — and is agnostic to where the streams came
 //! from (a branch's tree scan, a [`Changes`] overlay, anything else
-//! that implements `Provider<Select>`).
+//! that implements `Provider<Select>`). Rows travel as borrowed-access
+//! [`ArtifactView`]s; nothing in this layer materializes an owned
+//! `Artifact`, and merge order comes from each row's
+//! [`sort_key`](ArtifactView::sort_key) — derived straight from a scanned
+//! row's stored key bytes, with no per-row value decode or re-encode.
 //!
 //! - [`merge_grouped`] is the k-way merge that backs query-time
 //!   union of multiple sources. It preserves the "as-if merged into a
@@ -18,23 +22,10 @@
 
 use std::collections::HashSet;
 
-use dialog_artifacts::{Artifact, ArtifactStream, Cause, Changes, SortKey, default_sort_key};
+use dialog_artifacts::{
+    Artifact, ArtifactStream, ArtifactView, Cause, Changes, SortKey, default_sort_key,
+};
 use futures_util::{StreamExt, stream};
-
-/// The canonical group key for artifacts traveling through a query stream.
-///
-/// Consumers — notably the cardinality-one sliding window in
-/// [`AttributeQueryOnly::evaluate`](dialog_query::attribute::query::AttributeQuery) —
-/// assume that artifacts sharing the same `(the, of)` pair arrive
-/// consecutively. Anything that unions facts from multiple sources must
-/// preserve that invariant; this helper produces the comparable key used
-/// when grouping.
-pub(crate) fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
-    (
-        artifact.the.as_str().as_bytes().to_vec(),
-        artifact.of.as_str().as_bytes().to_vec(),
-    )
-}
 
 /// Merge sorted artifact streams into one stream whose order matches
 /// what a single physical prolly tree containing every input would
@@ -68,11 +59,15 @@ pub(crate) fn group_key(artifact: &Artifact) -> (Vec<u8>, Vec<u8>) {
 ///
 /// # Dedup: "same claim from two sources is still one claim"
 ///
-/// When the same `(the, of, is, cause)` artifact appears in multiple
+/// When the same `(the, of, is, cause)` claim appears in multiple
 /// inputs, only the first occurrence within a `(the, of)` run is
-/// yielded. The dedup region is the `(the, of)` group, tracked via
-/// [`group_key`]; the fingerprint is `Cause::from(&artifact)` which
-/// hashes all four fields so position-independent duplicates collapse.
+/// yielded. The dedup region is the `(the, of)` run, tracked by the sort
+/// key's leading components; the fingerprint is the full [`SortKey`] plus
+/// the row's cause. The sort key's value tail identifies the value exactly
+/// (an inline tail is the value's lossless order-preserving encoding; a
+/// spilled tail carries the whole-value content hash), so two rows share a
+/// fingerprint iff they are the same `(the, of, is, cause)` claim — no
+/// value decode needed.
 pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a> {
     use std::pin::Pin;
 
@@ -87,13 +82,28 @@ pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStr
         return streams.into_iter().next().expect("len == 1");
     }
 
-    let mut peekable: Vec<_> = streams.into_iter().map(StreamExt::peekable).collect();
+    // Pair every row with its sort key ONCE as it enters the merge, so the
+    // k-way head comparison below reads a cached key instead of re-deriving
+    // it on every peek round (the pre-view code re-encoded each head's value
+    // once per competing stream per yielded item).
+    let mut peekable: Vec<_> = streams
+        .into_iter()
+        .map(|stream| {
+            stream
+                .map(|row| {
+                    let view = row?;
+                    let key = view.sort_key()?;
+                    Ok::<_, dialog_artifacts::DialogArtifactsError>((key, view))
+                })
+                .peekable()
+        })
+        .collect();
 
     Box::pin(async_stream::try_stream! {
         // Fingerprints already yielded within the current (the, of) run.
-        // Cleared whenever the run advances to a new group_key.
-        let mut current_key: Option<(Vec<u8>, Vec<u8>)> = None;
-        let mut seen: HashSet<Cause> = HashSet::new();
+        // Cleared whenever the run advances to a new group.
+        let mut current_group: Option<(Vec<u8>, Vec<u8>)> = None;
+        let mut seen: HashSet<(Vec<u8>, Option<Cause>)> = HashSet::new();
 
         loop {
             let mut min_idx: Option<usize> = None;
@@ -105,31 +115,33 @@ pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStr
                         min_idx = Some(i);
                         break;
                     }
-                    Some(Ok(head)) => {
-                        let sk = default_sort_key(head);
-                        if min_sort.as_ref().is_none_or(|cur| &sk < cur) {
-                            min_sort = Some(sk);
+                    Some(Ok((key, _))) => {
+                        // Clone only when this head beats the running
+                        // minimum; the key was computed once at stream
+                        // entry, never re-derived here.
+                        if min_sort.as_ref().is_none_or(|cur| key < cur) {
+                            min_sort = Some(key.clone());
                             min_idx = Some(i);
                         }
                     }
                 }
             }
             let Some(idx) = min_idx else { break };
-            let item = peekable[idx]
+            let (key, view) = peekable[idx]
                 .next()
                 .await
                 .expect("peek returned Some, so next must too")?;
 
-            let key = group_key(&item);
-            if current_key.as_ref() != Some(&key) {
-                current_key = Some(key);
+            let (the, of, tail) = key;
+            let group = (the, of);
+            if current_group.as_ref() != Some(&group) {
+                current_group = Some(group);
                 seen.clear();
             }
-            // `Cause::from(&Artifact)` hashes (the, of, is, cause) — two
-            // artifacts with identical fields produce identical
-            // fingerprints.
-            if seen.insert(Cause::from(&item)) {
-                yield item;
+            // Within the (the, of) run the value tail + cause identify the
+            // claim, so the fingerprint needs only those.
+            if seen.insert((tail, view.cause().cloned())) {
+                yield view;
             }
         }
     })
@@ -172,12 +184,22 @@ pub(crate) fn filter_tombstones<'a>(
             loop {
                 match inner.next().await {
                     None => return None,
-                    Some(Err(e)) => return Some((Err::<Artifact, _>(e), (inner, tombstones))),
-                    Some(Ok(artifact)) => {
-                        if tombstones.contains(&default_sort_key(&artifact)) {
-                            continue;
+                    Some(Err(e)) => return Some((Err::<ArtifactView, _>(e), (inner, tombstones))),
+                    Some(Ok(view)) => {
+                        // The row's sort key comes straight from its stored
+                        // key bytes; the tombstone set was built with
+                        // `default_sort_key`, which agrees byte-for-byte
+                        // under the default manifest (see
+                        // `ArtifactView::sort_key`).
+                        match view.sort_key() {
+                            Err(e) => return Some((Err(e), (inner, tombstones))),
+                            Ok(key) => {
+                                if tombstones.contains(&key) {
+                                    continue;
+                                }
+                            }
                         }
-                        return Some((Ok(artifact), (inner, tombstones)));
+                        return Some((Ok(view), (inner, tombstones)));
                     }
                 }
             }
@@ -205,7 +227,9 @@ mod tests {
 
     fn stream_of(items: Vec<Artifact>) -> ArtifactStream<'static> {
         Box::pin(stream::iter(
-            items.into_iter().map(Ok::<_, DialogArtifactsError>),
+            items
+                .into_iter()
+                .map(|artifact| Ok::<_, DialogArtifactsError>(artifact.into())),
         ))
     }
 
@@ -213,6 +237,7 @@ mod tests {
         Ok(s.collect::<Vec<_>>()
             .await
             .into_iter()
+            .map(|row| row.and_then(|view| view.to_owned()))
             .collect::<Result<_, _>>()?)
     }
 
