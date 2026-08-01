@@ -1175,10 +1175,17 @@ subtracted (SQLite spends ~3K instructions on the same lookup):
 
 ### Ticket list for the read gap (artifacts layer, not tree)
 
-1. A direct point-lookup API: selector-shaped single-key reads go
-   through `HitchhikerTree::get`/`PersistentTree::get` (one
-   descent, no stream machinery). Expected to remove the 17%
-   stream share and most of the allocation churn for point reads.
+1. (Corrected 2026-08-01: a true point get is impossible under the
+   value-in-key format — the value is part of the key, so an
+   entity+attribute lookup is inherently a PREFIX SCAN over
+   `(of, the, *)`. The scan is there for a reason; the overhead
+   around it is not.) A lightweight prefix-scan path: descend once
+   to the range start and cursor through entries in place —
+   typically one leaf, one to a few entries — instead of the full
+   selector -> stream-plan -> TreeWalker -> collect-Vec pipeline.
+   The 17% stream-machinery share and most of the allocation churn
+   are per-scan setup, not per-entry work, and vanish for short
+   prefixes.
 2. Key construction without the url parser on the hot path:
    pre-validated `Entity`/`Attribute` types (parse once at the
    edge, reuse bytes), and a `build_key` that writes into a reused
