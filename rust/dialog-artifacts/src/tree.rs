@@ -713,24 +713,6 @@ pub trait ArtifactTreeExt {
             + Clone
             + ConditionalSync
             + 's;
-
-    /// [`scan`](Self::scan) collected into a `Vec` with one direct
-    /// traversal: identical rows in identical order, minus the two nested
-    /// async-generator layers, whose per-scan setup dominates SHORT scans —
-    /// and under the value-in-key format every "point" lookup is a short
-    /// prefix scan. Not for unbounded exports: the result is materialized
-    /// whole, so genuinely large reads should stream through `scan`.
-    async fn scan_collect<S>(
-        self,
-        store: S,
-        cache: SpillCache,
-        selector: ArtifactSelector<Constrained>,
-    ) -> Result<Vec<Artifact>, DialogArtifactsError>
-    where
-        Self: Sized,
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -996,57 +978,6 @@ impl ArtifactTreeExt for ArtifactTree {
                 yield artifact;
             }
         }
-    }
-
-    async fn scan_collect<S>(
-        self,
-        store: S,
-        cache: SpillCache,
-        selector: ArtifactSelector<Constrained>,
-    ) -> Result<Vec<Artifact>, DialogArtifactsError>
-    where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
-    {
-        let tree = self;
-        let raw_store = store.clone();
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
-        // The same range construction and per-entry pipeline as `scan` —
-        // parse once, match, resolve spill, reconstruct, re-check — over
-        // the walker's collected entries instead of two nested stream
-        // generators.
-        let manifest = tree.manifest(&storage).await?;
-        let range = selector_range(&selector, &manifest);
-
-        let entries = tree.collect_range(range, &storage).await?;
-        let mut artifacts = Vec::with_capacity(entries.len());
-        for raw in entries {
-            let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
-                DialogArtifactsError::InvalidKey("scanned entry's key does not parse".to_string())
-            })?;
-            let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
-            if verdict == SelectorMatch::Excluded {
-                continue;
-            }
-            let State::Added(datum) = &raw.value else {
-                continue;
-            };
-            let spilled = match &parts.value {
-                ValueRef::Spilled { hash, .. } => {
-                    Some(fetch_spilled_reference(&raw_store, &cache, hash).await?)
-                }
-                ValueRef::Inline(_) => None,
-            };
-            let artifact = Artifact::from_key_ref_datum_value(&parts, datum, spilled)?;
-            if verdict == SelectorMatch::NeedsValue
-                && !value_predicates_admit(&selector, &artifact.is)
-            {
-                continue;
-            }
-            artifacts.push(artifact);
-        }
-        Ok(artifacts)
     }
 }
 

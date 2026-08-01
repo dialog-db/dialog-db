@@ -42,7 +42,7 @@ use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value,
 };
 use dialog_storage::{Blake3Hash, FileSystemStorageBackend, MemoryStorageBackend};
-use futures_util::stream;
+use futures_util::{TryStreamExt, stream};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rusqlite::Connection;
@@ -316,8 +316,8 @@ impl DialogFacts {
         selector: ArtifactSelector<dialog_artifacts::selector::Constrained>,
     ) -> Result<Vec<Artifact>> {
         Ok(match self {
-            Self::Memory(artifacts) => artifacts.select_all(selector).await?,
-            Self::Disk(artifacts, _) => artifacts.select_all(selector).await?,
+            Self::Memory(artifacts) => artifacts.select(selector).try_collect().await?,
+            Self::Disk(artifacts, _) => artifacts.select(selector).try_collect().await?,
         })
     }
 

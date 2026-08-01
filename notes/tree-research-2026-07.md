@@ -1237,3 +1237,67 @@ a whitespace-free fast-path validator for `entity:`-scheme URIs
 (skip `url::Parser` on the hot path), reusable selector/range
 buffers, and a borrowed row view for scans (the attr_scan/join
 residue is per-row materialization).
+
+## Pivot: fold the collect wins back into the stream (2026-08-01)
+
+Owner direction: "stick to async streams but avoid materializing
+unless needed. Materialization could also probably borrow instead
+of copying which would probably offer a big win." So the collect
+fork is gone and its structural wins live in `TreeWalker::stream`
+itself — one read path again, no equivalence pin to maintain.
+
+Reverted: `TreeWalker::collect_range`, `PersistentTree::
+collect_range`, `ArtifactTreeExt::scan_collect`, `Artifacts::
+select_all`, the baseline collect switch, and the stream/collect
+equivalence test. Kept: `DecodedKeys::lower_bound`.
+
+Ported into `stream`:
+
+1. The memoized-decode arm enters the leaf at the range's
+   partition point (`keys.lower_bound(start)`) instead of visiting
+   every entry from position 0 — the O(leaf) -> O(log leaf + hits)
+   win, now for every streamed read.
+2. Byte-level range checks in both arms (`below_start` /
+   `past_end_bytes` against the already-computed `start_bytes` /
+   `end_bytes`), sound because `Key`'s order agrees with its byte
+   order (the same invariant `pending_for_leaf`'s range restriction
+   already leans on). `Key::try_from_bytes` now runs only for
+   entries that actually YIELD; before, every visited entry paid a
+   typed-key materialization just to be range-checked.
+3. Buffered-op yields drop their redundant re-check entirely:
+   `pending_for_leaf` already restricts ops to the walk's byte
+   bounds, so every surviving assert is in range by construction.
+
+Measured same-window (same benches, stream path throughout):
+
+| read | stream before | stream after | collect had |
+|---|---|---|---|
+| point_get/dialog_mem | 18.9 us | **9.7 us** | 10.0 us |
+| attr_scan/dialog_mem | 1.386 ms | 1.474 ms | 1.258 ms |
+| join/dialog_mem | ~2.88 ms | 3.34 ms | 2.75 ms |
+
+The point-read win survives the port fully (the stream now beats
+the collect fork's own number). attr_scan/join read a few percent
+worse than the collect fork in this window, but those spreads are
+within the session's observed thermal drift; the collect fork's
+own -9%/-4% there were marginal to begin with. The stream
+apparatus cost that motivated the fork was a point-read tax, and
+the lower_bound + byte-check port removes the dominant share of
+it without forking the API.
+
+Suites green (293 + 159 — one fewer: the equivalence pin went with
+the fork), converge_check smoke CONVERGED at 1000
+(root 97d0d796..., byte-identical; reads only, writes untouched).
+
+Recorded next step (owner-endorsed direction, needs a design pass
+before implementing since it changes the yielded type across
+consumers): BORROWED MATERIALIZATION. Today every yielded entry is
+an owned `Entry<Key, Value>` (rkyv deserialize + Vec/String
+allocs), and the artifacts layer builds an owned `Artifact` per
+row (more allocs + a URI re-parse). Sketch: yield an `EntryView`
+borrowing the leaf's node buffer (Arc + offsets — the buffer is
+already Arc-shared and immutable), and an artifacts-level borrowed
+row view over it; consumers that need ownership call `.to_owned()`
+explicitly. Attribution says per-row materialization is the bulk
+of the remaining attr_scan (44% alloc churn) and join gaps, so
+this is where the next big read win lives.
