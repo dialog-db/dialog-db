@@ -1377,3 +1377,62 @@ Remaining read tickets, updated:
    the per-call fixed costs that dominate a one-row read.
 3. write_batch residue: apply-phase per-instruction supersession
    reads + value encodes (artifacts layer).
+
+## Query pipeline on views: shipped, engine-level result NEUTRAL (2026-08-01)
+
+The follow-up ticket from the borrowed-materialization work, landed
+as 8f1cc5b: `ArtifactStream` now carries `ArtifactView`s end to
+end. Branch scans enter the query layer un-materialized; the
+`Changes` overlay wraps its rows as owned-backed views (boxed); the
+k-way merge orders by a sort key derived ONCE per row from its
+stored key bytes; dedup fingerprints on (value tail, cause) — the
+tail identifies the value exactly (lossless inline encoding /
+content hash when spilled) — replacing a per-row blake3 over the
+materialized fact; tombstones compare stored-byte keys against
+default-manifest retract keys (byte-equal under the default
+manifest; documented). The cardinality-one sliding window compares
+group membership on raw key bytes, materializes only group winners,
+and the challenge path decodes only the surviving winner's value.
+The pre-view merge also re-encoded every stream head's value on
+every peek round — that pathology is gone outright.
+
+Measured same-window (A/B against the parent commit under current
+conditions):
+
+| bench | before | after | verdict |
+|---|---|---|---|
+| query_join/1000 | 11.94 ms | 12.32 ms | +3% (noise-adjacent) |
+| query_memory/100 | 176 us | 171 us | -3% |
+| query_memory/1000 | 1.209 ms | 1.253 ms | +4% |
+| query_memory/10000 | 15.33 ms | 15.38 ms | ~0 |
+
+HONEST VERDICT: neutral at the engine level. The scan-side wins
+(-60% at the Artifacts::select layer) do not register through the
+query engine because the engine's own per-row machinery dominates:
+at 1000 entities, query_join runs 12.3 ms against a 1.32 ms
+storage-layer join ceiling (~9x engine overhead), and query_memory
+1.25 ms against a 0.59 ms attr_scan. What the engine pays per row —
+Match/extension clones, term binding plumbing, per-premise
+re-selects — dwarfs what materialization cost. Two residual view
+overheads partly offset the merge savings at this scale: each
+borrowed accessor call re-parses the key (the window does several
+per row), and in cardinality-one data with no history EVERY row is
+a group winner, so winner-only materialization skips nothing.
+
+Why it still deserved to land: one row currency across the whole
+read stack (no double materialization anywhere), the merge's
+per-peek value re-encode and per-row blake3 are structurally gone
+(matters as sources multiply: multi-branch unions, overlays,
+subscriptions), and the pipeline is now shaped for an engine that
+binds from bytes.
+
+Updated read-ticket priorities, in expected-impact order:
+1. ENGINE BINDING MACHINERY — the dominant term by ~9x on joins.
+   Attribute where the 11 ms of query_join/1000 goes (Match clone
+   per row? selector resolve per premise? per-binding re-select
+   setup?) before touching anything else engine-side.
+2. point_get fixed costs (selector URI parse, range key builds,
+   RwLock + tree clone per select) — the 8.5us-vs-1us residue.
+3. write_batch apply-phase supersession reads + value encodes.
+4. Minor: view accessors could carry a parsed-offset cache to
+   avoid per-call key re-parsing if a profile ever shows it.
