@@ -1,7 +1,7 @@
 use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{Artifact, ArtifactSelector, DialogArtifactsError};
+use dialog_artifacts::{Artifact, ArtifactSelector, ArtifactViewStream as _, DialogArtifactsError};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -141,6 +141,14 @@ impl Select<'_> {
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
         // scans agree on key order — that adjacency invariant is what
         // the cardinality-one sliding window relies on.
-        Ok(tree.scan(store, self.branch.spill_cache(), self.selector))
+        //
+        // The scan yields borrowed-access views; the query pipeline above
+        // this boundary (`ArtifactStream`, the k-way merge, the `Changes`
+        // overlay) still traffics in owned `Artifact`s, so rows materialize
+        // here. Threading views through that pipeline — so a query only
+        // materializes rows that survive its filters — is the follow-up.
+        Ok(tree
+            .scan(store, self.branch.spill_cache(), self.selector)
+            .owned())
     }
 }

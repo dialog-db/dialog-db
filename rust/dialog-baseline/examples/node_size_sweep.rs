@@ -28,7 +28,8 @@ use std::str::FromStr as _;
 use std::time::Instant;
 
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStoreMut as _, Artifacts, Attribute, Entity, Value,
+    Artifact, ArtifactSelector, ArtifactStoreMut as _, ArtifactViewStream as _, Artifacts,
+    Attribute, Entity, Value,
 };
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_storage::{Blake3Hash, MeasuredStorage, MemoryStorageBackend, StorageSource as _};
@@ -51,7 +52,7 @@ async fn profile(
     for selector in selectors {
         let cold: Artifacts<_> = Artifacts::open(IDENTIFIER.into(), backend.clone()).await?;
         let before = (backend.reads(), backend.read_bytes());
-        let found: Vec<Artifact> = cold.select(selector).try_collect().await?;
+        let found: Vec<Artifact> = cold.select(selector).owned().try_collect().await?;
         rows += found.len();
         fetches += backend.reads() - before.0;
         bytes += backend.read_bytes() - before.1;
@@ -154,7 +155,7 @@ fn main() -> anyhow::Result<()> {
             let selector = ArtifactSelector::new()
                 .the(Attribute::from_str("se.post/kind")?)
                 .of(Entity::from_str(&titled[0])?);
-            let _: Vec<Artifact> = cold.select(selector).try_collect().await?;
+            let _: Vec<Artifact> = cold.select(selector).owned().try_collect().await?;
             (backend.reads() - before.0, backend.read_bytes() - before.1)
         };
         println!("  cold open + first point query: {open_fetches} fetches, {open_bytes} bytes");

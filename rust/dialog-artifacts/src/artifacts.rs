@@ -385,11 +385,13 @@ where
         index.select_data(self.storage.clone(), of, the).await
     }
 
-    /// Stream every [`Artifact`] matching `selector`.
+    /// Stream every fact matching `selector`, as borrowed-access
+    /// [`ArtifactView`]s: read fields off the view, or call
+    /// [`ArtifactView::to_owned`] for a materialized [`Artifact`].
     pub fn select(
         &self,
         selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 'static + ConditionalSend
     {
         let index = self.index.clone();
         let storage = self.storage.clone();
@@ -567,7 +569,7 @@ where
     fn select(
         &self,
         selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 'static + ConditionalSend
     {
         let index = self.index.clone();
         let storage = self.storage.clone();
@@ -622,7 +624,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use crate::tree::distribution;
     use crate::{
-        Artifact, ArtifactSelector, ArtifactStoreMutExt, Artifacts, Attribute,
+        Artifact, ArtifactSelector, ArtifactStoreMutExt, ArtifactViewStream, Artifacts, Attribute,
         DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
     };
 
@@ -670,9 +672,13 @@ mod tests {
         }
 
         let selector = ArtifactSelector::new().the(Attribute::from_str("test/value")?);
-        let reused_rows: Vec<Artifact> = reused.select(selector.clone()).try_collect().await?;
+        let reused_rows: Vec<Artifact> = reused
+            .select(selector.clone())
+            .owned()
+            .try_collect()
+            .await?;
         let fresh = Artifacts::open("spine-pin".into(), fresh_backend.clone()).await?;
-        let fresh_rows: Vec<Artifact> = fresh.select(selector).try_collect().await?;
+        let fresh_rows: Vec<Artifact> = fresh.select(selector).owned().try_collect().await?;
         assert_eq!(reused_rows.len(), fresh_rows.len());
         Ok(())
     }
@@ -1055,6 +1061,7 @@ mod tests {
             let scan_start = std::time::Instant::now();
             let selected: Vec<Artifact> = facts
                 .select(ArtifactSelector::new().the(the))
+                .owned()
                 .try_collect()
                 .await?;
             let scan_elapsed = scan_start.elapsed();
@@ -1114,6 +1121,7 @@ mod tests {
             .is(sample.is.clone());
         let results: Vec<Artifact> = artifacts
             .select(selector)
+            .owned()
             .map(|artifact| artifact.unwrap())
             .collect()
             .await;
@@ -1153,8 +1161,9 @@ mod tests {
             .commit(data.clone().into_iter().map(Instruction::Assert))
             .await?;
 
-        let fact_stream =
-            facts.select(ArtifactSelector::new().the(Attribute::from_str("profile/name")?));
+        let fact_stream = facts
+            .select(ArtifactSelector::new().the(Attribute::from_str("profile/name")?))
+            .owned();
 
         let mut facts: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
         facts.sort_by(entity_order);
@@ -1195,6 +1204,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().the(Attribute::from_str("person/name")?))
+            .owned()
             .map(|fact| fact.unwrap())
             .collect()
             .await;
@@ -1294,6 +1304,7 @@ mod tests {
         // And the fact is not queryable.
         let hits: Vec<Artifact> = facts
             .select(ArtifactSelector::new().the(session))
+            .owned()
             .try_collect()
             .await?;
         assert!(hits.is_empty(), "the transient fact must not be queryable");
@@ -1336,6 +1347,7 @@ mod tests {
         // The fact is gone from queries.
         let hits: Vec<Artifact> = facts
             .select(ArtifactSelector::new().the(name))
+            .owned()
             .try_collect()
             .await?;
         assert!(
@@ -1380,6 +1392,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().the_starting_with("person/"))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 2, "two person/* facts");
@@ -1435,6 +1448,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().of_starting_with("urn:alpha:"))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 1, "short prefix selects on key bytes");
@@ -1444,6 +1458,7 @@ mod tests {
         assert!(long_prefix.len() > 32, "the prefix outruns the raw head");
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().of_starting_with(long_prefix))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1503,6 +1518,7 @@ mod tests {
         // "Al" spans two attributes (name + city) on the same entity.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_starting_with("Al"))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 2, "two values begin with Al");
@@ -1517,6 +1533,7 @@ mod tests {
         // A narrower prefix isolates one value.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_starting_with("Ali"))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 1);
@@ -1525,6 +1542,7 @@ mod tests {
         // A prefix that matches nothing returns nothing.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_starting_with("Zzz"))
+            .owned()
             .try_collect()
             .await?;
         assert!(selected.is_empty(), "no value begins with Zzz");
@@ -1570,6 +1588,7 @@ mod tests {
         // float, and boolean neighbors are non-matches, not errors.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(20)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1604,6 +1623,7 @@ mod tests {
                     .of(mixed)
                     .is_at_least(Value::UnsignedInt(20)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1621,6 +1641,7 @@ mod tests {
                     .is_at_least(Value::UnsignedInt(20))
                     .is_at_most(Value::Float(40.0)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert!(selected.is_empty(), "mixed-type bounds match nothing");
@@ -1631,6 +1652,7 @@ mod tests {
                     .is_at_least(Value::UnsignedInt(50))
                     .is_at_most(Value::UnsignedInt(20)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert!(selected.is_empty(), "inverted bounds match nothing");
@@ -1678,6 +1700,7 @@ mod tests {
         let probe = format!("{stem}-apple");
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_starting_with(&probe))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 1, "the probe distinguishes the tails");
@@ -1693,6 +1716,7 @@ mod tests {
                     .the(body.clone())
                     .is_at_least(Value::String(bound)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1728,6 +1752,7 @@ mod tests {
             .await?;
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().of(both))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 2, "same-prefix large values coexist");
@@ -1779,6 +1804,7 @@ mod tests {
                     .is_starting_with("a")
                     .is_at_most(Value::String("am".into())),
             )
+            .owned()
             .try_collect()
             .await?;
         let mut values: Vec<String> = selected
@@ -1803,6 +1829,7 @@ mod tests {
                     .is_starting_with("a")
                     .is_less_than(Value::String("am".into())),
             )
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 2, "exclusive bound drops the boundary");
@@ -1837,6 +1864,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_least(Value::Float(0.0)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1847,6 +1875,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_most(Value::Float(-0.0)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1907,6 +1936,7 @@ mod tests {
                     .of(alice.clone())
                     .is_at_least(Value::UnsignedInt(30)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert!(
@@ -1923,6 +1953,7 @@ mod tests {
                     .of(alice.clone())
                     .is_starting_with("Zzz"),
             )
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1941,6 +1972,7 @@ mod tests {
         // String band by their leading bytes.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_starting_with("Zzz"))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1953,6 +1985,7 @@ mod tests {
         // prefix is not a string and must not match.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().of(bob).is_starting_with("Al"))
+            .owned()
             .try_collect()
             .await?;
         assert!(
@@ -2000,6 +2033,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), expected, "every float fact reads back");
@@ -2061,6 +2095,7 @@ mod tests {
         // Inclusive lower bound.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(30)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(values(&selected), vec![30, 40, 50], ">= 30");
@@ -2068,6 +2103,7 @@ mod tests {
         // Exclusive lower bound drops the boundary value.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_greater_than(Value::UnsignedInt(30)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(values(&selected), vec![40, 50], "> 30");
@@ -2075,6 +2111,7 @@ mod tests {
         // Inclusive upper bound.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_most(Value::UnsignedInt(20)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(values(&selected), vec![10, 20], "<= 20");
@@ -2084,6 +2121,7 @@ mod tests {
             .select(
                 ArtifactSelector::new().is_between(Value::UnsignedInt(20), Value::UnsignedInt(40)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(values(&selected), vec![20, 30, 40], "[20, 40]");
@@ -2091,6 +2129,7 @@ mod tests {
         // A range that spans nothing.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(1000)))
+            .owned()
             .try_collect()
             .await?;
         assert!(selected.is_empty(), ">= 1000 matches nothing");
@@ -2113,7 +2152,9 @@ mod tests {
             .commit(data.into_iter().map(Instruction::Assert))
             .await?;
 
-        let stream = artifacts.select(ArtifactSelector::new().the("item/id".parse()?));
+        let stream = artifacts
+            .select(ArtifactSelector::new().the("item/id".parse()?))
+            .owned();
 
         tokio::pin!(stream);
 
@@ -2149,6 +2190,7 @@ mod tests {
 
             let ids = artifacts
                 .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
+                .owned()
                 .map(|result| result.unwrap())
                 .collect::<Vec<Artifact>>()
                 .await;
@@ -2166,6 +2208,7 @@ mod tests {
 
         let actual_ids = artifacts
             .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
+            .owned()
             .map(|result| result.unwrap())
             .collect::<Vec<Artifact>>()
             .await;
@@ -2201,7 +2244,9 @@ mod tests {
             (storage_backend.reads(), storage_backend.writes())
         };
 
-        let fact_stream = facts.select(ArtifactSelector::new().of(entity.clone()).is(name.clone()));
+        let fact_stream = facts
+            .select(ArtifactSelector::new().of(entity.clone()).is(name.clone()))
+            .owned();
 
         let results: Vec<Artifact> = fact_stream.map(|result| result.unwrap()).collect().await;
 
@@ -2260,11 +2305,13 @@ mod tests {
             (storage_backend.reads(), storage_backend.writes())
         };
 
-        let fact_stream = facts.select(
-            ArtifactSelector::new()
-                .the(attribute.clone())
-                .is(name.clone()),
-        );
+        let fact_stream = facts
+            .select(
+                ArtifactSelector::new()
+                    .the(attribute.clone())
+                    .is(name.clone()),
+            )
+            .owned();
 
         let results: Vec<Artifact> = fact_stream.map(|result| result.unwrap()).collect().await;
 
@@ -2371,7 +2418,9 @@ mod tests {
             (storage_backend.reads(), storage_backend.writes())
         };
 
-        let fact_stream = facts.select(ArtifactSelector::new().is(Value::String("name64".into())));
+        let fact_stream = facts
+            .select(ArtifactSelector::new().is(Value::String("name64".into())))
+            .owned();
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
         assert_eq!(results.len(), 1);
@@ -2392,8 +2441,9 @@ mod tests {
         assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
-        let fact_stream =
-            facts.select(ArtifactSelector::new().the(Attribute::from_str("item/id")?));
+        let fact_stream = facts
+            .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
+            .owned();
 
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
@@ -2441,6 +2491,7 @@ mod tests {
 
         let results = artifacts
             .select(ArtifactSelector::new().is(Value::UnsignedInt(123)))
+            .owned()
             .map(|result| result.unwrap().of)
             .collect::<BTreeSet<Entity>>()
             .await;
@@ -2474,6 +2525,7 @@ mod tests {
 
         let results = artifacts
             .select(ArtifactSelector::new().is(Value::UnsignedInt(123)))
+            .owned()
             .map(|result| result.unwrap().of)
             .collect::<BTreeSet<Entity>>()
             .await;
@@ -2536,11 +2588,14 @@ mod tests {
 
         assert_eq!(revision, restored_revision);
 
-        let fact_stream = facts.select(ArtifactSelector::new().is(Value::String("name10".into())));
+        let fact_stream = facts
+            .select(ArtifactSelector::new().is(Value::String("name10".into())))
+            .owned();
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
-        let restored_fact_stream =
-            restored_facts.select(ArtifactSelector::new().is(Value::String("name10".into())));
+        let restored_fact_stream = restored_facts
+            .select(ArtifactSelector::new().is(Value::String("name10".into())))
+            .owned();
         let restored_results: Vec<Artifact> = restored_fact_stream
             .map(|fact| fact.unwrap())
             .collect()
@@ -2583,6 +2638,7 @@ mod tests {
 
         let results = artifacts
             .select(ArtifactSelector::new().of(entity))
+            .owned()
             .collect::<Vec<Result<Artifact, DialogArtifactsError>>>()
             .await;
 
@@ -2617,6 +2673,7 @@ mod tests {
 
         let results = artifacts
             .select(ArtifactSelector::new().the("item/id".parse()?))
+            .owned()
             .map(|result| result.unwrap())
             .collect::<Vec<Artifact>>()
             .await;
@@ -2710,6 +2767,7 @@ mod tests {
         // Verify the data exists
         let results = artifacts
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2743,6 +2801,7 @@ mod tests {
         // Verify the data exists
         let results = artifacts
             .select(ArtifactSelector::new().the(attribute.clone()))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2754,6 +2813,7 @@ mod tests {
         // Verify data is gone (empty state)
         let results = artifacts
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2822,6 +2882,7 @@ mod tests {
         // Query the data to verify it was stored
         let results = artifacts_mut
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2920,6 +2981,7 @@ mod tests {
         // A select reconstructs the exact value by fetching the block.
         let results = artifacts
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2969,6 +3031,7 @@ mod tests {
             // Either way the value reconstructs.
             let results = artifacts
                 .select(ArtifactSelector::new().of(entity))
+                .owned()
                 .map(|r| r.unwrap())
                 .collect::<Vec<_>>()
                 .await;
@@ -3016,6 +3079,7 @@ mod tests {
                 .await?;
             let results = artifacts
                 .select(ArtifactSelector::new().of(entity))
+                .owned()
                 .map(|r| r.unwrap())
                 .collect::<Vec<_>>()
                 .await;
@@ -3052,6 +3116,7 @@ mod tests {
 
             let results = artifacts
                 .select(ArtifactSelector::new().of(entity).the(attribute.clone()))
+                .owned()
                 .map(|r| r.unwrap())
                 .collect::<Vec<_>>()
                 .await;
@@ -3085,6 +3150,7 @@ mod tests {
 
         let results = artifacts
             .select(ArtifactSelector::new().of(entity))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -3130,6 +3196,7 @@ mod tests {
         );
         let results = artifacts
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -3184,6 +3251,7 @@ mod tests {
         }
         let results = artifacts
             .select(ArtifactSelector::new().is(wanted.clone()))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;

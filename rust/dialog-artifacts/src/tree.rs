@@ -41,10 +41,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::history::{Cause as HistoryCause, Claim, Record, Version};
 use crate::{
-    Artifact, ArtifactSelector, ArtifactWriter, AttributeKey, AttributeKeyPart, Datum,
-    DialogArtifactsError, EntityKey, EntityKeyPart, Instruction, Key, KeyView, KeyViewConstruct,
-    KeyViewMut, SelectorMatch, State, Value, ValueDataType, ValueKey, encode_bytes,
-    encode_value_owned,
+    Artifact, ArtifactSelector, ArtifactView, ArtifactWriter, AttributeKey, AttributeKeyPart,
+    Datum, DialogArtifactsError, EntityKey, EntityKeyPart, Instruction, Key, KeyView,
+    KeyViewConstruct, KeyViewMut, SelectorMatch, State, Value, ValueDataType, ValueKey,
+    decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
     match_selector_and_key_ref,
@@ -688,8 +688,11 @@ pub trait ArtifactTreeExt {
             + Clone
             + ConditionalSync;
 
-    /// Scan the tree for [`Artifact`]s matching the given constrained
-    /// selector.
+    /// Scan the tree for facts matching the given constrained selector,
+    /// yielding each as a borrowed-access [`ArtifactView`] rather than a
+    /// materialized [`Artifact`] — the caller decides per row whether to
+    /// read a field off the view or [`to_owned`](ArtifactView::to_owned)
+    /// the whole fact.
     ///
     /// Picks the EAV/AEV/VAE index based on which field of the
     /// selector is constrained (entity / value / attribute, in that
@@ -706,7 +709,7 @@ pub trait ArtifactTreeExt {
         store: S,
         cache: SpillCache,
         selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
+    ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + ConditionalSend
     where
         Self: Sized,
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -913,7 +916,7 @@ impl ArtifactTreeExt for ArtifactTree {
         store: S,
         cache: SpillCache,
         selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
+    ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + ConditionalSend
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
@@ -937,13 +940,11 @@ impl ArtifactTreeExt for ArtifactTree {
             tokio::pin!(stream);
             for await item in stream {
                 let raw = item?;
-                // Parse each entry's key ONCE into borrowed components, and reuse
-                // that single parse for matching, spill resolution, and
-                // reconstruction. The previous flow re-split the key many times
-                // per entry (once per `KeyView` accessor in `matches_selector`,
-                // again in the spill lookup, again in reconstruction); on the
-                // variable-length M3 key that per-entry re-splitting dominated
-                // scan cost.
+                // Parse each entry's key ONCE into borrowed components for
+                // matching and spill resolution. Nothing else is materialized
+                // here: the entry's key and payload travel into the yielded
+                // view as-is, and the consumer decides per row whether to
+                // borrow a field or reconstruct the whole fact.
                 // A key that does not parse is corruption; dropping it
                 // silently would make the corrupt entry vanish from results
                 // with no signal.
@@ -956,26 +957,32 @@ impl ArtifactTreeExt for ArtifactTree {
                 if verdict == SelectorMatch::Excluded {
                     continue;
                 }
-                let State::Added(datum) = &raw.value else {
+                if !matches!(raw.value, State::Added(_)) {
                     continue;
-                };
+                }
                 let spilled = match &parts.value {
                     ValueRef::Spilled { hash, .. } => {
                         Some(fetch_spilled_reference(&raw_store, &cache, hash).await?)
                     }
                     ValueRef::Inline(_) => None,
                 };
-                let artifact = Artifact::from_key_ref_datum_value(&parts, datum, spilled)?;
                 // A NeedsValue verdict means some value predicate's answer
                 // lies beyond the spilled value's in-key prefix; the block is
-                // in hand now (it was fetched for reconstruction anyway), so
-                // re-check semantically before yielding.
+                // in hand now (it was fetched for the view anyway), so
+                // re-check semantically before yielding. Only the value is
+                // decoded for the check — not the entity or attribute.
                 if verdict == SelectorMatch::NeedsValue
-                    && !value_predicates_admit(&selector, &artifact.is)
+                    && !value_predicates_admit(
+                        &selector,
+                        &decode_value_parts(&parts, spilled.clone())?,
+                    )
                 {
                     continue;
                 }
-                yield artifact;
+                let State::Added(datum) = raw.value else {
+                    unreachable!("Added state checked above")
+                };
+                yield ArtifactView::new(raw.key, datum, spilled);
             }
         }
     }

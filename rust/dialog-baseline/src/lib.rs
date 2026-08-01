@@ -39,10 +39,11 @@ use std::str::FromStr;
 use anyhow::Result;
 use base58::ToBase58;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStoreMut, Artifacts, Attribute, Entity, Instruction, Value,
+    Artifact, ArtifactSelector, ArtifactStoreMut, ArtifactView, ArtifactViewStream as _, Artifacts,
+    Attribute, Entity, Instruction, Value,
 };
 use dialog_storage::{Blake3Hash, FileSystemStorageBackend, MemoryStorageBackend};
-use futures_util::{TryStreamExt, stream};
+use futures_util::{StreamExt, TryStreamExt, stream};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rusqlite::Connection;
@@ -316,9 +317,30 @@ impl DialogFacts {
         selector: ArtifactSelector<dialog_artifacts::selector::Constrained>,
     ) -> Result<Vec<Artifact>> {
         Ok(match self {
-            Self::Memory(artifacts) => artifacts.select(selector).try_collect().await?,
-            Self::Disk(artifacts, _) => artifacts.select(selector).try_collect().await?,
+            Self::Memory(artifacts) => artifacts.select(selector).owned().try_collect().await?,
+            Self::Disk(artifacts, _) => artifacts.select(selector).owned().try_collect().await?,
         })
+    }
+
+    /// The `(entity, value)` pairs a scan yields, materialized per row to
+    /// exactly the degree the SQLite arms materialize theirs (a `String`
+    /// per column read off the statement row): entity bytes to a `String`,
+    /// value decoded to an owned [`Value`] — no entity URI parse, no
+    /// per-row [`Artifact`].
+    async fn scan_pairs(
+        stream: impl futures_util::Stream<
+            Item = std::result::Result<ArtifactView, dialog_artifacts::DialogArtifactsError>,
+        >,
+    ) -> Result<Vec<(String, Value)>> {
+        let mut pairs = Vec::new();
+        futures_util::pin_mut!(stream);
+        while let Some(row) = stream.next().await {
+            let row = row?;
+            let parts = row.parts()?;
+            let entity = String::from_utf8(parts.entity.to_vec())?;
+            pairs.push((entity, row.value()?));
+        }
+        Ok(pairs)
     }
 
     /// Point lookup: the value of `(entity, stuff/name)`.
@@ -326,13 +348,21 @@ impl DialogFacts {
         let selector = ArtifactSelector::new()
             .the(Attribute::from_str(NAME_ATTRIBUTE)?)
             .of(Entity::from_str(entity)?);
-        Ok(self.collect(selector).await?.pop().map(|found| found.is))
+        let mut pairs = match self {
+            Self::Memory(artifacts) => Self::scan_pairs(artifacts.select(selector)).await?,
+            Self::Disk(artifacts, _) => Self::scan_pairs(artifacts.select(selector)).await?,
+        };
+        Ok(pairs.pop().map(|(_, value)| value))
     }
 
     /// Attribute scan: every `stuff/name` fact.
     pub async fn attribute_scan(&self) -> Result<usize> {
         let selector = ArtifactSelector::new().the(Attribute::from_str(NAME_ATTRIBUTE)?);
-        Ok(self.collect(selector).await?.len())
+        let pairs = match self {
+            Self::Memory(artifacts) => Self::scan_pairs(artifacts.select(selector)).await?,
+            Self::Disk(artifacts, _) => Self::scan_pairs(artifacts.select(selector)).await?,
+        };
+        Ok(pairs.len())
     }
 
     /// Two-attribute hash join on the shared entity, at the fact-store
@@ -340,19 +370,22 @@ impl DialogFacts {
     /// storage-layer ceiling for the `query_join` engine benchmark — the
     /// gap between this number and `query_join` is engine overhead.
     pub async fn join(&self) -> Result<usize> {
-        let names = self
-            .collect(ArtifactSelector::new().the(Attribute::from_str(NAME_ATTRIBUTE)?))
-            .await?;
-        let roles = self
-            .collect(ArtifactSelector::new().the(Attribute::from_str(ROLE_ATTRIBUTE)?))
-            .await?;
-        let names_by_entity: std::collections::HashMap<String, Value> = names
-            .into_iter()
-            .map(|artifact| (artifact.of.to_string(), artifact.is))
-            .collect();
+        let names_selector = ArtifactSelector::new().the(Attribute::from_str(NAME_ATTRIBUTE)?);
+        let roles_selector = ArtifactSelector::new().the(Attribute::from_str(ROLE_ATTRIBUTE)?);
+        let (names, roles) = match self {
+            Self::Memory(artifacts) => (
+                Self::scan_pairs(artifacts.select(names_selector)).await?,
+                Self::scan_pairs(artifacts.select(roles_selector)).await?,
+            ),
+            Self::Disk(artifacts, _) => (
+                Self::scan_pairs(artifacts.select(names_selector)).await?,
+                Self::scan_pairs(artifacts.select(roles_selector)).await?,
+            ),
+        };
+        let names_by_entity: std::collections::HashMap<String, Value> = names.into_iter().collect();
         let mut count = 0;
-        for role in roles {
-            if names_by_entity.contains_key(&role.of.to_string()) {
+        for (entity, _role_value) in roles {
+            if names_by_entity.contains_key(&entity) {
                 count += 1;
             }
         }

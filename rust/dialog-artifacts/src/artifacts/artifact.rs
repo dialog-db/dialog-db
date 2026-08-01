@@ -9,6 +9,8 @@ use std::{
     str::{FromStr, from_utf8},
 };
 
+use dialog_common::ConditionalSend;
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -171,6 +173,114 @@ impl Artifact {
     }
 }
 
+/// A scanned fact row that has NOT been materialized into an owned
+/// [`Artifact`]: the index key, its stored [`Datum`] payload, and (for a
+/// spilled value) the fetched block bytes, exactly as the scan produced them.
+///
+/// Scans yield these instead of owned [`Artifact`]s because full
+/// materialization is the dominant per-row cost of a scan — an entity URI
+/// parse, an attribute alloc, a value decode with its allocs, and a cause
+/// clone, per row — and many consumers never need most of it (a count, a
+/// filter on one field, a re-encode). The key already carries the entity,
+/// attribute, and value losslessly, so accessors borrow straight from the key
+/// bytes on demand:
+///
+/// - [`parts`](Self::parts) parses the key once into borrowed components —
+///   the right call when reading several fields of the same row.
+/// - [`value`](Self::value) decodes just the value.
+/// - [`cause`](Self::cause) reads the payload's cause without any key walk.
+/// - [`to_owned`](Self::to_owned) materializes the full [`Artifact`] for
+///   consumers that genuinely need ownership.
+#[derive(Clone, Debug)]
+pub struct ArtifactView {
+    key: Key,
+    datum: Datum,
+    spilled: Option<Vec<u8>>,
+}
+
+impl ArtifactView {
+    /// Assembles a view from a scanned entry's key, its payload, and (for a
+    /// spilled value) the fetched block bytes.
+    pub(crate) fn new(key: Key, datum: Datum, spilled: Option<Vec<u8>>) -> Self {
+        Self {
+            key,
+            datum,
+            spilled,
+        }
+    }
+
+    /// The index key this row was scanned at.
+    pub fn key(&self) -> &Key {
+        &self.key
+    }
+
+    /// The stored payload of this row (the parts of the fact the key does not
+    /// carry).
+    pub fn datum(&self) -> &Datum {
+        &self.datum
+    }
+
+    /// The [`Cause`] of this fact, if any, without touching the key.
+    pub fn cause(&self) -> Option<&Cause> {
+        self.datum.cause.as_ref()
+    }
+
+    /// The raw bytes of this row's spilled value block, when the value
+    /// spilled (`None` for an inline value).
+    pub fn spilled(&self) -> Option<&[u8]> {
+        self.spilled.as_deref()
+    }
+
+    /// Parses the key into borrowed components: entity, attribute, value
+    /// type, and value payload, borrowing from the key bytes (owning only an
+    /// escaped entity/attribute). One walk of the key; call this once and
+    /// read every field a consumer needs off the result.
+    pub fn parts(&self) -> Result<KeyRef<'_>, DialogArtifactsError> {
+        varkey::parse_key_ref(self.key.as_ref()).ok_or_else(|| {
+            DialogArtifactsError::InvalidKey("key did not parse into components".to_string())
+        })
+    }
+
+    /// Decodes just this row's [`Value`], from the key's inline payload or
+    /// from the spilled block fetched at scan time.
+    pub fn value(&self) -> Result<Value, DialogArtifactsError> {
+        decode_value_parts(&self.parts()?, self.spilled.clone())
+    }
+
+    /// Materializes the full owned [`Artifact`]: entity, attribute, value,
+    /// and cause. This is the whole per-row cost scans stopped paying by
+    /// default — reach for it only when ownership is genuinely needed.
+    pub fn to_owned(&self) -> Result<Artifact, DialogArtifactsError> {
+        reconstruct(&self.parts()?, &self.datum, self.spilled.clone())
+    }
+}
+
+/// Chainable materialization for streams of scanned rows: `.owned()` turns a
+/// stream of [`ArtifactView`]s into a stream of owned [`Artifact`]s by calling
+/// [`ArtifactView::to_owned`] on every row.
+///
+/// This is the explicit opt-in to the full per-row materialization cost —
+/// scans stopped paying it by default. Prefer reading fields off the views
+/// where possible; reach for `.owned()` when rows genuinely leave the scan's
+/// scope (collected into results handed to a caller, serialized outward, fed
+/// to an API that requires [`Artifact`]).
+pub trait ArtifactViewStream:
+    Stream<Item = Result<ArtifactView, DialogArtifactsError>> + Sized
+{
+    /// Materializes every row into an owned [`Artifact`].
+    fn owned(self) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + ConditionalSend
+    where
+        Self: ConditionalSend,
+    {
+        self.map(|row| row.and_then(|view| view.to_owned()))
+    }
+}
+
+impl<S> ArtifactViewStream for S where
+    S: Stream<Item = Result<ArtifactView, DialogArtifactsError>> + Sized
+{
+}
+
 /// Extracts the entity and attribute from a key view, decoding the raw UTF-8
 /// key columns.
 fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Attribute), DialogArtifactsError> {
@@ -203,7 +313,27 @@ fn reconstruct(
         DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
     })?)?;
 
-    let is = match parts.value {
+    let is = decode_value_parts(parts, spilled)?;
+
+    Ok(Artifact {
+        the,
+        of,
+        is,
+        cause: datum.cause.clone(),
+    })
+}
+
+/// Decodes a fact's [`Value`] from its parsed key components: the inline
+/// order-preserving payload for an inline value, or the fetched archive block
+/// bytes (`spilled`) for a spilled one. The value-only slice of
+/// [`reconstruct`], for callers (a value predicate re-check, a
+/// [`ArtifactView::value`] access) that need the value without paying for the
+/// entity and attribute materialization.
+pub(crate) fn decode_value_parts(
+    parts: &KeyRef<'_>,
+    spilled: Option<Vec<u8>>,
+) -> Result<Value, DialogArtifactsError> {
+    Ok(match parts.value {
         // The key carries the value's prefix and hash; the raw value bytes
         // live in a content-addressed archive block the caller fetched and
         // passed in.
@@ -230,12 +360,5 @@ fn reconstruct(
             }
             value
         }
-    };
-
-    Ok(Artifact {
-        the,
-        of,
-        is,
-        cause: datum.cause.clone(),
     })
 }
