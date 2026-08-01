@@ -802,7 +802,7 @@ mod tests {
                 ArtifactSelector::new()
                     .the(name_attr.clone())
                     .of(alice.clone()),
-            )
+            ).to_owned()
             .perform(&operator)
             .await?
             .try_collect()
@@ -820,7 +820,7 @@ mod tests {
                 ArtifactSelector::new()
                     .the(age_attr.clone())
                     .of(alice.clone()),
-            )
+            ).to_owned()
             .perform(&operator)
             .await?
             .try_collect()
@@ -843,7 +843,7 @@ mod tests {
                 ArtifactSelector::new()
                     .the(name_attr.clone())
                     .of(alice.clone()),
-            )
+            ).to_owned()
             .perform(&operator)
             .await?
             .try_collect()
@@ -860,7 +860,7 @@ mod tests {
                 ArtifactSelector::new()
                     .the(age_attr.clone())
                     .of(alice.clone()),
-            )
+            ).to_owned()
             .perform(&operator)
             .await?
             .try_collect()
@@ -903,7 +903,7 @@ mod tests {
                 ArtifactSelector::new()
                     .the(name_attr.clone().into())
                     .of(alice.clone()),
-            )
+            ).to_owned()
             .perform(&operator)
             .await?
             .try_collect()
@@ -925,7 +925,7 @@ mod tests {
                 ArtifactSelector::new()
                     .the(name_attr.clone().into())
                     .of(alice.clone()),
-            )
+            ).to_owned()
             .perform(&operator)
             .await?
             .try_collect()

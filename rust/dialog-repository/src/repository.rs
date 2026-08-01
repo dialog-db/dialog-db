@@ -457,7 +457,7 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -514,7 +514,7 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().of("user:alice".parse()?))
+            .select(ArtifactSelector::new().of("user:alice".parse()?)).to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -536,7 +536,7 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -571,7 +571,7 @@ mod tests {
         // Verify it's there
         let before: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -588,7 +588,7 @@ mod tests {
 
         let after: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -2061,7 +2061,7 @@ mod tests {
                 // Raw branch scan — bypass the QuerySession overlay so
                 // we see tree-order output without auto-metadata noise.
                 // The branch's prolly tree is the order ground truth.
-                let select = branch.claims().select(sel.clone());
+                let select = branch.claims().select(sel.clone()).to_owned();
                 let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
                 let branch_stream: ArtifactStream<'_> = Box::pin(select.execute(store).await?);
                 let branch_order = keys_from_stream(branch_stream).await?;
@@ -2141,7 +2141,7 @@ mod tests {
 
             let results: Vec<_> = r_branch
                 .claims()
-                .select(ArtifactSelector::new().the("user/name".parse()?))
+                .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()
@@ -2190,7 +2190,7 @@ mod tests {
             let named_branch = named_repo.branch("main").open().perform(&operator).await?;
             let results: Vec<_> = named_branch
                 .claims()
-                .select(ArtifactSelector::new().the("item/tag".parse()?))
+                .select(ArtifactSelector::new().the("item/tag".parse()?)).to_owned()
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()

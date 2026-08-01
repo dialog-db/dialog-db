@@ -423,7 +423,7 @@ mod tests {
         let main_reloaded = repo.branch("main").load().perform(&operator).await?;
         let results: Vec<_> = main_reloaded
             .claims()
-            .select(dialog_artifacts::ArtifactSelector::new().the("doc/body".parse()?))
+            .select(dialog_artifacts::ArtifactSelector::new().the("doc/body".parse()?)).to_owned()
             .perform(&operator)
             .await?
             .filter_map(|r| async { r.ok() })

@@ -128,6 +128,8 @@ impl From<CasError> for ArchiveError {
 /// Run a blocking archive operation off the async executor.
 async fn blocking<T, F>(op: F) -> Result<T, ArchiveError>
 where
+    // bare-send-ok: tokio::task::spawn_blocking moves the closure to a
+    // worker thread and requires real Send; this provider is native-only.
     T: Send + 'static,
     F: FnOnce() -> Result<T, ArchiveError> + Send + 'static,
 {

@@ -321,7 +321,7 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("person/name".parse()?))
+            .select(ArtifactSelector::new().the("person/name".parse()?)).to_owned()
             .perform(&operator)
             .await?
             .filter_map(|r| async { r.ok() })

@@ -362,7 +362,9 @@ where
         + 'static,
 {
     Box::pin(async_stream::try_stream! {
-        let select = branch.claims().select(input);
+        // `ArtifactStream` (and the merge/overlay pipeline it feeds) still
+        // traffics in owned `Artifact`s, so ingest through the owned form.
+        let select = branch.claims().select(input).to_owned();
 
         let remote = match branch.upstream() {
             Some(Upstream::Remote { remote: name, .. }) => {

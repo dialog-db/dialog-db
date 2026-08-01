@@ -1,7 +1,9 @@
 use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{Artifact, ArtifactSelector, ArtifactViewStream as _, DialogArtifactsError};
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, ArtifactView, ArtifactViewStream as _, DialogArtifactsError,
+};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -43,17 +45,36 @@ impl<'a> Select<'a> {
     }
 }
 
+impl<'a> Select<'a> {
+    /// Materialize every row: the select's streams yield owned
+    /// [`Artifact`]s instead of borrowed-access [`ArtifactView`]s.
+    ///
+    /// `select(..).to_owned().perform(..)` is the drop-in spelling for
+    /// consumers of the pre-view API; prefer reading fields off the views
+    /// where the rows never leave the caller's scope.
+    // to_owned takes `self` because the select statement is a builder the
+    // terminal perform/execute consumes; there is no `&self` version to
+    // convert from.
+    #[allow(clippy::wrong_self_convention)]
+    pub fn to_owned(self) -> SelectOwned<'a> {
+        SelectOwned(self)
+    }
+}
+
 impl Select<'_> {
     /// Execute the select, using fallback to remote if the branch has
     /// a remote upstream.
     ///
-    /// The per-item error type remains [`DialogArtifactsError`] because
-    /// stream items surface artifact-decoding errors that the caller may
-    /// want to inspect directly.
+    /// Rows stream as borrowed-access [`ArtifactView`]s; chain
+    /// [`to_owned`](Self::to_owned) before this call for owned
+    /// [`Artifact`]s. The per-item error type remains
+    /// [`DialogArtifactsError`] because stream items surface
+    /// artifact-decoding errors that the caller may want to inspect
+    /// directly.
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogSearchTreeError>
+    ) -> Result<impl Stream<Item = Result<ArtifactView, DialogArtifactsError>>, DialogSearchTreeError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -93,7 +114,7 @@ impl Select<'_> {
         self,
         store: S,
     ) -> Result<
-        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
+        impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's,
         DialogSearchTreeError,
     >
     where
@@ -141,14 +162,56 @@ impl Select<'_> {
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
         // scans agree on key order — that adjacency invariant is what
         // the cardinality-one sliding window relies on.
-        //
-        // The scan yields borrowed-access views; the query pipeline above
-        // this boundary (`ArtifactStream`, the k-way merge, the `Changes`
-        // overlay) still traffics in owned `Artifact`s, so rows materialize
-        // here. Threading views through that pipeline — so a query only
-        // materializes rows that survive its filters — is the follow-up.
-        Ok(tree
-            .scan(store, self.branch.spill_cache(), self.selector)
-            .owned())
+        Ok(tree.scan(store, self.branch.spill_cache(), self.selector))
+    }
+}
+
+/// A [`Select`] whose streams materialize every row into an owned
+/// [`Artifact`] — the explicit opt-in produced by [`Select::to_owned`].
+///
+/// The query pipeline above the branch scan (`ArtifactStream`, the k-way
+/// merge, the `Changes` overlay) still traffics in owned `Artifact`s, so it
+/// ingests through this form. Threading views through that pipeline — so a
+/// query only materializes rows that survive its filters — is the follow-up.
+pub struct SelectOwned<'a>(Select<'a>);
+
+impl SelectOwned<'_> {
+    /// The catalog (archive index) scoped to this branch's subject.
+    pub fn catalog(&self) -> Capability<Catalog> {
+        self.0.catalog()
+    }
+
+    /// [`Select::perform`], with every row materialized.
+    pub async fn perform<Env>(
+        self,
+        env: &Env,
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogSearchTreeError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        Ok(self.0.perform(env).await?.owned())
+    }
+
+    /// [`Select::execute`], with every row materialized.
+    pub async fn execute<'s, S>(
+        self,
+        store: S,
+    ) -> Result<
+        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
+        DialogSearchTreeError,
+    >
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync
+            + 's,
+    {
+        Ok(self.0.execute(store).await?.owned())
     }
 }

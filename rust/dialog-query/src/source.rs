@@ -56,7 +56,7 @@ pub(crate) mod test {
             let stream = self
                 .branch
                 .claims()
-                .select(input)
+                .select(input).to_owned()
                 .perform(self.operator)
                 .await?;
             Ok(Box::pin(stream))
