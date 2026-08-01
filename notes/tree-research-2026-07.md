@@ -1086,3 +1086,46 @@ their own future tickets, not tree work.
 
 Remaining caveat: SQLite arms were measured on the main-graft
 build, but the SQLite code is identical in both.
+
+## Bulk-dominance plant: the write_batch tweak (2026-07-31)
+
+Owner question: write_batch suffers far more than anything else
+(66x behind sqlite_mem where small txns are 12.5x) — can it be
+tweaked? Attribution: a 1000-entity batch sends ~6,000 index ops
+through `replay_ops` as ONE canonical edit each (descent + gates +
+reshape, ~45 us/op) — for a batch into a fresh store that is pure
+overhead, since the canonical tree of a known fact set can be built
+bottom-up in one pass.
+
+Two pieces shipped:
+
+1. `TransientTree::plant`: sort ops (stable, so a batch's temporal
+   order survives within a key), fold last-wins, drop retracts that
+   survive (no-ops on empty), then build canonically —
+   `regroup_entries` for the leaf level and `seal_root`'s per-level
+   grouping loop upward. History independence makes this exact: the
+   canonical form is a pure function of the surviving fact set.
+2. The bulk-dominance rebuild in `write_with`: the empty-tree hook
+   alone never fired in the real flow (a batch's first instruction
+   seeds a tiny root before the rest buffer behind it), so after the
+   settle cascade, when the leaf-bound batch dwarfs the live tree
+   (>= 64 ops and > 8x the tree's entries, checked by a BOUNDED
+   novelty-aware scan that a genuinely large tree aborts after
+   deferred/8 entries), the tree's resolved state streams out, the
+   deferred ops append (strictly newer — a key's ops cascade as a
+   whole link buffer, so no key straddles), and one plant replaces
+   the per-op replay. Per-txn commits (~7 ops against thousands of
+   entries) never trigger it.
+
+Measured, same machine window (the earlier 289 ms reading was a
+faster thermal window; pre-change re-measured at 380-403 ms):
+write_batch/dialog_mem **385 -> 270 ms (-29%)**, byte counts and
+canonical roots unchanged, converge_check CONVERGED at
+200/1000/3000 (10K in flight at write-up) with the same roots as
+every prior build, suites green, SE replay byte-identical.
+
+What remains in write_batch's 270 ms is NOT tree work: the
+per-instruction apply phase (cardinality-one supersession reads
+against the buffered state, per-instruction value encodes — the
+very first audit's finding) now dominates. That is an artifacts-
+layer ticket: batch the instruction processing, not the tree.

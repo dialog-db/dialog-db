@@ -392,6 +392,75 @@ where
         Ok(self)
     }
 
+    /// Whether this tree is empty and unedited — the bulk-load
+    /// precondition for [`plant`](Self::plant).
+    pub(crate) fn is_unplanted(&self) -> bool {
+        matches!(&self.root, TransientRoot::Unloaded(hash) if hash == NULL_BLAKE3_HASH)
+    }
+
+    /// Plants a whole batch into an EMPTY tree with one bottom-up build —
+    /// the bulk-load fast path. The ops are resolved last-wins per key
+    /// (the stable sort keeps a batch's temporal order within a key), the
+    /// surviving asserts become the sorted entry list, and the canonical
+    /// tree is built directly: [`regroup_entries`] for the leaf level,
+    /// then the same per-level grouping loop `seal_root` runs — instead of
+    /// one canonical edit per op, which is where a large batch into a
+    /// fresh store spends essentially all of its time.
+    ///
+    /// History independence makes this exact: the canonical form is a
+    /// pure function of the surviving fact set, so the bottom-up build
+    /// and the per-op replay produce the same bytes (converge_check's
+    /// single-commit arm pins exactly this equality against the per-txn
+    /// arms). A batch whose surviving set is empty leaves the tree empty.
+    pub(crate) async fn plant<Backend>(
+        mut self,
+        mut ops: Vec<NoveltyEntry<Value>>,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        debug_assert!(self.is_unplanted(), "plant requires an empty tree");
+        ops.sort_by(|a, b| a.key.cmp(&b.key));
+
+        // Keep only each key's last op; a surviving retract on an empty
+        // tree is a no-op and drops out.
+        let mut entries: Vec<Entry<Key, Value>> = Vec::with_capacity(ops.len());
+        let mut push = |op: NoveltyEntry<Value>| -> Result<(), DialogSearchTreeError> {
+            if let NoveltyOp::Assert(value) = op.op {
+                entries.push(Entry {
+                    key: Key::try_from_bytes(&op.key)?,
+                    value,
+                });
+            }
+            Ok(())
+        };
+        let mut pending: Option<NoveltyEntry<Value>> = None;
+        for op in ops {
+            match &mut pending {
+                Some(previous) if previous.key == op.key => *previous = op,
+                Some(previous) => push(std::mem::replace(previous, op))?,
+                None => pending = Some(op),
+            }
+        }
+        if let Some(last) = pending {
+            push(last)?;
+        }
+        if entries.is_empty() {
+            return Ok(self);
+        }
+
+        let manifest = self.manifest;
+        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let pieces = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
+        self.root = match seal_root::<Key, Value, D, _>(pieces, 0, &manifest, &accessor).await? {
+            Some(node) => TransientRoot::Loaded(node),
+            None => TransientRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
+        };
+        Ok(self)
+    }
+
     /// Retrieves the value associated with `key` from the in-flight transient
     /// tree, reading exactly what [`persist`](Self::persist) would produce.
     ///

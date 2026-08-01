@@ -532,6 +532,78 @@ where
             }
         };
 
+        // Bulk-dominance rebuild: when the leaf-bound batch dwarfs the whole
+        // live tree — the bulk-load shape, where a batch's first instruction
+        // seeded a tiny root and everything since buffered behind it — the
+        // per-op canonical replay below is pure overhead. Resolve the tree's
+        // full logical state through the novelty-aware stream (bounded by
+        // the dominance ratio, so a genuinely large tree pays one aborted
+        // scan of at most `deferred/8` entries) and rebuild bottom-up with
+        // one plant. Exact: the stream yields the resolved pre-batch state,
+        // the deferred ops are strictly newer (a key's ops cascade as a
+        // whole link buffer, so no key straddles the two), and the plant's
+        // stable last-wins fold reproduces sequential application. History
+        // independence makes the bottom-up build byte-identical to the
+        // per-op replay's canonical outcome, which converge_check pins.
+        const PLANT_MIN: usize = 64;
+        const PLANT_DOMINANCE: usize = 8;
+        let node = if deferred.len() >= PLANT_MIN && node.is_some() {
+            let Some(live) = node else { unreachable!() };
+            self.root = HitchhikerRoot::Loaded(live);
+            let limit = deferred.len() / PLANT_DOMINANCE;
+            let existing = {
+                let stream = self.stream_range(.., storage);
+                futures_util::pin_mut!(stream);
+                let mut entries: Vec<Entry<Key, Value>> = Vec::new();
+                let mut small = true;
+                while let Some(entry) = futures_util::StreamExt::next(&mut stream).await {
+                    entries.push(entry?);
+                    if entries.len() > limit {
+                        small = false;
+                        break;
+                    }
+                }
+                small.then_some(entries)
+            };
+            match existing {
+                Some(entries) => {
+                    let mut oplist: Vec<NoveltyEntry<Value>> = entries
+                        .into_iter()
+                        .map(|entry| NoveltyEntry {
+                            key: entry.key.as_ref().to_vec(),
+                            op: NoveltyOp::Assert(entry.value),
+                        })
+                        .collect();
+                    oplist.extend(deferred);
+                    let edit = TransientTree::<Key, Value, D>::with_manifest(
+                        NULL_BLAKE3_HASH.clone(),
+                        self.cache.clone(),
+                        self.manifest.unwrap_or_default(),
+                    )
+                    .plant(oplist, storage)
+                    .await?;
+                    self.root = match edit.into_root() {
+                        TransientRootParts::Loaded(node) => HitchhikerRoot::Loaded(node),
+                        TransientRootParts::Unloaded(hash) => HitchhikerRoot::Unloaded(hash),
+                    };
+                    return Ok(self);
+                }
+                None => match std::mem::replace(
+                    &mut self.root,
+                    HitchhikerRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
+                ) {
+                    HitchhikerRoot::Loaded(node) => Some(node),
+                    HitchhikerRoot::Unloaded(_) => {
+                        return Err(DialogSearchTreeError::Node(
+                            "The bulk-dominance check lost the live spine".into(),
+                        ));
+                    }
+                },
+            }
+        } else {
+            node
+        };
+
         // Apply the deferred (leaf-bound) ops to the live spine in memory through
         // the canonical edit path, with no serialization round-trip. The buffered
         // upper nodes ride along untouched; only the leaves the ops reach are
@@ -1314,6 +1386,13 @@ where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync,
 {
+    // Bulk-load fast path: a batch landing in an EMPTY tree builds the
+    // canonical tree bottom-up in one pass instead of one canonical edit
+    // per op — history independence guarantees the same bytes, and
+    // converge_check's single-commit arm pins that equality.
+    if edit.is_unplanted() && !ops.is_empty() {
+        return edit.plant(ops, storage).await;
+    }
     for entry in ops {
         // A buffered op carries raw key bytes; the canonical edit path takes a
         // typed key, so reconstruct it here (the same round trip a leaf read
