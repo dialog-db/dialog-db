@@ -53,6 +53,23 @@ impl DecodedKeys {
         (0..self.len()).map(|index| self.get(index).expect("index in range"))
     }
 
+    /// Position of the first key at or above `probe` (the partition
+    /// point): where a range starting at `probe` enters this leaf. O(log n)
+    /// key comparisons against the linear walk a front-coded stream needs.
+    pub fn lower_bound(&self, probe: &[u8]) -> usize {
+        let mut low = 0usize;
+        let mut high = self.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.get(middle).expect("index in range") < probe {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        low
+    }
+
     /// Position of the key equal to `probe`, or `None`. Keys are stored in
     /// entry (sorted) order, so this is a binary search — O(log n) key
     /// comparisons against the linear front-coded stream a fresh decode

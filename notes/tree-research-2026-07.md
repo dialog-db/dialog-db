@@ -1198,3 +1198,42 @@ subtracted (SQLite spends ~3K instructions on the same lookup):
    (the leaf streaming itself is ~2%).
 4. The remaining write_batch gap is the same layer: apply-phase
    per-instruction supersession reads + value encodes.
+
+## Prefix-scan collect path shipped (2026-08-01)
+
+The first bite of the read tickets, on the branch:
+
+1. `TreeWalker::collect_range` — the stream's exact walk-and-merge
+   semantics (pinned by test `it_collects_exactly_what_it_streams`
+   across buffered trees and range shapes) as one direct traversal
+   into a `Vec`, no async-generator layers.
+2. `ArtifactTreeExt::scan_collect` + `Artifacts::select_all` — the
+   same per-entry pipeline as `scan` (parse once, match, spill,
+   reconstruct, re-check) over the collected entries; `select`
+   remains for genuinely large streaming reads.
+3. The structural win: the memoized-decode arm now enters the leaf
+   at the range's PARTITION POINT (`DecodedKeys::lower_bound`)
+   instead of key-materializing every entry from the leaf's start —
+   a point-shaped read did ~200 `Key::try_from_bytes` calls before
+   reaching its range; now O(log leaf) + hits.
+
+Measured same-window A/B (the stream baseline re-benched under
+current thermal conditions at 18.9 us):
+
+| read | stream path | collect + lower_bound | change |
+|---|---|---|---|
+| point_get/dialog_mem | 18.9 us | **10.0 us** | -47% |
+| attr_scan/dialog_mem | 1.386 ms | 1.258 ms | -9% |
+| join/dialog_mem | ~2.88 ms | 2.75 ms | -4% |
+
+Both suites green (294 + 159 incl. the new equivalence pin),
+converge_check smoke CONVERGED (reads only; writes untouched).
+
+Remaining per point read (~10 us vs sqlite ~1 us same-window):
+the per-call `Entity::from_str` URI parse (url crate), selector and
+range-bound key builds, the RwLock + tree clone per select_all, the
+3-level descent, and per-row Artifact reconstruction. Next bites:
+a whitespace-free fast-path validator for `entity:`-scheme URIs
+(skip `url::Parser` on the hot path), reusable selector/range
+buffers, and a borrowed row view for scans (the attr_scan/join
+residue is per-row materialization).

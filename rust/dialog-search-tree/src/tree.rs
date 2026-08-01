@@ -245,6 +245,28 @@ where
         TreeWalker::new(self.root.clone()).stream(range, accessor)
     }
 
+    /// Collects the entries within `range` into a `Vec` with one direct
+    /// traversal — [`TreeWalker::collect_range`], which yields exactly what
+    /// [`stream_range`](Self::stream_range) streams without the
+    /// async-generator machinery whose setup cost dominates short scans.
+    /// Not for unbounded exports: the result is materialized whole.
+    pub async fn collect_range<R, Backend>(
+        &self,
+        range: R,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Vec<Entry<Key, Value>>, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        R: RangeBounds<Key> + ConditionalSend,
+    {
+        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+
+        TreeWalker::new(self.root.clone())
+            .collect_range(range, accessor)
+            .await
+    }
+
     /// Returns a differential that produces changes to transform `self` into
     /// `other`.
     ///

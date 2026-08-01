@@ -408,6 +408,21 @@ where
         }
     }
 
+    /// Every [`Artifact`] matching `selector`, collected with one direct
+    /// traversal: the same rows [`select`](Self::select) streams, minus
+    /// the stream machinery, whose per-scan setup dominates SHORT scans —
+    /// and under the value-in-key format every "point" lookup is a short
+    /// prefix scan. Prefer this for bounded reads; genuinely large reads
+    /// (exports, whole-index sweeps) should stream through `select`.
+    pub async fn select_all(
+        &self,
+        selector: ArtifactSelector<Constrained>,
+    ) -> Result<Vec<Artifact>, DialogArtifactsError> {
+        let tree = self.index.read().await.clone();
+        tree.scan_collect(self.storage.clone(), self.spill_cache.clone(), selector)
+            .await
+    }
+
     /// Commit the given instructions to the store's indexes.
     ///
     /// Data committed this way carries no [`Version`](crate::history::Version)

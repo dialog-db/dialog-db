@@ -287,7 +287,10 @@ fn bench_writes(c: &mut Criterion) {
                             rt.block_on(async {
                                 let mut store =
                                     DialogFacts::open(*mode).await.expect("open dialog");
-                                store.insert_one_transaction(&seed_rows).await.expect("seed");
+                                store
+                                    .insert_one_transaction(&seed_rows)
+                                    .await
+                                    .expect("seed");
                                 store
                             })
                         },

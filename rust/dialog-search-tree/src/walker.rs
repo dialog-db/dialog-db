@@ -513,6 +513,227 @@ where
         }
     }
 
+    /// Collects the entries within `range` into a `Vec` with one direct
+    /// traversal — the same walk, merge, and range semantics as
+    /// [`stream`](Self::stream) (the equivalence is pinned by test), minus
+    /// the async-generator machinery, whose per-scan setup and per-entry
+    /// yield cost dominates SHORT scans: under the value-in-key format a
+    /// "point" lookup is a prefix scan yielding one to a few entries, so
+    /// the stream apparatus was measured at a double-digit share of every
+    /// such read. Not for unbounded exports: the result is materialized
+    /// whole, so genuinely large ranges should stream.
+    pub async fn collect_range<R, Backend>(
+        self,
+        range: R,
+        accessor: Accessor<Backend>,
+    ) -> Result<Vec<Entry<Key, Value>>, DialogSearchTreeError>
+    where
+        R: RangeBounds<Key> + ConditionalSend,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        let mut out = Vec::new();
+        let start_key = match range.start_bound() {
+            Bound::Included(start) => start.clone(),
+            Bound::Excluded(start) => start.clone(),
+            Bound::Unbounded => <Key as self::Key>::min(),
+        };
+        let Some(search_result) = self
+            .search(&start_key, accessor.clone(), SearchOptions::default())
+            .await?
+        else {
+            return Ok(out);
+        };
+        let mut search_path = search_result.into_indexed();
+        let mut entered_range = false;
+
+        while let Some((node, maybe_index)) = search_path.pop() {
+            let body = node.body()?;
+            let is_segment = matches!(body, ArchivedNodeBody::Segment(_));
+            if !is_segment {
+                let ArchivedNodeBody::Index(index) = body else {
+                    unreachable!("checked above")
+                };
+                let child_index = if let Some(index) = maybe_index {
+                    index + 1
+                } else {
+                    0
+                };
+
+                if child_index < index.len() {
+                    let next_node = accessor.get_node(index.hash_at(child_index)?).await?;
+                    search_path.push((node, Some(child_index)));
+                    search_path.push((next_node, None));
+                }
+                continue;
+            }
+
+            let start_bytes = match range.start_bound() {
+                Bound::Included(bound) => Bound::Included(bound.as_ref()),
+                Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
+                Bound::Unbounded => Bound::Unbounded,
+            };
+            let end_bytes = match range.end_bound() {
+                Bound::Included(bound) => Bound::Included(bound.as_ref()),
+                Bound::Excluded(bound) => Bound::Excluded(bound.as_ref()),
+                Bound::Unbounded => Bound::Unbounded,
+            };
+            let pending = pending_for_leaf::<Key, Value>(&search_path, start_bytes, end_bytes)?;
+            let mut buffered = pending.into_iter().peekable();
+
+            // The same memo discipline as the stream: a leaf re-touched
+            // across collects (a point-shaped read cycling nearby keys, a
+            // join re-selecting the same branch) reuses the flat-arena
+            // decode memoized on the node buffer instead of re-running the
+            // front decoder per touch.
+            if node.should_memoize_keys() {
+                let keys = node.memoized_keys()?;
+                // The memoized decode has random access, so enter the leaf at
+                // the range's partition point instead of key-materializing
+                // every entry before it — the difference between O(leaf) and
+                // O(log leaf + hits) per point-shaped read. Buffered ops are
+                // already range-restricted, so none sort below the entry
+                // point's range.
+                let start_at = match range.start_bound() {
+                    Bound::Included(bound) | Bound::Excluded(bound) => {
+                        keys.lower_bound(bound.as_ref())
+                    }
+                    Bound::Unbounded => 0,
+                };
+                let mut segment = None;
+                for at in start_at..keys.len() {
+                    let key = keys.get(at).expect("index in range");
+                    // Buffered inserts sorting before this entry.
+                    while let Some((buffered_key, _)) = buffered.peek() {
+                        if buffered_key.as_slice() >= key {
+                            break;
+                        }
+                        let (buffered_key, op) = buffered.next().expect("peeked");
+                        if let NoveltyOp::Assert(value) = op {
+                            let entry_key = Key::try_from_bytes(&buffered_key)?;
+                            if range.contains(&entry_key) {
+                                entered_range = true;
+                                out.push(Entry {
+                                    key: entry_key,
+                                    value,
+                                });
+                            }
+                        }
+                    }
+
+                    // A covering op supersedes the stored entry.
+                    if matches!(buffered.peek(), Some((buffered_key, _)) if buffered_key.as_slice() == key)
+                    {
+                        let (buffered_key, op) = buffered.next().expect("peeked");
+                        if let NoveltyOp::Assert(value) = op {
+                            let entry_key = Key::try_from_bytes(&buffered_key)?;
+                            if range.contains(&entry_key) {
+                                entered_range = true;
+                                out.push(Entry {
+                                    key: entry_key,
+                                    value,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+
+                    let entry_key = Key::try_from_bytes(key)?;
+                    if range.contains(&entry_key) {
+                        entered_range = true;
+                        let segment = match &segment {
+                            Some(segment) => segment,
+                            None => {
+                                let ArchivedNodeBody::Segment(resolved) = node.body()? else {
+                                    unreachable!("segment checked above")
+                                };
+                                segment.insert(resolved)
+                            }
+                        };
+                        let value = into_owned(segment.value_at(at)?)?;
+                        out.push(Entry {
+                            key: entry_key,
+                            value,
+                        });
+                    } else if entered_range || past_end(&range, &entry_key) {
+                        return Ok(out);
+                    }
+                }
+            } else {
+                let ArchivedNodeBody::Segment(segment) = node.body()? else {
+                    unreachable!("segment checked above")
+                };
+                let mut keys = segment.keys::<Key>()?;
+                while let Some((at, key)) = keys.next_key()? {
+                    // Buffered inserts sorting before this entry.
+                    while let Some((buffered_key, _)) = buffered.peek() {
+                        if buffered_key.as_slice() >= key {
+                            break;
+                        }
+                        let (buffered_key, op) = buffered.next().expect("peeked");
+                        if let NoveltyOp::Assert(value) = op {
+                            let entry_key = Key::try_from_bytes(&buffered_key)?;
+                            if range.contains(&entry_key) {
+                                entered_range = true;
+                                out.push(Entry {
+                                    key: entry_key,
+                                    value,
+                                });
+                            }
+                        }
+                    }
+
+                    // A covering op supersedes the stored entry.
+                    if matches!(buffered.peek(), Some((buffered_key, _)) if buffered_key.as_slice() == key)
+                    {
+                        let (buffered_key, op) = buffered.next().expect("peeked");
+                        if let NoveltyOp::Assert(value) = op {
+                            let entry_key = Key::try_from_bytes(&buffered_key)?;
+                            if range.contains(&entry_key) {
+                                entered_range = true;
+                                out.push(Entry {
+                                    key: entry_key,
+                                    value,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+
+                    let entry_key = Key::try_from_bytes(key)?;
+                    if range.contains(&entry_key) {
+                        entered_range = true;
+                        let value = into_owned(segment.value_at(at)?)?;
+                        out.push(Entry {
+                            key: entry_key,
+                            value,
+                        });
+                    // As in the stream: the `past_end` half must not be gated
+                    // on `entered_range`, or a range matching no stored entry
+                    // walks the rest of the tree.
+                    } else if entered_range || past_end(&range, &entry_key) {
+                        return Ok(out);
+                    }
+                }
+            }
+
+            // Buffered inserts past the last stored entry of this leaf.
+            for (buffered_key, op) in buffered {
+                if let NoveltyOp::Assert(value) = op {
+                    let entry_key = Key::try_from_bytes(&buffered_key)?;
+                    if range.contains(&entry_key) {
+                        entered_range = true;
+                        out.push(Entry {
+                            key: entry_key,
+                            value,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Searches for the leaf segment that would contain the given key.
     pub async fn search<Backend>(
         &self,
@@ -828,6 +1049,80 @@ mod walker_novelty_tests {
             storage
                 .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
                 .await?;
+        }
+        Ok(())
+    }
+
+    /// `collect_range` must yield exactly what `stream` yields — same
+    /// entries, same order — over a buffered tree (novelty on the spine)
+    /// and across range shapes: full, prefix-like sub-ranges, point-sized
+    /// ranges, and empty ranges. The collect path is a hand transform of
+    /// the stream body, and this pin is what keeps the two from drifting.
+    #[dialog_common::test]
+    async fn it_collects_exactly_what_it_streams() -> Result<()> {
+        use crate::{Accessor, TreeWalker};
+
+        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut tree = Tree::empty();
+
+        // Buffered writes with a tiny op buffer, so novelty rides several
+        // levels and some leaves carry pending inserts and supersessions.
+        for i in 0..120u32 {
+            let key = (i * 17 % 300).to_be_bytes();
+            let value = vec![i as u8, (i >> 8) as u8];
+            let buffered = HitchhikerTree::open(&tree)
+                .with_op_buf_size(4)
+                .insert(key, value, &storage)
+                .await?;
+            let mut delta = Delta::zero();
+            let root = buffered.persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+            tree = Tree::from_hash_with_cache(root, Default::default());
+        }
+
+        let root = tree.root().clone();
+        type Range = (std::ops::Bound<[u8; 4]>, std::ops::Bound<[u8; 4]>);
+        let ranges: Vec<Range> = vec![
+            (std::ops::Bound::Unbounded, std::ops::Bound::Unbounded),
+            (
+                std::ops::Bound::Included(10u32.to_be_bytes()),
+                std::ops::Bound::Included(90u32.to_be_bytes()),
+            ),
+            (
+                std::ops::Bound::Included(34u32.to_be_bytes()),
+                std::ops::Bound::Included(34u32.to_be_bytes()),
+            ),
+            (
+                std::ops::Bound::Excluded(50u32.to_be_bytes()),
+                std::ops::Bound::Excluded(200u32.to_be_bytes()),
+            ),
+            (
+                std::ops::Bound::Included(1000u32.to_be_bytes()),
+                std::ops::Bound::Included(1001u32.to_be_bytes()),
+            ),
+        ];
+        for range in ranges {
+            let accessor = Accessor::new(Default::default(), storage.clone());
+            let mut streamed = Vec::new();
+            {
+                let stream = TreeWalker::<[u8; 4], Vec<u8>>::new(root.clone())
+                    .stream(range, accessor.clone());
+                futures_util::pin_mut!(stream);
+                while let Some(entry) = stream.next().await {
+                    let entry = entry?;
+                    streamed.push((entry.key, entry.value));
+                }
+            }
+            let collected: Vec<_> = TreeWalker::<[u8; 4], Vec<u8>>::new(root.clone())
+                .collect_range(range, accessor)
+                .await?
+                .into_iter()
+                .map(|entry| (entry.key, entry.value))
+                .collect();
+            assert_eq!(
+                collected, streamed,
+                "collect_range must match stream for {range:?}"
+            );
         }
         Ok(())
     }
