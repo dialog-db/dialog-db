@@ -1038,9 +1038,51 @@ bytes read per commit — with convergence verified at every step
 and canonical roots byte-identical throughout this session's
 changes.
 
-Caveats for honest reading: dialog_disk arms compare different
-storage backends across builds (main predates the provider
-architecture), so treat the disk rows as end-to-end product
-comparisons, not like-for-like backend measurements; SQLite arms
-were measured on the main-graft build but the SQLite code is
-identical in both.
+### Durability annotations (correction, 2026-07-31)
+
+Owner correction: main DOES have the capability-provider
+architecture (`dialog_storage::capability::Provider`); what it
+lacks is specifically the `provider::Dcaa` single-file archive
+module, added later on the perf lineage. That is why the repo/DCAA
+bench arms could not build on the main graft — the earlier caveat
+overstated it, and the dialog_disk arms above DO use the same
+`FileSystemStorageBackend` on both builds (like-for-like after
+all).
+
+What each dialog arm's durability actually is:
+
+- SE replay and `dialog_mem`/`repo_mem`: `MemoryStorageBackend` —
+  VOLATILE. These are the CPU-cost numbers.
+- `dialog_disk`/`repo_disk`: file-per-block
+  `FileSystemStorageBackend`, which does NOT fsync — durability
+  equivalent to `sqlite_disk_nosync` (`synchronous=OFF`), weaker
+  than SQLite's WAL+NORMAL bar.
+- `repo_dcaa` is the only DURABLE dialog configuration (DCAA
+  archive, one fdatasync per commit); `repo_dcaa_nosync` is the
+  same archive without the sync.
+
+Durable-tier numbers on this branch (repo surface =
+`Branch::commit`, which adds version tags, history claims, and a
+signed revision record on top of the same index writes — a heavier
+surface than the raw `Artifacts::commit` the dialog_* rows use):
+
+| workload | repo_mem | repo_disk | repo_dcaa (durable) | repo_dcaa_nosync | sqlite_disk (durable) |
+|---|---|---|---|---|---|
+| write_small_txns (100 x 1-entity txns) | 31.4 ms | 132 ms | **306 ms** | 116 ms | 2.30 ms |
+| write_batch (1000 entities, 1 txn) | 698 ms | 759 ms | **675 ms** | 718 ms | 4.57 ms |
+
+Readings: the durable small-commit configuration is fsync-bound —
+repo_dcaa minus repo_dcaa_nosync is ~1.9 ms per commit of
+fdatasync, ~62% of its time — while SQLite's WAL+NORMAL amortizes
+syncs across checkpoints and pays ~23 us per small transaction.
+The repo surface itself costs ~3-4x over raw `Artifacts::commit`
+(repo_mem 31.4 ms vs dialog_mem 7.9 ms for the same rows: signing,
+history, head publication). So the durable-vs-durable small-commit
+gap (repo_dcaa vs sqlite_disk, ~130x) bundles three distinct
+terms: index CPU (this campaign's target, now 12.5x at the raw
+memory tier), the repository surface (~3-4x), and per-commit
+fdatasync vs WAL group sync (~2 ms/commit) — the last two being
+their own future tickets, not tree work.
+
+Remaining caveat: SQLite arms were measured on the main-graft
+build, but the SQLite code is identical in both.
