@@ -1121,8 +1121,7 @@ Measured, same machine window (the earlier 289 ms reading was a
 faster thermal window; pre-change re-measured at 380-403 ms):
 write_batch/dialog_mem **385 -> 270 ms (-29%)**, byte counts and
 canonical roots unchanged, converge_check CONVERGED at
-200/1000/3000 (10K in flight at write-up) with the same roots as
-every prior build, suites green, SE replay byte-identical.
+200/1000/3000/10000 with the same roots as every prior build, suites green, SE replay byte-identical.
 
 What remains in write_batch's 270 ms is NOT tree work: the
 per-instruction apply phase (cardinality-one supersession reads
