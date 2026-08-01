@@ -1301,3 +1301,79 @@ row view over it; consumers that need ownership call `.to_owned()`
 explicitly. Attribution says per-row materialization is the bulk
 of the remaining attr_scan (44% alloc churn) and join gaps, so
 this is where the next big read win lives.
+
+## Borrowed materialization shipped: select yields ArtifactView (2026-08-01)
+
+Owner-directed ("materialization could also probably borrow instead
+of copying"), option (b): the select API itself changed, consumers
+opt into ownership.
+
+What changed:
+
+1. `ArtifactView` (dialog-artifacts): a scanned row as the scan
+   holds it — the index key (owned `Key` bytes), its `Datum`
+   payload (moved, not cloned), and any fetched spill block.
+   Accessors borrow from the key bytes on demand: `parts()` (one
+   key walk for multi-field access), `value()` (decode just the
+   value), `cause()` (no key walk at all), `to_owned()` (the full
+   old per-row materialization, now opt-in).
+2. `ArtifactTreeExt::scan`, `Artifacts::select`, and the
+   `ArtifactStore` trait yield `ArtifactView`. The scan's
+   NeedsValue re-check decodes only the value, not the entity or
+   attribute.
+3. `ArtifactViewStream::owned()` — chainable stream adapter
+   (`select(..).owned()`), the explicit spelling of "materialize
+   every row".
+4. Branch-level `Select` statement (dialog-repository) yields view
+   streams from `perform`/`execute`, and gained `.to_owned()`
+   (returning `SelectOwned` with the same perform/execute surface),
+   so pre-view consumers migrate with one token:
+   `select(..).to_owned().perform(..)`. The query pipeline's
+   ingestion points (session `select_from_branch`, the JS binding,
+   query-engine test envs) sit on that form for now.
+5. dialog-baseline's read arms consume views with per-row work
+   equal to the SQLite arms' column reads (entity String + owned
+   Value per row): no URI parse, no triple struct — the same work
+   both engines are asked to do.
+
+What the old default cost per row (now opt-in): an entity URI
+parse (`Entity::from_str` through the url crate), an attribute
+alloc, a full value decode + allocs, and a cause clone.
+
+Same-window results (previous window's stream numbers as
+baseline; SQLite arms drifted -2 to -19% in this window, so the
+dialog deltas below overstate slightly — the vs-sqlite gap
+columns are the honest cross-engine read):
+
+| read (dialog_mem) | before | after | sqlite_mem | gap |
+|---|---|---|---|---|
+| point_get | 9.7 us | 8.5 us (-12%) | 0.99 us | 8.6x |
+| attr_scan | 1.474 ms | 588 us (-60%) | 200 us | 2.9x |
+| join | 3.34 ms | 1.319 ms (-61%) | 658 us | 2.0x |
+
+The campaign's read-gap story, start to finish: point_get 18.9 ->
+8.5 us (2.2x), attr_scan ~7.4x-vs-sqlite -> 2.9x, join ~4.4x ->
+2.0x. Scans stopped paying for materialization they don't need;
+what remains of the scan gap is stream/tree traversal plus the
+per-row entity String + value decode both engines now share.
+
+Validation: full workspace suite green (0 failures across every
+crate incl. repository 737), clippy -D warnings clean, fmt clean,
+converge_check CONVERGED at 1000 (root 97d0d796..., byte-identical
+— reads only). One pre-existing conventions failure surfaced by
+the first-ever full-workspace run this session (bare `Send` in the
+DCAA provider's spawn_blocking helper from the durability work)
+fixed with the sanctioned `bare-send-ok` exemption marker.
+
+Remaining read tickets, updated:
+1. Query pipeline on views: `ArtifactStream`/merge/overlay still
+   traffic in owned Artifacts; branch select ingests via
+   `.to_owned()`. Threading views through (sort keys can come
+   straight from the tree key bytes — the merge comparator
+   currently re-derives them from materialized rows) moves the
+   -60% scan win into engine-level queries.
+2. point_get residue: selector-side `Entity::from_str` URI parse,
+   selector/range key builds, RwLock + tree clone per select —
+   the per-call fixed costs that dominate a one-row read.
+3. write_batch residue: apply-phase per-instruction supersession
+   reads + value encodes (artifacts layer).

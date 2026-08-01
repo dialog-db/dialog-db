@@ -592,7 +592,10 @@ where
             .perform(&self.operator)
             .await?;
 
-        let select = branch.claims().select(ArtifactSelector::new().the(the)).to_owned();
+        let select = branch
+            .claims()
+            .select(ArtifactSelector::new().the(the))
+            .to_owned();
         let store = NetworkedIndex::new(&self.operator, select.catalog(), None);
         let journaled = JournaledStorage::new(store);
         journaled.clear_journal();
@@ -1835,7 +1838,10 @@ mod test {
         // Any constrained selector works here; the catalog it names is the
         // branch's archive index, which is where the tree nodes live.
         let the: Attribute = "se.post/title".parse()?;
-        let select = branch.claims().select(ArtifactSelector::new().the(the)).to_owned();
+        let select = branch
+            .claims()
+            .select(ArtifactSelector::new().the(the))
+            .to_owned();
         let store = NetworkedIndex::new(env.operator(), select.catalog(), None);
         let stats = distribution::capture(&root, &store).await?;
         distribution::report(&format!("se-replay-{limit}"), &stats);

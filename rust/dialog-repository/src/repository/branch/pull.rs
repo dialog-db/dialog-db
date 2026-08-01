@@ -1155,7 +1155,8 @@ mod tests {
         // Both data sets are visible on the feature branch.
         let emails = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/email".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("user/email".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -1303,7 +1304,8 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
         let committed: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/email".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("user/email".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -1315,7 +1317,8 @@ mod tests {
 
         let pulled: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -1775,7 +1778,8 @@ mod history_tests {
         use futures_util::StreamExt as _;
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -2078,7 +2082,8 @@ mod history_tests {
         // the cardinality-one (entity, attribute).
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -2175,7 +2180,8 @@ mod history_tests {
 
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -2208,7 +2214,8 @@ mod history_tests {
             async move {
                 let rows: Vec<_> = branch
                     .claims()
-                    .select(ArtifactSelector::new().the("task/label".parse().unwrap())).to_owned()
+                    .select(ArtifactSelector::new().the("task/label".parse().unwrap()))
+                    .to_owned()
                     .perform(operator)
                     .await
                     .unwrap()
@@ -2312,7 +2319,8 @@ mod history_tests {
             async move {
                 let rows: Vec<_> = branch
                     .claims()
-                    .select(ArtifactSelector::new().the("task/label".parse().unwrap())).to_owned()
+                    .select(ArtifactSelector::new().the("task/label".parse().unwrap()))
+                    .to_owned()
                     .perform(operator)
                     .await
                     .unwrap()
@@ -2397,7 +2405,8 @@ mod history_tests {
             async move {
                 let rows: Vec<_> = branch
                     .claims()
-                    .select(ArtifactSelector::new().the("post/title".parse().unwrap())).to_owned()
+                    .select(ArtifactSelector::new().the("post/title".parse().unwrap()))
+                    .to_owned()
                     .perform(operator)
                     .await
                     .unwrap()
@@ -2513,7 +2522,8 @@ mod history_tests {
 
         let names: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -2747,7 +2757,8 @@ mod history_tests {
         // The adopted data is really there: reads hydrate lazily.
         let rows: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&env)
             .await?
             .collect::<Vec<_>>()
@@ -2924,7 +2935,8 @@ mod history_tests {
 
         let titles: Vec<_> = replica
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -3010,7 +3022,8 @@ mod history_tests {
         // Both sides' content is present.
         let titles: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .to_owned()
             .perform(&env)
             .await?
             .collect::<Vec<_>>()
@@ -3020,7 +3033,8 @@ mod history_tests {
         assert_eq!(titles.len(), 2, "seed and local novelty both present");
         let churn: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&env)
             .await?
             .collect::<Vec<_>>()
@@ -3132,7 +3146,8 @@ mod history_tests {
 
         let values: Vec<_> = f
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -3216,7 +3231,8 @@ mod history_tests {
 
         let values: Vec<_> = f
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -3300,7 +3316,8 @@ mod history_tests {
         // Both sides' content is present in the merged state.
         let ours: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("post/title".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("post/title".parse()?))
+            .to_owned()
             .perform(&env)
             .await?
             .collect::<Vec<_>>()
@@ -3310,7 +3327,8 @@ mod history_tests {
         assert_eq!(ours.len(), 2, "our facts survive");
         let theirs: Vec<_> = feature
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&env)
             .await?
             .collect::<Vec<_>>()
@@ -3542,7 +3560,8 @@ mod history_tests {
             async move {
                 anyhow::Ok(
                     us.claims()
-                        .select(ArtifactSelector::new().the(the)).to_owned()
+                        .select(ArtifactSelector::new().the(the))
+                        .to_owned()
                         .perform(env)
                         .await?
                         .collect::<Vec<_>>()
@@ -3660,7 +3679,8 @@ mod history_tests {
 
         let labels: Vec<_> = us
             .claims()
-            .select(ArtifactSelector::new().the("task/label".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("task/label".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -3680,7 +3700,8 @@ mod history_tests {
             async move {
                 anyhow::Ok(
                     us.claims()
-                        .select(ArtifactSelector::new().the(the)).to_owned()
+                        .select(ArtifactSelector::new().the(the))
+                        .to_owned()
                         .perform(operator)
                         .await?
                         .collect::<Vec<_>>()

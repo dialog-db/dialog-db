@@ -413,7 +413,8 @@ mod tests {
 
         let results: Vec<_> = branch
             .claims()
-            .select(ArtifactSelector::new().the("person/name".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("person/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .filter_map(|r| async { r.ok() })
@@ -444,7 +445,12 @@ mod tests {
 
         // Select should find the artifact
         let selector = ArtifactSelector::new().the("user/name".parse()?);
-        let stream = branch.claims().select(selector).to_owned().perform(&operator).await?;
+        let stream = branch
+            .claims()
+            .select(selector)
+            .to_owned()
+            .perform(&operator)
+            .await?;
         tokio::pin!(stream);
 
         let results: Vec<_> = stream.filter_map(|r| async { r.ok() }).collect().await;
@@ -528,7 +534,8 @@ mod tests {
         let fresh = repo.branch("main").open().perform(&operator).await?;
         let results: Vec<_> = fresh
             .claims()
-            .select(ArtifactSelector::new().the("user/name".parse()?)).to_owned()
+            .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -872,7 +879,8 @@ mod history_tests {
                 dialog_artifacts::ArtifactSelector::new()
                     .the("post/title".parse()?)
                     .of("post:1".parse()?),
-            ).to_owned()
+            )
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
