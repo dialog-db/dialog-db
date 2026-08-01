@@ -1129,3 +1129,66 @@ per-instruction apply phase (cardinality-one supersession reads
 against the buffered state, per-instruction value encodes — the
 very first audit's finding) now dominates. That is an artifacts-
 layer ticket: batch the instruction processing, not the tree.
+
+## Read-path waste attribution + warm-batch bench (2026-08-01)
+
+Owner directions: DCAA was decided against, so the durable-tier
+rows above are historical context only — the focus is MEMORY
+performance until the overall shape is right. The empty-store batch
+bench is renamed `write_batch_empty` and a warm twin added.
+
+### write_batch_warm (1000 fresh entities into a 1000-entity store)
+
+| arm | time |
+|---|---|
+| sqlite_mem | 5.57 ms |
+| sqlite_disk | 7.05 ms |
+| dialog_mem | **124 ms** (22x behind sqlite_mem) |
+| dialog_disk | 131 ms |
+
+Notably CHEAPER than the empty-store batch (270 ms): the warm tree
+absorbs the 6,000 ops through the optimized edit path at ~20 us/op
+(the campaign's fast-path/quiet-check work), while the empty case
+still pays the apply-phase instruction processing over a growing
+buffered state. Both are now dominated by the artifacts layer, not
+the tree.
+
+### Where a point get's 146,193 instructions go
+
+Callgrind, 4,000 point gets over 1,000 entities, seed profile
+subtracted (SQLite spends ~3K instructions on the same lookup):
+
+- **~44% allocator + memcpy + memcmp** — allocation churn: the
+  "copying by select" suspicion confirmed, dozens of transient
+  allocations per lookup.
+- **17% TreeWalker::stream machinery** — `point_get` is implemented
+  as an ArtifactSelector + `collect`: a full range-scan pipeline
+  (selector build, async stream plan, walker state, Vec collect,
+  pop) for a single-key lookup. The tree HAS a direct `get`
+  descent; the artifacts layer never exposes it.
+- **~20% key construction and parsing** — `Entity::from_str` /
+  `Attribute::from_str` run the `url` crate parser per call
+  (`Parser::parse_cannot_be_a_base_path` alone is 4.1%), then
+  `varkey::build_key` (9.3%) and `parse_key_ref` (3.7%) rebuild
+  and re-split key bytes.
+- **1.9% StreamingLeaf::next_key** — the actual tree decode. The
+  TREE is not the problem on reads; the API shape above it is.
+
+### Ticket list for the read gap (artifacts layer, not tree)
+
+1. A direct point-lookup API: selector-shaped single-key reads go
+   through `HitchhikerTree::get`/`PersistentTree::get` (one
+   descent, no stream machinery). Expected to remove the 17%
+   stream share and most of the allocation churn for point reads.
+2. Key construction without the url parser on the hot path:
+   pre-validated `Entity`/`Attribute` types (parse once at the
+   edge, reuse bytes), and a `build_key` that writes into a reused
+   buffer.
+3. Scan materialization: `collect` yields owned Artifacts (rkyv
+   deserialize + String/Vec allocs + URI re-parse per row).
+   A borrowed/streaming row view — or at minimum reusing buffers
+   across rows — attacks the attr_scan (7.5x) and join (5.3x)
+   gaps, which are per-row materialization, not tree traversal
+   (the leaf streaming itself is ~2%).
+4. The remaining write_batch gap is the same layer: apply-phase
+   per-instruction supersession reads + value encodes.

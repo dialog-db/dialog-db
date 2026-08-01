@@ -93,7 +93,10 @@ fn bench_writes(c: &mut Criterion) {
     let rt = runtime();
     for (group_name, size, per_row) in [
         ("write_small_txns", WRITE_SMALL_SIZE, true),
-        ("write_batch", WRITE_BATCH_SIZE, false),
+        // A single-transaction batch into a FRESH, EMPTY store: the
+        // cold-start / first-import shape. The warm-store twin below is
+        // the general case.
+        ("write_batch_empty", WRITE_BATCH_SIZE, false),
     ] {
         let mut group = c.benchmark_group(group_name);
         // Each sample writes `size` entities (2 facts each); report
@@ -239,6 +242,66 @@ fn bench_writes(c: &mut Criterion) {
                 );
             },
         );
+        group.finish();
+    }
+
+    // The same-scale batch landing in a NON-empty store: 1000 fresh
+    // entities into a store already holding 1000 — the shape every bulk
+    // load past its first commit actually sees, and the general case the
+    // empty-store batch above is only the cold start of.
+    {
+        let mut group = c.benchmark_group("write_batch_warm");
+        group.throughput(criterion::Throughput::Elements(WRITE_BATCH_SIZE as u64));
+        group.sample_size(10);
+        let all = generate_rows(WRITE_BATCH_SIZE * 2);
+        let seed_rows: Vec<FactRow> = all[..WRITE_BATCH_SIZE].to_vec();
+        let fresh_rows: Vec<FactRow> = all[WRITE_BATCH_SIZE..].to_vec();
+
+        for (label, mode) in SQLITE_MODES {
+            group.bench_with_input(
+                BenchmarkId::new(*label, WRITE_BATCH_SIZE),
+                &fresh_rows,
+                |b, rows| {
+                    b.iter_batched(
+                        || {
+                            let mut store = SqliteFacts::open(*mode).expect("open sqlite");
+                            store.insert_one_transaction(&seed_rows).expect("seed");
+                            store
+                        },
+                        |mut store| {
+                            store.insert_one_transaction(rows).expect("insert");
+                            store
+                        },
+                        BatchSize::PerIteration,
+                    );
+                },
+            );
+        }
+        for (label, mode) in DIALOG_MODES {
+            group.bench_with_input(
+                BenchmarkId::new(*label, WRITE_BATCH_SIZE),
+                &fresh_rows,
+                |b, rows| {
+                    b.iter_batched(
+                        || {
+                            rt.block_on(async {
+                                let mut store =
+                                    DialogFacts::open(*mode).await.expect("open dialog");
+                                store.insert_one_transaction(&seed_rows).await.expect("seed");
+                                store
+                            })
+                        },
+                        |mut store| {
+                            rt.block_on(async {
+                                store.insert_one_transaction(rows).await.expect("insert");
+                            });
+                            store
+                        },
+                        BatchSize::PerIteration,
+                    );
+                },
+            );
+        }
         group.finish();
     }
 }
