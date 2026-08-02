@@ -1436,3 +1436,58 @@ Updated read-ticket priorities, in expected-impact order:
 3. write_batch apply-phase supersession reads + value encodes.
 4. Minor: view accessors could carry a parsed-offset cache to
    avoid per-call key re-parsing if a profile ever shows it.
+
+## Engine attribution: the ~9x is select fixed costs, not binding (2026-08-02)
+
+Callgrind on `profile_join` (1000 entities), seed-profile subtracted
+to isolate the query side: 125M instructions per query_join run.
+
+Per-query breakdown:
+
+| category | share |
+|---|---|
+| allocator churn (malloc/free/realloc family) | 30% |
+| key construction (build_key, KeyParts::max) | 13% |
+| raw memcpy (key builds, clones) | 11% |
+| entity URI parse (url crate; winner materialization) | 8% |
+| key re-parsing (parse_key_ref; view accessors) | 7% |
+| engine binding proper (SipHash, HashMap<String,Binding>, bind) | 8% |
+| stream/scan plumbing + blake3 verify | 7% |
+
+HYPOTHESIS REVISED: the engine's binding machinery is only ~8%.
+The dominant structure is the join's inner premise issuing ONE FULL
+SELECT PER OUTER BINDING (1000 per query), each paying the whole
+select fixed cost — selector build, two range-bound build_keys,
+scan setup (manifest read, root probe), Changes-overlay scan + sort
++ box, tombstone set, merge setup, boxed stream per level — and the
+30% allocator churn is largely this per-select scaffolding being
+built and torn down 1000 times.
+
+BYCATCH, and it is big: the seed profile locates the write-batch
+residue exactly. Committing 2000 facts costs ~2.3B instructions,
+~83% of it inside `Novelty::route` — every enqueued fact lifts the
+root link buffer, appends, and re-sorts the WHOLE accumulated
+buffer (adaptive sort, but the merge still walks the sorted prefix:
+O(n) memmove/memcmp per op, O(n^2) per batch). This is the
+"apply-phase" write_batch residue ticket, now with a mechanism.
+
+Ranked tickets with landing estimates (discuss before building):
+
+A. WRITE: batch novelty enqueue — sort each incoming batch once and
+   merge, or mark links dirty and sort once at seal/read. Route is
+   ~83% of the bulk-commit write path; landing zone is a multiple
+   (3-5x?) on warm batch commits.
+B. READ: premise-scoped scan context — reuse the pinned tree,
+   manifest, catalog/NetworkedIndex, overlay scan, and tombstone
+   set across a premise's inner selects (they differ only in the
+   probed entity). Attacks the per-select fixed cost AND its alloc
+   churn; est. -30-50% on query_join.
+C. Reusable key buffers: selector/range build_keys into reused
+   allocations (13% + memcpy/alloc share).
+D. Winner bind without URI re-parse: the sliding window's winner
+   to_owned re-parses the entity URI per yielded row (8%); bind
+   entity from validated bytes instead.
+E. ArtifactView parsed-offset cache: accessors currently re-walk
+   the key per call (7%).
+F. Engine binding (HashMap<String, Binding> etc.): real but last
+   (~8%); interned symbols / small-map could halve it at most.
