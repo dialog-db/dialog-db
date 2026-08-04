@@ -8,7 +8,6 @@ use rkyv::{
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
-use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use crate::{
@@ -78,8 +77,29 @@ pub struct TransientIndex<Key, Value> {
 enum LinkNovelty<Value> {
     /// The stored encoding, exactly as persisted, untouched since open.
     Sealed(NoveltyBuffer<Value>),
-    /// Decoded ops, sorted by key with the newest op for a key last.
-    Open(Vec<NoveltyEntry<Value>>),
+    /// Decoded ops as two sorted runs. `run` holds the settled majority;
+    /// `tail` holds recent arrivals, capped at [`NOVELTY_TAIL_LIMIT`] and
+    /// merged into `run` when full (and by any consumer that needs one flat
+    /// sorted list). Both runs are sorted by key with the newest op for a
+    /// key last, and every `tail` op is newer than every `run` op FOR THE
+    /// SAME KEY (arrivals only ever land in the tail), so the stable merge
+    /// that keeps `run` entries first on ties reproduces exactly the order
+    /// a single always-sorted buffer would hold.
+    ///
+    /// The split exists because enqueue inserts ops ONE AT A TIME (the
+    /// per-op cascade timing is deliberate — batching moved where flushes
+    /// fire and measured slower): insertion into one flat sorted vec walked
+    /// and shifted the whole accumulated buffer per op, O(n^2) per bulk
+    /// batch and the dominant cost of a bulk commit. Inserting into the
+    /// bounded tail is O(tail); point and range readers binary-search both
+    /// runs.
+    Open {
+        /// The settled ops, sorted by key, oldest ops first within a key.
+        run: Vec<NoveltyEntry<Value>>,
+        /// Recent arrivals, sorted by key, chronological within a key,
+        /// every one newer than any `run` op for its key.
+        tail: Vec<NoveltyEntry<Value>>,
+    },
     /// Decoded ops WITH their current encoding alongside, the state a
     /// non-consuming persist leaves an open link in: the next persist
     /// re-embeds `buffer` verbatim (like a sealed link), while the next
@@ -94,6 +114,128 @@ enum LinkNovelty<Value> {
     },
 }
 
+/// The size the tail run of an open link may grow to before it is merged
+/// into the main run. Bounds the linear share of every per-op insert and of
+/// every reader's tail probe; the merge amortizes to O(total / limit) full
+/// passes over the buffer.
+const NOVELTY_TAIL_LIMIT: usize = 128;
+
+/// Stably merges two sorted runs into one flat sorted list, keeping `run`
+/// entries before `tail` entries for equal keys — `tail` ops are newer, and
+/// the newest op for a key must sort last.
+fn merge_runs<Value>(
+    run: Vec<NoveltyEntry<Value>>,
+    tail: Vec<NoveltyEntry<Value>>,
+) -> Vec<NoveltyEntry<Value>> {
+    if tail.is_empty() {
+        return run;
+    }
+    if run.is_empty() {
+        return tail;
+    }
+    let mut merged = Vec::with_capacity(run.len() + tail.len());
+    let mut left = run.into_iter().peekable();
+    let mut right = tail.into_iter().peekable();
+    loop {
+        match (left.peek(), right.peek()) {
+            (Some(a), Some(b)) => {
+                if a.key <= b.key {
+                    merged.push(left.next().expect("peeked"));
+                } else {
+                    merged.push(right.next().expect("peeked"));
+                }
+            }
+            (Some(_), None) => merged.push(left.next().expect("peeked")),
+            (None, Some(_)) => merged.push(right.next().expect("peeked")),
+            (None, None) => break,
+        }
+    }
+    merged
+}
+
+/// Appends the winning op per key within `[start, end]` across two sorted
+/// runs, in ascending key order. The winner for a key is its last tail op
+/// when the tail holds the key at all (tail ops are newer than run ops for
+/// the same key), and its last run op otherwise. Both runs are sorted, so
+/// the in-range span of each is contiguous and sought by binary search; a
+/// flat single-run buffer passes an empty tail.
+fn winners_in_runs<Value>(
+    run: &[NoveltyEntry<Value>],
+    tail: &[NoveltyEntry<Value>],
+    start: Bound<&[u8]>,
+    end: Bound<&[u8]>,
+    out: &mut Vec<NoveltyEntry<Value>>,
+) where
+    Value: self::Value,
+{
+    let seek = |entries: &[NoveltyEntry<Value>]| match start {
+        Bound::Included(bound) => entries.partition_point(|entry| entry.key.as_slice() < bound),
+        Bound::Excluded(bound) => entries.partition_point(|entry| entry.key.as_slice() <= bound),
+        Bound::Unbounded => 0,
+    };
+    let past_end = |key: &[u8]| match end {
+        Bound::Included(bound) => key > bound,
+        Bound::Excluded(bound) => key >= bound,
+        Bound::Unbounded => false,
+    };
+    let mut r = seek(run);
+    let mut t = seek(tail);
+    while r < run.len() || t < tail.len() {
+        let key = match (run.get(r), tail.get(t)) {
+            (Some(a), Some(b)) => {
+                if a.key <= b.key {
+                    a.key.as_slice()
+                } else {
+                    b.key.as_slice()
+                }
+            }
+            (Some(a), None) => a.key.as_slice(),
+            (None, Some(b)) => b.key.as_slice(),
+            (None, None) => unreachable!("the loop condition holds a head"),
+        };
+        if past_end(key) {
+            break;
+        }
+        // Walk both heads past this key's contiguous span; the last tail
+        // entry seen wins over the last run entry (assigned after it).
+        let mut winner = None;
+        loop {
+            let Some(entry) = run.get(r) else { break };
+            if entry.key.as_slice() != key {
+                break;
+            }
+            winner = Some(entry);
+            r += 1;
+        }
+        loop {
+            let Some(entry) = tail.get(t) else { break };
+            if entry.key.as_slice() != key {
+                break;
+            }
+            winner = Some(entry);
+            t += 1;
+        }
+        out.push(winner.expect("some head held the key").clone());
+    }
+}
+
+/// The winning buffered op for `key` across an open link's two runs: the
+/// newest op for the key, which lives at the end of the key's contiguous
+/// span in the tail when the tail holds the key at all (tail ops are newer
+/// than run ops for the same key), and at the end of its span in the run
+/// otherwise.
+fn resolve_runs<'a, Value>(
+    run: &'a [NoveltyEntry<Value>],
+    tail: &'a [NoveltyEntry<Value>],
+    key: &[u8],
+) -> Option<&'a NoveltyOp<Value>> {
+    let last_for_key = |entries: &'a [NoveltyEntry<Value>]| {
+        let past = entries.partition_point(|entry| entry.key.as_slice() <= key);
+        (past > 0 && entries[past - 1].key.as_slice() == key).then(|| &entries[past - 1].op)
+    };
+    last_for_key(tail).or_else(|| last_for_key(run))
+}
+
 impl<Value> LinkNovelty<Value>
 where
     Value: self::Value,
@@ -102,42 +244,104 @@ where
     fn len(&self) -> usize {
         match self {
             LinkNovelty::Sealed(buffer) => buffer.count as usize,
-            LinkNovelty::Open(entries) => entries.len(),
+            LinkNovelty::Open { run, tail } => run.len() + tail.len(),
             LinkNovelty::Cached { entries, .. } => entries.len(),
         }
     }
 
-    /// Lifts this link to its decoded entries for mutation, decoding a sealed
-    /// buffer. The encoding (sealed or cached) is discarded: from here on
-    /// this link's buffer is re-encoded at persist, which is exactly the
-    /// invalidation the cache needs.
+    /// An empty open link.
+    fn empty() -> Self {
+        LinkNovelty::Open {
+            run: Vec::new(),
+            tail: Vec::new(),
+        }
+    }
+
+    /// Merges an open link's tail into its run, so `run` is the one flat
+    /// sorted op list and `tail` is empty. A no-op for every other state
+    /// (sealed and cached entries are already flat and sorted).
+    fn consolidate(&mut self) {
+        if let LinkNovelty::Open { run, tail } = self
+            && !tail.is_empty()
+        {
+            let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
+            *run = merged;
+        }
+    }
+
+    /// Lifts this link to ONE flat sorted list of decoded entries for
+    /// order-dependent mutation, decoding a sealed buffer and merging an
+    /// open link's tail. The encoding (sealed or cached) is discarded: from
+    /// here on this link's buffer is re-encoded at persist, which is exactly
+    /// the invalidation the cache needs.
     fn lift<K>(&mut self) -> Result<&mut Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
     where
         K: self::Key,
     {
         match self {
             LinkNovelty::Sealed(buffer) => {
-                *self = LinkNovelty::Open(buffer.entries::<K>()?);
+                *self = LinkNovelty::Open {
+                    run: buffer.entries::<K>()?,
+                    tail: Vec::new(),
+                };
             }
             LinkNovelty::Cached { entries, .. } => {
-                *self = LinkNovelty::Open(std::mem::take(entries));
+                *self = LinkNovelty::Open {
+                    run: std::mem::take(entries),
+                    tail: Vec::new(),
+                };
             }
-            LinkNovelty::Open(_) => {}
+            LinkNovelty::Open { .. } => self.consolidate(),
         }
         match self {
-            LinkNovelty::Open(entries) => Ok(entries),
+            LinkNovelty::Open { run, .. } => Ok(run),
             _ => unreachable!("the buffer was lifted above"),
         }
     }
 
-    /// Takes this link's ops, leaving it empty.
+    /// Inserts one arriving op, preserving every reader's invariants without
+    /// touching the settled run: the op binary-inserts into the bounded
+    /// sorted tail (after any equal keys, so chronological order within a
+    /// key holds), and a full tail merges into the run first. This is the
+    /// enqueue path's insertion — O(tail limit) per op instead of a re-sort
+    /// of the whole accumulated buffer.
+    fn insert<K>(&mut self, entry: NoveltyEntry<Value>) -> Result<(), DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        match self {
+            LinkNovelty::Sealed(buffer) => {
+                *self = LinkNovelty::Open {
+                    run: buffer.entries::<K>()?,
+                    tail: vec![entry],
+                };
+            }
+            LinkNovelty::Cached { entries, .. } => {
+                *self = LinkNovelty::Open {
+                    run: std::mem::take(entries),
+                    tail: vec![entry],
+                };
+            }
+            LinkNovelty::Open { run, tail } => {
+                if tail.len() >= NOVELTY_TAIL_LIMIT {
+                    let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
+                    *run = merged;
+                }
+                let at = tail.partition_point(|held| held.key <= entry.key);
+                tail.insert(at, entry);
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes this link's ops as one flat sorted list, leaving it empty.
     fn take<K>(&mut self) -> Result<Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
     where
         K: self::Key,
     {
-        match std::mem::replace(self, LinkNovelty::Open(Vec::new())) {
+        match std::mem::replace(self, LinkNovelty::empty()) {
             LinkNovelty::Sealed(buffer) => buffer.entries::<K>(),
-            LinkNovelty::Open(entries) => Ok(entries),
+            LinkNovelty::Open { run, tail } => Ok(merge_runs(run, tail)),
             LinkNovelty::Cached { entries, .. } => Ok(entries),
         }
     }
@@ -150,9 +354,8 @@ where
     {
         match self {
             LinkNovelty::Sealed(buffer) => Ok(buffer.resolve::<K>(key)?.is_some()),
-            LinkNovelty::Open(entries) | LinkNovelty::Cached { entries, .. } => {
-                Ok(resolve_pending(entries, key).is_some())
-            }
+            LinkNovelty::Open { run, tail } => Ok(resolve_runs(run, tail, key).is_some()),
+            LinkNovelty::Cached { entries, .. } => Ok(resolve_pending(entries, key).is_some()),
         }
     }
 }
@@ -267,8 +470,7 @@ where
     /// buffers as needed.
     fn link_mut(&mut self, at: usize) -> &mut LinkNovelty<Value> {
         if self.links.len() <= at {
-            self.links
-                .resize_with(at + 1, || LinkNovelty::Open(Vec::new()));
+            self.links.resize_with(at + 1, LinkNovelty::empty);
         }
         &mut self.links[at]
     }
@@ -276,9 +478,11 @@ where
     /// Routes `incoming` ops into their link buffers by the children's
     /// bounds (see [`link_bounds`]): one binary search per op, the same
     /// lower-bound rule stored routing uses, with a key below every bound
-    /// clamping into link 0. Only the touched links are lifted and re-sorted;
-    /// the stable sort keeps existing ops before incoming ones for equal
-    /// keys, so the newest op for a key stays last.
+    /// clamping into link 0. Each op inserts into its link's bounded sorted
+    /// tail in arrival order (see [`LinkNovelty::insert`]), so for equal
+    /// keys existing ops stay before incoming ones and the newest op for a
+    /// key stays last — the same order the old whole-buffer stable re-sort
+    /// produced, without its O(buffer) cost per op.
     pub(crate) fn route<K>(
         &mut self,
         bounds: &[&[u8]],
@@ -290,19 +494,13 @@ where
         if incoming.is_empty() {
             return Ok(());
         }
-        let mut buckets: BTreeMap<usize, Vec<NoveltyEntry<Value>>> = BTreeMap::new();
         for entry in incoming {
             let at = bounds.partition_point(|separator| *separator <= entry.key.as_slice());
-            buckets.entry(at).or_default().push(entry);
-        }
-        for (at, bucket) in buckets {
-            self.total += bucket.len();
+            self.total += 1;
             if let Some(weight) = self.weight.as_mut() {
-                *weight += bucket.iter().map(novelty_entry_weight).sum::<usize>();
+                *weight += novelty_entry_weight(&entry);
             }
-            let entries = self.link_mut(at).lift::<K>()?;
-            entries.extend(bucket);
-            entries.sort_by(|left, right| left.key.cmp(&right.key));
+            self.link_mut(at).insert::<K>(entry)?;
         }
         Ok(())
     }
@@ -321,9 +519,8 @@ where
         match self.links.get(at) {
             None => Ok(None),
             Some(LinkNovelty::Sealed(buffer)) => buffer.resolve::<K>(key),
-            Some(LinkNovelty::Open(entries)) | Some(LinkNovelty::Cached { entries, .. }) => {
-                Ok(resolve_pending(entries, key).cloned())
-            }
+            Some(LinkNovelty::Open { run, tail }) => Ok(resolve_runs(run, tail, key).cloned()),
+            Some(LinkNovelty::Cached { entries, .. }) => Ok(resolve_pending(entries, key).cloned()),
         }
     }
 
@@ -342,7 +539,12 @@ where
         for link in &self.links {
             weight += match link {
                 LinkNovelty::Sealed(buffer) => buffer.weight::<K>()?,
-                LinkNovelty::Open(entries) | LinkNovelty::Cached { entries, .. } => {
+                LinkNovelty::Open { run, tail } => run
+                    .iter()
+                    .chain(tail.iter())
+                    .map(novelty_entry_weight)
+                    .sum(),
+                LinkNovelty::Cached { entries, .. } => {
                     entries.iter().map(novelty_entry_weight).sum()
                 }
             };
@@ -368,7 +570,12 @@ where
             }
             let weight = match link {
                 LinkNovelty::Sealed(buffer) => buffer.weight::<K>()?,
-                LinkNovelty::Open(entries) | LinkNovelty::Cached { entries, .. } => {
+                LinkNovelty::Open { run, tail } => run
+                    .iter()
+                    .chain(tail.iter())
+                    .map(novelty_entry_weight)
+                    .sum(),
+                LinkNovelty::Cached { entries, .. } => {
                     entries.iter().map(novelty_entry_weight).sum()
                 }
             };
@@ -444,9 +651,8 @@ where
         };
         let present = match link {
             LinkNovelty::Sealed(buffer) => buffer.resolve::<K>(key)?.is_some(),
-            LinkNovelty::Open(entries) | LinkNovelty::Cached { entries, .. } => {
-                resolve_pending(entries, key).is_some()
-            }
+            LinkNovelty::Open { run, tail } => resolve_runs(run, tail, key).is_some(),
+            LinkNovelty::Cached { entries, .. } => resolve_pending(entries, key).is_some(),
         };
         if !present {
             return Ok(());
@@ -492,10 +698,20 @@ where
             return Ok(());
         }
 
+        // The first/last probes and the partition splits below need each
+        // touched link as one flat sorted list; folding a pending tail in
+        // here is once-per-boundary-move, off every hot path.
+        for touched in [at - 1, at] {
+            if let Some(link) = self.links.get_mut(touched) {
+                link.consolidate();
+            }
+        }
+
         // A risen bound: the leading ops of link `at` fall below it now.
         let strays_below = match self.links.get(at) {
             None => false,
-            Some(LinkNovelty::Open(entries)) | Some(LinkNovelty::Cached { entries, .. }) => entries
+            Some(LinkNovelty::Open { run, .. })
+            | Some(LinkNovelty::Cached { entries: run, .. }) => run
                 .first()
                 .is_some_and(|entry| entry.key.as_slice() < bound),
             Some(LinkNovelty::Sealed(buffer)) => match buffer.keys::<K>()?.next_key()? {
@@ -519,7 +735,8 @@ where
         // A dropped bound: the trailing ops of link `at - 1` reach it now.
         let strays_above = match self.links.get(at - 1) {
             None => false,
-            Some(LinkNovelty::Open(entries)) | Some(LinkNovelty::Cached { entries, .. }) => entries
+            Some(LinkNovelty::Open { run, .. })
+            | Some(LinkNovelty::Cached { entries: run, .. }) => run
                 .last()
                 .is_some_and(|entry| entry.key.as_slice() >= bound),
             Some(LinkNovelty::Sealed(buffer)) => {
@@ -560,33 +777,11 @@ where
     {
         for link in &self.links {
             match link {
-                LinkNovelty::Open(entries) | LinkNovelty::Cached { entries, .. } => {
-                    // Buffers are sorted by key, so the in-range ops are a
-                    // contiguous run: seek to its start rather than walking
-                    // the whole buffer.
-                    let from = match start {
-                        Bound::Included(bound) => {
-                            entries.partition_point(|entry| entry.key.as_slice() < bound)
-                        }
-                        Bound::Excluded(bound) => {
-                            entries.partition_point(|entry| entry.key.as_slice() <= bound)
-                        }
-                        Bound::Unbounded => 0,
-                    };
-                    let mut at = from;
-                    while at < entries.len() {
-                        match end {
-                            Bound::Included(bound) if entries[at].key.as_slice() > bound => break,
-                            Bound::Excluded(bound) if entries[at].key.as_slice() >= bound => break,
-                            _ => {}
-                        }
-                        let mut last = at;
-                        while last + 1 < entries.len() && entries[last + 1].key == entries[at].key {
-                            last += 1;
-                        }
-                        out.push(entries[last].clone());
-                        at = last + 1;
-                    }
+                LinkNovelty::Open { run, tail } => {
+                    winners_in_runs(run, tail, start, end, out);
+                }
+                LinkNovelty::Cached { entries, .. } => {
+                    winners_in_runs(entries, &[], start, end, out);
                 }
                 LinkNovelty::Sealed(buffer) => {
                     let mut keys = buffer.keys::<K>()?;
@@ -673,7 +868,8 @@ where
                 ));
             }
             let buffer = match link {
-                LinkNovelty::Open(entries) => {
+                LinkNovelty::Open { run, tail } => {
+                    let entries = merge_runs(run, tail);
                     if entries.is_empty() {
                         continue;
                     }
@@ -745,14 +941,20 @@ where
                 ));
             }
             let buffer = match link {
-                LinkNovelty::Open(entries) => {
-                    if entries.is_empty() {
+                LinkNovelty::Open { run, tail } => {
+                    // Encoding needs the one flat sorted list; fold the tail
+                    // in first (once per persist, not per op).
+                    if !tail.is_empty() {
+                        let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
+                        *run = merged;
+                    }
+                    if run.is_empty() {
                         continue;
                     }
-                    let buffer = NoveltyBuffer::from_entries_ref::<K>(at as u32, entries)?;
+                    let buffer = NoveltyBuffer::from_entries_ref::<K>(at as u32, run)?;
                     let emitted = buffer.clone();
                     *link = LinkNovelty::Cached {
-                        entries: std::mem::take(entries),
+                        entries: std::mem::take(run),
                         buffer,
                     };
                     emitted
@@ -841,7 +1043,7 @@ where
             let sealed: NoveltyBuffer<Value> = rkyv::deserialize::<_, rkyv::rancor::Error>(buffer)
                 .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
             if links.len() <= child {
-                links.resize_with(child + 1, || LinkNovelty::Open(Vec::new()));
+                links.resize_with(child + 1, LinkNovelty::empty);
             }
             links[child] = LinkNovelty::Sealed(sealed);
         }
