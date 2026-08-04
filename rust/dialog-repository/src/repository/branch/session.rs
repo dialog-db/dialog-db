@@ -1419,7 +1419,7 @@ mod procedure_tests {
     use dialog_operator::Operator;
     use dialog_query::query::Output as _;
     use dialog_query::{
-        ProcedureConclusion, ProcedureQuery, Term, TreeKeyQuery, TreeLinkQuery, TreeNodeQuery, the,
+        ProcedureConclusion, ProcedureQuery, Term, TreeKeyQuery, TreeNodeQuery, TreeSpanQuery, the,
     };
     use dialog_storage::provider::storage::VolatileSpace;
 
@@ -1454,19 +1454,18 @@ mod procedure_tests {
             kind: Term::var("kind"),
             size: Term::var("size"),
             count: Term::var("count"),
-            bound: Term::var("bound"),
-            rank: Term::var("rank"),
             scale: Term::var("scale"),
             novelty: Term::var("novelty"),
         })
     }
 
-    fn tree_link(reference: &str) -> ProcedureQuery {
-        ProcedureQuery::TreeLink(TreeLinkQuery {
+    fn tree_span(reference: &str) -> ProcedureQuery {
+        ProcedureQuery::TreeSpan(TreeSpanQuery {
             of: Term::from(Value::String(reference.into())).into(),
             at: Term::var("at"),
             node: Term::var("node"),
             separator: Term::var("separator"),
+            until: Term::var("until"),
             scale: Term::var("scale"),
             rank: Term::var("rank"),
             novelty: Term::var("novelty"),
@@ -1478,6 +1477,7 @@ mod procedure_tests {
             of: Term::from(Value::String(reference.into())).into(),
             at: Term::var("at"),
             key: Term::var("key"),
+            rank: Term::var("rank"),
         })
     }
 
@@ -1519,9 +1519,10 @@ mod procedure_tests {
     }
 
     /// Structure is consistent between procedures: a segment's
-    /// `tree/key` rows match its count and `tree/link` yields nothing;
-    /// an index's `tree/link` rows match its count and each child
-    /// answers `tree/node` in turn (the descent chain).
+    /// `tree/key` rows match its count and `tree/span` yields nothing;
+    /// an index's `tree/span` rows match its count, chain into
+    /// contiguous ranges, and each child answers `tree/node` in turn
+    /// (the descent chain).
     #[dialog_common::test]
     async fn it_descends_consistently() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
@@ -1536,9 +1537,9 @@ mod procedure_tests {
             .await?;
         let count = unsigned(&node[0], "count") as usize;
 
-        let links: Vec<ProcedureConclusion> = branch
+        let spans: Vec<ProcedureConclusion> = branch
             .query()
-            .select(tree_link(&root))
+            .select(tree_span(&root))
             .perform(&operator)
             .try_vec()
             .await?;
@@ -1552,16 +1553,25 @@ mod procedure_tests {
         match text(&node[0], "kind").as_str() {
             "segment" => {
                 assert_eq!(keys.len(), count, "one key row per entry");
-                assert!(links.is_empty(), "a segment has no links");
+                assert!(spans.is_empty(), "a segment has no spans");
                 assert!(
                     keys.iter().all(|row| matches!(row.get("key"), Some(Value::Bytes(bytes)) if !bytes.is_empty())),
                     "keys carry bytes: {keys:?}"
                 );
             }
             "index" => {
-                assert_eq!(links.len(), count, "one link row per child");
+                assert_eq!(spans.len(), count, "one span row per child");
                 assert!(keys.is_empty(), "an index has no entries");
-                let child = text(&links[0], "node");
+                // Spans tile the key space: each span ends where the
+                // next begins, and the outer bounds are open.
+                for pair in spans.windows(2) {
+                    assert_eq!(
+                        pair[0].get("until"),
+                        pair[1].get("separator"),
+                        "spans are contiguous: {spans:?}"
+                    );
+                }
+                let child = text(&spans[0], "node");
                 let child_node: Vec<ProcedureConclusion> = branch
                     .query()
                     .select(tree_node(&child))
