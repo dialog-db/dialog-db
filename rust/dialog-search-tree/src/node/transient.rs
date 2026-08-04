@@ -2513,7 +2513,11 @@ mod novelty_model_tests {
         let victim = 3u32.to_be_bytes().to_vec();
         let keeper = 5u32.to_be_bytes().to_vec();
         for at in 0..(NOVELTY_TAIL_LIMIT + NOVELTY_TAIL_LIMIT / 2) {
-            let key = if at.is_multiple_of(2) { &victim } else { &keeper };
+            let key = if at.is_multiple_of(2) {
+                &victim
+            } else {
+                &keeper
+            };
             let op = NoveltyOp::Assert(vec![at as u8]);
             model.push(key.clone(), op.clone());
             novelty

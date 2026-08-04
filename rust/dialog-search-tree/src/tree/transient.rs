@@ -461,6 +461,44 @@ where
         Ok(self)
     }
 
+    /// The separator lists of every level below the root, top-down, for the
+    /// canonical-form validator: level `d` holds, in order, the separator of
+    /// every node at depth `d + 1`. A fully in-memory tree only (as
+    /// [`plant`](Self::plant) leaves it); a [`Node::Persistent`] child errors
+    /// rather than silently comparing an unloaded subtree.
+    pub(crate) fn level_separators(&self) -> Result<Vec<Vec<Vec<u8>>>, DialogSearchTreeError> {
+        let root = match &self.root {
+            TransientRoot::Unloaded(_) => return Ok(Vec::new()),
+            TransientRoot::Loaded(node) => node,
+        };
+        let mut levels = Vec::new();
+        let mut current: Vec<&TransientNode<Key, Value>> = vec![root];
+        loop {
+            let mut next: Vec<&TransientNode<Key, Value>> = Vec::new();
+            let mut separators: Vec<Vec<u8>> = Vec::new();
+            for node in &current {
+                let TransientNode::Index(index) = node else {
+                    continue;
+                };
+                for child in &index.children {
+                    let Node::Transient(child) = child else {
+                        return Err(DialogSearchTreeError::Node(
+                            "level_separators requires a fully in-memory tree".into(),
+                        ));
+                    };
+                    separators.push(child.separator()?.to_vec());
+                    next.push(child);
+                }
+            }
+            if separators.is_empty() {
+                break;
+            }
+            levels.push(separators);
+            current = next;
+        }
+        Ok(levels)
+    }
+
     /// Retrieves the value associated with `key` from the in-flight transient
     /// tree, reading exactly what [`persist`](Self::persist) would produce.
     ///

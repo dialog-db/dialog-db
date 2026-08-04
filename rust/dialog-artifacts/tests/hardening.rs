@@ -9,8 +9,8 @@ use std::str::FromStr as _;
 
 use anyhow::Result;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStoreMutExt as _, Artifacts, Attribute,
-    Cause, Entity, Instruction, Uri, Value, default_sort_key,
+    Artifact, ArtifactSelector, ArtifactStoreMutExt as _, Artifacts, Attribute, Cause, Entity,
+    Instruction, Uri, Value, default_sort_key,
 };
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 use futures_util::TryStreamExt as _;

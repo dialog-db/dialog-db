@@ -1660,3 +1660,46 @@ batch shape; the pacing-ramp prototype's known convergence residue
 is documented in converge_check and deliberately not asserted; and
 the wasm arms of the new tests run only where the wasm test rig
 runs them.
+
+## Canonical-form validator (2026-08-02, external-feedback priority 1)
+
+`PersistentTree::canonical_divergences` (dialog-search-tree/src/
+validate.rs): validates that a REAL stored tree is THE canonical
+tree for its entry set, in O(n), with no reference store and no
+second persist. Because the shape rules are history-independent
+they are locally re-derivable — and rather than re-deriving seam
+rules (coins, vetoed stretches, frame ceilings, forced-long
+separators, anchor elections) in a second implementation that
+could drift, the validator reuses the canonical constructor the
+crate already has: it walks the stored tree (flagging any
+non-empty novelty buffer — canonical form is fully flushed),
+collects the entries, replants them through the production
+regroup/seal path in memory (no hashing), and lockstep-compares
+per-level separator lists. A failure names the level, node
+position, and both separators — "root differs after 3,000
+commits" becomes "level 2, node 17, seam diverges at key…".
+
+The module docs pin the precise property statement: canonical +
+fully-persisted form is a pure function of the entry set under a
+manifest; in-flight buffered state is explicitly outside the
+property (and the validator correctly reports a published buffered
+root as non-canonical — a test constructs exactly that shape).
+
+Wired in: the convergence test now validates every replay's
+canonical tree, so a future break localizes instead of surfacing
+as an opaque root mismatch. Unit tests: canonical edits validate
+clean at every 50th step, canonicalized buffered trees validate
+clean, and a root with parked novelty is flagged (the first
+attempt at that negative was itself instructive: a TINY op buffer
+cascades everything to the leaves and publishes a form that
+genuinely IS canonical — the validator accepted it and was right).
+
+Remaining items from the same feedback, in its priority order, for
+future sessions: (2) one serializable Program harness run through
+every executor surface with oracles at checkpoints; (3) an
+adversarial workload generator sampling conjunctions of known
+stress patterns + manifest + lifecycle; (4) cargo-fuzz +
+arbitrary on Program with proptest mirrors; (5) nightly replay/
+soak matrix with first-divergence bisection (the validator is the
+bisection probe); (6) replica-level simulation and cargo-mutants
+over the shaping logic.

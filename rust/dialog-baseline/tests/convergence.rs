@@ -19,9 +19,13 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use anyhow::Result;
+use dialog_artifacts::tree::TreeStorageBridge;
 use dialog_artifacts::{ArtifactStoreMut as _, Artifacts, Datum, IndexRoot, Key, State};
 use dialog_baseline::se::{SeLog, se_instructions};
-use dialog_search_tree::{ArchivedNodeBody, Buffer as TreeBuffer, PersistentNode};
+use dialog_common::Blake3Hash as NodeHash;
+use dialog_search_tree::{
+    ArchivedNodeBody, Buffer as TreeBuffer, ContentAddressedStorage, PersistentNode, PersistentTree,
+};
 use dialog_storage::{
     Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend as _,
 };
@@ -56,6 +60,24 @@ async fn replay(log: &SeLog, group: usize) -> Result<(Blake3Hash, Blake3Hash, us
         .await?
         .ok_or_else(|| anyhow::anyhow!("revision block missing"))?;
     let root: IndexRoot = CborEncoder.decode(&bytes).await?;
+
+    // The canonical-form validator localizes any break to a node before the
+    // root comparison reports it as an opaque hash difference: the stored
+    // tree must be fully flushed and shaped exactly as the canonical
+    // constructor shapes its entry set.
+    let tree: PersistentTree<Key, State<Datum>> =
+        PersistentTree::from_hash_with_cache(NodeHash::from(*root.index()), Default::default());
+    let divergences = tree
+        .canonical_divergences(&ContentAddressedStorage::new(TreeStorageBridge(
+            backend.clone(),
+        )))
+        .await?;
+    assert_eq!(
+        divergences,
+        Vec::<String>::new(),
+        "group={group}: canonical tree failed canonical-form validation"
+    );
+
     let mut stack: Vec<Blake3Hash> = vec![*root.index()];
     let mut keyroll: Vec<u8> = Vec::new();
     let mut entries = 0usize;
