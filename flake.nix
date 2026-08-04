@@ -238,6 +238,50 @@
             command = "nix flake check";
           };
 
+          "soak:adversarial" = {
+            description = "Adversarial manifest soak (DIALOG_ADVERSARIAL_SEEDS/_OPS override)";
+            command = ''
+              export DIALOG_ADVERSARIAL_SEEDS="''${DIALOG_ADVERSARIAL_SEEDS:-200}"
+              export DIALOG_ADVERSARIAL_OPS="''${DIALOG_ADVERSARIAL_OPS:-1200}"
+              cargo test -p dialog-search-tree --release --test adversarial
+            '';
+          };
+
+          "soak:all" = {
+            description = "Run every nightly soak arm back to back";
+            command = ''
+              soak:adversarial
+              soak:program
+              soak:artifacts
+              soak:converge
+            '';
+          };
+
+          "soak:artifacts" = {
+            description = "Artifacts-level fuzz soak (DIALOG_ARTIFACT_FUZZ_SEEDS/_OPS override)";
+            command = ''
+              export DIALOG_ARTIFACT_FUZZ_SEEDS="''${DIALOG_ARTIFACT_FUZZ_SEEDS:-200}"
+              export DIALOG_ARTIFACT_FUZZ_OPS="''${DIALOG_ARTIFACT_FUZZ_OPS:-600}"
+              cargo test -p dialog-baseline --release --test artifact_fuzz
+            '';
+          };
+
+          "soak:converge" = {
+            description = "Deep SE-log convergence replay (DIALOG_CONVERGE_TXNS override)";
+            command = ''
+              export DIALOG_CONVERGE_TXNS="''${DIALOG_CONVERGE_TXNS:-5000}"
+              cargo test -p dialog-baseline --release --test convergence
+            '';
+          };
+
+          "soak:program" = {
+            description = "Program-surface convergence soak (DIALOG_PROGRAM_OPS override)";
+            command = ''
+              export DIALOG_PROGRAM_OPS="''${DIALOG_PROGRAM_OPS:-2000}"
+              cargo test -p dialog-search-tree --release --test program
+            '';
+          };
+
           "test:all" = {
             description = "Run the full test suite (all configurations, grab a coffee)";
             command = ''

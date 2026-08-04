@@ -34,35 +34,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Each arm is a dev-shell menu command (see the `soak:*` entries in
+        # flake.nix) carrying its own heavy-knob defaults; the matrix only
+        # wires the workflow_dispatch overrides through as env vars.
         include:
           - name: 'adversarial manifests'
-            command: >-
-              cargo test -p dialog-search-tree --release --test adversarial
+            command: 'soak:adversarial'
             env_name: 'DIALOG_ADVERSARIAL_SEEDS'
             env_value_input: 'adversarial_seeds'
-            env_default: '200'
-            extra_env: 'DIALOG_ADVERSARIAL_OPS=1200'
           - name: 'program surfaces'
-            command: >-
-              cargo test -p dialog-search-tree --release --test program
-            env_name: 'DIALOG_PROGRAM_OPS'
+            command: 'soak:program'
+            env_name: ''
             env_value_input: ''
-            env_default: '2000'
-            extra_env: ''
           - name: 'artifact fuzz'
-            command: >-
-              cargo test -p dialog-baseline --release --test artifact_fuzz
+            command: 'soak:artifacts'
             env_name: 'DIALOG_ARTIFACT_FUZZ_SEEDS'
             env_value_input: 'fuzz_seeds'
-            env_default: '200'
-            extra_env: 'DIALOG_ARTIFACT_FUZZ_OPS=600'
           - name: 'SE convergence deep'
-            command: >-
-              cargo test -p dialog-baseline --release --test convergence
-            env_name: 'DIALOG_CONVERGE_TXNS'
+            command: 'soak:converge'
+            env_name: ''
             env_value_input: ''
-            env_default: '5000'
-            extra_env: ''
     steps:
       - uses: cisagov/action-disable-apparmor@v1
       - uses: actions/checkout@v4
@@ -76,17 +67,18 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-      # Env knobs exported here are inherited by the `nix develop` command;
-      # the flake lives at the repo root, so the arm cd's into rust/ itself.
+      # Knobs exported here are inherited by the menu command inside
+      # `nix develop`; without an override the command's own defaults apply.
       - name: 'Run soak arm'
         shell: bash
         run: |
-          value="${{ github.event.inputs[matrix.env_value_input] || matrix.env_default }}"
-          export ${{ matrix.env_name }}="$value"
-          if [ -n "${{ matrix.extra_env }}" ]; then
-            export ${{ matrix.extra_env }}
+          override="${{ github.event.inputs[matrix.env_value_input] }}"
+          if [ -n "${{ matrix.env_name }}" ] && [ -n "$override" ]; then
+            export ${{ matrix.env_name }}="$override"
+            echo "soak arm: ${{ matrix.name }} (${{ matrix.env_name }}=$override)"
+          else
+            echo "soak arm: ${{ matrix.name }} (default knobs)"
           fi
-          echo "soak arm: ${{ matrix.name }} (${{ matrix.env_name }}=$value ${{ matrix.extra_env }})"
           nix develop \
             --accept-flake-config \
-            --command bash -c 'cd rust && ${{ matrix.command }}'
+            --command ${{ matrix.command }}

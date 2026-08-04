@@ -1887,3 +1887,11 @@ with, and the env-knob resolution (workflow_dispatch overrides
 for seed counts) is unchanged: knobs exported in the step shell
 are inherited by the nix develop command. One toolchain path for
 CI to maintain instead of two.
+
+Follow-up (same day): the soak arms are now dev-shell menu items
+like every other repo command — `soak:adversarial`, `soak:program`,
+`soak:artifacts`, `soak:converge`, plus `soak:all` to run the
+battery locally. Heavy-knob defaults live in the menu commands
+(env vars still override), so the workflow matrix shrank to just
+wiring workflow_dispatch overrides, and a contributor can run any
+nightly arm with e.g. `nix develop --command soak:adversarial`.
