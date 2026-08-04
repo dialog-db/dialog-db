@@ -139,6 +139,91 @@ pub struct TreeKeyQuery {
     pub rank: Term<Any>,
 }
 
+/// The `tree/entry` procedure: one row per entry of a segment node,
+/// surfacing the entry's stored claim metadata — the *value* side; the
+/// fact content itself lives in the key (`tree/key` +
+/// `dialog/key-part`). This is what makes the history and coverage
+/// regions legible: versions, causes, and coverage ride here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeEntryQuery {
+    /// Node reference of the segment node — required.
+    #[serde(default = "blank")]
+    pub of: Term<Any>,
+    /// Position within the segment.
+    #[serde(default = "blank")]
+    pub at: Term<Any>,
+    /// The entry's variable-length index key bytes.
+    #[serde(default = "blank")]
+    pub key: Term<Any>,
+    /// `"asserted"` for a stored datum, `"removed"` for a tombstone.
+    #[serde(default = "blank")]
+    pub state: Term<Any>,
+    /// Whether the datum marks a retraction (a covering record).
+    #[serde(default = "blank")]
+    pub retraction: Term<Any>,
+    /// Origin half of the claim's version (32 bytes; empty when the
+    /// write was unversioned).
+    #[serde(default = "blank")]
+    pub origin: Term<Any>,
+    /// Edition half of the claim's version (0 when unversioned).
+    #[serde(default = "blank")]
+    pub edition: Term<Any>,
+    /// Number of prior claim versions in the entry's cause.
+    #[serde(default = "blank")]
+    pub cause: Term<Any>,
+    /// Extra claim versions collapsed into this entry.
+    #[serde(default = "blank")]
+    pub collapsed: Term<Any>,
+    /// Versions a covering record supersedes.
+    #[serde(default = "blank")]
+    pub supersedes: Term<Any>,
+    /// The spilled value's block reference (base58), empty when the
+    /// value is inline in the key. Feeds `tree/value`.
+    #[serde(default = "blank")]
+    pub spill: Term<Any>,
+}
+
+/// The `tree/value` procedure: read a spilled value's raw bytes by its
+/// content-addressed block reference (a `tree/entry` row's `spill`).
+/// The block holds the value's raw bytes; the value's type is in the
+/// key (`dialog/key-part`'s `vtype` component).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeValueQuery {
+    /// The spilled value's 32-byte block reference — required.
+    #[serde(default = "blank")]
+    pub of: Term<Any>,
+    /// Size of the value in bytes.
+    #[serde(default = "blank")]
+    pub size: Term<Any>,
+    /// The value's raw bytes.
+    #[serde(default = "blank")]
+    pub bytes: Term<Any>,
+}
+
+/// The `tree/blob` procedure: one row per blob-index entry of a
+/// segment node — the content-derived metadata the tree stores about a
+/// referenced blob. The blob's bytes live in the blob store, outside
+/// the tree; sizes and hashes here are what replication and the
+/// inspector reason with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeBlobQuery {
+    /// Node reference of the segment node — required.
+    #[serde(default = "blank")]
+    pub of: Term<Any>,
+    /// Position within the segment.
+    #[serde(default = "blank")]
+    pub at: Term<Any>,
+    /// The referenced blob's 32-byte content hash.
+    #[serde(default = "blank")]
+    pub blob: Term<Any>,
+    /// The blob record's encoding version.
+    #[serde(default = "blank")]
+    pub version: Term<Any>,
+    /// Total size of the blob in bytes.
+    #[serde(default = "blank")]
+    pub size: Term<Any>,
+}
+
 /// The `tree/manifest` procedure: the format manifest the node embeds,
 /// field for field. Every node carries one, so a bare reference is
 /// self-describing and mixed-format trees are visible per node.
@@ -195,6 +280,15 @@ pub enum ProcedureQuery {
     /// Procedure `tree/key`.
     #[serde(rename = "tree/key")]
     TreeKey(TreeKeyQuery),
+    /// Procedure `tree/entry`.
+    #[serde(rename = "tree/entry")]
+    TreeEntry(TreeEntryQuery),
+    /// Procedure `tree/value`.
+    #[serde(rename = "tree/value")]
+    TreeValue(TreeValueQuery),
+    /// Procedure `tree/blob`.
+    #[serde(rename = "tree/blob")]
+    TreeBlob(TreeBlobQuery),
     /// Procedure `tree/manifest`.
     #[serde(rename = "tree/manifest")]
     TreeManifest(TreeManifestQuery),
@@ -272,6 +366,81 @@ static TREE_KEY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     })
 });
 
+static TREE_ENTRY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
+    Cells::define(|builder| {
+        builder
+            .cell("of", Some(Kind::from(ValueType::String)))
+            .the("Node reference of the segment node.")
+            .required();
+        builder
+            .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Position within the segment.");
+        builder
+            .cell("key", Some(Kind::from(ValueType::Bytes)))
+            .the("The entry's variable-length index key bytes.");
+        builder
+            .cell("state", Some(Kind::from(ValueType::String)))
+            .the("\"asserted\" or \"removed\".");
+        builder
+            .cell("retraction", Some(Kind::from(ValueType::Boolean)))
+            .the("Whether the datum marks a retraction.");
+        builder
+            .cell("origin", Some(Kind::from(ValueType::Bytes)))
+            .the("Origin half of the claim's version (empty = unversioned).");
+        builder
+            .cell("edition", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Edition half of the claim's version.");
+        builder
+            .cell("cause", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Prior claim versions in the entry's cause.");
+        builder
+            .cell("collapsed", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Extra claim versions collapsed into this entry.");
+        builder
+            .cell("supersedes", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Versions a covering record supersedes.");
+        builder
+            .cell("spill", Some(Kind::from(ValueType::String)))
+            .the("Spilled value's block reference (empty = inline).");
+    })
+});
+
+static TREE_VALUE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
+    Cells::define(|builder| {
+        builder
+            .cell("of", Some(Kind::from(ValueType::String)))
+            .the("The spilled value's 32-byte block reference.")
+            .required();
+        builder
+            .cell("size", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Size of the value in bytes.");
+        builder
+            .cell("bytes", Some(Kind::from(ValueType::Bytes)))
+            .the("The value's raw bytes.");
+    })
+});
+
+static TREE_BLOB_CELLS: LazyLock<Cells> = LazyLock::new(|| {
+    Cells::define(|builder| {
+        builder
+            .cell("of", Some(Kind::from(ValueType::String)))
+            .the("Node reference of the segment node.")
+            .required();
+        builder
+            .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Position within the segment.");
+        builder
+            .cell("blob", Some(Kind::from(ValueType::Bytes)))
+            .the("The referenced blob's 32-byte content hash.");
+        builder
+            .cell("version", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("The blob record's encoding version.");
+        builder
+            .cell("size", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Total size of the blob in bytes.");
+    })
+});
+
 static TREE_MANIFEST_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
@@ -315,6 +484,9 @@ impl ProcedureQuery {
             Self::TreeNode(_) => "tree/node",
             Self::TreeSpan(_) => "tree/span",
             Self::TreeKey(_) => "tree/key",
+            Self::TreeEntry(_) => "tree/entry",
+            Self::TreeValue(_) => "tree/value",
+            Self::TreeBlob(_) => "tree/blob",
             Self::TreeManifest(_) => "tree/manifest",
         }
     }
@@ -325,6 +497,9 @@ impl ProcedureQuery {
             Self::TreeNode(_) => &TREE_NODE_CELLS,
             Self::TreeSpan(_) => &TREE_SPAN_CELLS,
             Self::TreeKey(_) => &TREE_KEY_CELLS,
+            Self::TreeEntry(_) => &TREE_ENTRY_CELLS,
+            Self::TreeValue(_) => &TREE_VALUE_CELLS,
+            Self::TreeBlob(_) => &TREE_BLOB_CELLS,
             Self::TreeManifest(_) => &TREE_MANIFEST_CELLS,
         }
     }
@@ -340,6 +515,9 @@ impl ProcedureQuery {
             Self::TreeNode(query) => &query.of,
             Self::TreeSpan(query) => &query.of,
             Self::TreeKey(query) => &query.of,
+            Self::TreeEntry(query) => &query.of,
+            Self::TreeValue(query) => &query.of,
+            Self::TreeBlob(query) => &query.of,
             Self::TreeManifest(query) => &query.of,
         }
     }
@@ -382,6 +560,31 @@ impl ProcedureQuery {
                 params.insert("key".into(), query.key.clone());
                 params.insert("rank".into(), query.rank.clone());
             }
+            Self::TreeEntry(query) => {
+                params.insert("of".into(), query.of.clone());
+                params.insert("at".into(), query.at.clone());
+                params.insert("key".into(), query.key.clone());
+                params.insert("state".into(), query.state.clone());
+                params.insert("retraction".into(), query.retraction.clone());
+                params.insert("origin".into(), query.origin.clone());
+                params.insert("edition".into(), query.edition.clone());
+                params.insert("cause".into(), query.cause.clone());
+                params.insert("collapsed".into(), query.collapsed.clone());
+                params.insert("supersedes".into(), query.supersedes.clone());
+                params.insert("spill".into(), query.spill.clone());
+            }
+            Self::TreeValue(query) => {
+                params.insert("of".into(), query.of.clone());
+                params.insert("size".into(), query.size.clone());
+                params.insert("bytes".into(), query.bytes.clone());
+            }
+            Self::TreeBlob(query) => {
+                params.insert("of".into(), query.of.clone());
+                params.insert("at".into(), query.at.clone());
+                params.insert("blob".into(), query.blob.clone());
+                params.insert("version".into(), query.version.clone());
+                params.insert("size".into(), query.size.clone());
+            }
             Self::TreeManifest(query) => {
                 params.insert("of".into(), query.of.clone());
                 params.insert("version".into(), query.version.clone());
@@ -412,11 +615,16 @@ impl ProcedureQuery {
                 _ => return None,
             },
         };
-        let Value::String(reference) = value else {
-            return None;
-        };
-        let bytes = reference.from_base58().ok()?;
-        <[u8; 32]>::try_from(bytes).ok()
+        match value {
+            Value::String(reference) => {
+                let bytes = reference.from_base58().ok()?;
+                <[u8; 32]>::try_from(bytes).ok()
+            }
+            // Raw 32-byte references chain too (e.g. straight from a
+            // decomposition formula's bytes output).
+            Value::Bytes(bytes) => <[u8; 32]>::try_from(bytes).ok(),
+            _ => None,
+        }
     }
 
     /// Evaluate this procedure over the incoming selection.
@@ -480,6 +688,57 @@ impl ProcedureQuery {
                                 (&query.at, Value::UnsignedInt(at as u128)),
                                 (&query.key, Value::Bytes(entry.key)),
                                 (&query.rank, Value::UnsignedInt(entry.rank.into())),
+                            ])?;
+                            if let Some(row) = row {
+                                yield row;
+                            }
+                        }
+                    }
+                    ProcedureQuery::TreeEntry(query) => {
+                        for entry in inspect::inspect_entries(bytes)? {
+                            let spill = entry
+                                .spill
+                                .map(|reference| reference.to_base58())
+                                .unwrap_or_default();
+                            let row = project(&base, &[
+                                (&query.at, Value::UnsignedInt(entry.at.into())),
+                                (&query.key, Value::Bytes(entry.key)),
+                                (&query.state, Value::String(entry.state.into())),
+                                (&query.retraction, Value::Boolean(entry.retraction)),
+                                (&query.origin, Value::Bytes(entry.origin)),
+                                (&query.edition, Value::UnsignedInt(entry.edition.into())),
+                                (&query.cause, Value::UnsignedInt(entry.cause.into())),
+                                (&query.collapsed, Value::UnsignedInt(entry.collapsed.into())),
+                                (
+                                    &query.supersedes,
+                                    Value::UnsignedInt(entry.supersedes.into()),
+                                ),
+                                (&query.spill, Value::String(spill)),
+                            ])?;
+                            if let Some(row) = row {
+                                yield row;
+                            }
+                        }
+                    }
+                    ProcedureQuery::TreeValue(query) => {
+                        // The loaded block IS the value: raw bytes, no
+                        // node decode. Type information lives in the
+                        // key the reference came from.
+                        let row = project(&base, &[
+                            (&query.size, Value::UnsignedInt(bytes.len() as u128)),
+                            (&query.bytes, Value::Bytes(bytes)),
+                        ])?;
+                        if let Some(row) = row {
+                            yield row;
+                        }
+                    }
+                    ProcedureQuery::TreeBlob(query) => {
+                        for record in inspect::inspect_blob_records(bytes)? {
+                            let row = project(&base, &[
+                                (&query.at, Value::UnsignedInt(record.at.into())),
+                                (&query.blob, Value::Bytes(record.blob)),
+                                (&query.version, Value::UnsignedInt(record.version.into())),
+                                (&query.size, Value::UnsignedInt(record.size.into())),
                             ])?;
                             if let Some(row) = row {
                                 yield row;

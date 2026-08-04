@@ -1419,7 +1419,8 @@ mod procedure_tests {
     use dialog_operator::Operator;
     use dialog_query::query::Output as _;
     use dialog_query::{
-        ProcedureConclusion, ProcedureQuery, Term, TreeKeyQuery, TreeNodeQuery, TreeSpanQuery, the,
+        ProcedureConclusion, ProcedureQuery, Term, TreeEntryQuery, TreeKeyQuery, TreeNodeQuery,
+        TreeSpanQuery, TreeValueQuery, the,
     };
     use dialog_storage::provider::storage::VolatileSpace;
 
@@ -1469,6 +1470,30 @@ mod procedure_tests {
             scale: Term::var("scale"),
             rank: Term::var("rank"),
             novelty: Term::var("novelty"),
+        })
+    }
+
+    fn tree_entry(reference: &str) -> ProcedureQuery {
+        ProcedureQuery::TreeEntry(TreeEntryQuery {
+            of: Term::from(Value::String(reference.into())).into(),
+            at: Term::var("at"),
+            key: Term::var("key"),
+            state: Term::var("state"),
+            retraction: Term::var("retraction"),
+            origin: Term::var("origin"),
+            edition: Term::var("edition"),
+            cause: Term::var("cause"),
+            collapsed: Term::var("collapsed"),
+            supersedes: Term::var("supersedes"),
+            spill: Term::var("spill"),
+        })
+    }
+
+    fn tree_value(reference: &str) -> ProcedureQuery {
+        ProcedureQuery::TreeValue(TreeValueQuery {
+            of: Term::from(Value::String(reference.into())).into(),
+            size: Term::var("size"),
+            bytes: Term::var("bytes"),
         })
     }
 
@@ -1653,6 +1678,87 @@ mod procedure_tests {
             .try_vec()
             .await?;
         assert_eq!(rows.len(), 1, "tx query serves tree/node: {rows:?}");
+        Ok(())
+    }
+
+    /// A value past the inline threshold spills to a content-addressed
+    /// block; `tree/entry` names its reference and `tree/value` reads
+    /// it back — and versioned commits stamp claim metadata (origin,
+    /// edition) that `tree/entry` surfaces, which is what makes the
+    /// history region legible.
+    #[dialog_common::test]
+    async fn it_reads_spilled_values_and_claim_metadata() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let big = "x".repeat(10 * 1024);
+        branch
+            .transaction()
+            .assert(the!("test/big").of(Entity::new()?).is(big.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let revision = branch.revision().expect("committed");
+        let tree_bytes: &[u8] = revision.tree.hash();
+        let root = ToBase58::to_base58(tree_bytes);
+
+        // Walk every segment reachable from the root, collecting entry
+        // rows — shape-agnostic (the root may be a segment or index).
+        let mut queue = vec![root];
+        let mut entries: Vec<ProcedureConclusion> = Vec::new();
+        while let Some(node) = queue.pop() {
+            entries.extend(
+                branch
+                    .query()
+                    .select(tree_entry(&node))
+                    .perform(&operator)
+                    .try_vec()
+                    .await?,
+            );
+            for span in branch
+                .query()
+                .select(tree_span(&node))
+                .perform(&operator)
+                .try_vec()
+                .await?
+            {
+                queue.push(text(&span, "node"));
+            }
+        }
+        assert!(!entries.is_empty(), "the committed tree has entries");
+
+        assert!(
+            entries.iter().any(
+                |row| matches!(row.get("origin"), Some(Value::Bytes(bytes)) if !bytes.is_empty())
+            ),
+            "versioned commits stamp claim versions: {entries:?}"
+        );
+
+        let spill = entries
+            .iter()
+            .find_map(|row| match row.get("spill") {
+                Some(Value::String(reference)) if !reference.is_empty() => Some(reference.clone()),
+                _ => None,
+            })
+            .expect("the 10 KiB value spilled");
+
+        let values: Vec<ProcedureConclusion> = branch
+            .query()
+            .select(tree_value(&spill))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(values.len(), 1, "one row per value block");
+        let size = unsigned(&values[0], "size");
+        assert!(
+            size >= big.len() as u128,
+            "the block holds the whole value ({size} bytes)"
+        );
+        match values[0].get("bytes") {
+            Some(Value::Bytes(bytes)) => assert_eq!(bytes.len() as u128, size),
+            other => panic!("expected value bytes, got {other:?}"),
+        }
         Ok(())
     }
 }
