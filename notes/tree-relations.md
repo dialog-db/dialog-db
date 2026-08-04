@@ -168,8 +168,13 @@ test first (test 7 below), then land the flag.
 
 ## Operations: the general facility
 
-An **operation** is to an idempotent effect what a formula is to a pure
-function: a named, moded, multi-row premise — except evaluation
+An **operation** is a premise kind of its own, not a kind of formula —
+the resemblance to formulas begins and ends at the parameter
+machinery: named slots with `Requirement::Required` input cells, and
+the `estimate() → None` protocol that makes an unbound-input premise
+non-viable until a join binds it. That machinery (`Cells`,
+`Requirement`, the planner's feasibility check) is engine-level and
+reused verbatim. Everything past the cells is different: evaluation
 performs a capability-authorized effect through the query environment
 instead of computing in-process. "Idempotent" here means *replayable
 forever*: same bound inputs ⇒ same rows, at any later time, on any
@@ -200,8 +205,9 @@ point:
 
 ### Shape
 
-Sketch (final naming open — "operation" avoids overloading `Formula`
-and the `dialog-operator` crate is about authority, not queries):
+Sketch (final naming open — anything but "formula": "operation",
+"procedure", "derivation" all work; the `dialog-operator` crate is
+about authority, not queries, so watch the collision):
 
 ```no_run
 # use dialog_query::{Cells, EvaluationError};
