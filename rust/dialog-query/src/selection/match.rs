@@ -1,5 +1,4 @@
 use futures_util::stream::once;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::Claim;
@@ -110,17 +109,51 @@ impl Binding {
 /// ([`Selection`](super::Selection)): each premise receives the
 /// stream, potentially expands each match into zero or more new
 /// matches, and passes them to the next premise.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Match {
     /// Named variable bindings: maps variable names to their
     /// row-level binding (Present or Absent). A name absent from
-    /// this map means "no premise has touched this variable":
+    /// this list means "no premise has touched this variable":
     /// distinct from [`Binding::Absent`].
-    bindings: HashMap<String, Binding>,
+    ///
+    /// Held as a small vec probed linearly, not a hash map: a query
+    /// binds a handful of variables, and a `Match` clones once per
+    /// yielded row — the vec clone is one allocation plus reference
+    /// bumps on the `Arc<str>` names, where the map cloned a bucket
+    /// table and re-allocated every `String` key, and every probe paid
+    /// a SipHash of the name before comparing anything.
+    bindings: Vec<(Arc<str>, Binding)>,
     // TODO: Once Value::Record supports the RecordFormat trait proposed in
     // https://github.com/dialog-db/dialog-db/pull/221 claims can be stored
-    // directly as Value::Record in bindings, eliminating this separate map.
-    claims: HashMap<String, Arc<Claim>>,
+    // directly as Value::Record in bindings, eliminating this separate list.
+    claims: Vec<(Arc<str>, Arc<Claim>)>,
+}
+
+/// Binding order is premise-evaluation order, an artifact of the plan;
+/// two rows are the same result when they bind the same names to the
+/// same values, in any order.
+impl PartialEq for Match {
+    fn eq(&self, other: &Self) -> bool {
+        fn same<T: PartialEq>(left: &[(Arc<str>, T)], right: &[(Arc<str>, T)]) -> bool {
+            left.len() == right.len()
+                && left.iter().all(|(name, value)| {
+                    right
+                        .iter()
+                        .any(|(other_name, other_value)| name == other_name && value == other_value)
+                })
+        }
+        same(&self.bindings, &other.bindings) && same(&self.claims, &other.claims)
+    }
+}
+
+impl Eq for Match {}
+
+/// Probes a name list, the small-vec analogue of `HashMap::get`.
+fn probe<'a, T>(entries: &'a [(Arc<str>, T)], key: &str) -> Option<&'a T> {
+    entries
+        .iter()
+        .find(|(name, _)| name.as_ref() == key)
+        .map(|(_, value)| value)
 }
 
 impl Match {
@@ -147,7 +180,7 @@ impl Match {
             }
         };
 
-        if let Some(claim) = self.claims.get(key) {
+        if let Some(claim) = probe(&self.claims, key) {
             Ok(claim.as_ref().clone())
         } else {
             Err(EvaluationError::Store(format!(
@@ -163,7 +196,15 @@ impl Match {
             name: Some(name), ..
         } = term
         {
-            self.claims.insert(name.clone(), Arc::new(claim.to_owned()));
+            let claim = Arc::new(claim.to_owned());
+            match self
+                .claims
+                .iter_mut()
+                .find(|(held, _)| held.as_ref() == name.as_str())
+            {
+                Some((_, slot)) => *slot = claim,
+                None => self.claims.push((name.as_str().into(), claim)),
+            }
         }
 
         Ok(())
@@ -199,7 +240,7 @@ impl Match {
                         value_type: format!("{:?}", value.data_type()),
                     });
                 }
-                if let Some(existing) = self.bindings.get(name) {
+                if let Some(existing) = probe(&self.bindings, name) {
                     match existing {
                         Binding::Present(existing_value) => {
                             if *existing_value != value {
@@ -221,7 +262,8 @@ impl Match {
                         }),
                     }
                 } else {
-                    self.bindings.insert(name.into(), Binding::Present(value));
+                    self.bindings
+                        .push((name.as_str().into(), Binding::Present(value)));
                     Ok(())
                 }
             }
@@ -238,7 +280,7 @@ impl Match {
             Term::Variable {
                 name: Some(name), ..
             } => {
-                if let Some(existing) = self.bindings.get(name) {
+                if let Some(existing) = probe(&self.bindings, name) {
                     match existing {
                         Binding::Absent => Ok(()),
                         Binding::Present(value) => Err(EvaluationError::Assignment {
@@ -249,7 +291,7 @@ impl Match {
                         }),
                     }
                 } else {
-                    self.bindings.insert(name.into(), Binding::Absent);
+                    self.bindings.push((name.as_str().into(), Binding::Absent));
                     Ok(())
                 }
             }
@@ -264,7 +306,7 @@ impl Match {
         match term {
             Term::Variable {
                 name: Some(key), ..
-            } => self.bindings.contains_key(key),
+            } => probe(&self.bindings, key).is_some(),
             Term::Variable { name: None, .. } => false,
             Term::Constant(_) => true,
         }
@@ -276,9 +318,7 @@ impl Match {
         match term {
             Term::Variable {
                 name: Some(key), ..
-            } => self
-                .bindings
-                .get(key)
+            } => probe(&self.bindings, key)
                 .map(|b| b.is_present())
                 .unwrap_or(false),
             Term::Variable { name: None, .. } => false,
@@ -302,7 +342,7 @@ impl Match {
             Term::Variable {
                 name: Some(key), ..
             } => {
-                if let Some(binding) = self.bindings.get(key) {
+                if let Some(binding) = probe(&self.bindings, key) {
                     Ok(binding.clone())
                 } else {
                     Err(EvaluationError::UnboundVariable {

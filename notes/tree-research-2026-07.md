@@ -1520,3 +1520,51 @@ Same-window A/B (dialog_mem):
 write_batch_empty vs sqlite_mem (5.3 ms) is now 6x — from 66x at
 the campaign's start. The "apply-phase residue" was never mostly
 supersession value encodes; it was this insertion sort.
+
+## Self-drive round: engine per-select costs (2026-08-02)
+
+Wall clock in this window is unusable (the same committed code
+measured 2x apart across runs), so every claim below is
+instruction-counted under callgrind (profile_join, 1000 entities,
+25 query iterations, seed subtracted). Baseline at the start of
+the round: 121M instructions per query_join run.
+
+Landed, in order:
+
+1. e4bdbec — three per-select reductions:
+   - selector_range now builds each range bound with ONE KeyParts
+     mutation + one build_key. The old chain
+     (min()/max().apply_selector) re-parsed and re-built the whole
+     key inside every set_* call, ~10 round-trips per range, paid
+     once per outer binding: measured 1.05B instructions inclusive
+     = a THIRD of engine query time. -766M total, -26%/query.
+   - Uri::from_str memoizes successful parses per thread (bounded
+     4096, clear-at-capacity). Entity URIs repeat across scans and
+     join probes; a hit is a hash lookup + Url clone vs ~7-10k
+     instructions of url::Parser. About -280M gross.
+   - QueryEnv pushes the overlay stream into the merge only when it
+     matched rows (the common inner probe matches none and now
+     takes merge_grouped's single-stream passthrough); tombstones
+     share via Arc. Small on its own.
+2. Match bindings/claims: HashMap<String, _> -> Vec<(Arc<str>, _)>
+   with linear probes and order-insensitive PartialEq. A Match
+   clones once per yielded row; the vec clone is one alloc plus
+   Arc bumps where the map re-allocated every String key, and
+   probes stop paying SipHash. -126M, -6%/query.
+
+Net: 121M -> 79M instructions per query_join run (-35%). Remaining
+profile: allocator family ~28%, memcpy ~16% (boxed per-select
+stream scaffolding, per-row Key/Value clones), parse_key_ref ~3.4%
+(ArtifactView accessors re-walk the key per call), blake3 verify
+~3%, KeyParts::max filler allocs ~1%.
+
+Still-open engine tickets, updated:
+- B-full: premise-scoped scan context (reuse pinned tree +
+  manifest + store handle across a premise's inner selects) —
+  attacks the boxed-stream + setup alloc churn.
+- The deeper fix for joins is strategic, not micro: the inner
+  premise issues one EAV probe per outer binding (1000 selects);
+  a merge-join strategy (sort outer bindings, one AEV scan
+  interleaved) would collapse them into one scan. Planner
+  territory; needs a design pass.
+- ArtifactView parsed-offset cache (~3%).
