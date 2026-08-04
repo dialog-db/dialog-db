@@ -59,7 +59,7 @@ impl Debug for Artifact {
 impl Display for Artifact {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let attribute = self.the.to_string();
-        let entity = format!("{}", &self.of);
+        let entity = format!("{}", self.of);
         let value = self.is.to_utf8();
 
         write!(f, "Artifact: the '{attribute}' of '{entity}' is '{value}'")
