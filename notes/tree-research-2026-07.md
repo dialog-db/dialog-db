@@ -1871,3 +1871,19 @@ Consequences landed:
 - The partial-replication-SAFE engine lever goes back on the
   list: premise-scoped setup reuse (same blocks fetched, less
   per-select scaffolding).
+
+## Nightly soak moved onto the nix toolchain (2026-08-04)
+
+Owner directive: "We should use same nix setup everywhere." The
+soak workflow originally stood up its own toolchain path
+(dtolnay/rust-toolchain + Swatinem/rust-cache) for speed of
+setup; it now mirrors test.yml's step sequence exactly —
+disable-apparmor, nothing-but-nix, install-nix-action,
+cachix-action (tonk-ops) — and runs each arm as
+`nix develop --accept-flake-config --command bash -c
+'cd rust && cargo test ...'`. The dev shell carries the pinned
+rustToolchain, so the arms exercise the same compiler CI tests
+with, and the env-knob resolution (workflow_dispatch overrides
+for seed counts) is unchanged: knobs exported in the step shell
+are inherited by the nix develop command. One toolchain path for
+CI to maintain instead of two.

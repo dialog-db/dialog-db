@@ -64,13 +64,22 @@ jobs:
             env_default: '5000'
             extra_env: ''
     steps:
+      - uses: cisagov/action-disable-apparmor@v1
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: wimpysworld/nothing-but-nix@main
         with:
-          workspaces: 'rust'
+          root-safe-haven: '16384'
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v16
+        with:
+          name: tonk-ops
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+      # Env knobs exported here are inherited by the `nix develop` command;
+      # the flake lives at the repo root, so the arm cd's into rust/ itself.
       - name: 'Run soak arm'
-        working-directory: 'rust'
+        shell: bash
         run: |
           value="${{ github.event.inputs[matrix.env_value_input] || matrix.env_default }}"
           export ${{ matrix.env_name }}="$value"
@@ -78,4 +87,6 @@ jobs:
             export ${{ matrix.extra_env }}
           fi
           echo "soak arm: ${{ matrix.name }} (${{ matrix.env_name }}=$value ${{ matrix.extra_env }})"
-          ${{ matrix.command }}
+          nix develop \
+            --accept-flake-config \
+            --command bash -c 'cd rust && ${{ matrix.command }}'
