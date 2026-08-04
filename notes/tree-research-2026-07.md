@@ -1491,3 +1491,32 @@ E. ArtifactView parsed-offset cache: accessors currently re-walk
    the key per call (7%).
 F. Engine binding (HashMap<String, Binding> etc.): real but last
    (~8%); interned symbols / small-map could halve it at most.
+
+## Ticket A landed: two-run novelty insertion (2026-08-02)
+
+`LinkNovelty::Open` is now a sorted main run plus a bounded sorted
+tail (128 ops). Enqueue inserts each op into the tail — O(tail)
+instead of the stable re-sort that walked the whole accumulated
+buffer per op — and the tail merges into the run when full or when
+a consumer needs one flat list (take, persist encode, boundary
+reroute). resolve / collect_winners_in_range binary-search both
+runs; weight and remove-key work on both without consolidating.
+Per-key op order is exact (tail ops are newer than run ops for the
+same key; the merge keeps run first on ties), so sealed bytes,
+cascade timing, and canonical roots are unchanged — converge_check
+CONVERGED at all four scales with the pinned roots (2bb2ee93 /
+97d0d796 / 87dd1526 / f5e466b7), and the artifacts dev suite runs
+the cached-vs-fresh byte-identity debug asserts green.
+
+Same-window A/B (dialog_mem):
+
+| bench | before | after | change |
+|---|---|---|---|
+| write_batch_empty/1000 | 307 ms | 31.8 ms | -90% (9.7x) |
+| write_batch_warm/1000 | 153 ms | 122 ms | -20% |
+| write_small_txns/100 | 8.77 ms | 8.17 ms | -7% |
+| se_replay per-commit | — | 2.6/3.3/5.5 ms | unchanged |
+
+write_batch_empty vs sqlite_mem (5.3 ms) is now 6x — from 66x at
+the campaign's start. The "apply-phase residue" was never mostly
+supersession value encodes; it was this insertion sort.
