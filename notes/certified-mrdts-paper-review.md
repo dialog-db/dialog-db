@@ -6,6 +6,11 @@ assessment of which of its ideas are worth incorporating into Dialog.
 
 [arXiv:2203.14518]: https://arxiv.org/abs/2203.14518
 
+Companion note:
+[`mergeable-types-paper-review.md`](./mergeable-types-paper-review.md)
+covers Kaki et al.'s OOPSLA '19 paper (Quark) that introduced the MRDT
+model this paper builds on.
+
 ## What the paper does
 
 The paper presents **Peepul**, an F* library for building *mergeable
