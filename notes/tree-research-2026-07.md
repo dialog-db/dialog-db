@@ -1942,3 +1942,32 @@ first-time pulls (empty base) from the writer each peer never
 synced, with enough unrelated local commits (8) to hold the merge
 in the screen-theirs direction — leaving R3 record coverage as the
 only carrier, which is exactly the surface the union feeds.
+
+## Node unification observation + cardinality-one merge backlog (2026-08-04)
+
+Owner musing confirmed at the codec level: a NoveltyBuffer
+({child, count, layout, columns, polarity, values}) is a
+PersistentSegment ({header, count, layout, columns, values}) plus
+a child index and op polarity — buffers are literally encoded with
+the segment codec and share the MIXED_LAYOUT straddle rule. The
+unified reading "node = manifest + children (separator, hash,
+scale) + novelty" makes a leaf children=[] with one resolved
+buffer and the EMPTY TREE children=[] novelty=[] — exactly the
+pending empty-node-with-manifest proposal, which falls out of this
+view as the zero case rather than a special case. The type split
+that remains is deliberate: buffers are last-wins op logs
+(retracts, shadowing) where segments are resolved state, and
+separator tables are routing data deliberately excluded from
+novelty so buffering can never reshape the tree. Recommendation
+stands: do the empty node; full structural unification is a format
+campaign of its own.
+
+Backlog (owner: "probably tangent here"): cardinality-one
+resolution of truly concurrent different-value edits cannot use
+the tree's value merge — values live in keys, so different values
+never contend at one slot; the temporary many-standing anomaly is
+resolved through supersession + the merge screen. A value+cause
+aware deterministic collapse (instead of surfacing the anomaly)
+would hook into the engine's read-side collapse or the Replace
+supersession path, per the standing principle: engine decides
+policy, fact query decides cardinality.
