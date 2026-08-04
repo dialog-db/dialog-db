@@ -140,7 +140,7 @@ mod tests {
     /// An entity-ordered key decomposes into tag, entity, attribute,
     /// value-type and value components — in sort order, with the
     /// attribute and value legible in `text`.
-    #[test]
+    #[dialog_common::test]
     fn it_decomposes_an_entity_key() {
         let fact = fact();
         let rows = parts(entity_key(&fact));
@@ -161,7 +161,7 @@ mod tests {
 
     /// Garbage input never yields zero rows: an unknown tag falls back
     /// to a single opaque component.
-    #[test]
+    #[dialog_common::test]
     fn it_falls_back_to_opaque_for_unknown_tags() {
         let rows = parts(vec![0xEE, 1, 2, 3]);
         assert_eq!(rows.len(), 1, "one opaque row: {rows:?}");
@@ -175,7 +175,7 @@ mod tests {
 
     /// The empty separator is the −∞ boundary; a non-empty one is the
     /// tag plus a lenient prefix component.
-    #[test]
+    #[dialog_common::test]
     fn it_decomposes_separators_leniently() {
         let empty = separator_parts(Vec::new());
         assert_eq!(empty.len(), 1);
