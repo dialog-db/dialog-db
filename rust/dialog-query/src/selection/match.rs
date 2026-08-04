@@ -475,3 +475,118 @@ mod tests {
         assert!(m.contains(&nname));
     }
 }
+
+#[cfg(test)]
+mod model_tests {
+    #![allow(unexpected_cfgs)]
+
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::artifact::Value;
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    fn xorshift(state: &mut u64) -> u32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        (*state >> 32) as u32
+    }
+
+    /// The small-vec representation against a `HashMap` reference model:
+    /// random bind / bind_absent sequences over a small variable pool must
+    /// agree on every outcome — success vs conflict, and every lookup —
+    /// with what the map-backed semantics dictate.
+    #[dialog_common::test]
+    async fn it_matches_the_hash_map_model() {
+        for seed in 0..16u64 {
+            let mut rng = 0x2545F4914F6CDD1Du64 ^ seed;
+            let mut row = Match::new();
+            let mut model: HashMap<String, Binding> = HashMap::new();
+
+            for _ in 0..200 {
+                let name = format!("v{}", xorshift(&mut rng) % 12);
+                let term: Term<Any> = Term::var(&name);
+                match xorshift(&mut rng) % 3 {
+                    0 => {
+                        let value = Value::UnsignedInt(u128::from(xorshift(&mut rng) % 4));
+                        let expect = match model.get(&name) {
+                            None => {
+                                model.insert(name.clone(), Binding::Present(value.clone()));
+                                true
+                            }
+                            Some(Binding::Present(held)) => *held == value,
+                            Some(Binding::Absent) => false,
+                        };
+                        assert_eq!(
+                            row.bind(&term, value).is_ok(),
+                            expect,
+                            "seed {seed}: bind({name}) verdict diverged from the model"
+                        );
+                    }
+                    1 => {
+                        let expect = match model.get(&name) {
+                            None => {
+                                model.insert(name.clone(), Binding::Absent);
+                                true
+                            }
+                            Some(Binding::Absent) => true,
+                            Some(Binding::Present(_)) => false,
+                        };
+                        assert_eq!(
+                            row.bind_absent(&term).is_ok(),
+                            expect,
+                            "seed {seed}: bind_absent({name}) verdict diverged"
+                        );
+                    }
+                    _ => {
+                        let looked = row.lookup(&term).ok();
+                        assert_eq!(
+                            looked.as_ref(),
+                            model.get(&name),
+                            "seed {seed}: lookup({name}) diverged"
+                        );
+                        assert_eq!(row.contains(&term), model.contains_key(&name));
+                        assert_eq!(
+                            row.is_present(&term),
+                            model.get(&name).map(Binding::is_present).unwrap_or(false)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Binding order is plan order, not identity: two rows binding the same
+    /// names to the same values in different orders are equal, and any
+    /// differing binding breaks equality both ways.
+    #[dialog_common::test]
+    async fn it_compares_rows_order_insensitively() {
+        let a_term: Term<Any> = Term::var("a");
+        let b_term: Term<Any> = Term::var("b");
+
+        let mut forward = Match::new();
+        forward.bind(&a_term, Value::UnsignedInt(1)).unwrap();
+        forward.bind(&b_term, Value::UnsignedInt(2)).unwrap();
+
+        let mut backward = Match::new();
+        backward.bind(&b_term, Value::UnsignedInt(2)).unwrap();
+        backward.bind(&a_term, Value::UnsignedInt(1)).unwrap();
+
+        assert_eq!(forward, backward, "binding order must not affect identity");
+        assert_eq!(backward, forward, "equality must be symmetric");
+
+        let mut different = Match::new();
+        different.bind(&a_term, Value::UnsignedInt(1)).unwrap();
+        different.bind(&b_term, Value::UnsignedInt(3)).unwrap();
+        assert_ne!(forward, different);
+        assert_ne!(different, forward);
+
+        let mut subset = Match::new();
+        subset.bind(&a_term, Value::UnsignedInt(1)).unwrap();
+        assert_ne!(forward, subset, "missing bindings must break equality");
+        assert_ne!(subset, forward);
+    }
+}

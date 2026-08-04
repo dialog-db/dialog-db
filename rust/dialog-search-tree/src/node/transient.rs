@@ -2287,3 +2287,283 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod novelty_model_tests {
+    #![allow(unexpected_cfgs)]
+
+    use std::collections::BTreeMap;
+
+    use super::{LinkNovelty, NOVELTY_TAIL_LIMIT, Novelty};
+    use crate::{NoveltyEntry, NoveltyOp};
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    type Val = Vec<u8>;
+
+    /// A reference model of one link's buffer: the chronological op log per
+    /// key. Everything the two-run structure must answer derives from it.
+    #[derive(Default)]
+    struct Model {
+        by_key: BTreeMap<Vec<u8>, Vec<NoveltyOp<Val>>>,
+        total: usize,
+    }
+
+    impl Model {
+        fn push(&mut self, key: Vec<u8>, op: NoveltyOp<Val>) {
+            self.by_key.entry(key).or_default().push(op);
+            self.total += 1;
+        }
+
+        fn newest(&self, key: &[u8]) -> Option<&NoveltyOp<Val>> {
+            self.by_key.get(key).and_then(|ops| ops.last())
+        }
+
+        /// The flat sorted op list the buffer must produce: ascending keys,
+        /// chronological order within a key (newest last).
+        fn flat(&self) -> Vec<NoveltyEntry<Val>> {
+            self.by_key
+                .iter()
+                .flat_map(|(key, ops)| {
+                    ops.iter().map(|op| NoveltyEntry {
+                        key: key.clone(),
+                        op: op.clone(),
+                    })
+                })
+                .collect()
+        }
+
+        /// The winner per key within `[start, end]`, ascending.
+        fn winners(&self, start: &[u8], end: &[u8]) -> Vec<NoveltyEntry<Val>> {
+            self.by_key
+                .range(start.to_vec()..=end.to_vec())
+                .map(|(key, ops)| NoveltyEntry {
+                    key: key.clone(),
+                    op: ops.last().expect("non-empty log").clone(),
+                })
+                .collect()
+        }
+    }
+
+    fn xorshift(state: &mut u64) -> u32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        (*state >> 32) as u32
+    }
+
+    /// Single-op routing (the enqueue hot path) against the model, sweeping
+    /// seeds and op counts sized to cross the tail limit repeatedly, with a
+    /// small key pool so equal-key chains span run/tail boundaries.
+    #[dialog_common::test]
+    async fn it_matches_the_model_through_single_op_routing() {
+        for seed in 0..8u64 {
+            let mut rng = 0x9E3779B97F4A7C15u64 ^ seed;
+            let mut novelty: Novelty<Val> = Novelty::new();
+            let mut model = Model::default();
+
+            let ops = NOVELTY_TAIL_LIMIT * 3 + 17;
+            let pool = 24u32;
+            for at in 0..ops {
+                let key = (xorshift(&mut rng) % pool).to_be_bytes().to_vec();
+                let op = if xorshift(&mut rng).is_multiple_of(4) {
+                    NoveltyOp::Retract
+                } else {
+                    NoveltyOp::Assert(vec![at as u8, seed as u8])
+                };
+                model.push(key.clone(), op.clone());
+                novelty
+                    .route::<[u8; 4]>(&[], vec![NoveltyEntry { key, op }])
+                    .expect("route");
+
+                // Point-resolve a rotating probe against the model mid-run,
+                // so run/tail splits are checked at every phase, not only
+                // after the final consolidation.
+                if at.is_multiple_of(7) {
+                    let probe = (xorshift(&mut rng) % pool).to_be_bytes();
+                    assert_eq!(
+                        novelty.resolve::<[u8; 4]>(0, &probe).expect("resolve"),
+                        model.newest(&probe).cloned(),
+                        "seed {seed}, op {at}: resolve disagrees with the model"
+                    );
+                }
+            }
+
+            assert_eq!(novelty.len(), model.total, "seed {seed}: op count");
+            assert_eq!(novelty.peak(), model.total, "seed {seed}: single-link peak");
+
+            // Range winners while the tail is (very likely) non-empty.
+            for _ in 0..8 {
+                let mut lo = (xorshift(&mut rng) % pool).to_be_bytes().to_vec();
+                let mut hi = (xorshift(&mut rng) % pool).to_be_bytes().to_vec();
+                if lo > hi {
+                    std::mem::swap(&mut lo, &mut hi);
+                }
+                let mut got = Vec::new();
+                novelty
+                    .collect_winners_in_range::<[u8; 4]>(
+                        std::ops::Bound::Included(lo.as_slice()),
+                        std::ops::Bound::Included(hi.as_slice()),
+                        &mut got,
+                    )
+                    .expect("winners");
+                assert_eq!(
+                    got,
+                    model.winners(&lo, &hi),
+                    "seed {seed}: range winners [{lo:?}, {hi:?}] disagree"
+                );
+            }
+
+            // The drained flat list is the stored order: ascending keys,
+            // newest op for a key last. `NoveltyBuffer::from_entries` is a
+            // pure function of this list, so equality here IS sealed-bytes
+            // equality with a buffer built any other way.
+            assert_eq!(
+                novelty.take_all::<[u8; 4]>().expect("take_all"),
+                model.flat(),
+                "seed {seed}: flat drain order"
+            );
+            assert!(novelty.is_empty());
+        }
+    }
+
+    /// Multi-link routing partitions by the same lower-bound rule stored
+    /// routing uses, and each link's buffer independently matches the model.
+    #[dialog_common::test]
+    async fn it_routes_links_like_the_model_partition() {
+        let bounds: Vec<Vec<u8>> = vec![8u32.to_be_bytes().to_vec(), 16u32.to_be_bytes().to_vec()];
+        for seed in 0..4u64 {
+            let mut rng = 0xD1B54A32D192ED03u64 ^ seed;
+            let mut novelty: Novelty<Val> = Novelty::new();
+            let mut models: Vec<Model> = (0..3).map(|_| Model::default()).collect();
+
+            for at in 0..(NOVELTY_TAIL_LIMIT * 2 + 5) {
+                let key = (xorshift(&mut rng) % 24).to_be_bytes().to_vec();
+                let op = NoveltyOp::Assert(vec![at as u8]);
+                let slot = bounds
+                    .iter()
+                    .take_while(|bound| bound.as_slice() <= key.as_slice())
+                    .count();
+                models[slot].push(key.clone(), op.clone());
+                let borrowed: Vec<&[u8]> = bounds.iter().map(Vec::as_slice).collect();
+                novelty
+                    .route::<[u8; 4]>(&borrowed, vec![NoveltyEntry { key, op }])
+                    .expect("route");
+            }
+
+            let expected_peak = models.iter().map(|model| model.total).max().unwrap_or(0);
+            assert_eq!(novelty.peak(), expected_peak, "seed {seed}: peak");
+            for (slot, model) in models.iter().enumerate() {
+                assert_eq!(
+                    novelty.take_link::<[u8; 4]>(slot).expect("take_link"),
+                    model.flat(),
+                    "seed {seed}: link {slot} drain"
+                );
+            }
+            assert!(novelty.is_empty(), "seed {seed}: all links drained");
+        }
+    }
+
+    /// The tail-limit boundary exactly: inserting precisely at, below, and
+    /// above the limit keeps every reader consistent (the consolidation
+    /// fires between the limit-th and limit+1-th insert).
+    #[dialog_common::test]
+    async fn it_consolidates_exactly_at_the_tail_limit() {
+        for extra in [0usize, 1, 2] {
+            let mut novelty: Novelty<Val> = Novelty::new();
+            let mut model = Model::default();
+            // One shared key so every entry is one equal-key chain — the
+            // hardest shape for "newest last" across a consolidation.
+            let key = 7u32.to_be_bytes().to_vec();
+            for at in 0..(NOVELTY_TAIL_LIMIT + extra) {
+                let op = NoveltyOp::Assert(vec![at as u8, (at >> 8) as u8]);
+                model.push(key.clone(), op.clone());
+                novelty
+                    .route::<[u8; 4]>(
+                        &[],
+                        vec![NoveltyEntry {
+                            key: key.clone(),
+                            op,
+                        }],
+                    )
+                    .expect("route");
+                assert_eq!(
+                    novelty.resolve::<[u8; 4]>(0, &key).expect("resolve"),
+                    model.newest(&key).cloned(),
+                    "extra {extra}, op {at}: newest op must win across the limit"
+                );
+            }
+            assert_eq!(
+                novelty.take_all::<[u8; 4]>().expect("take_all"),
+                model.flat(),
+                "extra {extra}: chronological order within the key must survive"
+            );
+        }
+    }
+
+    /// `remove_key` drops every op for the key from BOTH runs and keeps the
+    /// accounting exact, without disturbing other keys.
+    #[dialog_common::test]
+    async fn it_removes_keys_across_both_runs() {
+        let mut novelty: Novelty<Val> = Novelty::new();
+        let mut model = Model::default();
+        // Interleave two keys so, after the limit crossing, the victim key
+        // holds ops in the run AND the tail.
+        let victim = 3u32.to_be_bytes().to_vec();
+        let keeper = 5u32.to_be_bytes().to_vec();
+        for at in 0..(NOVELTY_TAIL_LIMIT + NOVELTY_TAIL_LIMIT / 2) {
+            let key = if at.is_multiple_of(2) { &victim } else { &keeper };
+            let op = NoveltyOp::Assert(vec![at as u8]);
+            model.push(key.clone(), op.clone());
+            novelty
+                .route::<[u8; 4]>(
+                    &[],
+                    vec![NoveltyEntry {
+                        key: key.clone(),
+                        op,
+                    }],
+                )
+                .expect("route");
+        }
+        novelty
+            .remove_key::<[u8; 4]>(0, &victim)
+            .expect("remove_key");
+        let dropped = model.by_key.remove(&victim).expect("victim present");
+        model.total -= dropped.len();
+
+        assert_eq!(novelty.len(), model.total, "count after removal");
+        assert_eq!(
+            novelty.resolve::<[u8; 4]>(0, &victim).expect("resolve"),
+            None,
+            "removed key must not resolve"
+        );
+        assert_eq!(
+            novelty.take_all::<[u8; 4]>().expect("take_all"),
+            model.flat(),
+            "surviving ops must be untouched and ordered"
+        );
+    }
+
+    /// An empty-tail consolidation and a consolidation of a lifted sealed
+    /// buffer are both no-ops that leave the flat order intact.
+    #[dialog_common::test]
+    async fn it_consolidates_idempotently() {
+        let mut link: LinkNovelty<Val> = LinkNovelty::empty();
+        for at in 0..5u8 {
+            link.insert::<[u8; 4]>(NoveltyEntry {
+                key: vec![at],
+                op: NoveltyOp::Assert(vec![at]),
+            })
+            .expect("insert");
+        }
+        link.consolidate();
+        link.consolidate();
+        let drained = link.take::<[u8; 4]>().expect("take");
+        assert_eq!(drained.len(), 5);
+        assert!(
+            drained.windows(2).all(|pair| pair[0].key <= pair[1].key),
+            "consolidation must leave sorted order"
+        );
+    }
+}

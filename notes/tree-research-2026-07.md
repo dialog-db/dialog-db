@@ -1595,3 +1595,68 @@ of truth): query_join/1000 14.6 ms, query_memory/1000 1.61 ms,
 
 Both suites green throughout, clippy clean, converge oracle
 byte-identical at every landed step.
+
+## Hardening: the tests this campaign should have had (2026-08-02)
+
+Testing infrastructure derived from the failure modes we actually
+hit (or dodged by manually running an example at the right moment),
+now part of the workspace suite:
+
+1. CONVERGENCE IN-TREE (`dialog-baseline/tests/convergence.rs`):
+   the history-independence oracle promoted from the manually-run
+   `converge_check` example to a real test — per-txn vs by-five vs
+   single-commit replays of the synthetic SE log must canonicalize
+   to the same root, with the key+value digest separating "fact-set
+   diverged" (a data bug, e.g. batched supersession dropping a
+   write) from "same facts, different shape" (a history-independence
+   break). Plus a canonicalize-is-idempotent fixpoint test. Default
+   120 txns for CI budget; `DIALOG_CONVERGE_TXNS` scales it; the
+   example remains for 10k-scale sweeps.
+2. TWO-RUN NOVELTY MODEL TESTS (node/transient.rs): random single-op
+   routing (the enqueue hot path) against a BTreeMap op-log
+   reference model, checking resolve mid-run at every phase of the
+   run/tail split, range winners with the tail non-empty, the flat
+   drain order (which IS sealed-bytes identity, since the encoder is
+   a pure function of it), multi-link partitioning, the exact
+   tail-limit boundary with a single-key chain (the hardest shape
+   for newest-last across a consolidation), remove-key across both
+   runs, and consolidation idempotence.
+3. SELECTOR RANGE EQUIVALENCE PIN (tree.rs tests): the direct
+   KeyParts construction against the legacy min()/max()
+   .apply_selector view chain it replaced, across a selector matrix
+   (entity/attr/value combos, prefixes, value bounds) and a value
+   population straddling every encoding decision — inline strings,
+   strings AT and around the spill threshold, numerics, bytes,
+   entity refs — under the default manifest AND one with a shifted
+   inline_n that flips the spill decision.
+4. EQUIVALENCE PINS THROUGH THE PUBLIC API
+   (`dialog-artifacts/tests/hardening.rs`):
+   - scanned-view sort keys (derived from stored key bytes) equal
+     field-derived sort keys for every value shape incl. spilled —
+     the invariant the query merge's ordering and dedup rest on;
+   - sort-key identity tracks VALUE identity, including type
+     differences over identical raw bytes ("5" as string vs bytes
+     vs integer must not collide) — the dedup fingerprint's
+     foundation;
+   - the URI memo is transparent: hits equal misses including url's
+     normalizations, failures are not cached, and entries survive
+     the capacity-clear cycle.
+5. MATCH MODEL TESTS (selection/match.rs): random
+   bind/bind_absent/lookup sequences against a HashMap reference
+   model (verdicts and lookups must agree exactly), and
+   order-insensitive row equality pinned in both directions with
+   subset/differing-value counterexamples.
+
+Workspace suite now 2158 tests, all green; clippy clean.
+
+What remains unpinned, honestly: the buffered (non-canonical)
+published root's byte-stability across enqueue-structure changes is
+still guarded only by the artifacts spine-reuse pin and the
+converge oracle's canonical roots — a dedicated
+"buffered-root replay equality" test (same commits, same published
+roots, across two independent stores) exists
+(it_commits_identically_when_the_spine_is_reused) but only for one
+batch shape; the pacing-ramp prototype's known convergence residue
+is documented in converge_check and deliberately not asserted; and
+the wasm arms of the new tests run only where the wasm test rig
+runs them.

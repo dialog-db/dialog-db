@@ -1587,3 +1587,166 @@ mod spill_cache_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod selector_range_tests {
+    #![allow(unexpected_cfgs)]
+    // The dialog_common::test macro requires async test fns; this pure
+    // construction test awaits nothing.
+    #![allow(clippy::unused_async)]
+
+    use std::ops::RangeInclusive;
+
+    use std::str::FromStr as _;
+
+    use super::{apply_prefix_bounds, selector_range};
+    use crate::key::default_manifest;
+    use crate::selector::Constrained;
+    use crate::{
+        ArtifactSelector, Attribute, AttributeKey, Entity, EntityKey, Key, KeyViewConstruct,
+        KeyViewMut as _, Value, ValueKey,
+    };
+    use dialog_search_tree::Manifest;
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// The range construction `selector_range` replaced: chained
+    /// `min()/max().apply_selector(..)` view mutations (each a full key
+    /// parse + rebuild), fed through the same `apply_prefix_bounds`. The
+    /// rewrite claimed byte-equivalence by construction; this pin holds it
+    /// to that claim across the selector shapes and value sizes that pick
+    /// different encodings.
+    fn legacy_selector_range(
+        selector: &ArtifactSelector<Constrained>,
+        manifest: &Manifest,
+    ) -> RangeInclusive<Key> {
+        if selector.entity().is_some()
+            || (selector.entity_prefix().is_some()
+                && selector.value().is_none()
+                && selector.attribute().is_none()
+                && selector.attribute_prefix().is_none())
+        {
+            let (start, end) = apply_prefix_bounds(
+                <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
+                <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+                selector,
+                manifest,
+            );
+            start.into_key()..=end.into_key()
+        } else if selector.value().is_some()
+            || selector.value_prefix().is_some()
+            || selector.value_lower().is_some()
+            || selector.value_upper().is_some()
+        {
+            let (start, end) = apply_prefix_bounds(
+                <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
+                <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+                selector,
+                manifest,
+            );
+            start.into_key()..=end.into_key()
+        } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
+            let (start, end) = apply_prefix_bounds(
+                <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
+                <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+                selector,
+                manifest,
+            );
+            start.into_key()..=end.into_key()
+        } else {
+            unreachable!("ArtifactSelector will always have at least one field specified")
+        }
+    }
+
+    fn entity() -> Entity {
+        Entity::from_str("did:key:z6Mk2WiNvjBbuWZ8jYNmFzh4uFyt8iqwpDND6ymg6KnKzchw")
+            .expect("valid entity")
+    }
+
+    fn attribute() -> Attribute {
+        Attribute::from_str("person/name").expect("valid attribute")
+    }
+
+    /// Values chosen to straddle every encoding decision the bound
+    /// construction makes: short inline strings, strings AT and just past
+    /// the spill threshold (which flip the bound's payload from a full
+    /// inline encoding to a prefix + hash), numerics with fixed-width
+    /// encodings, negative and fractional floats, booleans, raw bytes, and
+    /// an entity-valued reference.
+    fn probe_values(manifest: &Manifest) -> Vec<Value> {
+        let spill_at = manifest.inline_n as usize;
+        vec![
+            Value::String("Alice".into()),
+            Value::String("x".repeat(spill_at.saturating_sub(1))),
+            Value::String("x".repeat(spill_at)),
+            Value::String("x".repeat(spill_at + 1)),
+            Value::String("x".repeat(spill_at * 2)),
+            Value::UnsignedInt(0),
+            Value::UnsignedInt(u128::from(u64::MAX)),
+            Value::SignedInt(-42),
+            Value::Float(-0.5),
+            Value::Boolean(true),
+            Value::Bytes(vec![0xFF; 9]),
+            Value::Entity(entity()),
+        ]
+    }
+
+    fn selector_matrix(manifest: &Manifest) -> Vec<ArtifactSelector<Constrained>> {
+        let mut matrix: Vec<ArtifactSelector<Constrained>> = vec![
+            ArtifactSelector::new().of(entity()),
+            ArtifactSelector::new().the(attribute()),
+            ArtifactSelector::new().of(entity()).the(attribute()),
+            ArtifactSelector::new().the_starting_with("person/"),
+            ArtifactSelector::new().of_starting_with("did:key:"),
+            ArtifactSelector::new().is_starting_with("Al"),
+            ArtifactSelector::new()
+                .the(attribute())
+                .is_starting_with("Al"),
+            ArtifactSelector::new().is_at_least(Value::UnsignedInt(10)),
+            ArtifactSelector::new().is_at_most(Value::Float(0.0)),
+            ArtifactSelector::new()
+                .is_at_least(Value::UnsignedInt(5))
+                .is_at_most(Value::UnsignedInt(50)),
+        ];
+        for value in probe_values(manifest) {
+            matrix.push(ArtifactSelector::new().is(value.clone()));
+            matrix.push(ArtifactSelector::new().the(attribute()).is(value.clone()));
+            matrix.push(
+                ArtifactSelector::new()
+                    .of(entity())
+                    .the(attribute())
+                    .is(value),
+            );
+        }
+        matrix
+    }
+
+    /// Every selector shape must produce byte-identical ranges through the
+    /// direct-parts construction and the legacy view-mutation chain, under
+    /// the default manifest and under one with a shifted spill threshold
+    /// (which moves the inline-vs-spill decision for the probe values).
+    #[dialog_common::test]
+    async fn it_builds_ranges_identical_to_the_view_chain() {
+        let mut shifted = default_manifest();
+        shifted.inline_n = 24;
+        for manifest in [default_manifest(), shifted] {
+            for (at, selector) in selector_matrix(&manifest).into_iter().enumerate() {
+                let fast = selector_range(&selector, &manifest);
+                let legacy = legacy_selector_range(&selector, &manifest);
+                assert_eq!(
+                    fast.start().as_ref(),
+                    legacy.start().as_ref(),
+                    "selector {at}: range START diverged (inline_n {})",
+                    manifest.inline_n
+                );
+                assert_eq!(
+                    fast.end().as_ref(),
+                    legacy.end().as_ref(),
+                    "selector {at}: range END diverged (inline_n {})",
+                    manifest.inline_n
+                );
+            }
+        }
+    }
+}
