@@ -2665,10 +2665,7 @@ where
     // Strip a non-canonical chain of single-child index nodes over indices. A
     // persistent single child is lifted first: its kind (index or segment)
     // decides whether the wrapper above it is canonical.
-    loop {
-        let TransientNode::Index(index) = &mut root else {
-            break;
-        };
+    while let TransientNode::Index(index) = &mut root {
         if index.children.len() != 1 {
             break;
         }
