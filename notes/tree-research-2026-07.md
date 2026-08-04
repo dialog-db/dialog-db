@@ -1987,3 +1987,54 @@ now a one-place change in dialog-artifacts. The policy's own tests
 moved down with it (hardening.rs: commutative higher-cause
 election, deterministic tie-break, caused-beats-uncaused); the
 engine keeps the integration tests over all scan strategies.
+
+## Empty tree as manifest-carrying node (2026-08-04, stacked branch)
+
+Owner go-ahead ("Yes empty tree as manifest node as branch on top");
+implemented on `claude/empty-tree-manifest-node` stacked on the
+campaign branch. The owner's framing — the empty tree's node is "the
+manifest without children or novelty" — falls out of the unified node
+view as its zero case.
+
+Design (the surgical variant): the canonical empty form is now
+manifest-dependent. Under `Manifest::default()` it remains the NULL
+root — every existing tree hash, revision reference (EMPTY_TREE_HASH),
+and empty-tree sentinel comparison across artifacts/repository stays
+byte-identical, so the entire default-manifest fleet is untouched.
+Under any other manifest, persisting an empty tree emits the canonical
+zero-entry segment node stamped with the manifest (fixed encoding:
+opaque layout, one empty arena column), and that node is the root. The
+mapping (entry set, manifest) → persisted form stays a bijection, so
+the convergence property statement got simpler, not weaker: persisting
+empty-from-scratch and emptying-by-deletes land on the same root.
+
+The marker is a pure FORMAT MARKER, never edited in place: load paths
+(TransientTree::load, hitchhiker root load) treat a zero-entry root as
+"no root, manifest M", so every structural invariant (a live root is
+always an index) survives, and the first insert after emptiness builds
+the same canonical spine a fresh tree builds. Reads (walker search,
+streams, differentials) flow through the zero-entry segment naturally.
+
+Touched: PersistentSegment::empty + empty-tolerant from_entries (the
+zero-entry guard moved from encode to the interior-invariant, which
+the validator still enforces); PersistentNode::is_empty;
+persist_empty_root (shared by TransientTree::persist and hitchhiker
+persist/persist_mut); hitchhiker canonicalize's quiet arm and flush's
+empty arm now carry the session manifest (the flush arm was a LATENT
+BUG adjacent to this seam: a with_manifest session's first batch into
+an empty tree replayed under the DEFAULT manifest — invisible only
+while first batches were too small to split); validator: zero-entry
+root canonical iff byte-identical to the fixed empty node for a
+non-default manifest, flagged under default.
+
+The with_manifest continuity pin from the original adversarial catch
+is now structurally unnecessary for reopen-after-empty (still the way
+a session DECLARES a format for a genuinely fresh tree). Tests:
+emptied-tree persist emits the node (and default stays NULL, and
+no-op batches are a fixpoint); unpinned reopen after emptiness
+converges with a never-emptied replica through both canonical and
+buffered paths, and a buffered empty-out lands on the same canonical
+empty node; differentials over the marker are pure adds/removes and
+integrate back to exact roots; validator accepts the canonical empty
+node and flags the default-manifest impostor. Adversarial soak
+(40x600), program harness (800 ops), SE convergence: green.

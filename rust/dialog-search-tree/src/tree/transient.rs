@@ -310,6 +310,16 @@ where
                          {header:?} but the edit runs under {manifest:?}"
                     )));
                 }
+                // The empty tree's node (see `persist_empty_root`) is a pure
+                // format marker: it carries the manifest and nothing else,
+                // and it is never edited in place. Loading it yields the same
+                // "no root" a null hash yields, so every edit path keeps its
+                // structural invariants (a live root is always an index) and
+                // the first insert builds the same canonical spine it builds
+                // over a fresh tree.
+                if node.is_empty()? {
+                    return Ok(None);
+                }
                 // The root's left edge is the tree's global leftmost seam,
                 // whose separator is the empty string (negative infinity).
                 Ok(Some(TransientNode::open(&node, Vec::new())?))
@@ -642,8 +652,13 @@ where
     }
 
     /// Serializes the edited tree bottom-up into `delta` and returns it as a
-    /// [`PersistentTree`], carrying the node cache forward. The root is empty
-    /// (`NULL_BLAKE3_HASH`) when the batch left the tree empty.
+    /// [`PersistentTree`], carrying the node cache forward.
+    ///
+    /// A batch that leaves the tree EMPTY persists to the null root under the
+    /// default manifest, and to the canonical zero-entry node (the manifest
+    /// with no entries — see [`persist_empty_root`]) under any other: the
+    /// format must survive emptiness, or the next session over the tree
+    /// would silently continue under the defaults.
     ///
     /// The caller owns `delta`: it is the batch's output, an accumulator the
     /// caller may aggregate across many persists and flush on its own schedule.
@@ -654,10 +669,18 @@ where
         delta: &mut Delta<Blake3Hash, Buffer>,
     ) -> Result<PersistentTree<Key, Value, D>, DialogSearchTreeError> {
         let root = match self.root {
-            // An untouched root (including an empty tree's null hash) was never
-            // loaded; its hash is already durable and is returned verbatim,
-            // touching no storage.
-            TransientRoot::Unloaded(hash) => hash,
+            // An untouched non-null root was never loaded; its hash is
+            // already durable and is returned verbatim, touching no storage.
+            TransientRoot::Unloaded(hash) => {
+                if &hash == NULL_BLAKE3_HASH {
+                    match persist_empty_root::<Key, Value>(&self.manifest, delta)? {
+                        Some(node) => node.hash().clone(),
+                        None => hash,
+                    }
+                } else {
+                    hash
+                }
+            }
             TransientRoot::Loaded(transient) => {
                 transient.persist(delta, &self.manifest)?.hash().clone()
             }
@@ -3896,6 +3919,41 @@ fn adjust_index_origins(
             })
         })
         .collect()
+}
+
+/// Persists the canonical EMPTY-TREE root for `manifest` into `delta`.
+///
+/// Returns `None` under the default manifest: the canonical empty form
+/// there remains the null root, which keeps every existing tree hash,
+/// revision reference, and empty-tree sentinel comparison valid. Under any
+/// other format it returns the zero-entry segment node stamped with the
+/// manifest — the empty tree "whose node is the manifest without children
+/// or novelty" — so the format survives emptiness and a reopened session
+/// recovers it from the root instead of silently reverting to the
+/// defaults. Deterministic: one fixed encoding per manifest, so replicas
+/// that empty the same tree agree on the root byte for byte, and the
+/// convergence property stays a bijection from (entry set, manifest) to
+/// persisted form.
+pub(crate) fn persist_empty_root<Key, Value>(
+    manifest: &Manifest,
+    delta: &mut Delta<Blake3Hash, Buffer>,
+) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
+where
+    Key: self::Key,
+    Value: self::Value
+        + for<'a> Serialize<
+            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+        >,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    if *manifest == Manifest::default() {
+        return Ok(None);
+    }
+    let node = TransientNode::<Key, Value>::Segment(TransientSegment::new(Vec::new(), Vec::new()))
+        .persist(delta, manifest)?;
+    Ok(Some(node))
 }
 
 /// Turns the root's replacement run (the nodes that stand for the old root after

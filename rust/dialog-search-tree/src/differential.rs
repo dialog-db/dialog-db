@@ -1606,6 +1606,83 @@ mod tests {
         Ok(changes)
     }
 
+    /// A differential where one side is the manifest-carrying empty node
+    /// (an emptied non-default-format replica): marker → populated is pure
+    /// adds, populated → marker pure removes, and integrating each
+    /// direction lands the receiving replica on the other's exact root —
+    /// the empty node syncs like any root instead of poisoning the walk.
+    #[dialog_common::test]
+    async fn test_differential_over_the_manifest_carrying_empty_root() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(CountingBackend::new());
+        let custom = Manifest {
+            fanout_n: 2,
+            ..Manifest::default()
+        };
+
+        let mut edit = crate::TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
+            dialog_common::NULL_BLAKE3_HASH.clone(),
+            Default::default(),
+            custom,
+        );
+        for k in 0..30u32 {
+            edit = edit
+                .insert(k.to_le_bytes(), vec![k as u8], &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let populated = edit.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        let mut delta = Delta::zero();
+        let emptied = crate::TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
+            dialog_common::NULL_BLAKE3_HASH.clone(),
+            Default::default(),
+            custom,
+        )
+        .persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        let adds = collect_changes(&emptied, &populated, &storage).await?;
+        assert_eq!(adds.len(), 30, "marker → populated is every entry");
+        assert!(adds.iter().all(|change| matches!(change, Change::Add(_))));
+        let removes = collect_changes(&populated, &emptied, &storage).await?;
+        assert_eq!(removes.len(), 30, "populated → marker removes every entry");
+        assert!(
+            removes
+                .iter()
+                .all(|change| matches!(change, Change::Remove(_)))
+        );
+
+        let mut delta = Delta::zero();
+        let adopted = emptied
+            .edit_with_manifest(&storage)
+            .await?
+            .integrate(iter(adds.into_iter().map(Ok)), &storage)
+            .await?
+            .persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+        assert_eq!(
+            adopted.root(),
+            populated.root(),
+            "integrating the adds onto the empty node reproduces the source"
+        );
+
+        let mut delta = Delta::zero();
+        let cleared = populated
+            .edit_with_manifest(&storage)
+            .await?
+            .integrate(iter(removes.into_iter().map(Ok)), &storage)
+            .await?
+            .persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+        assert_eq!(
+            cleared.root(),
+            emptied.root(),
+            "integrating the removes lands back on the canonical empty node"
+        );
+        Ok(())
+    }
+
     /// Applies `ops` to a buffered tree over `base` and persists it with its
     /// buffers intact, so the returned tree carries live novelty.
     async fn buffered(
