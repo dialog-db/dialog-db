@@ -291,6 +291,24 @@ where
         }
     }
 
+    /// Pins the format [`Manifest`] this session writes under, instead of
+    /// reading it from the tree's root on first load.
+    ///
+    /// The manifest normally travels IN the tree (every node carries it),
+    /// which leaves one gap: an EMPTY tree has no node to carry it, so a
+    /// session opened over an empty root writes under [`Manifest::default`]
+    /// — even when the tree held a different format before its last entry
+    /// was deleted. A caller that configures a non-default format must
+    /// therefore re-impose it whenever it opens over a possibly-empty
+    /// tree, or an empty-and-refill lifecycle silently reverts the store
+    /// to the default format (and two replicas that emptied at different
+    /// points diverge on identical facts). This was found by the
+    /// adversarial convergence soak's delete-to-empty pattern.
+    pub fn with_manifest(mut self, manifest: Manifest) -> Self {
+        self.manifest = Some(manifest);
+        self
+    }
+
     /// Sets the per-node novelty capacity (the write-amplification knob).
     pub fn with_op_buf_size(mut self, op_buf_size: usize) -> Self {
         self.op_buf_size = op_buf_size.max(1);

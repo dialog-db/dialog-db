@@ -7,11 +7,19 @@
 //! is a pure function of its entry set — the same `(key, value)` set
 //! canonicalizes to the same node graph, byte for byte, regardless of the
 //! order, grouping, or path (edits, buffered writes, plants, flushes) by
-//! which the entries arrived. The property does NOT cover in-flight
-//! buffered state: a hitchhiker root with pending novelty is valid and
-//! publishable, but its shape deliberately depends on where ops currently
-//! sit, and two such roots holding the same facts may differ until
-//! canonicalized.
+//! which the entries arrived. Two boundary clauses matter:
+//!
+//! - the function is PARAMETERIZED BY THE MANIFEST, and the manifest
+//!   travels in the tree's nodes — so an EMPTY tree carries none. A
+//!   lifecycle that deletes every entry and writes again re-stamps
+//!   whatever manifest the writer imposes ([`Manifest::default`] unless
+//!   pinned via `HitchhikerTree::with_manifest`); convergence claims hold
+//!   only among writers imposing the same manifest across such gaps. The
+//!   adversarial soak's delete-to-empty pattern found exactly this seam.
+//! - the property does NOT cover in-flight buffered state: a hitchhiker
+//!   root with pending novelty is valid and publishable, but its shape
+//!   deliberately depends on where ops currently sit, and two such roots
+//!   holding the same facts may differ until canonicalized.
 //!
 //! # What the validator does
 //!

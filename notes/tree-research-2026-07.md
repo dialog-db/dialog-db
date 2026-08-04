@@ -1732,3 +1732,53 @@ merges and replica-reconcile orders as additional executor
 surfaces; cargo-fuzz + arbitrary over `Program` with proptest
 mirrors; the nightly soak matrix using the validator as its
 first-divergence bisection probe.
+
+## Adversarial soak: first catch (2026-08-02)
+
+`dialog-search-tree/tests/adversarial.rs`: the program harness
+aimed at what ordinary workloads barely touch — 40-byte keys with
+deep shared prefixes under manifests whose max_separator (8 / 32)
+sits far below the key length, so FORCED-LONG SEPARATORS ARE THE
+COMMON CASE and the forced-run merge, widen/quiet-check regimes,
+and election paths run constantly. Vocabulary grew to include
+absent-key deletes, idempotent rewrites, delete-to-empty cycles,
+and a mixed-buffer lifecycle (op buffer 4 -> 32 -> default across
+persist-and-reopen sessions). Knobs: DIALOG_ADVERSARIAL_SEEDS /
+_OPS; an ignored minimizer test shrinks any catch to its exact op
+prefix and prints the entry-level diff.
+
+THE CATCH, at 80 seeds x 1200 ops: manifest max_sep=8, seed 14,
+the mixed-buffer arm diverged from canonical at every checkpoint —
+with the canonical-form validator PASSING on both sides. Both
+trees canonical, same single entry, different roots. Minimized to
+12 ops: a delete-to-empty cycle followed by one insert.
+
+Mechanism (real, latent, now documented): THE MANIFEST TRAVELS IN
+THE TREE'S NODES, SO AN EMPTIED TREE FORGETS ITS FORMAT. A
+HitchhikerTree session opened over an empty root has no header to
+read and writes under Manifest::default() — even when the tree
+carried a different format before its last entry was deleted. Any
+configured (non-default-manifest) deployment that ever empties a
+store silently reverts format on the next write, and replicas that
+empty at different times diverge on identical facts. No production
+impact today (nothing constructs non-default manifests), but a
+genuine seam in the convergence property.
+
+Fixes landed:
+- `HitchhikerTree::with_manifest(..)`: callers can pin the format
+  for a session; a loaded root still overrides the pin with the
+  tree's own stored manifest (existing trees keep their format).
+- The convergence property statement in validate.rs now carries
+  the boundary clause: the entry-set -> canonical-form function is
+  parameterized by the manifest, an empty tree carries none, and
+  convergence claims hold among writers imposing the same manifest
+  across empty gaps.
+- The soak's buffered arms pin the manifest per session (what a
+  configured deployment must do); the delete-to-empty pattern
+  stays in the vocabulary per the institutionalization rule.
+
+Re-run at 80 seeds x 1200 ops x 4 manifests x 5 executor arms:
+fully green. Also validated the validator's own reach along the
+way: an earlier attempted negative test (tiny op buffer) was
+ACCEPTED by it — correctly, since full cascade publishes a
+genuinely canonical form.
