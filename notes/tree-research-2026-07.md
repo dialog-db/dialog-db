@@ -1782,3 +1782,39 @@ fully green. Also validated the validator's own reach along the
 way: an earlier attempted negative test (tiny op buffer) was
 ACCEPTED by it — correctly, since full cascade publishes a
 genuinely canonical form.
+
+## Hunt round 2: artifacts fuzz + reconcile property (2026-08-02)
+
+Two more surfaces brought under randomized convergence pressure;
+both held.
+
+1. `dialog-baseline/tests/artifact_fuzz.rs`: randomized
+   assert/replace/retract programs over small entity/attribute
+   pools with values straddling the 4096-byte spill threshold
+   (4095/4096/4097 plus 8k definitely-spilled), replayed under
+   groupings {1,2,3,7,single} and a canonicalize-mid-stream
+   lifecycle. Oracles: canonical root equality, fact-set equality
+   READ BACK THROUGH THE PUBLIC SELECT PATH (so a dropped or
+   orphaned spill block is a hard error, not a digest quirk), and
+   the canonical-form validator per arm. This is the conjunction
+   the SE log never exercises: supersession chains (Replace with
+   cause chaining), retracts of absent facts, spill-boundary
+   values, all crossed with grouping. Green at 100 seeds x 600 ops
+   x 6 arms. Knobs: DIALOG_ARTIFACT_FUZZ_SEEDS / _OPS.
+2. `it_reconciles_disjoint_replicas_order_independently`
+   (hitchhiker tests): randomized two-replica reconcile over
+   disjoint key sets (parity-split), one replica still BUFFERED at
+   the sync boundary and one cascading with a tiny buffer.
+   Reconciling in either direction and applying both op sets
+   directly to the base must canonicalize identically, and the
+   merged root must pass canonical-form validation. Green across
+   seeds. Overlapping key sets are deliberately out of the
+   order-independence claim (integrate direction decides winners);
+   a directed-overlap property is future work alongside the
+   replica-simulation item.
+
+Hunt round tally: one real (latent) catch — the manifest-continuity
+seam — plus infrastructure now standing at: convergence oracle
+in-tree, canonical-form validator, program harness, adversarial
+manifest soak with minimizer, artifacts-level fuzz, reconcile
+property. Workspace suite 2165 tests.

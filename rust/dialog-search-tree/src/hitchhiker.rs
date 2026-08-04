@@ -2774,6 +2774,74 @@ mod tests {
         Ok(())
     }
 
+    /// Randomized reconcile convergence over DISJOINT key sets: replica A
+    /// edits even keys, replica B odd keys (inserts, rewrites, and deletes
+    /// of base keys), each with its own buffer size and possibly still
+    /// buffered at the sync boundary. Reconciling in either direction and
+    /// applying both op sets directly to the base must all canonicalize to
+    /// the same root — and that root must pass canonical-form validation.
+    /// (Overlapping key sets are deliberately out of scope here: the
+    /// integrate direction then decides winners, so order-independence is
+    /// not the property.)
+    #[dialog_common::test]
+    async fn it_reconciles_disjoint_replicas_order_independently() -> Result<()> {
+        for seed in 0..12u64 {
+            let mut rng = Rng::new(0x5851F42D4C957F2D ^ seed);
+            let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+            let base_keys: Vec<u32> = (0..200).map(|_| rng.next_u32() % 4000).collect();
+            let base = sequential(&base_keys, &mut storage).await?;
+
+            // Disjoint by parity: replica A touches even keys, B odd.
+            let mut a_ops: Vec<(bool, u32)> = Vec::new();
+            let mut b_ops: Vec<(bool, u32)> = Vec::new();
+            for _ in 0..80 {
+                let key = (rng.next_u32() % 4000) & !1;
+                a_ops.push((!rng.next_u32().is_multiple_of(3), key));
+                let key = (rng.next_u32() % 4000) | 1;
+                b_ops.push((!rng.next_u32().is_multiple_of(3), key));
+            }
+
+            // Replica A stays buffered at the sync boundary (large buffer);
+            // replica B cascades aggressively (tiny buffer).
+            let a = buffered_replica(&base, &a_ops, 100_000, &storage).await?;
+            let a_tree = persist_buffered(a, &mut storage).await?;
+            let b = buffered_replica(&base, &b_ops, 4, &storage).await?;
+            let b_tree = persist_buffered(b, &mut storage).await?;
+
+            let merged_ab = reconcile(&base, &a_tree, &b_tree, &mut storage).await?;
+            let merged_ba = reconcile(&base, &b_tree, &a_tree, &mut storage).await?;
+
+            // The reference: both op sets applied straight to the base.
+            let mut all_ops = a_ops.clone();
+            all_ops.extend(b_ops.iter().copied());
+            let direct = buffered_replica(&base, &all_ops, 64, &storage).await?;
+            let direct_tree = canonicalize_flushed(direct, &mut storage).await?;
+
+            let ab = canonicalize_flushed(TestHitchhiker::open(&merged_ab), &mut storage).await?;
+            let ba = canonicalize_flushed(TestHitchhiker::open(&merged_ba), &mut storage).await?;
+
+            assert_eq!(
+                ab.root(),
+                ba.root(),
+                "seed {seed}: reconcile direction changed the canonical result"
+            );
+            assert_eq!(
+                ab.root(),
+                direct_tree.root(),
+                "seed {seed}: reconcile disagrees with direct application"
+            );
+
+            let divergences = ab.canonical_divergences(&storage).await?;
+            assert_eq!(
+                divergences,
+                Vec::<String>::new(),
+                "seed {seed}: merged canonical tree failed canonical-form validation"
+            );
+        }
+        Ok(())
+    }
+
     /// The flush trigger must not change what the tree contains, only when work
     /// happens. Canonicalizing under either trigger must reach the identical
     /// canonical tree for the same op stream.
