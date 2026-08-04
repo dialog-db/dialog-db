@@ -1703,3 +1703,32 @@ arbitrary on Program with proptest mirrors; (5) nightly replay/
 soak matrix with first-divergence bisection (the validator is the
 bisection probe); (6) replica-level simulation and cargo-mutants
 over the shaping logic.
+
+## Program-convergence harness v1 (2026-08-02, feedback priority 2)
+
+`dialog-search-tree/tests/program.rs`: one seeded, deterministic
+`Program` — ops drawn by SAMPLING CONJUNCTIONS of the stress
+vocabulary (uniform scatter, narrow prefix clusters, recent-key
+churn, smallest-key min-churn), with checkpoint positions — run
+through four executor surfaces:
+
+- canonical sequential edits (persist + settle per op),
+- buffered writes with op buffers 4 / 32 / default, each with a
+  different persist-and-reopen cadence (the commit lifecycle),
+  canonicalizing and continuing at checkpoints.
+
+At every checkpoint every surface must produce the same canonical
+root, and each checkpoint tree runs through the canonical-form
+validator first — so a divergence names its level and node before
+the cross-surface comparison even fires. 4 seeds x 240 ops by
+default; `DIALOG_PROGRAM_OPS` scales it.
+
+The institutionalization rule the feedback asked for, written down
+here so it survives sessions: every future field bug lands as
+(1) the fix, (2) a regression instance, (3) a new pattern in this
+generator's vocabulary, and (4) where possible a new validator
+assertion. Future harness growth, still open: stitch/differential
+merges and replica-reconcile orders as additional executor
+surfaces; cargo-fuzz + arbitrary over `Program` with proptest
+mirrors; the nightly soak matrix using the validator as its
+first-divergence bisection probe.
