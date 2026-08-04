@@ -1,0 +1,81 @@
+name: 'Nightly Soak'
+
+# The standing convergence soak: the same tests CI runs at bounded scale,
+# nightly at the heavy knobs — many-seed adversarial manifests, the
+# artifacts-level fuzz, and a deep SE-log convergence replay. Every arm
+# runs the canonical-form validator at its checkpoints, so a red night
+# localizes to a level and node (see rust/dialog-search-tree/src/
+# validate.rs); an ignored minimizer test in tests/adversarial.rs shrinks
+# a caught divergence to its exact op prefix.
+
+on:
+  workflow_dispatch:
+    inputs:
+      adversarial_seeds:
+        description: 'Adversarial soak seed count'
+        required: false
+        default: '200'
+      fuzz_seeds:
+        description: 'Artifact fuzz seed count'
+        required: false
+        default: '200'
+  schedule:
+    # 03:17 UTC nightly — off the busy on-the-hour spike.
+    - cron: '17 3 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: '${{ matrix.name }}'
+    runs-on: 'ubuntu-latest'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 'adversarial manifests'
+            command: >-
+              cargo test -p dialog-search-tree --release --test adversarial
+            env_name: 'DIALOG_ADVERSARIAL_SEEDS'
+            env_value_input: 'adversarial_seeds'
+            env_default: '200'
+            extra_env: 'DIALOG_ADVERSARIAL_OPS=1200'
+          - name: 'program surfaces'
+            command: >-
+              cargo test -p dialog-search-tree --release --test program
+            env_name: 'DIALOG_PROGRAM_OPS'
+            env_value_input: ''
+            env_default: '2000'
+            extra_env: ''
+          - name: 'artifact fuzz'
+            command: >-
+              cargo test -p dialog-baseline --release --test artifact_fuzz
+            env_name: 'DIALOG_ARTIFACT_FUZZ_SEEDS'
+            env_value_input: 'fuzz_seeds'
+            env_default: '200'
+            extra_env: 'DIALOG_ARTIFACT_FUZZ_OPS=600'
+          - name: 'SE convergence deep'
+            command: >-
+              cargo test -p dialog-baseline --release --test convergence
+            env_name: 'DIALOG_CONVERGE_TXNS'
+            env_value_input: ''
+            env_default: '5000'
+            extra_env: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'rust'
+      - name: 'Run soak arm'
+        working-directory: 'rust'
+        run: |
+          value="${{ github.event.inputs[matrix.env_value_input] || matrix.env_default }}"
+          export ${{ matrix.env_name }}="$value"
+          if [ -n "${{ matrix.extra_env }}" ]; then
+            export ${{ matrix.extra_env }}
+          fi
+          echo "soak arm: ${{ matrix.name }} (${{ matrix.env_name }}=$value ${{ matrix.extra_env }})"
+          ${{ matrix.command }}

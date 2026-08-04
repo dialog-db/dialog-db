@@ -1818,3 +1818,14 @@ seam — plus infrastructure now standing at: convergence oracle
 in-tree, canonical-form validator, program harness, adversarial
 manifest soak with minimizer, artifacts-level fuzz, reconcile
 property. Workspace suite 2165 tests.
+
+## Nightly soak workflow (2026-08-02, feedback priority 5)
+
+`.github/workflows/nightly-soak.yml`: the bounded suite tests, run
+nightly at heavy knobs as four parallel arms — adversarial
+manifests (200 seeds x 1200 ops), program surfaces (2000 ops),
+artifact fuzz (200 seeds x 600 ops), and a 5000-txn SE convergence
+replay — with workflow_dispatch overrides for the seed counts.
+Every arm carries the canonical-form validator at its checkpoints,
+so a red night names a level and node rather than a root hash, and
+the adversarial minimizer turns it into a unit-test-sized repro.
