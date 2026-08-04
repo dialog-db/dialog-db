@@ -225,16 +225,23 @@ branch.pull().perform(&operator).await?;   // A's live head, no A-side push
   by A before any effect touches its storage.
 
 Both devices can do this to each other simultaneously (each hosts, each
-tracks the other), and the gossip swarm generalizes it to N devices. What's
-still missing for a fully live experience is *reactivity*: A learns about
-B's push when it next resolves the branch. The `Announce` swarm message is
-reserved exactly for this — a subscription layer can turn it into an
-automatic fetch/merge.
+tracks the other), and the gossip swarm generalizes it to N devices.
+Reactivity comes from the swarm: pushes and local publishes are announced,
+and followers pull on announce (see "Reactive head updates" below).
 
-`tests/device_to_device.rs` exercises the whole story end to end: B pulls
-A's live head (A never pushes), B pushes back, A observes; then both
+`tests/device_to_device.rs` exercises the two-device story end to end: B
+pulls A's live head (A never pushes), B pushes back, A observes; then both
 commit concurrently, B's push is rejected non-fast-forward, B merges and
-retries, and both devices converge.
+retries, and both devices converge. `tests/collaboration.rs` scales it to
+three peers, all running the live-sync loop: A's local commit fans out to
+B and C with no manual pulls; B's pushed edit reaches C through A's
+announce without C ever contacting B; and concurrent pushes from B and C
+converge everywhere — the loser of A's CAS pulls, merges, and retries.
+That test also pinned down a conflict-reporting gap: a concurrent pusher
+can land between push's fast-forward gate and its remote CAS, and the
+resulting `VersionMismatch` now surfaces as the same
+`PushError::NonFastForward` the gate reports, so clients handle one
+conflict shape.
 
 ## Gossip block swarm
 
@@ -426,6 +433,9 @@ workspace's wasm targets, the cfg boundary is the only thing that moves.
   block it does not have via Want/Have + direct get.
 - Full-stack: an `Operator` env forking effects at an `IrohAddress` through
   the `Network` dispatch (the same path `repo.push()` exercises).
+- Collaboration: two-device pull/push/conflict/live-sync
+  (`device_to_device.rs`) and three-peer star convergence with concurrent
+  edits (`collaboration.rs`), both hermetic over localhost.
 
 ## Future work
 

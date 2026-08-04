@@ -282,7 +282,26 @@ impl Push<'_> {
                     }
                 }
 
-                upstream.publish(revision.clone()).perform(env).await?;
+                // The fast-forward gate above raced a concurrent pusher if
+                // the upstream advanced between our fetch and this CAS. The
+                // publish fails with a version mismatch; surface it as the
+                // same `NonFastForward` the gate itself reports, so callers
+                // handle one conflict shape (pull to integrate, then retry).
+                match upstream.publish(revision.clone()).perform(env).await {
+                    Ok(_) => {}
+                    Err(crate::PublishRemoteBranchError::Publish(
+                        PublishError::VersionMismatch { .. },
+                    )) => {
+                        upstream.fetch().perform(env).await?;
+                        let actual = upstream.revision().map(|r| r.tree).unwrap_or_default();
+                        return Err(PushError::NonFastForward {
+                            branch: branch.name().to_string(),
+                            expected: base,
+                            actual,
+                        });
+                    }
+                    Err(other) => return Err(other.into()),
+                }
             }
         }
 
