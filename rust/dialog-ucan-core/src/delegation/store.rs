@@ -130,7 +130,7 @@ impl<S: Signature, H: BuildHasher> DelegationStore<Local, S, Arc<Delegation<S>>>
                 if let Some(dlg) = locked.get(c) {
                     dlgs.push(dlg.clone());
                 } else {
-                    return Err(Missing(*c))?;
+                    Err(Missing(*c))?;
                 }
             }
             Ok(dlgs)
@@ -174,7 +174,7 @@ where
                 if let Some(dlg) = locked.get(c) {
                     dlgs.push(dlg.clone());
                 } else {
-                    return Err(Missing(*c))?;
+                    Err(Missing(*c))?;
                 }
             }
             Ok(dlgs)
