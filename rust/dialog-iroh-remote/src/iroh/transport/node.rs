@@ -295,6 +295,90 @@ impl IrohNode {
     }
 }
 
+/// Spawn a task invoking `react` for every publish of the given
+/// subject/space/cell on a storage publish stream — the local counterpart
+/// of [`SwarmHandle::follow`](super::swarm::SwarmHandle::follow).
+///
+/// `follow` reacts to *swarm* signals: peers pushing into this device's
+/// host or announcing publishes elsewhere. This reacts to *this device's
+/// own* head movements — a local commit, a pull integrating a remote, or
+/// a hosted peer push — which are what the device's storage publish
+/// stream carries (each exactly once, whichever path performed it) and
+/// which the swarm deliberately never echoes back to their originator.
+///
+/// Together they close the relay loop for a device that sits between an
+/// upstream and downstream peers:
+///
+/// ```no_run
+/// # async fn example(
+/// #     node: std::sync::Arc<dialog_iroh_remote::IrohNode>,
+/// #     swarm: std::sync::Arc<dialog_iroh_remote::SwarmHandle>,
+/// #     operator: std::sync::Arc<dialog_operator::Operator<dialog_storage::provider::storage::VolatileSpace>>,
+/// #     branch: dialog_repository::Branch,
+/// #     subject: dialog_capability::Did,
+/// # ) {
+/// // Downstream: pull when the upstream's swarm announces.
+/// let puller = branch.clone();
+/// let puller_env = operator.clone();
+/// swarm.follow("branch/main", "revision", move |_| {
+///     let branch = puller.clone();
+///     let operator = puller_env.clone();
+///     async move {
+///         let _ = branch.pull().perform(&*operator).await;
+///     }
+/// });
+/// // Upstream: push whenever our own head moves, however it moved.
+/// dialog_iroh_remote::follow_publishes(
+///     operator.storage().publishes(),
+///     subject,
+///     "branch/main",
+///     "revision",
+///     move |_| {
+///         let branch = branch.clone();
+///         let operator = operator.clone();
+///         async move {
+///             let _ = branch.refresh(&*operator).await;
+///             let _ = branch.push().perform(&*operator).await;
+///         }
+///     },
+/// );
+/// # }
+/// ```
+///
+/// Reactions must be idempotent — a push with nothing novel is a no-op —
+/// and a subscriber that falls behind skips the missed signals and reacts
+/// to the next one. Abort the returned handle to stop following; the task
+/// also ends when the storage environment is dropped.
+pub fn follow_publishes<F, Fut>(
+    mut publishes: tokio::sync::broadcast::Receiver<PublishEvent>,
+    subject: Did,
+    space: impl Into<String>,
+    cell: impl Into<String>,
+    mut react: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: FnMut(PublishEvent) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let space = space.into();
+    let cell = cell.into();
+    tokio::spawn(async move {
+        loop {
+            match publishes.recv().await {
+                Ok(event)
+                    if event.subject == subject && event.space == space && event.cell == cell =>
+                {
+                    react(event).await;
+                }
+                Ok(_) => {}
+                // Signals, not a log: skip whatever we missed.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
 impl std::fmt::Debug for IrohNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IrohNode")

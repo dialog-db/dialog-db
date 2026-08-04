@@ -347,6 +347,23 @@ others with no push and no manual pull — live sync. Reactions must be
 idempotent (a pull that finds nothing is a no-op); a follower that falls
 behind skips missed signals and catches up on the next one.
 
+The swarm deliberately never echoes a device's own publishes back to it,
+so a device that should *forward* its own head — a relay sitting between
+an upstream and downstream peers — follows its storage publish stream
+instead: [`follow_publishes`] is the local counterpart of
+`SwarmHandle::follow`, reacting to every movement of the live head (a
+local commit, a pull integrating a remote, a hosted peer's push — each
+carried exactly once) with, typically, a `push`. The idle case is free: a
+push with nothing novel short-circuits before any I/O. Follow the swarm
+and `pull`; follow your own publishes and `push` — together they chain
+repositories: `tests/relay.rs` runs three devices with three *distinct*
+repository subjects and branch names (`trunk` → `draft` → `notes`), each
+the next one's remote, and edits flow both ways end to end. The
+authorization story is the point of that test: the leaf holds a
+delegation rooted in the middle device's repository only — nothing from
+the origin — and the two ends never connect or even know of each other;
+the middle relays data and authority alike.
+
 ### Why gossip + direct fetch (and not gossip'd blocks or iroh-blobs)
 
 - Broadcasting block bytes over the topic would push every block to every
@@ -434,8 +451,10 @@ workspace's wasm targets, the cfg boundary is the only thing that moves.
 - Full-stack: an `Operator` env forking effects at an `IrohAddress` through
   the `Network` dispatch (the same path `repo.push()` exercises).
 - Collaboration: two-device pull/push/conflict/live-sync
-  (`device_to_device.rs`) and three-peer star convergence with concurrent
-  edits (`collaboration.rs`), both hermetic over localhost.
+  (`device_to_device.rs`), three-peer star convergence with concurrent
+  edits (`collaboration.rs`), and a chain of three distinct repositories
+  and branch names relaying edits both ways (`relay.rs`) — all hermetic
+  over localhost.
 
 ## Future work
 
