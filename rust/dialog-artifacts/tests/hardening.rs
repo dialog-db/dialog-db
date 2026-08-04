@@ -9,8 +9,8 @@ use std::str::FromStr as _;
 
 use anyhow::Result;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStoreMutExt as _, Artifacts, Attribute, Cause, Entity,
-    Instruction, Uri, Value, default_sort_key,
+    Artifact, ArtifactSelector, ArtifactStoreMutExt as _, ArtifactView, Artifacts, Attribute,
+    Cause, Entity, Instruction, Uri, Value, default_sort_key,
 };
 use dialog_storage::{Blake3Hash, MemoryStorageBackend};
 use futures_util::TryStreamExt as _;
@@ -157,5 +157,82 @@ async fn it_memoizes_uri_parses_transparently() -> Result<()> {
         let _ = Uri::from_str(&format!("entity:cycle-{n}"))?;
     }
     assert_eq!(Uri::from_str("entity:early")?, early);
+    Ok(())
+}
+
+/// The cardinality-one election (`ArtifactView::elect`) prefers the higher
+/// cause, symmetrically: whichever argument order two replicas fold the
+/// same rows in, the same row survives. This policy used to be hardcoded
+/// in the query engine's winner loop; it now lives with the value layer,
+/// and this pins its semantics where they are owned.
+#[tokio::test]
+async fn it_elects_the_higher_cause_in_either_order() -> Result<()> {
+    let attr = Attribute::from_str("person/name").expect("valid attribute");
+    let of = entity(1);
+
+    let older = Artifact {
+        the: attr.clone(),
+        of: of.clone(),
+        is: Value::String("Alice".into()),
+        cause: Some(Cause([1u8; 32])),
+    };
+    let newer = Artifact {
+        the: attr,
+        of,
+        is: Value::String("Alicia".into()),
+        cause: Some(Cause([2u8; 32])),
+    };
+
+    let winner = ArtifactView::from(older.clone()).elect(newer.clone().into())?;
+    assert_eq!(winner.cause().cloned(), newer.cause, "higher cause wins");
+    let winner = ArtifactView::from(newer.clone()).elect(older.into())?;
+    assert_eq!(
+        winner.cause().cloned(),
+        newer.cause,
+        "the election is commutative"
+    );
+    Ok(())
+}
+
+/// Equal causes fall to the fact-hash tiebreaker, which must also be
+/// order-insensitive; and a caused row must beat an uncaused one.
+#[tokio::test]
+async fn it_breaks_election_ties_deterministically() -> Result<()> {
+    let attr = Attribute::from_str("person/name").expect("valid attribute");
+    let of = entity(2);
+
+    let a = Artifact {
+        the: attr.clone(),
+        of: of.clone(),
+        is: Value::String("Alice".into()),
+        cause: Some(Cause([1u8; 32])),
+    };
+    let b = Artifact {
+        the: attr.clone(),
+        of: of.clone(),
+        is: Value::String("Alicia".into()),
+        cause: Some(Cause([1u8; 32])),
+    };
+
+    let ab = ArtifactView::from(a.clone()).elect(b.clone().into())?;
+    let ba = ArtifactView::from(b.clone()).elect(a.clone().into())?;
+    assert_eq!(
+        Cause::from(&ab.to_owned()?),
+        Cause::from(&ba.to_owned()?),
+        "the fact-hash tiebreak elects the same row in either order"
+    );
+
+    let uncaused = Artifact {
+        the: attr,
+        of,
+        is: Value::String("Anon".into()),
+        cause: None,
+    };
+    let winner = ArtifactView::from(uncaused.clone()).elect(a.clone().into())?;
+    assert_eq!(
+        winner.cause().cloned(),
+        a.cause,
+        "a caused row beats an uncaused one"
+    );
     Ok(())
 }

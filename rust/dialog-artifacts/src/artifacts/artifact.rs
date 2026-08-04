@@ -367,6 +367,39 @@ impl ArtifactView {
             Backing::Owned(artifact) => Ok(artifact.as_ref().clone()),
         }
     }
+
+    /// The cardinality-one election: of this row and a `challenger`
+    /// standing at the same `(attribute, entity)`, the row a
+    /// `Cardinality::One` reader observes. The policy belongs to the value
+    /// layer — the query engine folds competing rows through this method
+    /// and encodes no rule of its own — so refining how concurrent edits
+    /// resolve (e.g. merging by value and cause rather than electing a
+    /// winner) happens here without touching the engine.
+    ///
+    /// The current rule: the higher cause wins, a caused row beats an
+    /// uncaused one, and equal (including absent) causes fall to the fact
+    /// hash. Deterministic and commutative — folding any set of rows in
+    /// any order elects the same row — which is what lets every replica
+    /// agree on the observed value without coordination. Causes read
+    /// straight off the rows; only a genuine tie pays for the
+    /// materialization the fact hash needs.
+    pub fn elect(self, challenger: ArtifactView) -> Result<ArtifactView, DialogArtifactsError> {
+        Ok(match (self.cause(), challenger.cause()) {
+            (Some(a), Some(b)) if a > b => self,
+            (Some(a), Some(b)) if a < b => challenger,
+            (Some(_), None) => self,
+            (None, Some(_)) => challenger,
+            _ => {
+                // Causes are equal: the fact hash is the deterministic
+                // tiebreaker.
+                if Cause::from(&self.to_owned()?) >= Cause::from(&challenger.to_owned()?) {
+                    self
+                } else {
+                    challenger
+                }
+            }
+        })
+    }
 }
 
 /// Chainable materialization for streams of scanned rows: `.owned()` turns a

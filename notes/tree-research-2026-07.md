@@ -1971,3 +1971,19 @@ aware deterministic collapse (instead of surfacing the anomaly)
 would hook into the engine's read-side collapse or the Replace
 supersession path, per the standing principle: engine decides
 policy, fact query decides cardinality.
+
+## Cardinality-one election moved to the value layer (2026-08-04)
+
+Owner clarification of the "tangent": AttributeQueryOnly hardcoded
+the winner choice (higher cause wins, fact-hash tiebreak) in the
+engine's fold loops. The policy now lives with the value layer as
+`ArtifactView::elect` — the engine folds competing rows through it
+and encodes no rule of its own, mirroring how the tree delegates
+contested-slot resolution to `Value::prevails_over`/`fuse`. The
+semantics are unchanged (byte-for-byte the same rule); what changed
+is ownership: refining how concurrent cardinality-one edits resolve
+(e.g. merging by value and cause instead of electing a winner) is
+now a one-place change in dialog-artifacts. The policy's own tests
+moved down with it (hardening.rs: commutative higher-cause
+election, deterministic tie-break, caused-beats-uncaused); the
+engine keeps the integration tests over all scan strategies.

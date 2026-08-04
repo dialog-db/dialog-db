@@ -18,31 +18,6 @@ use dialog_common::ConditionalSync;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 
-/// Given two fact rows for the same `(attribute, entity)` pair, return the
-/// winner. The winner is the row with the higher cause; when causes are
-/// equal (including both `None`), the fact hash (`Cause::from`) breaks the
-/// tie. Causes read straight off the rows; only a genuine tie pays for the
-/// materialization the fact hash needs.
-fn choose(
-    current: ArtifactView,
-    challenger: ArtifactView,
-) -> Result<ArtifactView, dialog_artifacts::DialogArtifactsError> {
-    Ok(match (current.cause(), challenger.cause()) {
-        (Some(a), Some(b)) if a > b => current,
-        (Some(a), Some(b)) if a < b => challenger,
-        (Some(_), None) => current,
-        (None, Some(_)) => challenger,
-        _ => {
-            // Causes are equal: use the fact hash as a deterministic tiebreaker.
-            if Cause::from(&current.to_owned()?) >= Cause::from(&challenger.to_owned()?) {
-                current
-            } else {
-                challenger
-            }
-        }
-    })
-}
-
 /// Winner verification.
 ///
 /// When the entity is unknown, results from the base scan (VAE or AEV) are
@@ -81,9 +56,12 @@ where
         let mut winner: Option<ArtifactView> = None;
         for await each in challengers {
             let challenger = each?;
+            // The election policy lives with the value layer
+            // (`ArtifactView::elect`); this loop only folds rows
+            // through it.
             winner = Some(match winner {
                 None => challenger,
-                Some(winner) => choose(winner, challenger)?,
+                Some(winner) => winner.elect(challenger)?,
             });
         }
 
@@ -102,9 +80,11 @@ where
 
 /// Winner-selecting attribute query for `Cardinality::One`.
 ///
-/// Wraps an [`AttributeQueryAll`] and applies winner selection logic so that
-/// only one value per `(attribute, entity)` pair is yielded: the one with
-/// the highest cause.
+/// Wraps an [`AttributeQueryAll`] and yields one value per
+/// `(attribute, entity)` pair. Which row survives is not this layer's
+/// decision: competing rows fold through [`ArtifactView::elect`], the
+/// value layer's cardinality-one election, and the engine encodes no
+/// policy of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct AttributeQueryOnly {
     query: AttributeQueryAll,
@@ -252,7 +232,7 @@ impl AttributeQueryOnly {
                                 if current.the_bytes()? == artifact.the_bytes()?
                                     && current.of_bytes()? == artifact.of_bytes()?
                                 {
-                                    choose(current, artifact)?
+                                    current.elect(artifact)?
                                 } else {
                                     // Group closed: only its winner pays
                                     // for materialization, and only if it
@@ -347,9 +327,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::{Value, the};
-    use dialog_artifacts::{Artifact, Attribute, Cause};
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-    use std::str::FromStr;
 
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
@@ -738,67 +716,6 @@ mod tests {
         assert_eq!(results[0].of(), &entity);
 
         Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn choose_prefers_higher_cause() {
-        let attr = Attribute::from_str("person/name").unwrap();
-        let entity = Entity::new().unwrap();
-
-        let older = Artifact {
-            the: attr.clone(),
-            of: entity.clone(),
-            is: Value::String("Alice".into()),
-            cause: Some(Cause([1u8; 32])),
-        };
-
-        let newer = Artifact {
-            the: attr,
-            of: entity,
-            is: Value::String("Alicia".into()),
-            cause: Some(Cause([2u8; 32])),
-        };
-
-        let winner = choose(older.clone().into(), newer.clone().into()).unwrap();
-        assert_eq!(
-            winner.cause().cloned(),
-            newer.cause,
-            "Higher cause should win"
-        );
-
-        // Reversed argument order should produce the same winner.
-        let winner2 = choose(newer.clone().into(), older.clone().into()).unwrap();
-        assert_eq!(winner2.cause().cloned(), newer.cause);
-    }
-
-    #[dialog_common::test]
-    async fn choose_uses_fact_hash_for_equal_causes() {
-        let attr = Attribute::from_str("person/name").unwrap();
-        let entity = Entity::new().unwrap();
-
-        let a = Artifact {
-            the: attr.clone(),
-            of: entity.clone(),
-            is: Value::String("Alice".into()),
-            cause: Some(Cause([1u8; 32])),
-        };
-
-        let b = Artifact {
-            the: attr,
-            of: entity,
-            is: Value::String("Alicia".into()),
-            cause: Some(Cause([1u8; 32])),
-        };
-
-        let winner_ab = choose(a.clone().into(), b.clone().into()).unwrap();
-        let winner_ba = choose(b.clone().into(), a.clone().into()).unwrap();
-
-        // The winner should be deterministic regardless of argument order.
-        assert_eq!(
-            Cause::from(&winner_ab.to_owned().unwrap()),
-            Cause::from(&winner_ba.to_owned().unwrap()),
-            "Tiebreaker should be deterministic"
-        );
     }
 
     /// An *optional* `is` whose variable an earlier premise bound to
