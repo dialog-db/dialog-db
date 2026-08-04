@@ -8,13 +8,10 @@ use crate::attribute::query::dynamic::DynamicAttributeQuery;
 use crate::descriptor::Descriptor;
 use crate::query::Application;
 use crate::selection::{Match, Selection};
-use crate::source::SelectRules;
 use crate::types::Any;
 use crate::types::Scalar;
 use crate::{Entity, EvaluationError, Premise, Proposition, Term, Value};
-use dialog_artifacts::Select;
-use dialog_capability::Provider;
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_common::ConditionalSend;
 
 /// A typed attribute query with named fields for entity and value.
 ///
@@ -85,7 +82,7 @@ where
 
     fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         let query = DynamicAttributeQuery::from(self);
         Application::evaluate(query, selection, env)

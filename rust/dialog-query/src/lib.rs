@@ -58,12 +58,18 @@ pub mod planner;
 pub mod predicate;
 /// Premise trait for rule conditions and pattern matching.
 pub mod premise;
+
+/// Procedure premises resolved by idempotent effects.
+pub mod procedure;
 /// Query trait and store abstractions for polymorphic querying.
 pub mod query;
 /// Rule-based deduction system for deriving facts.
 pub mod rule;
 /// Schema system for describing parameter signatures.
 pub mod schema;
+
+/// The evaluation scope (provider bundle).
+pub mod scope;
 /// Selection and match types for query results.
 pub mod selection;
 /// Database sessions for querying and committing changes.
@@ -103,10 +109,12 @@ pub use parameters::*;
 pub use planner::*;
 pub use predicate::*;
 pub use premise::*;
+pub use procedure::*;
 pub use proposition::*;
 pub use query::*;
 pub use rule::*;
 pub use schema::*;
+pub use scope::*;
 pub use selection::*;
 pub use session::*;
 pub use statement::*;

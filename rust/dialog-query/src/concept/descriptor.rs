@@ -11,7 +11,6 @@ use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
 use crate::query::{Application, Restriction};
 use crate::selection::{Match, Selection};
-use crate::source::SelectRules;
 use crate::statement::Retraction;
 use crate::term::Term;
 use crate::type_system::{ConceptRef, Primitive, Type as Kind};
@@ -20,10 +19,7 @@ use crate::{
     Cardinality, Entity, EvaluationError, Field, Parameters, Proposition, Requirement, Schema,
     Statement, Type, Value,
 };
-use dialog_artifacts::Select;
 use dialog_artifacts::Update;
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
@@ -548,7 +544,7 @@ impl Application for ConceptQuery {
 
     fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         ConceptQuery::evaluate(self, selection, env)
     }

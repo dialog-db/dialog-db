@@ -8,14 +8,11 @@ use crate::proposition::Proposition;
 use crate::query::Output;
 use crate::query::{Application, Restriction};
 use crate::selection::{Match, Selection};
-use crate::source::SelectRules;
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Premise, Schema, Term, Value};
 use auto_enums::auto_enum;
-use dialog_artifacts::{Cause, Select};
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
+use dialog_artifacts::Cause;
 use serde::Serialize;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
@@ -173,7 +170,7 @@ impl DynamicAttributeQuery {
         selection: M,
     ) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         match self {
             DynamicAttributeQuery::All(query) => query.evaluate(env, selection),
@@ -184,7 +181,7 @@ impl DynamicAttributeQuery {
     /// Execute this query, returning a stream of claims.
     pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Claim> + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
         Self: Sized,
     {
         Application::perform(self, env)
@@ -196,7 +193,7 @@ impl Application for DynamicAttributeQuery {
 
     fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         self.evaluate(env, selection)
     }

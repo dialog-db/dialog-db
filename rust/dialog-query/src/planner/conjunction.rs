@@ -1,11 +1,7 @@
 use super::Plan;
 use crate::Environment;
 use crate::selection::Selection;
-use crate::source::SelectRules;
 use core::pin::Pin;
-use dialog_artifacts::Select;
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
 
 /// An ordered sequence of [`Plan`] steps produced by the query planner.
 ///
@@ -46,7 +42,7 @@ impl Conjunction {
         env: &'a Env,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         self.steps.into_iter().fold(
             Box::pin(selection) as Pin<Box<dyn Selection + 'a>>,

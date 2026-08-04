@@ -22,9 +22,7 @@ use crate::source::SelectRules;
 use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
 };
-use dialog_artifacts::Select;
 use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
@@ -266,7 +264,7 @@ impl ConceptQuery {
         env: &'a Env,
     ) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         let app = self;
 

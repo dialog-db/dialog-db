@@ -3,7 +3,6 @@ use crate::attribute::query::DynamicAttributeQuery;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::selection::{Binding, Match, Selection};
-use crate::source::SelectRules;
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::Any;
 use crate::{
@@ -11,9 +10,7 @@ use crate::{
     Schema, Term, try_stream,
 };
 use core::pin::Pin;
-use dialog_artifacts::{Cause, Select};
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
+use dialog_artifacts::Cause;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 
@@ -132,7 +129,7 @@ impl OptionalAttributeQuery {
         selection: M,
     ) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         let selector = self;
         try_stream! {
@@ -216,7 +213,7 @@ impl Application for OptionalAttributeQuery {
 
     fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         self.evaluate(env, selection)
     }
