@@ -1542,6 +1542,153 @@ mod history_tests {
         Ok(())
     }
 
+    /// The observable consequence of the contested-slot union
+    /// (`Value::fuse` on `State<Datum>`): a retraction minted AFTER two
+    /// branches merged their concurrent identical asserts covers BOTH
+    /// claims, so peers that replicated either side's claim before the
+    /// merge all converge to the deletion. If the contest overwrote
+    /// instead of unioning, the retract record would cover only the
+    /// surviving claim and the peer holding the other one would keep
+    /// the fact alive — whichever side the hash race favored, one of
+    /// the two peers below would resurrect it.
+    ///
+    /// Three merge routes can delete the peer's claim WITHOUT
+    /// consulting the record's coverage, and the scenario steers off
+    /// all of them so that coverage (R3) is the only carrier of the
+    /// deletion: a tracked sync base that covered the fact ships a
+    /// byte-guarded remove (R2) — so the final pulls are first-time
+    /// pulls (empty base) from the writer each peer never synced; a
+    /// peer with no local novelty adopts the upstream tree wholesale —
+    /// so each peer commits unrelated local facts; and a merge that
+    /// REPLAYS OURS onto the upstream tree re-screens the peer's claim
+    /// against the writer's context and drops it by watermark — so
+    /// each peer carries MORE local revisions than the writer has
+    /// unseen ones, putting the merge in the screen-theirs direction
+    /// where the peer's claim stays put unless a record retires it.
+    #[dialog_common::test]
+    async fn it_retracts_across_peers_holding_either_contended_claim() -> Result<()> {
+        use dialog_query::attribute::The;
+        use dialog_query::query::Output as _;
+        use dialog_query::{AttributeQuery, Claim, Term, the};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let a = repo.branch("a").open().perform(&operator).await?;
+        let b = repo.branch("b").open().perform(&operator).await?;
+
+        // Skew the editions so the two copies of the fact carry
+        // different version metadata — a genuinely contended slot.
+        a.commit(stream::iter(vec![assert_one("filler/x", "f:1", "pad")]))
+            .perform(&operator)
+            .await?;
+        a.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.commit(stream::iter(vec![assert_one(
+            "post/title",
+            "post:1",
+            "Hej",
+        )]))
+        .perform(&operator)
+        .await?;
+
+        let titles = |branch: &crate::Branch| {
+            let branch = branch.clone();
+            let operator = &operator;
+            async move {
+                let rows: Vec<Claim> = branch
+                    .query()
+                    .select(AttributeQuery::from(
+                        Term::<The>::from(the!("post/title"))
+                            .of(Term::<dialog_artifacts::Entity>::var("of"))
+                            .is(Term::<String>::var("is")),
+                    ))
+                    .perform(operator)
+                    .try_vec()
+                    .await?;
+                anyhow::Ok(rows.len())
+            }
+        };
+
+        // Each peer replicates ONE side's claim before the merge, then
+        // commits enough unrelated local novelty to hold the merge in
+        // the screen-theirs direction (see the doc comment).
+        let peer_a = repo.branch("peer-a").open().perform(&operator).await?;
+        peer_a.pull().from(&a).perform(&operator).await?;
+        let peer_b = repo.branch("peer-b").open().perform(&operator).await?;
+        peer_b.pull().from(&b).perform(&operator).await?;
+        for at in 0..8 {
+            peer_a
+                .commit(stream::iter(vec![assert_one(
+                    "peer/note",
+                    &format!("pa:{at}"),
+                    "x",
+                )]))
+                .perform(&operator)
+                .await?;
+            peer_b
+                .commit(stream::iter(vec![assert_one(
+                    "peer/note",
+                    &format!("pb:{at}"),
+                    "y",
+                )]))
+                .perform(&operator)
+                .await?;
+        }
+        assert_eq!(titles(&peer_a).await?, 1, "peer-a replicated the claim");
+        assert_eq!(titles(&peer_b).await?, 1, "peer-b replicated the claim");
+
+        // The two writers reconcile: the contested slot fuses both
+        // claim versions into one canonical entry.
+        let mut quiesced = false;
+        for _ in 0..4 {
+            let pulled_a = a.pull().from(&b).perform(&operator).await?;
+            let pulled_b = b.pull().from(&a).perform(&operator).await?;
+            if pulled_a.is_none() && pulled_b.is_none() {
+                quiesced = true;
+                break;
+            }
+        }
+        assert!(quiesced, "mutual pulls must reach a fixed point");
+
+        // Minted against the fused entry, the retraction's record
+        // covers every claim version the entry collapsed. It reaches
+        // `b` through the tracked pull.
+        a.commit(stream::iter(vec![Instruction::Retract(Artifact {
+            the: "post/title".parse()?,
+            of: "post:1".parse()?,
+            is: Value::String("Hej".to_string()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+        b.pull().from(&a).perform(&operator).await?;
+        assert_eq!(titles(&b).await?, 0, "the retraction propagates to b");
+
+        // The crossed, first-time pulls: each peer merges from the
+        // writer it never synced with, over an empty base — coverage is
+        // the only carrier of the deletion.
+        peer_a.pull().from(&b).perform(&operator).await?;
+        assert_eq!(
+            titles(&peer_a).await?,
+            0,
+            "coverage retires the claim peer-a replicated"
+        );
+        peer_b.pull().from(&a).perform(&operator).await?;
+        assert_eq!(
+            titles(&peer_b).await?,
+            0,
+            "coverage also retires the claim peer-b replicated from the \
+             other writer — the fused entry remembered both"
+        );
+        Ok(())
+    }
+
     /// A retraction must survive reconciliation with a replica that still
     /// holds the fact — including a replica we have NEVER synced with,
     /// where the merge runs from the empty base and the data differential

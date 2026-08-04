@@ -1895,3 +1895,50 @@ battery locally. Heavy-knob defaults live in the menu commands
 (env vars still override), so the workflow matrix shrank to just
 wiring workflow_dispatch overrides, and a contributor can run any
 nightly arm with e.g. `nix develop --command soak:adversarial`.
+
+## Reconcile overlap resolved: the value owns the merge (2026-08-04)
+
+Owner decision: "make Value of the tree have own merge method via
+trait... Datum has to implement merge logic and tree stays
+agnostic." Investigation found this design ALREADY LANDED with the
+version-control work (PR #397): the tree's `Value` trait carries
+`prevails_over` (antisymmetric winner choice, defaulting to the
+deterministic hash race) and `fuse` (fold what the loser must keep
+into the winner, defaulting to pure last-write-wins), and
+`State<Datum>` implements fuse as `absorb_versions` — the union of
+both sides' claim versions in canonical form (sorted, smallest
+primary). `integrate` consults only those two hooks; policy lives
+entirely in the value type. So case B (same key, same value,
+different version metadata) was already union semantics — what was
+missing was any test that would fail if it regressed to overwrite.
+
+Two mutation-verified pins added (each confirmed to FAIL with fuse
+degraded to `winner` and pass with the real impl):
+
+- `it_unions_contended_claim_versions_in_either_direction`
+  (dialog-artifacts history tests): two replicas assert the
+  identical value under different versions, exchange empty-base
+  full-state differentials, integrate in OPPOSITE directions; roots
+  must be byte-identical and the standing datum must carry both
+  claim versions ({bob, mallory}, bob primary, mallory collapsed).
+
+- `it_retracts_across_peers_holding_either_contended_claim`
+  (dialog-repository pull tests): the union's end-to-end
+  consequence — a retraction minted after the writers merged covers
+  BOTH claims, so peers that replicated either side's claim
+  converge to the deletion.
+
+The repository test took three iterations to make DISCRIMINATING,
+which itself mapped the deletion carriers: a first draft passed
+even under the overwrite mutation because (1) a peer with no local
+novelty ADOPTS the upstream tree wholesale (fast-forward arm — no
+merge at all), (2) a tracked sync base that covered the fact ships
+a byte-guarded REMOVE (R2) that deletes without consulting
+coverage, and (3) the replay-ours merge direction re-screens the
+peer's own claim against the writer's CONTEXT watermark and drops
+it as observed-but-not-live-upstream, again without reading the
+record's version set. The final scenario steers off all three:
+first-time pulls (empty base) from the writer each peer never
+synced, with enough unrelated local commits (8) to hold the merge
+in the screen-theirs direction — leaving R3 record coverage as the
+only carrier, which is exactly the surface the union feeds.
