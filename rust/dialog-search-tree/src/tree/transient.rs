@@ -6124,7 +6124,7 @@ mod tests {
     /// of 15 near-duplicate keys sharing a 24-byte cluster prefix.
     fn semantic_cluster() -> Vec<VarKey> {
         let mut keys = Vec::new();
-        for sub in [b'A', b'B', b'C'] {
+        for sub in *b"ABC" {
             for n in 0..15u32 {
                 let mut bytes = vec![b'W'];
                 bytes.extend(vec![b'q'; 23]);
