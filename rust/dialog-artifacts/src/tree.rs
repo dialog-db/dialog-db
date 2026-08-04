@@ -40,11 +40,12 @@ use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
 use crate::history::{Cause as HistoryCause, Claim, Record, Version};
+use crate::key::value_payload as build_value_payload;
 use crate::{
-    Artifact, ArtifactSelector, ArtifactView, ArtifactWriter, AttributeKey, AttributeKeyPart,
-    Datum, DialogArtifactsError, EntityKey, EntityKeyPart, Instruction, Key, KeyView,
-    KeyViewConstruct, KeyViewMut, SelectorMatch, State, Value, ValueDataType, ValueKey,
-    decode_value_parts, encode_bytes, encode_value_owned,
+    ATTRIBUTE_KEY_TAG, Artifact, ArtifactSelector, ArtifactView, ArtifactWriter, AttributeKey,
+    AttributeKeyPart, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart,
+    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, SelectorMatch, State, VALUE_KEY_TAG,
+    Value, ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
     match_selector_and_key_ref,
@@ -1015,6 +1016,32 @@ pub fn selector_range(
     selector: &ArtifactSelector<Constrained>,
     manifest: &Manifest,
 ) -> RangeInclusive<Key> {
+    // One bound = one `KeyParts` mutation + one `build_key`. The previous
+    // construction chained `min()/max().apply_selector(..)`, and every
+    // `set_*` in that chain re-parsed and re-built the whole key — around
+    // ten parse/build round-trips per range, which a join pays once per
+    // outer binding; it measured as a third of engine query time. Applying
+    // the selector's exact fields onto the parts directly is equivalent by
+    // construction: `set_*` parses the built bound back into exactly these
+    // parts and mutates the same field.
+    let exact_bound = |tag: u8, upper: bool| {
+        let mut parts = if upper {
+            varkey::KeyParts::max(tag)
+        } else {
+            varkey::KeyParts::min(tag)
+        };
+        if let Some(entity) = selector.entity() {
+            parts.entity = EntityKeyPart::from(entity).raw().to_vec();
+        }
+        if let Some(attribute) = selector.attribute() {
+            parts.attribute = AttributeKeyPart::from(attribute).raw().to_vec();
+        }
+        if let Some(value) = selector.value() {
+            parts.value_type = value.data_type();
+            parts.value = build_value_payload(value, manifest);
+        }
+        Key::from(varkey::build_key(&parts))
+    };
     if selector.entity().is_some()
         || (selector.entity_prefix().is_some()
             && selector.value().is_none()
@@ -1022,8 +1049,8 @@ pub fn selector_range(
             && selector.attribute_prefix().is_none())
     {
         let (start, end) = apply_prefix_bounds(
-            <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
-            <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+            EntityKey(exact_bound(ENTITY_KEY_TAG, false)),
+            EntityKey(exact_bound(ENTITY_KEY_TAG, true)),
             selector,
             manifest,
         );
@@ -1034,16 +1061,16 @@ pub fn selector_range(
         || selector.value_upper().is_some()
     {
         let (start, end) = apply_prefix_bounds(
-            <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
-            <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+            ValueKey(exact_bound(VALUE_KEY_TAG, false)),
+            ValueKey(exact_bound(VALUE_KEY_TAG, true)),
             selector,
             manifest,
         );
         start.into_key()..=end.into_key()
     } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
         let (start, end) = apply_prefix_bounds(
-            <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
-            <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+            AttributeKey(exact_bound(ATTRIBUTE_KEY_TAG, false)),
+            AttributeKey(exact_bound(ATTRIBUTE_KEY_TAG, true)),
             selector,
             manifest,
         );

@@ -21,6 +21,7 @@
 //!   suppress facts in the underlying branch view.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use dialog_artifacts::{
     Artifact, ArtifactStream, ArtifactView, Cause, Changes, SortKey, default_sort_key,
@@ -173,7 +174,7 @@ pub(crate) fn tombstones_from(changes: &Changes) -> HashSet<SortKey> {
 /// [`sort_key`] is in `tombstones`. No-op when the set is empty.
 pub(crate) fn filter_tombstones<'a>(
     inner: ArtifactStream<'a>,
-    tombstones: HashSet<SortKey>,
+    tombstones: Arc<HashSet<SortKey>>,
 ) -> ArtifactStream<'a> {
     if tombstones.is_empty() {
         return inner;
@@ -303,7 +304,7 @@ mod tests {
         let mut tombstones = HashSet::new();
         tombstones.insert(default_sort_key(&drop));
 
-        let filtered = filter_tombstones(stream_of(vec![keep.clone(), drop]), tombstones);
+        let filtered = filter_tombstones(stream_of(vec![keep.clone(), drop]), Arc::new(tombstones));
         let items = collect(filtered).await?;
         assert_eq!(items, vec![keep]);
         Ok(())
@@ -313,7 +314,10 @@ mod tests {
     async fn it_passes_stream_through_when_tombstones_are_empty() -> anyhow::Result<()> {
         let a = artifact("id:a", "test/name", "Alice");
         let b = artifact("id:b", "test/name", "Bob");
-        let filtered = filter_tombstones(stream_of(vec![a.clone(), b.clone()]), HashSet::new());
+        let filtered = filter_tombstones(
+            stream_of(vec![a.clone(), b.clone()]),
+            Arc::new(HashSet::new()),
+        );
         let items = collect(filtered).await?;
         assert_eq!(items, vec![a, b]);
         Ok(())

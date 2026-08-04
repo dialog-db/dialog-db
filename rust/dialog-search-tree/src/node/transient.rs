@@ -199,16 +199,14 @@ fn winners_in_runs<Value>(
         // Walk both heads past this key's contiguous span; the last tail
         // entry seen wins over the last run entry (assigned after it).
         let mut winner = None;
-        loop {
-            let Some(entry) = run.get(r) else { break };
+        while let Some(entry) = run.get(r) {
             if entry.key.as_slice() != key {
                 break;
             }
             winner = Some(entry);
             r += 1;
         }
-        loop {
-            let Some(entry) = tail.get(t) else { break };
+        while let Some(entry) = tail.get(t) {
             if entry.key.as_slice() != key {
                 break;
             }
