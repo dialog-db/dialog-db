@@ -1829,3 +1829,21 @@ replay — with workflow_dispatch overrides for the seed counts.
 Every arm carries the canonical-form validator at its checkpoints,
 so a red night names a level and node rather than a root hash, and
 the adversarial minimizer turns it into a unit-test-sized repro.
+
+## First nightly battery: certified green (2026-08-02)
+
+The exact nightly-soak arms, run once by hand before the first
+scheduled night:
+
+| arm | scale | result |
+|---|---|---|
+| adversarial manifests | 200 seeds x 1200 ops x 4 manifests x 5 lifecycles | ok, 94s |
+| program surfaces | 4 seeds x 2000 ops x 4 lifecycles | ok |
+| artifact fuzz | 200 seeds x 600 ops x 6 arms | ok, 84s |
+| SE convergence | 5000 txns x 3 groupings + validator + fixpoint | ok, 50s |
+
+Every checkpoint of every arm passed canonical-form validation.
+Cumulative hunt exposure this session: ~1000 randomized programs
+at the tree level, 1200 at the artifacts level, one latent bug
+found and fixed (manifest continuity across empty trees), zero
+outstanding divergences.
