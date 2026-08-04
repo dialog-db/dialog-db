@@ -1568,3 +1568,30 @@ Still-open engine tickets, updated:
   interleaved) would collapse them into one scan. Planner
   territory; needs a design pass.
 - ArtifactView parsed-offset cache (~3%).
+
+## Round wrap: wall numbers and standing (2026-08-02)
+
+The window quieted enough for the baseline read benches to be
+trustworthy again (the sqlite arms — the noise control — returned
+to their usual values):
+
+| bench (1000) | dialog_mem | sqlite_mem | gap | campaign start |
+|---|---|---|---|---|
+| point_get | 4.97 us | 0.99 us | 5.0x | 18.6x |
+| attr_scan | 609 us | 210 us | 2.9x | ~7.4x |
+| join (storage) | 1.36 ms | 655 us | 2.1x | ~4.4x |
+| write_batch_empty | 31.8 ms | 5.3 ms | 6.0x | 66x |
+| write_batch_warm | 122 ms | ~5.5 ms | ~22x | — |
+| write_small_txns/100 | 8.2 ms | ~0.7 ms | ~12x | ~12.5x |
+
+point_get HALVED this round (8.5 -> 5.0 us): the one select a
+point read issues was paying the same ~40k-instruction
+selector_range construction the join paid per binding.
+
+Engine-level (still wall-noisy; instruction counts are the source
+of truth): query_join/1000 14.6 ms, query_memory/1000 1.61 ms,
+/10000 35.4 ms in this window; per-query instructions 121M -> 79M
+(-35%) across the round.
+
+Both suites green throughout, clippy clean, converge oracle
+byte-identical at every landed step.
