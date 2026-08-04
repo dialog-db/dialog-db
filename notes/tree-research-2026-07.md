@@ -1847,3 +1847,27 @@ Cumulative hunt exposure this session: ~1000 randomized programs
 at the tree level, 1200 at the artifacts level, one latent bug
 found and fixed (manifest continuity across empty trees), zero
 outstanding divergences.
+
+## Decision log: merge-join REJECTED for partial replication (2026-08-03)
+
+Owner decision with a rationale the fully-local benches could not
+see: the per-binding probe design is load-bearing for partial
+on-demand replication. A probe faults in only the blocks along the
+probed entity's path (measured: 2 unique blocks at 8k entities); a
+merge-join scans the attribute range and would fetch blocks for
+entities the query never asked about (the scan arm: 39 unique
+blocks at the same scale) — on a partially-replicated store that
+is strictly worse, not faster. Merge-join is off the table.
+
+Consequences landed:
+- `it_keeps_probe_queries_block_frugal` (dialog-query helpers
+  tests): pins the property — a cold point probe must stay
+  single-digit unique blocks while the contrast scan touches many
+  times more. Any future read-strategy change that breaks block
+  frugality fails this test instead of a partially-replicated
+  deployment. Bench-gap note: wall benches remain fully local, so
+  block-fetch counts are the only honest signal for replication
+  cost; this test is that signal in CI.
+- The partial-replication-SAFE engine lever goes back on the
+  list: premise-scoped setup reuse (same blocks fetched, less
+  per-select scaffolding).

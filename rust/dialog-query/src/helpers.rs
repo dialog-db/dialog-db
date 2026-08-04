@@ -621,6 +621,14 @@ where
     /// the implicit two-attribute rule can join over. Exposed so benches can
     /// seed once at setup and time only the query.
     pub async fn seed_stuff(&self, entity_count: usize) -> Result<()> {
+        self.seed_stuff_returning(entity_count).await.map(|_| ())
+    }
+
+    /// Like [`seed_stuff`](Self::seed_stuff), returning the seeded entities
+    /// so read-frugality tests can probe a KNOWN entity cold — without a
+    /// preparatory scan that would warm the caches the measurement is
+    /// about.
+    pub async fn seed_stuff_returning(&self, entity_count: usize) -> Result<Vec<Entity>> {
         let branch = self
             .repo
             .branch(&self.branch)
@@ -629,15 +637,18 @@ where
             .await?;
 
         let mut transaction = branch.transaction();
+        let mut entities = Vec::with_capacity(entity_count);
         for index in 0..entity_count {
+            let this = Entity::new()?;
+            entities.push(this.clone());
             transaction = transaction.assert(Stuff {
-                this: Entity::new()?,
+                this,
                 name: stuff::Name(format!("name-{index}")),
                 role: stuff::Role(format!("role-{}", index % 8)),
             });
         }
         transaction.commit().perform(&self.operator).await?;
-        Ok(())
+        Ok(entities)
     }
 
     /// Run the public [`Stuff`] concept query and report the block reads of
@@ -685,6 +696,62 @@ where
 
         Ok(JoinRun {
             results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+
+    /// Runs one point-shaped select — `(entity, stuff/name)` — through a
+    /// counting store and reports its block reads. The measurement is only
+    /// meaningful COLD (before any scan warms the node cache); see
+    /// `it_keeps_probe_queries_block_frugal`.
+    pub async fn probe_reads(&self, of: &Entity) -> Result<JoinRun> {
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .load()
+            .perform(&self.operator)
+            .await?;
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules: RuleRegistry::new(),
+            journal: ReadJournal::default(),
+        };
+        env.journal().clear();
+        let selector = ArtifactSelector::new()
+            .of(of.clone())
+            .the("stuff/name".parse().expect("valid attribute"));
+        let stream = Provider::<Select<'_>>::execute(&env, selector).await?;
+        let rows: Vec<_> = stream.try_collect().await?;
+        Ok(JoinRun {
+            results_len: rows.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+
+    /// Runs a full `stuff/name` attribute scan through a counting store and
+    /// reports its block reads: the frugality test's contrast arm.
+    pub async fn scan_reads(&self) -> Result<JoinRun> {
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .load()
+            .perform(&self.operator)
+            .await?;
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules: RuleRegistry::new(),
+            journal: ReadJournal::default(),
+        };
+        env.journal().clear();
+        let selector = ArtifactSelector::new().the("stuff/name".parse().expect("valid attribute"));
+        let stream = Provider::<Select<'_>>::execute(&env, selector).await?;
+        let rows: Vec<_> = stream.try_collect().await?;
+        Ok(JoinRun {
+            results_len: rows.len(),
             reads: env.journal().reads(),
             unique_reads: env.journal().unique_reads(),
         })
@@ -2069,6 +2136,52 @@ mod test {
         assert!(
             in_progress.results_len >= 1,
             "the reassigned bug shows up under its new status"
+        );
+        Ok(())
+    }
+
+    /// Pins the block-frugality property that partial on-demand replication
+    /// rests on: a point-shaped query must fault in only the blocks along
+    /// its probed entity's path — O(depth) — never a range's worth. This is
+    /// the property that ruled out merge-join-style strategies (which scan
+    /// the attribute range and would fetch blocks the query never asked
+    /// about, invisible in fully-local benches); any future optimizer
+    /// change that breaks it fails here, not in a partially-replicated
+    /// deployment.
+    #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn it_keeps_probe_queries_block_frugal() -> Result<()> {
+        let env = BenchEnv::volatile().await?;
+        let entities = env.seed_stuff_returning(8000).await?;
+
+        // Probe FIRST, while every cache is cold: the count is the blocks a
+        // partially-replicated reader would have to fetch.
+        let probe = env.probe_reads(&entities[1717]).await?;
+        assert_eq!(probe.results_len, 1, "the probed entity has one name");
+
+        let scan = env.scan_reads().await?;
+        assert_eq!(scan.results_len, 8000, "the scan sees every entity");
+
+        println!(
+            "probe: {} unique blocks / {} reads; scan: {} unique blocks",
+            probe.unique_reads, probe.reads, scan.unique_reads
+        );
+        // A probe touches the root and one path — single digits at this
+        // scale, with slack for a deeper tree. If this bound breaks, a read
+        // strategy started fetching blocks the query did not need.
+        assert!(
+            probe.unique_reads <= 12,
+            "point probe fetched {} unique blocks — block frugality broken",
+            probe.unique_reads
+        );
+        // And the scan demonstrates the gap being protected: it must touch
+        // many times more blocks than the probe.
+        assert!(
+            scan.unique_reads >= probe.unique_reads.max(1) * 5,
+            "scan touched {} unique blocks vs probe {} — the contrast arm \
+             is no longer meaningful, recalibrate this test",
+            scan.unique_reads,
+            probe.unique_reads
         );
         Ok(())
     }
