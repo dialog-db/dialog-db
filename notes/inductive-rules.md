@@ -180,8 +180,9 @@ Dispatch then gates per attribute in memory:
 
 The footprint is an over-approximation twice over (attribute
 granularity; shared attributes between concepts), and that is fine: the
-body evaluation is the precise filter. A false candidate costs one
-cached hydration and a body evaluation that fails on its first premise.
+later funnel stages ("Keeping dispatch flat" below) discriminate
+further before any store I/O, and the body evaluation is the precise
+filter.
 
 ### The dispatch loop, in `Commit::perform`
 
@@ -262,6 +263,70 @@ Semantics:
   subscription notification with settled state; intermediate rounds are
   invisible. Induction completes before the batch is applied and
   sealed, so a failed induction aborts with nothing persisted.
+
+### Keeping dispatch flat in the number of rules
+
+The footprint makes discovery O(touched attributes), but two places
+still scale with rule population and need clamping:
+
+1. **Per-attribute fan-out.** The `db.rule/on` probe returns *every*
+   rule watching an attribute. Five hundred rules watching `job/status`
+   — each pinning a different constant (`"done"`, `"failed"`, a
+   specific entity) — would mean five hundred hydrations and body
+   evaluations per matching commit, though at most a handful can fire.
+2. **Head-advance maintenance.** Rebuilding the footprint by
+   re-scanning the `on:` range at every head move is O(total rules),
+   paid per commit on a busy branch.
+
+The answer to (1) is a **dispatch funnel** — each stage strictly
+cheaper than the next, with rule count reaching a stage only when its
+rules genuinely might fire:
+
+- *Stage 1 — footprint intersection.* O(touched attributes),
+  in-memory; kills most commits outright.
+- *Stage 2 — indexed probe*, only for intersecting attributes,
+  head-cached: repeated commits on the same attributes at the same
+  head never re-read the index.
+- *Stage 3 — alpha discrimination.* At footprint-build time, compile
+  per watched attribute a discrimination map over the hydrated
+  candidates' *triggering premises*: candidates that pin a constant
+  (value or entity) keyed by that constant in a hash map, wildcard
+  candidates in a residual list. Matching a stimulus row is a hash
+  probe plus the wildcard walk — O(delta rows), independent of how
+  many constant-pinned rules watch the attribute. A rule watching
+  `status = "done"` costs nothing when the delta writes `"failed"`.
+  This is the alpha network of Rete, minus its stateful memories:
+  nothing persists across commits, which is what fits dialog's branch
+  model.
+- *Stage 4 — the delta-join*, only for surviving (rule, row) pairs,
+  and grouped: rules are content-addressed, so identical triggering
+  premises are recognizable — the shared premise-against-delta match
+  evaluates once and fans surviving bindings out to the individual
+  bodies. Store I/O happens only for rules whose trigger matched a
+  changed row.
+
+Net cost per commit ≈ O(touched attributes + actual firings), with a
+hash probe per (delta row, hot attribute) as the ceiling for
+everything that doesn't fire.
+
+For (2): the head-advance tree diff (already computed for subscription
+maintenance) names exactly which `db.rule/*` facts changed, so the
+footprint and discrimination maps update incrementally in O(rule
+churn) — a full rebuild happens only on cold open, and hydration is
+content-address-cached, so even that is one-time per rule. The whole
+structure is a pure function of the content-addressed rule set, so
+branches with identical rule sets can share it.
+
+Deliberately deferred: encoding constants into the storage-level index
+key (`on:<attr>?is=<hash>`) — it bloats the index and forces
+wildcard-plus-specific double probes for a discrimination the
+in-memory map does better; revisit only if a single attribute
+accumulates enough rules that hydrating them once per head is itself a
+burden. Likewise Rete-style beta memories (persistent join state
+across commits): dialog already has that shape in the subscription
+fixpoint continuation, and if delta-joins ever warrant cross-commit
+state, unifying with that machinery is the path rather than a parallel
+structure.
 
 ### Firing locality: commit-time only, fire-forward only
 
