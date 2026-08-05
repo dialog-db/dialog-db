@@ -15,7 +15,7 @@
 use std::cmp::Ordering;
 
 use crate::{
-    ArtifactSelector, Value, ValueDataType,
+    ArtifactSelector, NameShape, Value, ValueDataType,
     artifacts::selector::Constrained,
     decode_bytes_cow, decode_value,
     key::value_payload,
@@ -141,6 +141,23 @@ pub fn match_selector_and_key_ref(
             None => return SelectorMatch::Excluded,
         };
         if name_half != name.as_str().as_bytes() {
+            return SelectorMatch::Excluded;
+        }
+    }
+
+    if let Some(shape) = selector.name_shape() {
+        // The same coarse first-byte classification the range bounds
+        // use, so a filtered scan and a range-narrowed scan agree on
+        // exactly which keys match (strict vocabulary enforcement is
+        // the consumer's re-check). A name half missing or empty is
+        // neither shape: fail closed.
+        let segment = key.attribute.as_ref();
+        let classified = segment
+            .iter()
+            .position(|&byte| byte == b'/')
+            .and_then(|delimiter| segment.get(delimiter + 1))
+            .and_then(|&first| NameShape::classify(first));
+        if classified != Some(shape) {
             return SelectorMatch::Excluded;
         }
     }

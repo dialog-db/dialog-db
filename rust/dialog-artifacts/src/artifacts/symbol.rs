@@ -230,6 +230,63 @@ impl Display for Name {
     }
 }
 
+/// The shape of a [`Name`] — its discriminant without its content.
+///
+/// Because the shapes are disjoint by their first byte AND the byte
+/// classes are contiguous (`A`–`Z` for positions below `a`–`z` for
+/// symbols), a shape is more than a filter: within a domain each
+/// shape occupies one contiguous key range, so a shape-constrained
+/// scan narrows to the matching half of the domain instead of
+/// sweeping all of it (see `apply_prefix_bounds`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NameShape {
+    /// The name half is a [`Symbol`]: a named predicate.
+    Symbol,
+    /// The name half is a fractional [`Position`]: an
+    /// ordered-relation member's sort key.
+    Position,
+}
+
+impl NameShape {
+    /// Classify a name by its first byte alone: uppercase begins a
+    /// position, lowercase begins a symbol, anything else is
+    /// neither. This is the *coarse* classification the byte-range
+    /// machinery shares (scan bounds and per-key filters must agree
+    /// on the same class); it admits strings the strict [`Name`]
+    /// vocabulary rejects, and callers owing strictness re-check
+    /// via [`Name::try_from`] / [`crate::Attribute::split`].
+    pub fn classify(first: u8) -> Option<NameShape> {
+        if first.is_ascii_uppercase() {
+            Some(NameShape::Position)
+        } else if first.is_ascii_lowercase() {
+            Some(NameShape::Symbol)
+        } else {
+            None
+        }
+    }
+
+    /// The contiguous first-byte class this shape occupies, inclusive
+    /// on both ends. Position majors span all of `A`–`Z` (`A`–`M`
+    /// negative, `N`–`Z` positive); symbols start `a`–`z`.
+    pub fn first_byte_class(&self) -> (u8, u8) {
+        match self {
+            NameShape::Symbol => (b'a', b'z'),
+            NameShape::Position => (b'A', b'Z'),
+        }
+    }
+}
+
+impl Name {
+    /// This name's shape.
+    pub fn shape(&self) -> NameShape {
+        match self {
+            Name::Symbol(_) => NameShape::Symbol,
+            Name::Position(_) => NameShape::Position,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(unexpected_cfgs)]

@@ -451,8 +451,27 @@ fn apply_prefix_bounds<K: KeyViewMut>(
     if selector.attribute().is_none()
         && let Some(prefix) = selector.attribute_prefix()
     {
-        let lo = prefix_lower(prefix.as_bytes());
-        let hi = prefix_upper(prefix.as_bytes());
+        // A name-shape constraint under a whole-domain prefix narrows
+        // the range to the shape's contiguous first-byte class within
+        // the domain: positions (`A`–`Z`) occupy one sub-range, symbols
+        // (`a`–`z`) another, so the scan touches only the demanded half
+        // of a mixed domain. The class byte extends the prefix on each
+        // edge; a prefix not ending at the name boundary (`/`) leaves
+        // the shape to the per-entry check.
+        let (lo, hi) = match selector.name_shape() {
+            Some(shape) if prefix.ends_with('/') => {
+                let (first, last) = shape.first_byte_class();
+                let mut lo = prefix.as_bytes().to_vec();
+                lo.push(first);
+                let mut hi = prefix.as_bytes().to_vec();
+                hi.push(last);
+                (prefix_lower(&lo), prefix_upper(&hi))
+            }
+            _ => (
+                prefix_lower(prefix.as_bytes()),
+                prefix_upper(prefix.as_bytes()),
+            ),
+        };
         start = start.set_attribute(AttributeKeyPart(&lo));
         end = end.set_attribute(AttributeKeyPart(&hi));
     }
@@ -1535,5 +1554,57 @@ mod spill_cache_tests {
         assert_eq!(fetch_spilled_cached(&store, &cache, &key).await?, None);
         assert_eq!(fetch_spilled(&store, &key).await?, None);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::selector_range;
+    use crate::key::default_manifest;
+    use crate::{ArtifactSelector, NameShape};
+
+    /// A name shape under a whole-domain prefix narrows the scanned
+    /// key range itself: each shape's first-byte class is contiguous,
+    /// so the domain range splits into a position half strictly below
+    /// a symbol half, and a shape-constrained scan touches only its
+    /// half instead of sweeping the domain and filtering.
+    #[dialog_common::test]
+    fn it_narrows_domain_ranges_by_name_shape() {
+        let manifest = default_manifest();
+        let domain = || ArtifactSelector::new().the_starting_with("todo.list/");
+
+        let all = selector_range(&domain(), &manifest);
+        let positions = selector_range(&domain().with_name_shape(NameShape::Position), &manifest);
+        let symbols = selector_range(&domain().with_name_shape(NameShape::Symbol), &manifest);
+
+        assert!(
+            all.start() < positions.start() && positions.end() < all.end(),
+            "the position half is strictly inside the domain range"
+        );
+        assert!(
+            all.start() < symbols.start() && symbols.end() < all.end(),
+            "the symbol half is strictly inside the domain range"
+        );
+        assert!(
+            positions.end() < symbols.start(),
+            "the halves are disjoint, positions below symbols"
+        );
+
+        // A partial prefix does not end at the name boundary, so the
+        // shape cannot extend it: the range stays the prefix range and
+        // the shape remains a per-entry filter.
+        let partial = ArtifactSelector::new().the_starting_with("todo.li");
+        let partial_shaped = selector_range(
+            &partial.clone().with_name_shape(NameShape::Position),
+            &manifest,
+        );
+        assert_eq!(
+            selector_range(&partial, &manifest),
+            partial_shaped,
+            "a mid-domain prefix range is unchanged by a shape"
+        );
     }
 }
