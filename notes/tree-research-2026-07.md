@@ -2073,3 +2073,20 @@ bases became `Option<TreeReference>` (None = never synced), with a
 decode shim mapping legacy all-zero cells to None — safe forever,
 since no real tree can hash to zero. `TreeReference::default()` and
 `PushError::NonFastForward`'s sentinel fields went Option too.
+
+Third follow-up: NULL_BLAKE3_HASH is out of the tree layer entirely.
+PersistentTree's root is a two-variant enum — Node(hash) for a stored
+root, Empty { manifest, hash } with the derived empty root for that
+manifest — so root() always names the tree's true persisted form
+(empty included) and the new stored_root() -> Option is what read
+paths gate on (walker root is Option; differential's settled
+pseudo-hash is Option; helpers/validator/stitch match stored_root).
+TransientRoot/HitchhikerRoot gained explicit Empty variants
+(TransientTree::empty_with_manifest is the write-side entry), and
+HitchhikerTree::open over an in-memory empty tree now captures its
+manifest instead of dropping it — the last manifest-loss seam in the
+open path. artifacts' publish_root always mints a revision (a sealed
+batch persists even the empty tree), and the store-revision guard
+keys on stored_root. The null hash remains only in dialog-common
+(other crates' own legacy guards) — nothing in the tree crate
+produces or compares it.

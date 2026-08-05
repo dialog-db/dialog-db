@@ -224,8 +224,7 @@ async fn run_buffered(
     let mut ops = program.ops.iter();
     let first = *ops.next().expect("programs are non-empty");
     let mut delta = Delta::zero();
-    let seed_edit =
-        TransientTree::empty_with_manifest(Default::default(), manifest);
+    let seed_edit = TransientTree::empty_with_manifest(Default::default(), manifest);
     let mut tree = match first {
         Op::Insert(key, len) => {
             seed_edit
@@ -438,8 +437,7 @@ async fn minimize_caught_divergence() -> Result<()> {
     let mut ops2 = program.ops.iter();
     let first = *ops2.next().expect("non-empty");
     let mut delta = Delta::zero();
-    let seed_edit =
-        TransientTree::empty_with_manifest(Default::default(), manifest);
+    let seed_edit = TransientTree::empty_with_manifest(Default::default(), manifest);
     let mut tree2 = match first {
         Op::Insert(key, len) => {
             seed_edit

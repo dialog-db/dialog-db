@@ -6269,9 +6269,7 @@ mod tests {
         let mut delta = Delta::zero();
         for key in keys {
             let transient = match &tree {
-                None => {
-                    TransientTree::empty_with_manifest(Cache::new(), manifest)
-                }
+                None => TransientTree::empty_with_manifest(Cache::new(), manifest),
                 Some(tree) => tree.edit_with_manifest(storage).await?,
             };
             let next = transient
@@ -6443,7 +6441,7 @@ mod tests {
         storage: &ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
     ) -> Result<Vec<Vec<u8>>> {
         let mut boundaries: Vec<Vec<u8>> = Vec::new();
-                let accessor = Accessor::new(Cache::new(), storage.clone());
+        let accessor = Accessor::new(Cache::new(), storage.clone());
         let mut frontier = vec![root.clone()];
         while !frontier.is_empty() {
             let mut next = Vec::new();
@@ -7132,9 +7130,7 @@ mod tests {
         let mut delta = Delta::zero();
         for key in &sorted {
             let transient = match &fresh {
-                None => {
-                    TransientTree::empty_with_manifest(Cache::new(), manifest)
-                }
+                None => TransientTree::empty_with_manifest(Cache::new(), manifest),
                 Some(tree) => tree.edit_with_manifest(&fresh_storage).await?,
             };
             let value = if key == &target {
@@ -8106,11 +8102,10 @@ mod tests {
 
         let mut delta = Delta::zero();
         let first = key_at(0);
-        let mut tree: VarTree =
-            TransientTree::empty_with_manifest(Cache::new(), manifest)
-                .insert(first.clone(), first.0.clone(), &storage)
-                .await?
-                .persist(&mut delta)?;
+        let mut tree: VarTree = TransientTree::empty_with_manifest(Cache::new(), manifest)
+            .insert(first.clone(), first.0.clone(), &storage)
+            .await?
+            .persist(&mut delta)?;
         for (hash, buffer) in delta.flush() {
             storage.store(buffer.as_ref().to_vec(), &hash).await?;
         }
@@ -9513,12 +9508,14 @@ mod buffer_edit_interaction_tests {
         let mut delta = Delta::zero();
         for key in &base_keys {
             base = match base.stored_root() {
-                Some(root) => TransientTree::with_manifest(root.clone(), base.node_cache(), manifest),
+                Some(root) => {
+                    TransientTree::with_manifest(root.clone(), base.node_cache(), manifest)
+                }
                 None => TransientTree::empty_with_manifest(base.node_cache(), manifest),
             }
-                .insert(key.to_be_bytes(), vec![1], &storage)
-                .await?
-                .persist(&mut delta)?;
+            .insert(key.to_be_bytes(), vec![1], &storage)
+            .await?
+            .persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
         }
         let before = segment_count(&base, &storage).await?;

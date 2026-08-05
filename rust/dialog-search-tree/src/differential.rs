@@ -661,9 +661,9 @@ where
         self.nodes.retain(|node| {
             !prunable(node) || !node.hash().is_some_and(|hash| right.contains(hash))
         });
-        other.nodes.retain(|node| {
-            !prunable(node) || !node.hash().is_some_and(|hash| left.contains(hash))
-        });
+        other
+            .nodes
+            .retain(|node| !prunable(node) || !node.hash().is_some_and(|hash| left.contains(hash)));
     }
 
     /// Streams the entries of every node remaining in the frontier, in key
@@ -1638,7 +1638,10 @@ mod tests {
             ..Manifest::default()
         };
 
-        let mut edit = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Default::default(), custom);
+        let mut edit = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            Default::default(),
+            custom,
+        );
         for k in 0..30u32 {
             edit = edit
                 .insert(k.to_le_bytes(), vec![k as u8], &storage)
@@ -1649,7 +1652,10 @@ mod tests {
         flush(&mut delta, &mut storage).await?;
 
         let mut delta = Delta::zero();
-        let emptied = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Default::default(), custom)
+        let emptied = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            Default::default(),
+            custom,
+        )
         .persist(&mut delta)?;
         flush(&mut delta, &mut storage).await?;
 

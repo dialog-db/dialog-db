@@ -1898,7 +1898,8 @@ mod tests {
         // Seed a canonical base under the small manifest so every stored
         // node carries it and the buffered path below runs under it.
         let mut delta = Delta::zero();
-        let mut seed = TransientTree::<VarKey, Vec<u8>>::empty_with_manifest(Cache::new(), manifest);
+        let mut seed =
+            TransientTree::<VarKey, Vec<u8>>::empty_with_manifest(Cache::new(), manifest);
         let mut rng = Rng::new(11);
         for _ in 0..96 {
             let (key, value) = small_frame_op(&mut rng);
@@ -3503,7 +3504,8 @@ mod tests {
         let canonical = tree.canonicalize(&storage, &mut delta).await?;
         flush(&mut delta, &mut storage).await?;
 
-        let mut oracle = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
+        let mut oracle =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
         for k in 0..80u32 {
             oracle = oracle
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3581,7 +3583,7 @@ mod tests {
         // from scratch under the same manifest yields the same root.
         let mut delta = Delta::zero();
         let scratch = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom)
-        .persist(&mut delta)?;
+            .persist(&mut delta)?;
         flush(&mut delta, &mut storage).await?;
         assert_eq!(
             emptied.root(),
@@ -3602,8 +3604,10 @@ mod tests {
         // The same rule under the default format: emptying lands on the
         // default manifest's empty node, the pure function of (empty set,
         // Manifest::default()).
-        let mut edit =
-            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), Manifest::default());
+        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            Cache::new(),
+            Manifest::default(),
+        );
         for k in 0..10u32 {
             edit = edit
                 .insert(k.to_be_bytes(), vec![k as u8], &storage)
@@ -3668,7 +3672,8 @@ mod tests {
 
         // The oracle: the second-life entries written directly under the
         // custom format by a replica that never emptied anything.
-        let mut oracle = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
+        let mut oracle =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
         for k in 100..160u32 {
             oracle = oracle
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3791,12 +3796,14 @@ mod tests {
             let mut delta = Delta::zero();
             for &k in &keys {
                 base = match base.stored_root() {
-                    Some(root) => TransientTree::with_manifest(root.clone(), base.node_cache(), manifest),
+                    Some(root) => {
+                        TransientTree::with_manifest(root.clone(), base.node_cache(), manifest)
+                    }
                     None => TransientTree::empty_with_manifest(base.node_cache(), manifest),
                 }
-                        .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
-                        .await?
-                        .persist(&mut delta)?;
+                .insert(k.to_le_bytes(), k.to_le_bytes().to_vec(), &storage)
+                .await?
+                .persist(&mut delta)?;
                 flush(&mut delta, &mut storage).await?;
             }
         }

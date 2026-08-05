@@ -366,8 +366,9 @@ mod tests {
             Manifest::default(),
         ] {
             let mut delta = Delta::zero();
-            let emptied = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), manifest)
-            .persist(&mut delta)?;
+            let emptied =
+                TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), manifest)
+                    .persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
             assert!(emptied.stored_root().is_some());
             assert_eq!(

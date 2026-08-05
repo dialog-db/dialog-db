@@ -79,7 +79,10 @@ enum TreeRoot {
     /// The empty tree under `manifest`, not yet persisted. `hash` is the
     /// derived empty root for that manifest, precomputed so `root()` can
     /// hand out a reference.
-    Empty { manifest: Manifest, hash: Blake3Hash },
+    Empty {
+        manifest: Manifest,
+        hash: Blake3Hash,
+    },
 }
 
 // Manual impl: a derived `Clone` would demand `D: Clone`, but the
@@ -1642,7 +1645,6 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_returns_to_the_empty_node_after_deleting_all_entries() -> Result<()> {
-
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
