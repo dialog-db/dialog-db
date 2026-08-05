@@ -235,9 +235,19 @@ Two prior explorations bear directly on the interface, and together
 they answer the open ergonomics questions better than the plan below
 originally did:
 
+- **PR [#337](https://github.com/dialog-db/dialog-db/pull/337)
+  "feat: directory style concepts"** (`feat/directory`, draft) — the
+  first iteration: a `Symbol` type (lowercase letters, digits,
+  hyphens, dots; MUST start with a lowercase letter; no `/`; ≤ 63
+  bytes) and `Attribute` restructured as a `{domain, name}` Symbol
+  pair, with the selector split into domain/name slots. Structurally
+  invasive — the Attribute type change ripples through everything.
 - **PR [#338](https://github.com/dialog-db/dialog-db/pull/338)
   "feat: open dictionary like concepts"** (`feat/open-record`, draft,
-  stacked on `feat/type-inference-v2`):
+  stacked on `feat/type-inference-v2`) — the lesson learned from
+  #337: `Attribute` stays opaque with `.split() → (Symbol, Symbol)`
+  (parse-level, not structural), and the decomposition lives where it
+  pays —
   - `Attribute` reshaped as a **(domain, name) `Symbol` pair** with
     `.split()`, and the selector grows two slots —
     `ArtifactSelector::with_domain(d).with_name(n)` — so *domain-only*
@@ -254,6 +264,27 @@ originally did:
   their own attribute *types*, distinguishable by tag byte, opening
   storage/merge optimizations no userland prefix convention can reach.
   (It cites this very fractional-indexing design for `position`.)
+
+### Positions and symbols are now syntactically disjoint
+
+The load-bearing detail in both PRs: **a `Symbol` must start with a
+lowercase letter**. The position port originally used majors spanning
+`A–Z a–z`; restricting majors to **uppercase only** (`A–M` negative,
+`N–Z` positive — 13 length classes per side, still base62^13 ≈ 2^77
+integer headroom) makes the attribute's name half self-discriminating
+by its first byte:
+
+- lowercase first byte → a named field (a `Symbol`),
+- uppercase first byte → a position,
+- `0xFF` first byte → a reference (ADR 005's membership arm).
+
+No tag byte, byte ordering intact, and the position/word ambiguity is
+gone even in the text encoding — `person/name` cannot parse as a
+position, so `dialog/position-parts` is now a true filter for ordered
+members. (Landed: `MAJORS = A–M / N–Z`, origin position `N`.) The one
+ask this places on #337/#338 when they land: the name slot's
+validation must admit the position kind alongside `Symbol`, i.e. the
+name half becomes the variant above rather than Symbol-only.
 
 ### How this reshapes the ordered-relations interface
 

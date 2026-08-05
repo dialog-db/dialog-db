@@ -14,11 +14,11 @@
 //!   same `(member, after, before)`, which is what makes concurrent
 //!   identical inserts converge instead of duplicating.
 //! - [`PositionParts`] (`dialog/position-parts`) decomposes a
-//!   position-bearing attribute into its namespace and position.
-//!   Predicates that cannot be positions project nothing, but note
-//!   that any alphanumeric word starting with a letter *is* a
-//!   syntactically valid position — the namespace prefix, not
-//!   position syntax, is what scopes an ordered relation's scan.
+//!   position-bearing attribute into its namespace and position, and
+//!   doubles as the filter selecting a scan's ordered members:
+//!   positions start with an uppercase major while named predicates
+//!   (symbols) start lowercase, so the two are syntactically disjoint
+//!   and ordinary word predicates project nothing.
 //!
 //! Both are pure per-row computation — ordinary [`Formula`]s, sound
 //! under differential subscriptions with no extra machinery.
@@ -90,10 +90,10 @@ impl Position {
 }
 
 /// Decompose a position-bearing attribute (`namespace/<position>`)
-/// into its parts. A predicate that cannot be a position (illegal
-/// characters, wrong leading byte) projects nothing; scope scans by
-/// the namespace prefix, since ordinary word predicates can be
-/// syntactically valid positions too. Registered as
+/// into its parts. Positions start with an uppercase major and named
+/// predicates start lowercase, so a predicate that is not a position
+/// — any ordinary word — projects nothing, making this the filter
+/// that selects a scan's ordered members. Registered as
 /// `dialog/position-parts`.
 #[derive(Debug, Clone, Formula)]
 pub struct PositionParts {
@@ -203,11 +203,9 @@ mod tests {
             "predicates with non-position characters project nothing"
         );
         let wordlike: Attribute = "person/name".parse().expect("attribute parses");
-        assert_eq!(
-            PositionParts::compute(PositionPartsInput { of: wordlike }).len(),
-            1,
-            "word predicates can be syntactically valid positions; \
-             the namespace is what scopes an ordered relation"
+        assert!(
+            PositionParts::compute(PositionPartsInput { of: wordlike }).is_empty(),
+            "word predicates start lowercase and are never positions"
         );
     }
 }
