@@ -261,7 +261,10 @@ mod tests {
     /// [`Upstream`]; they must decode as a one-entry [`Upstreams`].
     #[dialog_common::test]
     async fn it_decodes_legacy_single_upstream_cells() -> Result<()> {
-        let single = remote("origin", 0);
+        // A nonzero seed: the zero hash is the legacy "never synced"
+        // sentinel and deliberately decodes to `None` (see the test
+        // below).
+        let single = remote("origin", 17);
         let (_, bytes) = CborEncoder.encode(&single).await?;
         let decoded: Upstreams = CborEncoder.decode(&bytes).await?;
         assert_eq!(decoded.default_upstream(), Some(&single));
