@@ -115,7 +115,10 @@ where
 
     /// Creates a new empty [`PersistentTree`] with no entries.
     ///
-    /// The empty tree has a null root hash and an empty node cache.
+    /// A tree that was never persisted has no root node yet, so its root
+    /// hash is the null sentinel until the first persist — which lands on
+    /// the canonical manifest-carrying empty node (see
+    /// [`empty_root`](Self::empty_root)) even if the tree is still empty.
     pub fn empty() -> Self {
         Self {
             key: PhantomData,
@@ -124,6 +127,34 @@ where
             root: NULL_BLAKE3_HASH.clone(),
             node_cache: Cache::new(),
         }
+    }
+
+    /// Creates a new empty [`PersistentTree`] sharing an existing node
+    /// cache — [`empty`](Self::empty) for callers that keep one cache warm
+    /// across successive tree reconstructions (e.g. a branch with no
+    /// revision yet).
+    pub fn empty_with_cache(node_cache: Cache<Blake3Hash, Buffer>) -> Self {
+        Self {
+            key: PhantomData,
+            value: PhantomData,
+            distribution: PhantomData,
+            root: NULL_BLAKE3_HASH.clone(),
+            node_cache,
+        }
+    }
+
+    /// The canonical root hash an empty tree persists to under `manifest`:
+    /// the hash of the zero-entry manifest-carrying node. Derived, not
+    /// read — the node has one fixed encoding per manifest, so this is a
+    /// pure function usable to name the empty tree without touching
+    /// storage.
+    pub fn empty_root(manifest: &Manifest) -> Result<Blake3Hash, DialogSearchTreeError> {
+        let mut scratch = crate::Delta::zero();
+        Ok(
+            transient::persist_empty_root::<Key, Value>(manifest, &mut scratch)?
+                .hash()
+                .clone(),
+        )
     }
 
     /// Creates a [`PersistentTree`] from a known root hash.
@@ -959,13 +990,9 @@ mod tests {
     /// The canonical empty-tree root hash for the default manifest: the
     /// zero-entry manifest-carrying node every persisted empty tree lands on.
     fn empty_root_hash() -> Result<dialog_common::Blake3Hash> {
-        let mut scratch = Delta::zero();
-        Ok(crate::persist_empty_root::<[u8; 4], Vec<u8>>(
+        Ok(PersistentTree::<[u8; 4], Vec<u8>>::empty_root(
             &crate::Manifest::default(),
-            &mut scratch,
-        )?
-        .hash()
-        .clone())
+        )?)
     }
 
     #[dialog_common::test]

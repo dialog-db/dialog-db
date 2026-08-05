@@ -2054,3 +2054,22 @@ fallbacks on the read side, none compare an emptied tree against the
 sentinel, so no downstream logic moved. The validator accepts the
 canonical empty node for any manifest (the "default impostor" rule is
 gone — under the uniform representation it IS the canonical form).
+
+Second follow-up (same feedback thread): EMPTY_TREE_HASH is gone.
+"No tree" is now represented through Option at every boundary instead
+of the all-zero sentinel: Select/Export/Commit/Blob/Pull/Subscription
+match on the revision's presence and construct either the real index
+(from the revision's root) or the empty index — new
+`Index::empty_with_cache` / `TreeHistory::empty_with_cache`
+constructors, backed by `PersistentTree::empty[_with_cache]`. Where a
+concrete TreeReference is needed before the final root exists (the
+mint-then-seal ordering in Commit/Blob and the three Pull merge
+mints), the revision starts from the tree the operation started from
+— the base revision's root, the pre-record merged root, or, for
+genesis, the derived empty tree for the configuration
+(`PersistentTree::empty_root(manifest)`: the canonical zero-entry
+node's hash as a pure function, no storage touched). Upstream sync
+bases became `Option<TreeReference>` (None = never synced), with a
+decode shim mapping legacy all-zero cells to None — safe forever,
+since no real tree can hash to zero. `TreeReference::default()` and
+`PushError::NonFastForward`'s sentinel fields went Option too.

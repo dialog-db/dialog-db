@@ -397,10 +397,11 @@ pub enum PushError {
         /// The local branch whose push was rejected.
         branch: String,
         /// The tree we recorded as the upstream's last-known state
-        /// (the divergence point).
-        expected: TreeReference,
-        /// The tree the upstream is actually at now.
-        actual: TreeReference,
+        /// (the divergence point), `None` before any sync.
+        expected: Option<TreeReference>,
+        /// The tree the upstream is actually at now, `None` for an
+        /// upstream with no revision.
+        actual: Option<TreeReference>,
     },
 
     /// A cell publish during push failed.

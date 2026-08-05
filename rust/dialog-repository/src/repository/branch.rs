@@ -254,12 +254,14 @@ impl Branch {
             + 'static,
     {
         let store = NetworkedIndex::new(env, self.archive().index(), None);
-        let root = self
-            .revision()
-            .map(|revision| *revision.tree.hash())
-            .unwrap_or(crate::EMPTY_TREE_HASH);
-        TreeHistory::from_root_with_cache(&root, store, self.node_cache())
-            .with_record_cache(self.records())
+        let history = match self.revision() {
+            Some(revision) => {
+                TreeHistory::from_root_with_cache(revision.tree.hash(), store, self.node_cache())
+            }
+            // No revision, no tree, no records.
+            None => TreeHistory::empty_with_cache(store, self.node_cache()),
+        };
+        history.with_record_cache(self.records())
     }
 
     /// The branch's committed history, newest first — at most `limit`

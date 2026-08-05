@@ -5,15 +5,18 @@ use serde::{Deserialize, Serialize};
 ///
 /// Stored in the branch's `upstream` cell. The `tree` field captures
 /// the upstream's tree root at the time of last sync, used as the
-/// divergence base for three-way merge.
+/// divergence base for three-way merge; `None` means no sync has
+/// happened yet, so the divergence point is "anything in the upstream
+/// from now on."
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Upstream {
     /// A local branch upstream.
     Local {
         /// Branch name.
         branch: String,
-        /// Tree root at last sync point.
-        tree: TreeReference,
+        /// Tree root at last sync point, if any sync has happened.
+        #[serde(deserialize_with = "stored_sync_base")]
+        tree: Option<TreeReference>,
     },
     /// A remote branch upstream.
     Remote {
@@ -21,9 +24,22 @@ pub enum Upstream {
         remote: String,
         /// Branch name on the remote.
         branch: String,
-        /// Tree root at last sync point.
-        tree: TreeReference,
+        /// Tree root at last sync point, if any sync has happened.
+        #[serde(deserialize_with = "stored_sync_base")]
+        tree: Option<TreeReference>,
     },
+}
+
+/// Decodes a stored sync base. Cells written before the sentinel-free
+/// representation recorded "never synced" as the all-zero hash; no real
+/// tree can have that root (the empty tree persists as a manifest-carrying
+/// node whose hash is never zero), so it maps to `None`.
+fn stored_sync_base<'de, D>(deserializer: D) -> Result<Option<TreeReference>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let stored = Option::<TreeReference>::deserialize(deserializer)?;
+    Ok(stored.filter(|tree| *tree.hash() != [0u8; 32]))
 }
 
 impl Upstream {
@@ -35,16 +51,18 @@ impl Upstream {
         }
     }
 
-    /// Returns the tree root at the last sync point.
-    pub fn tree(&self) -> &TreeReference {
+    /// Returns the tree root at the last sync point, if any sync has
+    /// happened.
+    pub fn tree(&self) -> Option<&TreeReference> {
         match self {
-            Self::Local { tree, .. } => tree,
-            Self::Remote { tree, .. } => tree,
+            Self::Local { tree, .. } => tree.as_ref(),
+            Self::Remote { tree, .. } => tree.as_ref(),
         }
     }
 
-    /// Returns a new upstream with the tree updated to the given value.
+    /// Returns a new upstream with the sync base advanced to `tree`.
     pub fn with_tree(self, tree: TreeReference) -> Self {
+        let tree = Some(tree);
         match self {
             Self::Local { branch, .. } => Self::Local { branch, tree },
             Self::Remote { remote, branch, .. } => Self::Remote {
@@ -169,8 +187,8 @@ impl Upstreams {
 ///
 /// Wraps a loaded local or remote branch handle. Convertible into
 /// [`Upstream`] (the persisted form) by extracting the names; the
-/// stored tree starts at [`TreeReference::default`] (empty) since the
-/// divergence point is "anything in the upstream from now on."
+/// stored tree starts at `None` (never synced) since the divergence
+/// point is "anything in the upstream from now on."
 ///
 /// Construct via the `From<&Branch>` and `From<&RemoteBranch>` impls;
 /// `branch.set_upstream(&local_or_remote)` invokes them implicitly.
@@ -210,12 +228,12 @@ impl From<UpstreamBranch> for Upstream {
         match source {
             UpstreamBranch::Local(branch) => Upstream::Local {
                 branch: branch.name().to_string(),
-                tree: TreeReference::default(),
+                tree: None,
             },
             UpstreamBranch::Remote(branch) => Upstream::Remote {
                 remote: branch.repository().site().name().to_string(),
                 branch: branch.name().to_string(),
-                tree: TreeReference::default(),
+                tree: None,
             },
         }
     }
@@ -235,7 +253,7 @@ mod tests {
         Upstream::Remote {
             remote: name.into(),
             branch: "main".into(),
-            tree: TreeReference::from([seed; 32]),
+            tree: Some(TreeReference::from([seed; 32])),
         }
     }
 
@@ -260,6 +278,23 @@ mod tests {
         Ok(())
     }
 
+    /// Cells written before the sentinel-free representation recorded
+    /// "never synced" as the all-zero hash; they must decode as `None`.
+    /// (Encoding `Some` is wire-transparent, so encoding the zero
+    /// reference reproduces the legacy bytes exactly.)
+    #[dialog_common::test]
+    async fn it_decodes_legacy_zero_sync_bases_as_none() -> Result<()> {
+        let legacy = Upstream::Remote {
+            remote: "origin".into(),
+            branch: "main".into(),
+            tree: Some(TreeReference::from([0u8; 32])),
+        };
+        let (_, bytes) = CborEncoder.encode(&legacy).await?;
+        let decoded: Upstream = CborEncoder.decode(&bytes).await?;
+        assert_eq!(decoded.tree(), None, "the zero sync base maps to None");
+        Ok(())
+    }
+
     #[dialog_common::test]
     fn it_upserts_by_target_and_promotes_defaults() {
         let mut upstreams = Upstreams::default();
@@ -279,7 +314,7 @@ mod tests {
         // A local entry never matches a remote one.
         let local = Upstream::Local {
             branch: "main".into(),
-            tree: TreeReference::default(),
+            tree: None,
         };
         assert!(!local.same_target(&remote("origin", 0)));
         upstreams.upsert(local.clone());

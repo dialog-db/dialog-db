@@ -15,8 +15,7 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt,
+    Branch, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt,
 };
 
 /// Command struct for selecting artifacts from a branch.
@@ -31,12 +30,8 @@ impl<'a> Select<'a> {
         Self { branch, selector }
     }
 
-    fn tree_hash(&self) -> Blake3Hash {
-        self.branch
-            .revision()
-            .as_ref()
-            .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPTY_TREE_HASH)
+    fn tree_hash(&self) -> Option<Blake3Hash> {
+        self.branch.revision().as_ref().map(|rev| *rev.tree.hash())
     }
 
     /// The catalog (archive index) scoped to this branch's subject.
@@ -137,26 +132,29 @@ impl Select<'_> {
         // makes the first select warm the cache and the rest hit it, while
         // still fetching (and, through `NetworkedIndex`, replicating) on a
         // genuine miss and failing fast when the root is truly absent.
-        let tree_hash = self.tree_hash();
         let node_cache = self.branch.node_cache();
-        if tree_hash != EMPTY_TREE_HASH {
-            node_cache
-                .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
-                    store
-                        .get(hash.as_bytes())
-                        .await
-                        .map(|maybe| maybe.map(Buffer::from))
-                })
-                .await?
-                .ok_or_else(|| {
-                    DialogSearchTreeError::Node(format!(
-                        "Blob not found in storage: {}",
-                        tree_hash.to_base58(),
-                    ))
-                })?;
-        }
-
-        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache);
+        let tree = match self.tree_hash() {
+            Some(tree_hash) => {
+                node_cache
+                    .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
+                        store
+                            .get(hash.as_bytes())
+                            .await
+                            .map(|maybe| maybe.map(Buffer::from))
+                    })
+                    .await?
+                    .ok_or_else(|| {
+                        DialogSearchTreeError::Node(format!(
+                            "Blob not found in storage: {}",
+                            tree_hash.to_base58(),
+                        ))
+                    })?;
+                Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache)
+            }
+            // No revision means no tree to probe or scan: the select runs
+            // over the empty index and yields nothing.
+            None => Index::empty_with_cache(node_cache),
+        };
 
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay

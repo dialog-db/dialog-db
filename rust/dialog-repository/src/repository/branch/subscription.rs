@@ -89,8 +89,8 @@ use futures_util::TryStreamExt as _;
 use super::session::{QueryEnv, QueryLayer};
 use crate::layer::tombstones_from;
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt as _, Revision, Upstream,
+    Branch, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt as _,
+    Revision, Upstream,
 };
 
 /// The demand cover of one evaluation: every index key range the
@@ -322,13 +322,10 @@ type EvaluationFuture<'a, T> =
 #[cfg(target_arch = "wasm32")]
 type EvaluationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, EvaluationError>> + 'a>>;
 
-/// The index root a revision pins, or the empty tree for an
-/// unborn branch.
-fn tree_hash(revision: &Option<Revision>) -> Blake3Hash {
-    revision
-        .as_ref()
-        .map(|revision| *revision.tree.hash())
-        .unwrap_or(EMPTY_TREE_HASH)
+/// The index root a revision pins — `None` for an unborn branch,
+/// which has no tree at all.
+fn tree_hash(revision: &Option<Revision>) -> Option<Blake3Hash> {
+    revision.as_ref().map(|revision| *revision.tree.hash())
 }
 
 impl<Q> Subscription<Q>
@@ -521,9 +518,16 @@ where
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store.clone();
         let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
-        let previous =
-            Index::from_hash_with_cache(NodeHash::from(pinned), self.branch.node_cache());
-        let next = Index::from_hash_with_cache(NodeHash::from(target), self.branch.node_cache());
+        let index_at = |hash: Option<Blake3Hash>| match hash {
+            Some(hash) => {
+                Index::from_hash_with_cache(NodeHash::from(hash), self.branch.node_cache())
+            }
+            // An unborn side of the diff has no tree; the differential
+            // runs against the empty index.
+            None => Index::empty_with_cache(self.branch.node_cache()),
+        };
+        let previous = index_at(pinned);
+        let next = index_at(target);
 
         let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
         let mut changes = Box::pin(changes);

@@ -1,5 +1,5 @@
 use crate::{
-    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
+    Branch, CommitError, Index, NetworkedIndex, PublishError, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
 use dialog_artifacts::history::{Context, Edition, TreeHistory, Version, context_of, extend_skips};
@@ -162,20 +162,21 @@ where
         let (branch_entity, origin) = branch.commit_identity(&profile, &issuer);
         let version = Version::new(origin, edition);
 
-        // Walk forward from the current revision's tree root, or from
-        // the empty tree if the branch has no commits yet.
-        let base_tree_hash = base_revision
-            .as_ref()
-            .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPTY_TREE_HASH);
-
+        // Walk forward from the current revision's tree root, or from the
+        // empty tree if the branch has no commits yet (and therefore no
+        // tree at all).
+        //
         // Read through the branch's shared node cache: the commit's
         // supersession scans and history reads then hit blocks earlier
         // commits and queries already fetched (and blocks the persist below
         // seeds), instead of re-fetching everything into a cache that dies
         // with this commit.
-        let mut tree =
-            Index::from_hash_with_cache(NodeHash::from(base_tree_hash), branch.node_cache());
+        let mut tree = match base_revision.as_ref() {
+            Some(base) => {
+                Index::from_hash_with_cache(NodeHash::from(*base.tree.hash()), branch.node_cache())
+            }
+            None => Index::empty_with_cache(branch.node_cache()),
+        };
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
         // cardinality-one supersession, retraction — and, because the
@@ -254,15 +255,15 @@ where
         // is lifted from the parent's recorded table, read out of the base
         // tree through the branch's shared node cache.
         let parent = base_revision.as_ref().map(Revision::version);
-        let skips = match &parent {
-            Some(parent) => {
+        let skips = match base_revision.as_ref() {
+            Some(base) => {
                 let history = TreeHistory::from_root_with_cache(
-                    &base_tree_hash,
+                    base.tree.hash(),
                     store.clone(),
                     branch.node_cache(),
                 )
                 .with_record_cache(branch.records());
-                extend_skips(&history, parent).await?
+                extend_skips(&history, &base.version()).await?
             }
             None => Vec::new(),
         };
@@ -275,29 +276,44 @@ where
         let contexts = branch.contexts();
         let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
         let context = {
-            let mut context = match (&parent, base_context) {
+            let mut context = match (base_revision.as_ref(), base_context) {
                 (None, _) => Context::new(),
                 (Some(_), Some(context)) => context,
-                (Some(parent), None) => match contexts.cached(parent).await {
-                    Some(context) => context,
-                    None => {
-                        let history = TreeHistory::from_root_with_cache(
-                            &base_tree_hash,
-                            store.clone(),
-                            branch.node_cache(),
-                        )
-                        .with_record_cache(branch.records());
-                        context_of(parent, &history).await?
+                (Some(base), None) => {
+                    let parent = base.version();
+                    match contexts.cached(&parent).await {
+                        Some(context) => context,
+                        None => {
+                            let history = TreeHistory::from_root_with_cache(
+                                base.tree.hash(),
+                                store.clone(),
+                                branch.node_cache(),
+                            )
+                            .with_record_cache(branch.records());
+                            context_of(&parent, &history).await?
+                        }
                     }
-                },
+                }
             };
             context.record(version);
             context
         };
 
+        // The revision's tree root is set after the seal below (its own
+        // record must enter the tree before the root is final); until then
+        // it carries the tree the commit started from — the base revision's
+        // root, or the derived empty tree for a genesis commit.
+        let starting_tree = match base_revision.as_ref() {
+            Some(base) => base.tree.clone(),
+            None => TreeReference::from(
+                *Index::empty_root(batch.manifest())
+                    .map_err(DialogArtifactsError::from)?
+                    .as_bytes(),
+            ),
+        };
         let mut revision = match base_revision {
-            Some(base) => base.advance(TreeReference::default(), branch_entity.clone(), issuer),
-            None => Revision::new(TreeReference::default(), branch_entity.clone(), issuer),
+            Some(base) => base.advance(starting_tree, branch_entity.clone(), issuer),
+            None => Revision::new(starting_tree, branch_entity.clone(), issuer),
         };
         debug_assert_eq!(revision.version(), version);
         // Sign the record before it enters the tree: the issuer's signature
@@ -441,7 +457,11 @@ mod tests {
         let instructions = stream::iter(vec![Instruction::Assert(artifact.clone())]);
 
         let revision = branch.commit(instructions).perform(&operator).await?;
-        assert_ne!(revision.tree, TreeReference::default());
+        // The commit wrote data, so its tree is not the derived empty tree.
+        let empty_tree = TreeReference::from(
+            *crate::Index::empty_root(&dialog_search_tree::Manifest::default())?.as_bytes(),
+        );
+        assert_ne!(revision.tree, empty_tree);
 
         // Select should find the artifact
         let selector = ArtifactSelector::new().the("user/name".parse()?);
