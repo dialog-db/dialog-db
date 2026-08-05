@@ -113,6 +113,9 @@ define_formulas! {
 
     "dialog/revision"         => Revision(super::revision::Revision, super::revision::RevisionQuery),
     "dialog/revision-parent"  => RevisionParent(super::revision::RevisionParent, super::revision::RevisionParentQuery),
+
+    "dialog/position"         => Position(super::position::Position, super::position::PositionQuery),
+    "dialog/position-parts"   => PositionParts(super::position::PositionParts, super::position::PositionPartsQuery),
 }
 
 impl FormulaQuery {

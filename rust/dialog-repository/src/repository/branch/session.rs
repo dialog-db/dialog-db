@@ -1360,3 +1360,98 @@ mod rule_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod ordered_relation_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use crate::helpers::{test_operator_with_profile, test_repo};
+    use dialog_artifacts::position::{Bias, Position, insert};
+    use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Value};
+    use dialog_query::AttributeStatement;
+    use dialog_query::attribute::The;
+    use futures_util::TryStreamExt as _;
+
+    /// Derive the position for `member` between the given bounds,
+    /// biased by the member's entity reference.
+    fn place(member: &Entity, after: Option<&Position>, before: Option<&Position>) -> Position {
+        let bias = Bias::derive(member.to_string().as_bytes());
+        insert(&bias, after, before).expect("position derives")
+    }
+
+    /// A membership fact: `[list  test.list/<position>  member]`.
+    fn membership(list: &Entity, position: &Position, member: &Entity) -> AttributeStatement {
+        let attribute =
+            Attribute::try_from(format!("test.list/{position}")).expect("attribute fits");
+        AttributeStatement {
+            the: The::from(attribute),
+            of: list.clone(),
+            is: Value::Entity(member.clone()),
+            cause: None,
+            cardinality: None,
+        }
+    }
+
+    /// An ordered collection encoded as position-bearing attributes
+    /// comes back from ONE prefix range scan already sorted — appends,
+    /// prepend-free insertion between neighbors and all.
+    #[dialog_common::test]
+    async fn it_reads_ordered_members_from_one_scan() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        let apples = Entity::new()?;
+        let bananas = Entity::new()?;
+        let milk = Entity::new()?;
+        let bread = Entity::new()?;
+
+        // Build the list by appending, then wedge bread between apples
+        // and bananas — the classic insert-in-the-middle.
+        let at_apples = place(&apples, None, None);
+        let at_bananas = place(&bananas, Some(&at_apples), None);
+        let at_milk = place(&milk, Some(&at_bananas), None);
+        let at_bread = place(&bread, Some(&at_apples), Some(&at_bananas));
+
+        branch
+            .transaction()
+            .assert(membership(&list, &at_apples, &apples))
+            .assert(membership(&list, &at_bananas, &bananas))
+            .assert(membership(&list, &at_milk, &milk))
+            .assert(membership(&list, &at_bread, &bread))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // One contiguous range scan of the list's ordered relation.
+        let members: Vec<_> = branch
+            .claims()
+            .select(
+                ArtifactSelector::new()
+                    .of(list.clone())
+                    .the_starting_with("test.list/"),
+            )
+            .perform(&operator)
+            .await?
+            .try_collect()
+            .await?;
+
+        let attributes: Vec<String> = members
+            .iter()
+            .map(|artifact| artifact.the.to_string())
+            .collect();
+        let mut sorted = attributes.clone();
+        sorted.sort();
+        assert_eq!(attributes, sorted, "the scan streams in position order");
+
+        let expected: Vec<Value> = [&apples, &bread, &bananas, &milk]
+            .into_iter()
+            .map(|member| Value::Entity(member.clone()))
+            .collect();
+        let values: Vec<Value> = members.into_iter().map(|artifact| artifact.is).collect();
+        assert_eq!(values, expected, "members arrive in list order");
+        Ok(())
+    }
+}
