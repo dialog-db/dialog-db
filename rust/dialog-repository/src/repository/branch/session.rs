@@ -1372,10 +1372,11 @@ mod ordered_relation_tests {
     use dialog_query::AttributeStatement;
     use dialog_query::attribute::The;
     use futures_util::TryStreamExt as _;
+    use std::ops::RangeBounds;
 
     /// Derive the position for `member` in the given range, biased by
     /// the member's entity reference.
-    fn place(member: &Entity, range: impl std::ops::RangeBounds<Position>) -> Position {
+    fn place(member: &Entity, range: impl RangeBounds<Position>) -> Position {
         let bias = Bias::derive(member.to_string().as_bytes());
         insert(&bias, range).expect("position derives")
     }
