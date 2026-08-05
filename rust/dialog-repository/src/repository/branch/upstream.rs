@@ -15,7 +15,6 @@ pub enum Upstream {
         /// Branch name.
         branch: String,
         /// Tree root at last sync point, if any sync has happened.
-        #[serde(deserialize_with = "stored_sync_base")]
         tree: Option<TreeReference>,
     },
     /// A remote branch upstream.
@@ -25,21 +24,8 @@ pub enum Upstream {
         /// Branch name on the remote.
         branch: String,
         /// Tree root at last sync point, if any sync has happened.
-        #[serde(deserialize_with = "stored_sync_base")]
         tree: Option<TreeReference>,
     },
-}
-
-/// Decodes a stored sync base. Cells written before the sentinel-free
-/// representation recorded "never synced" as the all-zero hash; no real
-/// tree can have that root (the empty tree persists as a manifest-carrying
-/// node whose hash is never zero), so it maps to `None`.
-fn stored_sync_base<'de, D>(deserializer: D) -> Result<Option<TreeReference>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let stored = Option::<TreeReference>::deserialize(deserializer)?;
-    Ok(stored.filter(|tree| *tree.hash() != [0u8; 32]))
 }
 
 impl Upstream {
@@ -261,9 +247,6 @@ mod tests {
     /// [`Upstream`]; they must decode as a one-entry [`Upstreams`].
     #[dialog_common::test]
     async fn it_decodes_legacy_single_upstream_cells() -> Result<()> {
-        // A nonzero seed: the zero hash is the legacy "never synced"
-        // sentinel and deliberately decodes to `None` (see the test
-        // below).
         let single = remote("origin", 17);
         let (_, bytes) = CborEncoder.encode(&single).await?;
         let decoded: Upstreams = CborEncoder.decode(&bytes).await?;
@@ -278,23 +261,6 @@ mod tests {
         let decoded: Upstreams = CborEncoder.decode(&bytes).await?;
         assert_eq!(decoded, many);
 
-        Ok(())
-    }
-
-    /// Cells written before the sentinel-free representation recorded
-    /// "never synced" as the all-zero hash; they must decode as `None`.
-    /// (Encoding `Some` is wire-transparent, so encoding the zero
-    /// reference reproduces the legacy bytes exactly.)
-    #[dialog_common::test]
-    async fn it_decodes_legacy_zero_sync_bases_as_none() -> Result<()> {
-        let legacy = Upstream::Remote {
-            remote: "origin".into(),
-            branch: "main".into(),
-            tree: Some(TreeReference::from([0u8; 32])),
-        };
-        let (_, bytes) = CborEncoder.encode(&legacy).await?;
-        let decoded: Upstream = CborEncoder.decode(&bytes).await?;
-        assert_eq!(decoded.tree(), None, "the zero sync base maps to None");
         Ok(())
     }
 

@@ -2090,3 +2090,13 @@ batch persists even the empty tree), and the store-revision guard
 keys on stored_root. The null hash remains only in dialog-common
 (other crates' own legacy guards) — nothing in the tree crate
 produces or compares it.
+
+The legacy zero-hash decode shim on upstream sync bases is gone too
+(owner: "can we remove that one place also?"). Upstream cells are now
+plain `Option<TreeReference>` on the wire; a hypothetical pre-Option
+cell recording "never synced" as the zero hash would decode as a sync
+base for a nonexistent tree and fail loudly on the next pull, rather
+than being silently coerced. With that, no zero-hash tree sentinel
+exists anywhere in the codebase — the remaining `[0; 32]` is
+NULL_REVISION_HASH, the ArtifactStore head-pointer's "no revision yet"
+marker, which is a revision-cell concept, not a tree root.
