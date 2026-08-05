@@ -387,8 +387,16 @@ churn #338 itself walked back):
   `AttributeQueryAll::admits` now gates the `the` slot against the
   term's kind (this is `Match::bind`'s stated contract — binding
   treats a kind mismatch as a violation on the premise that scans
-  pre-filter), covering the `only` winner path too. One domain scan,
-  typed into its dictionary half and its ordered half.
+  pre-filter), covering the `only` winner path too. Pinning a shape
+  is for premises that want one half; a consumer of both halves
+  leaves the shape unpinned — one scan, classified per row
+  downstream (the `Directory`/`Sequence` `admit` split). When a rule
+  genuinely needs the halves as two distinct typed premises, those
+  are semantically two subsets of the same contiguous range, and the
+  disjointness the refinement proves is exactly what would let a
+  planner fuse them into one physical scan with per-row dispatch —
+  a future optimization, not yet done; today they scan twice, though
+  demand recording coalesces on the shared range either way.
 
 ## Surfacing plan
 

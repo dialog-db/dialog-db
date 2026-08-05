@@ -551,9 +551,11 @@ mod tests {
     /// is the row generator, so a symbol row the refinement admits would be
     /// silently dropped with nothing downstream able to restore it.
     /// A domain scan with a name-shape-refined `the` variable
-    /// yields only the matching shape: one range scan over the
-    /// domain, split by the row filter into the dictionary half and
-    /// the ordered half.
+    /// yields only the matching shape, excluding the other half of
+    /// a mixed domain. Pinning a shape is for premises that want
+    /// one half; a consumer of both halves leaves the shape
+    /// unpinned — one scan, classified per row downstream (the
+    /// artifacts-layer `Directory`/`Sequence` `admit` split).
     #[dialog_common::test]
     async fn it_filters_domain_scans_by_name_shape() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
