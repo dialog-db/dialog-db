@@ -654,11 +654,12 @@ where
     /// Serializes the edited tree bottom-up into `delta` and returns it as a
     /// [`PersistentTree`], carrying the node cache forward.
     ///
-    /// A batch that leaves the tree EMPTY persists to the null root under the
-    /// default manifest, and to the canonical zero-entry node (the manifest
-    /// with no entries — see [`persist_empty_root`]) under any other: the
-    /// format must survive emptiness, or the next session over the tree
-    /// would silently continue under the defaults.
+    /// A batch that leaves the tree EMPTY persists to the canonical
+    /// zero-entry node (the manifest with no entries — see
+    /// [`persist_empty_root`]), under every manifest alike: the format must
+    /// survive emptiness, or the next session over the tree would silently
+    /// continue under the defaults. The null hash is never a persisted
+    /// form; it only ever names a tree that does not exist yet.
     ///
     /// The caller owns `delta`: it is the batch's output, an accumulator the
     /// caller may aggregate across many persists and flush on its own schedule.
@@ -673,10 +674,9 @@ where
             // already durable and is returned verbatim, touching no storage.
             TransientRoot::Unloaded(hash) => {
                 if &hash == NULL_BLAKE3_HASH {
-                    match persist_empty_root::<Key, Value>(&self.manifest, delta)? {
-                        Some(node) => node.hash().clone(),
-                        None => hash,
-                    }
+                    persist_empty_root::<Key, Value>(&self.manifest, delta)?
+                        .hash()
+                        .clone()
                 } else {
                     hash
                 }
@@ -3923,21 +3923,20 @@ fn adjust_index_origins(
 
 /// Persists the canonical EMPTY-TREE root for `manifest` into `delta`.
 ///
-/// Returns `None` under the default manifest: the canonical empty form
-/// there remains the null root, which keeps every existing tree hash,
-/// revision reference, and empty-tree sentinel comparison valid. Under any
-/// other format it returns the zero-entry segment node stamped with the
-/// manifest — the empty tree "whose node is the manifest without children
-/// or novelty" — so the format survives emptiness and a reopened session
-/// recovers it from the root instead of silently reverting to the
-/// defaults. Deterministic: one fixed encoding per manifest, so replicas
-/// that empty the same tree agree on the root byte for byte, and the
+/// The empty tree's persisted form is the zero-entry segment node stamped
+/// with the manifest — the empty tree "whose node is the manifest without
+/// children or novelty" — under EVERY manifest, the default included: the
+/// format survives emptiness and a reopened session recovers it from the
+/// root instead of silently reverting to the defaults. The null hash is
+/// never a persisted form; it only ever means a tree that does not exist
+/// yet. Deterministic: one fixed encoding per manifest, so replicas that
+/// empty the same tree agree on the root byte for byte, and the
 /// convergence property stays a bijection from (entry set, manifest) to
 /// persisted form.
 pub(crate) fn persist_empty_root<Key, Value>(
     manifest: &Manifest,
     delta: &mut Delta<Blake3Hash, Buffer>,
-) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError>
+) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError>
 where
     Key: self::Key,
     Value: self::Value
@@ -3948,12 +3947,8 @@ where
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
 {
-    if *manifest == Manifest::default() {
-        return Ok(None);
-    }
-    let node = TransientNode::<Key, Value>::Segment(TransientSegment::new(Vec::new(), Vec::new()))
-        .persist(delta, manifest)?;
-    Ok(Some(node))
+    TransientNode::<Key, Value>::Segment(TransientSegment::new(Vec::new(), Vec::new()))
+        .persist(delta, manifest)
 }
 
 /// Turns the root's replacement run (the nodes that stand for the old root after
@@ -8545,15 +8540,20 @@ mod tests {
     }
 
     /// Degenerate stitches: no pieces, an empty entries piece, and a range
-    /// that contains none of its source's keys all produce the empty tree.
+    /// that contains none of its source's keys all produce the empty tree —
+    /// whose persisted form is the canonical manifest-carrying empty node.
     #[dialog_common::test]
     async fn it_stitches_empty_pieces_to_the_empty_tree() -> Result<()> {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
-        let empty_root = TestTree::empty().root().clone();
+        let mut scratch = Delta::zero();
+        let empty_root =
+            super::persist_empty_root::<[u8; 4], Vec<u8>>(&Manifest::default(), &mut scratch)?
+                .hash()
+                .clone();
 
         let (root, written) = stitched(vec![], &storage).await?;
         assert_eq!(root, empty_root, "no pieces stitch to the empty tree");
-        assert_eq!(written, 0);
+        assert_eq!(written, 1, "the empty tree persists its one marker node");
 
         let (root, _) = stitched(vec![Piece::Entries(Vec::new())], &storage).await?;
         assert_eq!(

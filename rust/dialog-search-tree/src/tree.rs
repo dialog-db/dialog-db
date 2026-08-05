@@ -956,6 +956,18 @@ mod tests {
         Ok(())
     }
 
+    /// The canonical empty-tree root hash for the default manifest: the
+    /// zero-entry manifest-carrying node every persisted empty tree lands on.
+    fn empty_root_hash() -> Result<dialog_common::Blake3Hash> {
+        let mut scratch = Delta::zero();
+        Ok(crate::persist_empty_root::<[u8; 4], Vec<u8>>(
+            &crate::Manifest::default(),
+            &mut scratch,
+        )?
+        .hash()
+        .clone())
+    }
+
     #[dialog_common::test]
     async fn it_handles_empty_tree_operations() -> Result<()> {
         use futures_util::StreamExt;
@@ -967,14 +979,17 @@ mod tests {
         let value = tree.get(&1u32.to_le_bytes(), &storage).await?;
         assert_eq!(value, None);
 
-        // Delete on empty tree should be no-op
+        // Delete on empty tree should be a no-op on the entry set, and the
+        // persisted form of the (still empty) tree is the canonical
+        // manifest-carrying empty node, not the null hash the unpersisted
+        // tree starts from.
         let mut delta = Delta::zero();
         let tree_after_delete = tree
             .edit()
             .delete(&1u32.to_le_bytes(), &storage)
             .await?
             .persist(&mut delta)?;
-        assert_eq!(tree_after_delete.root(), tree.root());
+        assert_eq!(tree_after_delete.root(), &empty_root_hash()?);
 
         // Stream on empty tree should yield no entries
         let stream = tree.stream(&storage);
@@ -1329,9 +1344,8 @@ mod tests {
         let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
 
-        let root_before = tree.root().clone();
-
-        // Delete from empty tree should be no-op
+        // Delete from empty tree should be a no-op on the entry set; the
+        // persisted empty tree lands on the canonical empty node.
         let mut delta = Delta::zero();
         tree = tree
             .edit()
@@ -1339,8 +1353,7 @@ mod tests {
             .await?
             .persist(&mut delta)?;
 
-        // Root should be unchanged
-        assert_eq!(tree.root(), &root_before);
+        assert_eq!(tree.root(), &empty_root_hash()?);
 
         Ok(())
     }
@@ -1534,7 +1547,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_returns_to_null_root_after_deleting_all_entries() -> Result<()> {
+    async fn it_returns_to_the_empty_node_after_deleting_all_entries() -> Result<()> {
         use dialog_common::NULL_BLAKE3_HASH;
 
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
@@ -1613,8 +1626,10 @@ mod tests {
                 .await?;
         }
 
-        // Tree should be back to empty state with null root
-        assert_eq!(tree.root(), &NULL_BLAKE3_HASH.clone());
+        // Tree should be back to the empty state: the canonical
+        // manifest-carrying empty node, the same root a fresh empty tree
+        // persists to.
+        assert_eq!(tree.root(), &empty_root_hash()?);
 
         Ok(())
     }
@@ -1986,9 +2001,8 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_returns_to_null_root_after_sequential_deletion_of_many_entries() -> Result<()> {
-        use dialog_common::NULL_BLAKE3_HASH;
-
+    async fn it_returns_to_the_empty_node_after_sequential_deletion_of_many_entries() -> Result<()>
+    {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let mut tree = PersistentTree::<[u8; 4], Vec<u8>>::empty();
         let mut delta = Delta::zero();
@@ -2024,8 +2038,8 @@ mod tests {
 
         assert_eq!(
             tree.root(),
-            &NULL_BLAKE3_HASH.clone(),
-            "Tree should be empty after deleting all entries"
+            &empty_root_hash()?,
+            "Tree should land on the canonical empty node after deleting all entries"
         );
 
         Ok(())

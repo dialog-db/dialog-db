@@ -264,9 +264,8 @@ where
     /// Whether this node is the empty tree's node: a zero-entry segment
     /// carrying the format manifest and nothing else (see
     /// [`PersistentSegment::empty`]). Such a node is a pure format marker —
-    /// it is the persisted root of an empty tree under a non-default
-    /// manifest, never an interior node — and load paths treat it as the
-    /// absence of a root.
+    /// it is the persisted root of an empty tree, never an interior node —
+    /// and load paths treat it as the absence of a root.
     pub fn is_empty(&self) -> Result<bool, DialogSearchTreeError> {
         Ok(match self.body()? {
             ArchivedNodeBody::Index(_) => false,
@@ -896,12 +895,12 @@ where
         let Some(first_layout) = entries.first().map(|entry| entry.key.layout()) else {
             // The empty tree's node: the manifest with no entries (and, being
             // a leaf, no children or novelty). This is the persisted form of
-            // an empty tree under a NON-default manifest — the format must
-            // survive emptiness, or a session reopening the tree would
-            // silently continue under the defaults (the manifest-continuity
-            // bug the adversarial soak caught). The encoding is fixed —
-            // opaque layout, one empty arena column — so every replica's
-            // empty tree under a given manifest is byte-identical.
+            // an empty tree under every manifest — the format must survive
+            // emptiness, or a session reopening the tree would silently
+            // continue under the defaults (the manifest-continuity bug the
+            // adversarial soak caught). The encoding is fixed — opaque
+            // layout, one empty arena column — so every replica's empty tree
+            // under a given manifest is byte-identical.
             return Ok(Self::empty(header));
         };
         let uniform = entries
@@ -943,7 +942,7 @@ where
 
     /// The canonical zero-entry segment: a tree node that carries the format
     /// `header` and nothing else. See [`from_entries`](Self::from_entries) —
-    /// this is the empty tree's persisted representation under a non-default
+    /// this is the empty tree's persisted representation under every
     /// manifest. The column set mirrors the [`MIXED_LAYOUT`] opaque schema
     /// (one whole-key arena column, here empty) so decode paths see the
     /// arity they expect.

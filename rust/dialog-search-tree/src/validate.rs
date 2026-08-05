@@ -10,16 +10,16 @@
 //! which the entries arrived. Two boundary clauses matter:
 //!
 //! - the function is PARAMETERIZED BY THE MANIFEST, including for the
-//!   EMPTY entry set: under [`Manifest::default`] the canonical empty form
-//!   is the null root (which keeps every existing tree hash and empty-tree
-//!   sentinel comparison valid), and under any other manifest it is the
-//!   zero-entry node carrying that manifest (see
-//!   [`persist_empty_root`](crate::persist_empty_root)) — the format
-//!   survives emptiness structurally, so a delete-to-empty lifecycle no
-//!   longer needs `HitchhikerTree::with_manifest` to re-pin it. (The
-//!   adversarial soak's delete-to-empty pattern found the seam this
-//!   representation closes; a legacy null root under a non-default session
-//!   remains readable as the empty tree.)
+//!   EMPTY entry set: the canonical empty form is the zero-entry node
+//!   carrying the tree's manifest (see
+//!   [`persist_empty_root`](crate::persist_empty_root)), under every
+//!   manifest alike — the format survives emptiness structurally, so a
+//!   delete-to-empty lifecycle no longer needs
+//!   `HitchhikerTree::with_manifest` to re-pin it. The null root is not a
+//!   persisted form at all; it names a tree that does not exist yet, and a
+//!   legacy null root remains readable as the empty tree. (The adversarial
+//!   soak's delete-to-empty pattern found the seam this representation
+//!   closes.)
 //! - the property does NOT cover in-flight buffered state: a hitchhiker
 //!   root with pending novelty is valid and publishable, but its shape
 //!   deliberately depends on where ops currently sit, and two such roots
@@ -117,26 +117,20 @@ where
         let accessor: Accessor<Backend> = Accessor::new(Default::default(), storage.clone());
 
         // The empty tree's node: canonical exactly when it is byte-identical
-        // to the fixed zero-entry encoding for a NON-default manifest. Under
-        // the default manifest the canonical empty form is the null root, so
-        // a zero-entry node there is a divergence.
+        // to the fixed zero-entry encoding for its manifest — under every
+        // manifest, the default included.
         let root_node: PersistentNode<K, V> = accessor.get_node(self.root()).await?;
         if root_node.is_empty()? {
             let mut scratch = crate::Delta::zero();
-            return Ok(
-                match crate::persist_empty_root::<K, V>(&manifest, &mut scratch)? {
-                    Some(canonical) if canonical.hash() == self.root() => Vec::new(),
-                    Some(_) => vec![
-                        "zero-entry root diverges from the canonical empty node for its manifest"
-                            .to_string(),
-                    ],
-                    None => vec![
-                        "zero-entry root under the default manifest: the canonical empty \
-                         form there is the null root"
-                            .to_string(),
-                    ],
-                },
-            );
+            let canonical = crate::persist_empty_root::<K, V>(&manifest, &mut scratch)?;
+            return Ok(if canonical.hash() == self.root() {
+                Vec::new()
+            } else {
+                vec![
+                    "zero-entry root diverges from the canonical empty node for its manifest"
+                        .to_string(),
+                ]
+            });
         }
 
         let mut violations = Vec::new();
@@ -240,8 +234,8 @@ mod tests {
     use dialog_storage::MemoryStorageBackend;
 
     use crate::{
-        Buffer, Cache, ContentAddressedStorage, Delta, HitchhikerTree, Manifest,
-        PersistentNodeBody, PersistentTree, TransientTree,
+        Buffer, Cache, ContentAddressedStorage, Delta, HitchhikerTree, Manifest, PersistentTree,
+        TransientTree,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -356,53 +350,38 @@ mod tests {
         Ok(())
     }
 
-    /// The empty tree's canonical forms, both sides: the manifest-carrying
-    /// zero-entry node is canonical under its (non-default) manifest, and a
-    /// zero-entry node under the DEFAULT manifest is a divergence — the
-    /// canonical empty form there is the null root.
+    /// The empty tree's canonical form: the manifest-carrying zero-entry
+    /// node is canonical under its manifest — custom and default alike —
+    /// and a zero-entry node whose bytes diverge from the fixed encoding
+    /// for its manifest is flagged.
     #[dialog_common::test]
     async fn it_validates_the_empty_node_by_manifest() -> Result<()> {
         let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
 
-        // The canonical empty node for a non-default manifest, produced by
-        // the production persist path.
-        let custom = Manifest {
-            fanout_n: 2,
-            ..Manifest::default()
-        };
-        let mut delta = Delta::zero();
-        let emptied = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
-            NULL_BLAKE3_HASH.clone(),
-            Cache::new(),
-            custom,
-        )
-        .persist(&mut delta)?;
-        settle(&mut delta, &mut storage).await?;
-        assert_ne!(emptied.root(), &NULL_BLAKE3_HASH.clone());
-        assert_eq!(
-            emptied.canonical_divergences(&storage).await?,
-            Vec::<String>::new(),
-            "the manifest-carrying empty node is canonical"
-        );
-
-        // A zero-entry node under the default manifest never comes out of
-        // the persist path; hand-build one to prove the validator rejects it.
-        let body = PersistentNodeBody::<Vec<u8>>::segment_from_entries::<[u8; 4]>(
-            Vec::new(),
+        // The canonical empty node, produced by the production persist
+        // path, under a custom manifest and under the default.
+        for manifest in [
+            Manifest {
+                fanout_n: 2,
+                ..Manifest::default()
+            },
             Manifest::default(),
-        )?;
-        let bytes = body.as_bytes()?;
-        let buffer = Buffer::from(bytes);
-        let hash = buffer.blake3_hash();
-        storage.store(buffer.as_ref().to_vec(), hash).await?;
-        let bogus = Tree::from_hash_with_cache(hash.clone(), Default::default());
-        let divergences = bogus.canonical_divergences(&storage).await?;
-        assert!(
-            divergences
-                .iter()
-                .any(|violation| violation.contains("default manifest")),
-            "a zero-entry root under the default manifest must be flagged, got: {divergences:?}"
-        );
+        ] {
+            let mut delta = Delta::zero();
+            let emptied = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
+                NULL_BLAKE3_HASH.clone(),
+                Cache::new(),
+                manifest,
+            )
+            .persist(&mut delta)?;
+            settle(&mut delta, &mut storage).await?;
+            assert_ne!(emptied.root(), &NULL_BLAKE3_HASH.clone());
+            assert_eq!(
+                emptied.canonical_divergences(&storage).await?,
+                Vec::<String>::new(),
+                "the manifest-carrying empty node is canonical"
+            );
+        }
         Ok(())
     }
 }

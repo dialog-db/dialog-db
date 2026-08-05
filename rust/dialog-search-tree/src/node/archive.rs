@@ -407,8 +407,8 @@ where
 
     /// Whether this segment holds no entries. Legitimate only for the empty
     /// tree's node — the manifest-carrying format marker at the root of an
-    /// emptied non-default-format tree (see `PersistentSegment::empty`);
-    /// an INTERIOR zero-entry segment still violates the node invariant.
+    /// emptied tree (see `PersistentSegment::empty`); an INTERIOR
+    /// zero-entry segment still violates the node invariant.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }

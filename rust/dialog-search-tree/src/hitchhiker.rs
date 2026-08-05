@@ -708,9 +708,9 @@ where
                     || !subtree_has_novelty::<Key, Value, Backend>(&hash, &accessor).await?
                 {
                     // The session's manifest rides along so an empty tree
-                    // under a non-default format canonicalizes to the
-                    // manifest-carrying empty node (a non-null quiet root is
-                    // passed through verbatim either way).
+                    // canonicalizes to the manifest-carrying empty node (a
+                    // non-null quiet root is passed through verbatim either
+                    // way).
                     TransientTree::<Key, Value, D>::with_manifest(
                         hash,
                         self.cache.clone(),
@@ -978,16 +978,15 @@ where
         delta: &mut Delta<Blake3Hash, Buffer>,
     ) -> Result<Blake3Hash, DialogSearchTreeError> {
         match self.root {
-            // An empty tree under a non-default session format persists the
-            // manifest-carrying empty node, never the bare null hash — the
-            // format must survive emptiness (see `persist_empty_root`).
+            // An empty tree persists the manifest-carrying empty node, never
+            // the bare null hash — the format must survive emptiness (see
+            // `persist_empty_root`).
             HitchhikerRoot::Unloaded(hash) => {
-                if &hash == NULL_BLAKE3_HASH
-                    && let Some(node) = crate::persist_empty_root::<Key, Value>(
+                if &hash == NULL_BLAKE3_HASH {
+                    let node = crate::persist_empty_root::<Key, Value>(
                         &self.manifest.unwrap_or_default(),
                         delta,
-                    )?
-                {
+                    )?;
                     self.cache
                         .insert(node.hash().clone(), node.buffer().clone());
                     return Ok(node.hash().clone());
@@ -1030,15 +1029,14 @@ where
         delta: &mut Delta<Blake3Hash, Buffer>,
     ) -> Result<Blake3Hash, DialogSearchTreeError> {
         match &mut self.root {
-            // Same empty-tree rule as `persist`: a non-default session
-            // format persists the manifest-carrying empty node.
+            // Same empty-tree rule as `persist`: the manifest-carrying
+            // empty node, never the bare null hash.
             HitchhikerRoot::Unloaded(hash) => {
-                if hash == NULL_BLAKE3_HASH
-                    && let Some(node) = crate::persist_empty_root::<Key, Value>(
+                if hash == NULL_BLAKE3_HASH {
+                    let node = crate::persist_empty_root::<Key, Value>(
                         &self.manifest.unwrap_or_default(),
                         delta,
-                    )?
-                {
+                    )?;
                     self.cache
                         .insert(node.hash().clone(), node.buffer().clone());
                     return Ok(node.hash().clone());
@@ -1937,15 +1935,19 @@ mod tests {
         Ok(())
     }
 
-    /// Canonicalizing an empty buffered tree yields the null (empty) root.
+    /// Canonicalizing an empty buffered tree yields the canonical empty
+    /// node — the manifest-carrying marker, not the bare null hash.
     #[dialog_common::test]
-    async fn it_canonicalizes_empty_to_null_root() -> Result<()> {
+    async fn it_canonicalizes_empty_to_the_empty_node() -> Result<()> {
         let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let mut delta = Delta::zero();
         let canonical = TestHitchhiker::empty()
             .canonicalize(&storage, &mut delta)
             .await?;
-        assert_eq!(canonical.root(), TestTree::empty().root());
+        let mut scratch = Delta::zero();
+        let empty_node =
+            crate::persist_empty_root::<[u8; 4], Vec<u8>>(&Manifest::default(), &mut scratch)?;
+        assert_eq!(canonical.root(), empty_node.hash());
         Ok(())
     }
 
@@ -3526,13 +3528,12 @@ mod tests {
         Ok(())
     }
 
-    /// Emptying a NON-default-format tree persists the manifest-carrying
-    /// empty node, not the null root: the same fixed node an empty tree
-    /// persisted from scratch under that manifest produces (the canonical
-    /// form of the empty set is a pure function of the manifest), readable
-    /// as an empty tree, reporting its manifest. A DEFAULT-format tree
-    /// emptied the same way still persists the null root, so no existing
-    /// hash or empty-tree sentinel moves.
+    /// Emptying a tree persists the manifest-carrying empty node, not the
+    /// null root: the same fixed node an empty tree persisted from scratch
+    /// under that manifest produces (the canonical form of the empty set is
+    /// a pure function of the manifest), readable as an empty tree,
+    /// reporting its manifest. The rule is uniform — a DEFAULT-format tree
+    /// emptied the same way persists the default manifest's empty node.
     #[dialog_common::test]
     async fn it_persists_the_manifest_carrying_empty_node_when_emptied() -> Result<()> {
         let custom = Manifest {
@@ -3566,7 +3567,7 @@ mod tests {
         assert_ne!(
             emptied.root(),
             &NULL_BLAKE3_HASH.clone(),
-            "an emptied non-default-format tree must keep a root node"
+            "an emptied tree must keep a root node"
         );
         let node: PersistentNode<[u8; 4], Vec<u8>> = Accessor::new(Cache::new(), storage.clone())
             .get_node(emptied.root())
@@ -3614,7 +3615,9 @@ mod tests {
             .persist(&mut delta)?;
         assert_eq!(stable.root(), scratch.root(), "no-op batches keep the root");
 
-        // The default format's canonical empty form remains the null root.
+        // The same rule under the default format: emptying lands on the
+        // default manifest's empty node, the pure function of (empty set,
+        // Manifest::default()).
         let mut edit =
             TransientTree::<[u8; 4], Vec<u8>>::new(NULL_BLAKE3_HASH.clone(), Cache::new());
         for k in 0..10u32 {
@@ -3631,10 +3634,18 @@ mod tests {
         }
         let mut delta = Delta::zero();
         let default_emptied = edit.persist(&mut delta)?;
+        let mut scratch = Delta::zero();
+        let default_empty_node =
+            crate::persist_empty_root::<[u8; 4], Vec<u8>>(&Manifest::default(), &mut scratch)?;
         assert_eq!(
             default_emptied.root(),
-            &NULL_BLAKE3_HASH.clone(),
-            "the default format's empty tree stays the null root"
+            default_empty_node.hash(),
+            "the default format's empty tree lands on its manifest-carrying empty node"
+        );
+        assert_ne!(
+            default_emptied.root(),
+            emptied.root(),
+            "different manifests have different empty nodes"
         );
         Ok(())
     }

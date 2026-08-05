@@ -2038,3 +2038,19 @@ empty node; differentials over the marker are pure adds/removes and
 integrate back to exact roots; validator accepts the canonical empty
 node and flags the default-manifest impostor. Adversarial soak
 (40x600), program harness (800 ops), SE convergence: green.
+
+Follow-up (owner feedback, 2026-08-05): "special casing default
+manifest root is a bad idea" — the surgical variant's asymmetry is
+gone. The zero-entry manifest-carrying node is now the canonical
+persisted empty form under EVERY manifest, the default included;
+persist_empty_root no longer branches on the manifest. The NULL hash
+is no longer a persisted form at all — it only names a tree that does
+not exist yet (unpersisted fresh trees, absent revisions), and legacy
+null roots remain readable as empty. Consequences: an emptied
+default-manifest tree now persists one small node and gains a real
+revision hash instead of collapsing to EMPTY_TREE_HASH; every
+repository/artifacts NULL comparison audited — all are absent-tree
+fallbacks on the read side, none compare an emptied tree against the
+sentinel, so no downstream logic moved. The validator accepts the
+canonical empty node for any manifest (the "default impostor" rule is
+gone — under the uniform representation it IS the canonical form).
