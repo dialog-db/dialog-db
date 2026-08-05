@@ -202,7 +202,10 @@ fn main() -> anyhow::Result<()> {
                     let mut ledger = ledger.lock().expect("ledger lock");
                     std::mem::take(&mut *ledger)
                 };
-                let revision = store.revision().await?;
+                let revision = store
+                    .revision()
+                    .await?
+                    .expect("the store has commits, so it has a revision");
                 let (root_size, root_ops, root_links, depth) = probe(&inner, &revision).await?;
                 println!(
                     "{committed:>7}  {:>10} {:>10} {:>10}  {:>10} {:>10} {:>10}  {:>8.0} {:>6} {:>5} {:>5}  {:>8.0}",

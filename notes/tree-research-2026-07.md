@@ -2100,3 +2100,17 @@ than being silently coerced. With that, no zero-hash tree sentinel
 exists anywhere in the codebase — the remaining `[0; 32]` is
 NULL_REVISION_HASH, the ArtifactStore head-pointer's "no revision yet"
 marker, which is a revision-cell concept, not a tree root.
+
+NULL_REVISION_HASH is dissolved too. `Artifacts::revision()` returns
+`Option<Blake3Hash>` (None = no committed revision), the head-pointer
+cell records "no revision" as an EMPTY value instead of 32 zero bytes,
+and `reset(None)` now means "to the empty, no-revision state" — the
+old reset(None) reload-from-storage behavior became an explicit
+`reload()`. The wasm surface keeps `revision(): Uint8Array` by
+returning an empty byte array for a fresh store (which matches the
+experimental TS session's documented "empty byte array = empty db
+revision" convention better than the zero hash did); `reset()` accepts
+that empty array as "reset to empty" and a missing argument as
+"reload". A pointer naming a missing revision block now errors on
+open/reload instead of silently opening empty. No zero-hash sentinel
+of any kind remains in the codebase.

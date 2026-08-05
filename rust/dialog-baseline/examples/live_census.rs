@@ -175,7 +175,10 @@ fn main() -> anyhow::Result<()> {
             anyhow::Ok(*root.index())
         };
 
-        let revision = store.revision().await?;
+        let revision = store
+            .revision()
+            .await?
+            .expect("the store has commits, so it has a revision");
         let bytes = inner
             .get(&revision)
             .await?
@@ -189,7 +192,10 @@ fn main() -> anyhow::Result<()> {
         .await?;
 
         store.canonicalize().await?;
-        let revision = store.revision().await?;
+        let revision = store
+            .revision()
+            .await?
+            .expect("the store has commits, so it has a revision");
         let bytes = inner
             .get(&revision)
             .await?

@@ -237,10 +237,18 @@ impl ArtifactsBinding {
     /// Get the current revision of the triple store. This value will change on
     /// every successful call to `Artifacts.commit`. The returned value is
     /// suitable for use with `Artifacts.restore`, for example when re-opening
-    /// the triple store on future sessions.
+    /// the triple store on future sessions. A store with no committed
+    /// revision yet returns an empty byte array.
     #[wasm_bindgen]
     pub async fn revision(&self) -> Result<Vec<u8>, JsError> {
-        Ok(self.artifacts.read().await.revision().await?.to_vec())
+        Ok(self
+            .artifacts
+            .read()
+            .await
+            .revision()
+            .await?
+            .map(|hash| hash.to_vec())
+            .unwrap_or_default())
     }
 
     /// Persist a set of data in the triple store. The returned prommise
@@ -274,22 +282,28 @@ impl ArtifactsBinding {
             .to_vec())
     }
 
-    /// Reset the root of the database to `revision` if provided, or else reset
-    /// to the stored root if available, or else to an empty database.
+    /// Reset the root of the database to `revision` if provided, or else
+    /// reload from the stored root if available, or else to an empty
+    /// database. An empty byte array (the no-revision value `revision`
+    /// returns for a fresh store) resets to the empty database.
     #[wasm_bindgen]
     pub async fn reset(&self, revision: Option<Vec<u8>>) -> Result<(), JsError> {
-        let revision = if let Some(revision) = revision {
-            Some(Blake3Hash::try_from(revision).map_err(|bytes: Vec<u8>| {
-                DialogArtifactsError::InvalidRevision(format!(
-                    "Incorrect byte length (expected {HASH_SIZE}, received {})",
-                    bytes.len()
-                ))
-            })?)
-        } else {
-            None
-        };
-
-        self.artifacts.write().await.reset(revision).await?;
+        match revision {
+            // No argument: adopt whatever the durable head says.
+            None => self.artifacts.write().await.reload().await?,
+            Some(revision) if revision.is_empty() => {
+                self.artifacts.write().await.reset(None).await?
+            }
+            Some(revision) => {
+                let revision = Blake3Hash::try_from(revision).map_err(|bytes: Vec<u8>| {
+                    DialogArtifactsError::InvalidRevision(format!(
+                        "Incorrect byte length (expected {HASH_SIZE}, received {})",
+                        bytes.len()
+                    ))
+                })?;
+                self.artifacts.write().await.reset(Some(revision)).await?
+            }
+        }
 
         Ok(())
     }
