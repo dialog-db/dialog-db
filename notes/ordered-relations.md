@@ -356,11 +356,39 @@ churn #338 itself walked back):
 - **Not ported — `Composite::Directory`**: the spike's type-system
   work targeted the pre-rewrite lattice (`Composite` set alongside
   Product/Variant). The current lattice (`Primitive` bitfield +
-  `Refinement`) has no composite kinds, so the schema-level
-  `as: {"directory": "Entity"}` story is deferred until composites
-  return; `Directory`/`Sequence` live at the artifacts layer where
-  they are useful today, and concept-field aggregation remains the
-  realize-layer follow-up the spike itself deferred.
+  `Refinement`) has no composite kinds — and, it turns out, does not
+  want them for this: a directory is not a value kind (storage never
+  holds a directory value; a scan row binds one entry), it is a
+  *demand shape over attributes* plus a realize-time aggregation.
+  The lattice already expresses the demand shape — see the next
+  item — so the schema-level `as: {"directory": "Entity"}` story
+  becomes desugaring onto refinements when concept fields grow the
+  aggregation step, not a composite revival. `Directory`/`Sequence`
+  live at the artifacts layer as the aggregation targets, and
+  concept-field aggregation remains the realize-layer follow-up the
+  spike itself deferred.
+- **Name-shape refinement** (`dialog-query/src/type_system.rs`): the
+  directory distinction, expressed in the current lattice's own
+  vocabulary. `Refinement` grows a third constraint alongside
+  `prefix` and `conforms`: `name_shape: Option<NameShape>` with
+  `Symbol | Position` — the discriminant of the artifact layer's
+  `Name` sum lifted into the type system. The meet requires
+  agreement (a name is never both shapes, so conflicting pins are an
+  empty type), the join keeps only a shared pin, inclusion orders
+  pinned-shape types under unpinned ones, and — unlike conformance —
+  the constraint is row-checkable, classifying by the attribute
+  string alone via `Attribute::split()` (legacy names outside the
+  strict vocabulary satisfy neither shape). `Type::with_name_shape`
+  narrows membership to Symbol the way `with_conformance` narrows to
+  Entity. So the type of an ordered relation's attribute variable is
+  one expression: `Type::Symbol.with_prefix("todo.list/")` `.with_name_shape(Position)`
+  — the prefix half lowers onto the selector range (existing
+  pushdown), and the shape half filters rows in the scan:
+  `AttributeQueryAll::admits` now gates the `the` slot against the
+  term's kind (this is `Match::bind`'s stated contract — binding
+  treats a kind mismatch as a violation on the premise that scans
+  pre-filter), covering the `only` winner path too. One domain scan,
+  typed into its dictionary half and its ordered half.
 
 ## Surfacing plan
 

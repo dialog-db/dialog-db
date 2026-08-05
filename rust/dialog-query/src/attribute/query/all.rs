@@ -169,17 +169,32 @@ impl AttributeQueryAll {
             || absent(&Term::<Any>::from(&self.cause))
     }
 
-    /// True when a fact's value inhabits the `is` term's kind. A
-    /// typed value slot is a constraint: attribute values are
-    /// dynamically typed in the store (one attribute may hold values
-    /// of several types across facts), so a fact whose value falls
-    /// outside the term's kind is a non-match to be filtered, never
-    /// an error.
-    pub(crate) fn admits(&self, value: &Value) -> bool {
-        match self.is.kind() {
-            Some(kind) => kind.admits(value),
-            None => true,
+    /// True when a fact inhabits the scan's typed slots: the value
+    /// against the `is` term's kind, and the attribute against the
+    /// `the` term's kind. Typed slots are constraints: attribute
+    /// values are dynamically typed in the store (one attribute may
+    /// hold values of several types across facts), and a domain
+    /// scan sweeps attributes of both name shapes, so a fact
+    /// falling outside a term's kind is a non-match to be filtered,
+    /// never an error. This filter is [`Match::bind`]'s contract:
+    /// binding treats a kind mismatch as a violation, on the
+    /// premise that scans never feed one.
+    pub(crate) fn admits(&self, artifact: &Artifact) -> bool {
+        if let Some(kind) = self.is.kind()
+            && !kind.admits(&artifact.is)
+        {
+            return false;
         }
+        // Only the refined check needs the attribute lifted into a
+        // value; an unrefined kind admits every attribute the
+        // selector already ranged over.
+        if let Some(kind) = self.the.kind()
+            && kind.refinement().is_some()
+            && !kind.admits(&Value::Symbol(artifact.the.clone()))
+        {
+            return false;
+        }
+        true
     }
 
     /// Resolves variables from the given match. `Absent` bindings
@@ -303,9 +318,9 @@ impl AttributeQueryAll {
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
                 for await artifact in stream {
                     let artifact = artifact?;
-                    // A typed `is` slot filters facts whose value
-                    // falls outside the kind.
-                    if !selector.admits(&artifact.is) {
+                    // Typed `is`/`the` slots filter facts falling
+                    // outside their kinds.
+                    if !selector.admits(&artifact) {
                         continue;
                     }
                     let mut extension = base.clone();
@@ -470,6 +485,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
+    use crate::type_system::NameShape;
     use dialog_repository::helpers::{test_operator_with_profile, test_repo};
 
     /// A prefix refinement stamped onto a variable term becomes a
@@ -534,6 +550,59 @@ mod tests {
     /// brackets only the inline String band of the VAE index, and the scan
     /// is the row generator, so a symbol row the refinement admits would be
     /// silently dropped with nothing downstream able to restore it.
+    /// A domain scan with a name-shape-refined `the` variable
+    /// yields only the matching shape: one range scan over the
+    /// domain, split by the row filter into the dictionary half and
+    /// the ordered half.
+    #[dialog_common::test]
+    async fn it_filters_domain_scans_by_name_shape() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let list = Entity::new()?;
+        // One domain, both name shapes: a dictionary entry and an
+        // ordered member. A position name is uppercase, outside the
+        // `the!` notation, so it is composed at runtime.
+        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        branch
+            .transaction()
+            .assert(
+                the!("todo.list/title")
+                    .of(list.clone())
+                    .is("Groceries".to_string()),
+            )
+            .assert(member.of(list.clone()).is("Milk".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let scan = |shape: NameShape| {
+            let kind = Kind::from(Type::Symbol)
+                .with_prefix("todo.list/")
+                .expect("symbol is textual")
+                .with_name_shape(shape)
+                .expect("shapes compose with prefixes");
+            AttributeQueryAll::new(
+                Term::<The>::var("a").with_kind(kind),
+                Term::<Entity>::var("e"),
+                Term::var("v"),
+                Term::var("cause"),
+            )
+        };
+
+        let members = scan(NameShape::Position).perform(&source).try_vec().await?;
+        assert_eq!(members.len(), 1, "only the position-named member matches");
+        assert_eq!(members[0].is(), &Value::String("Milk".to_string()));
+
+        let entries = scan(NameShape::Symbol).perform(&source).try_vec().await?;
+        assert_eq!(entries.len(), 1, "only the symbol-named entry matches");
+        assert_eq!(entries[0].is(), &Value::String("Groceries".to_string()));
+
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_keeps_symbol_matches_under_prefix_pushdown() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
