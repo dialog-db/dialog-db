@@ -2,8 +2,10 @@
 
 Status: **proposed**. Evaluation of
 [deterministically biased fractional indexing](https://observablehq.com/@gozala/deterministically-biased-fractional-indexing)
-and the synopsys POC (`src/position/position.js`) as the basis for
-ordered collections in dialog, plus a surfacing plan. The core idea
+and the synopsys POC
+([`commontoolsinc/synopsys/src/position`](https://github.com/commontoolsinc/synopsys/blob/main/src/position/lib.js))
+as the basis for ordered collections in dialog, plus a surfacing
+plan. The core idea
 under evaluation: **the fractional index lives in the attribute name**,
 so all members of an ordered collection come out of a single key-range
 scan, already sorted.
@@ -59,6 +61,53 @@ Verdict: sound, simple, and it is the only member of the design space
 whose *retrieval* shape matches a triple store — no per-element joins,
 no materialized tree, no order state outside the facts themselves.
 
+## What the POC actually implements (position/*.js)
+
+The implementation is richer than textbook fractional indexing — a
+three-component hybrid that fixes fractional indexing's worst growth
+mode:
+
+```text
+position = major (1 byte, base52 A–Z a–z)
+         ‖ minor (capacity(major) bytes, base62)
+         ‖ patch (variable, base62 — the fractional tail)
+```
+
+- **Major** encodes the *length class* of the minor: `a`/`Z` denote a
+  1-digit minor, growing toward the edges (`z`/`A` = 26 digits), with
+  `A–Z` the negative side and `a–z` the positive. Appending past a
+  minor's range increments the major into a larger class — so
+  head/tail insertion (the overwhelmingly common case) grows
+  positions **logarithmically**, not linearly. This is LexoRank-style
+  integer headroom fused with a fractional tail; naive fractional
+  indexing grows O(n) on repeated appends.
+- **Minor** is a fixed-width (per major) base62 integer;
+  increment/decrement moves whole steps.
+- **Patch** is the unbounded fractional tail where the **bias**
+  lands: `deriveBias(item) = base62-digits(item bytes)` (the merkle
+  reference re-encoded). New positions take their tail from the bias;
+  when low/high patches are consecutive the bias is appended (median
+  fallback when absent); when an intermediate digit exists, its
+  tie-break digit is nudged to the bias's head digit when that fits
+  in the gap. Same `(after, before, item)` on any replica ⇒ the same
+  bytes.
+- **Canonical form**: trailing minimum digits are trimmed (patch,
+  then minor), so logically-equal positions are byte-identical —
+  which is what makes the convergence claim exact rather than
+  approximate.
+- **Ordering** is plain byte order: the base62 alphabet is the byte
+  ranges `0–9 < A–Z < a–z` (the parse-string order is presentational;
+  digit arithmetic runs over byte ranges), so a `Uint8Array`/`&[u8]`
+  lexicographic compare — i.e. dialog's key order — is the collation.
+  No character in the alphabet is `/`, `NUL`, or outside printable
+  ASCII.
+- **Edge sentinels**: `Patch.min()`/`Patch.max()` use bytes just
+  outside the alphabet (`/` = 0x2F, `{` = 0x7B) as virtual bounds,
+  and `before()` at the absolute minimum returns the input position
+  unchanged (no room left). A port must keep the sentinels out of
+  persisted positions — `/` especially, since it is the attribute's
+  namespace separator — and surface the exhaustion case to callers.
+
 ## Why "position in the attribute name" is right for dialog's keys
 
 This is the load-bearing mechanical fact. An M3 entity-ordered key is
@@ -68,17 +117,23 @@ tag ‖ entity ‖ attribute ‖ vtype ‖ value
 ```
 
 Fix `entity` = the collection and give members attributes sharing a
-prefix — `todo/item@<position>` — and the EAV region stores every
+prefix and the EAV region stores every
 member of the collection in one **contiguous** range, sorted by
 attribute bytes, i.e. by position, with the value slot free to carry
 the member reference:
 
 ```text
-[groceries  todo/item@V  apples ]
-[groceries  todo/item@n  milk   ]   ← one range scan,
-[groceries  todo/item@r  bread  ]   ← already in order
-[groceries  todo/item@x  bananas]
+[groceries  todo.item/aV  apples ]
+[groceries  todo.item/an  milk   ]   ← one range scan,
+[groceries  todo.item/ar  bread  ]   ← already in order
+[groceries  todo.item/ax  bananas]
 ```
+
+Because the position alphabet excludes `/`, the position can simply BE
+the predicate under a per-collection namespace (`todo.item/<position>`)
+— no extra separator character is needed, `Attribute`'s
+namespace/predicate shape is satisfied as-is, and the prefix for the
+range scan is `todo.item/`.
 
 The alternatives genuinely do not have this property in dialog's
 layout. Position as the *value* of a fixed attribute would sort members
@@ -107,24 +162,24 @@ Two properties come along for free:
 
 - **`ATTRIBUTE_LENGTH = 64`** (`dialog-artifacts/src/key.rs:84`), and
   `Attribute` must contain `/` and be NUL-free — otherwise free-form.
-  So the position budget is `64 − len(base) − 1` bytes (~50 for
-  realistic bases). Fractional positions grow under pathological
-  insertion patterns (always the same spot); the bias bits bound
-  growth statistically, but the cap makes a **rebalance story**
-  mandatory: reassigning positions is an ordinary retract/assert sweep
+  So the position budget is `64 − len(namespace) − 1` bytes (~50 for
+  realistic namespaces). The POC's major/minor headroom makes
+  head/tail insertion grow logarithmically — a 27-byte position
+  covers the entire positive integer range — so the cap only
+  pressures *middle* insertion patterns, where the patch tail grows
+  (bias bounds it statistically). The cap still makes a **rebalance
+  story** mandatory: reassigning positions is an ordinary retract/assert sweep
   an application (or later, a maintenance helper) performs when a
   collection's positions approach the cap. Alternatively the cap could
   be lifted for this use — the M3 key encoding is variable-length
   already; the cap is a type-level guard, not a format requirement.
-- **Alphabet**: byte order must equal position order (standard
-  fractional-index alphabets are constructed for exactly this), every
-  character legal in an attribute (NUL-free — trivially satisfiable),
-  and the base/position separator must be a character excluded from
-  the alphabet so the prefix range is exact. The alphabet and bias
-  truncation must match the synopsys `position.js` POC byte-for-byte
-  if positions are to interoperate — port from it, with shared test
-  vectors. (The POC was not reachable from this session; the port
-  needs it open as the reference.)
+- **Alphabet**: satisfied by the POC as-is — base62 byte ranges are
+  order-preserving under attribute byte order, every character is
+  attribute-legal, and `/` is excluded, so position-as-predicate
+  needs no separator. The Rust port must match the POC byte-for-byte
+  (major capacity map, trimming, bias nudge rules) with shared test
+  vectors, and must keep the `/`‌/`{` edge sentinels out of persisted
+  positions.
 - **It already works at the raw layer, today.** A member scan is
   expressible with the existing pieces: an `AttributeQuery` with bound
   `of` and variable `the`, plus the existing `Term::starts_with`
