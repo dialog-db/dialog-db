@@ -1373,11 +1373,11 @@ mod ordered_relation_tests {
     use dialog_query::attribute::The;
     use futures_util::TryStreamExt as _;
 
-    /// Derive the position for `member` between the given bounds,
-    /// biased by the member's entity reference.
-    fn place(member: &Entity, after: Option<&Position>, before: Option<&Position>) -> Position {
+    /// Derive the position for `member` in the given range, biased by
+    /// the member's entity reference.
+    fn place(member: &Entity, range: impl std::ops::RangeBounds<Position>) -> Position {
         let bias = Bias::derive(member.to_string().as_bytes());
-        insert(&bias, after, before).expect("position derives")
+        insert(&bias, range).expect("position derives")
     }
 
     /// A membership fact: `[list  test.list/<position>  member]`.
@@ -1410,10 +1410,10 @@ mod ordered_relation_tests {
 
         // Build the list by appending, then wedge bread between apples
         // and bananas — the classic insert-in-the-middle.
-        let at_apples = place(&apples, None, None);
-        let at_bananas = place(&bananas, Some(&at_apples), None);
-        let at_milk = place(&milk, Some(&at_bananas), None);
-        let at_bread = place(&bread, Some(&at_apples), Some(&at_bananas));
+        let at_apples = place(&apples, ..);
+        let at_bananas = place(&bananas, &at_apples..);
+        let at_milk = place(&milk, &at_bananas..);
+        let at_bread = place(&bread, &at_apples..&at_bananas);
 
         branch
             .transaction()
