@@ -20,7 +20,7 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use anyhow::Result;
-use dialog_common::{Blake3Hash, NULL_BLAKE3_HASH};
+use dialog_common::Blake3Hash;
 use dialog_search_tree::{
     Buffer, ContentAddressedStorage, Delta, HitchhikerTree, Manifest, PersistentTree, TransientTree,
 };
@@ -179,8 +179,8 @@ async fn run_canonical(program: &Program, manifest: Manifest) -> Result<Vec<Blak
     let mut roots = Vec::new();
     for (at, op) in program.ops.iter().enumerate() {
         let mut delta = Delta::zero();
-        let edit = if tree.root() == NULL_BLAKE3_HASH {
-            TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Default::default(), manifest)
+        let edit = if tree.stored_root().is_none() {
+            TransientTree::empty_with_manifest(Default::default(), manifest)
         } else {
             tree.edit_with_manifest(&storage).await?
         };
@@ -225,7 +225,7 @@ async fn run_buffered(
     let first = *ops.next().expect("programs are non-empty");
     let mut delta = Delta::zero();
     let seed_edit =
-        TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Default::default(), manifest);
+        TransientTree::empty_with_manifest(Default::default(), manifest);
     let mut tree = match first {
         Op::Insert(key, len) => {
             seed_edit
@@ -414,8 +414,8 @@ async fn minimize_caught_divergence() -> Result<()> {
     let mut tree = Tree::empty();
     for op in &program.ops {
         let mut delta = Delta::zero();
-        let edit = if tree.root() == NULL_BLAKE3_HASH {
-            TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Default::default(), manifest)
+        let edit = if tree.stored_root().is_none() {
+            TransientTree::empty_with_manifest(Default::default(), manifest)
         } else {
             tree.edit_with_manifest(&storage).await?
         };
@@ -439,7 +439,7 @@ async fn minimize_caught_divergence() -> Result<()> {
     let first = *ops2.next().expect("non-empty");
     let mut delta = Delta::zero();
     let seed_edit =
-        TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Default::default(), manifest);
+        TransientTree::empty_with_manifest(Default::default(), manifest);
     let mut tree2 = match first {
         Op::Insert(key, len) => {
             seed_edit

@@ -50,7 +50,7 @@ use rand::{Rng, distributions::Alphanumeric};
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
 use dialog_search_tree::{Buffer as TreeBuffer, ContentAddressedStorage as TreeStorage, Delta};
 pub use dialog_storage::{
     Blake3Hash, CborEncoder, ContentAddressedStorage, DialogStorageError, Encoder, HashType,
@@ -283,11 +283,10 @@ where
     pub async fn revision(&self) -> Result<Blake3Hash, DialogArtifactsError> {
         let index = self.index.read().await;
 
-        let root = index.root();
-        Ok(if root == NULL_BLAKE3_HASH {
-            NULL_REVISION_HASH
-        } else {
-            IndexRoot::new(root.as_bytes()).as_reference().await?
+        Ok(match index.stored_root() {
+            // Nothing was ever persisted: the store has no revision yet.
+            None => NULL_REVISION_HASH,
+            Some(root) => IndexRoot::new(root.as_bytes()).as_reference().await?,
         })
     }
 
@@ -533,18 +532,12 @@ where
             .try_collect::<()>()
             .await?;
 
-        let next_revision = if root == NULL_BLAKE3_HASH {
-            None
-        } else {
-            Some(IndexRoot::new(root.as_bytes()))
-        };
-
-        let revision_hash = if let Some(revision) = &next_revision {
-            storage.write(&revision).await?;
-            revision.as_reference().await?
-        } else {
-            NULL_REVISION_HASH
-        };
+        // The root is always real: a sealed batch persists even the empty
+        // tree as its manifest-carrying node, so every publish mints a
+        // revision.
+        let revision = IndexRoot::new(root.as_bytes());
+        storage.write(&revision).await?;
+        let revision_hash = revision.as_reference().await?;
 
         // Advance the effective pointer to the latest version of this DB
         storage

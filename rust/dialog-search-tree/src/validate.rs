@@ -49,7 +49,7 @@
 //! key …" at the causing edit. Cost is O(n) in entries plus one in-memory
 //! rebuild; no reference store, no second persist.
 
-use dialog_common::{Blake3Hash, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use rkyv::{
     Deserialize, Serialize,
@@ -110,7 +110,9 @@ where
             + Clone
             + ConditionalSync,
     {
-        if self.root() == NULL_BLAKE3_HASH {
+        // An unpersisted empty tree has no stored form to validate; it is
+        // trivially canonical.
+        if self.stored_root().is_none() {
             return Ok(Vec::new());
         }
         let manifest = self.manifest(storage).await?;
@@ -184,13 +186,9 @@ where
         }
 
         // The canonical constructor, over the same entries, in memory.
-        let expected = TransientTree::<K, V, D>::with_manifest(
-            NULL_BLAKE3_HASH.clone(),
-            Default::default(),
-            manifest,
-        )
-        .plant(entries, storage)
-        .await?;
+        let expected = TransientTree::<K, V, D>::empty_with_manifest(Default::default(), manifest)
+            .plant(entries, storage)
+            .await?;
         let expected_levels = expected.level_separators()?;
 
         if stored_levels.len() != expected_levels.len() {
@@ -230,7 +228,7 @@ mod tests {
     #![allow(unexpected_cfgs)]
 
     use anyhow::Result;
-    use dialog_common::{Blake3Hash, NULL_BLAKE3_HASH};
+    use dialog_common::Blake3Hash;
     use dialog_storage::MemoryStorageBackend;
 
     use crate::{
@@ -368,14 +366,10 @@ mod tests {
             Manifest::default(),
         ] {
             let mut delta = Delta::zero();
-            let emptied = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
-                NULL_BLAKE3_HASH.clone(),
-                Cache::new(),
-                manifest,
-            )
+            let emptied = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), manifest)
             .persist(&mut delta)?;
             settle(&mut delta, &mut storage).await?;
-            assert_ne!(emptied.root(), &NULL_BLAKE3_HASH.clone());
+            assert!(emptied.stored_root().is_some());
             assert_eq!(
                 emptied.canonical_divergences(&storage).await?,
                 Vec::<String>::new(),

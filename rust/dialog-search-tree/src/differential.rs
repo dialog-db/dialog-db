@@ -20,7 +20,7 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -139,14 +139,15 @@ where
         }
     }
 
-    fn hash(&self) -> &Blake3Hash {
+    /// The node's stored hash — `None` for a settled node, which stands
+    /// for ops rather than stored bytes and therefore never compares equal
+    /// to (never prunes against) a real node.
+    fn hash(&self) -> Option<&Blake3Hash> {
         match self {
-            SparseTreeNode::Loaded { node, .. } => node.hash(),
-            SparseTreeNode::Ref(link) => &link.node,
-            SparseTreeNode::Pending { link, .. } => &link.node,
-            // A settled node stands for ops, not stored bytes; the null hash
-            // keeps it from ever pruning against a real node.
-            SparseTreeNode::Settled { .. } => NULL_BLAKE3_HASH,
+            SparseTreeNode::Loaded { node, .. } => Some(node.hash()),
+            SparseTreeNode::Ref(link) => Some(&link.node),
+            SparseTreeNode::Pending { link, .. } => Some(&link.node),
+            SparseTreeNode::Settled { .. } => None,
         }
     }
 
@@ -224,15 +225,14 @@ where
         Ok(PersistentNode::new(Buffer::from(bytes)))
     }
 
-    /// Initializes a sparse tree from a root hash. The root is not loaded;
-    /// a null hash produces an empty frontier.
+    /// Initializes a sparse tree from a stored root hash. The root is not
+    /// loaded; `None` — a tree with no stored root — produces an empty
+    /// frontier.
     async fn from_root(
-        root: &Blake3Hash,
+        root: Option<&Blake3Hash>,
         storage: &'a ContentAddressedStorage<Backend>,
     ) -> Result<SparseTree<'a, Key, Value, Backend>, DialogSearchTreeError> {
-        let nodes = if root == NULL_BLAKE3_HASH {
-            vec![]
-        } else {
+        let nodes = if let Some(root) = root {
             let node: PersistentNode<Key, Value> = Self::load(storage, root).await?;
             // A root's frontier bound must be the separator the SAME subtree
             // would carry as a link child on the other side, or equal
@@ -253,9 +253,14 @@ where
                 lower_bound,
                 pending: Vec::new(),
             }]
+        } else {
+            vec![]
         };
 
-        let seen = nodes.iter().map(|node| node.hash().clone()).collect();
+        let seen = nodes
+            .iter()
+            .filter_map(|node| node.hash().cloned())
+            .collect();
         Ok(SparseTree {
             storage,
             nodes,
@@ -354,7 +359,9 @@ where
                             pending: routed,
                         }
                     };
-                    self.seen.insert(child.hash().clone());
+                    if let Some(hash) = child.hash() {
+                        self.seen.insert(hash.clone());
+                    }
                     children.push(child);
                 }
 
@@ -643,19 +650,20 @@ where
             .nodes
             .iter()
             .filter(|node| prunable(node))
-            .map(|node| node.hash().clone())
+            .filter_map(|node| node.hash().cloned())
             .collect();
         let right: HashSet<Blake3Hash> = other
             .nodes
             .iter()
             .filter(|node| prunable(node))
-            .map(|node| node.hash().clone())
+            .filter_map(|node| node.hash().cloned())
             .collect();
-        self.nodes
-            .retain(|node| !prunable(node) || !right.contains(node.hash()));
-        other
-            .nodes
-            .retain(|node| !prunable(node) || !left.contains(node.hash()));
+        self.nodes.retain(|node| {
+            !prunable(node) || !node.hash().is_some_and(|hash| right.contains(hash))
+        });
+        other.nodes.retain(|node| {
+            !prunable(node) || !node.hash().is_some_and(|hash| left.contains(hash))
+        });
     }
 
     /// Streams the entries of every node remaining in the frontier, in key
@@ -1033,9 +1041,9 @@ where
         }
 
         let mut source: SparseTree<'a, Key, Value, Backend> =
-            SparseTree::from_root(source_tree.root(), source_storage).await?;
+            SparseTree::from_root(source_tree.stored_root(), source_storage).await?;
         let mut target: SparseTree<'a, Key, Value, Backend> =
-            SparseTree::from_root(target_tree.root(), target_storage).await?;
+            SparseTree::from_root(target_tree.stored_root(), target_storage).await?;
 
         // Iteratively prune shared nodes and expand differing ones until a
         // fixed point: only differing leaf segments (and unique-range
@@ -1106,9 +1114,15 @@ where
                             // so it is peeled first.
                             let source_node = &source.nodes[source_idx];
                             let target_node = &target.nodes[target_idx];
-                            let source_first = if source_node.links_contain(target_node.hash()) {
+                            let source_first = if target_node
+                                .hash()
+                                .is_some_and(|hash| source_node.links_contain(hash))
+                            {
                                 true
-                            } else if target_node.links_contain(source_node.hash()) {
+                            } else if source_node
+                                .hash()
+                                .is_some_and(|hash| target_node.links_contain(hash))
+                            {
                                 false
                             } else if source_node.is_loaded_index() != target_node.is_loaded_index()
                             {
@@ -1312,7 +1326,10 @@ where
                 // buffers them, and that ancestor is in `expanded` above, so
                 // the seen-check below is still the right test for the block
                 // this frontier entry names.
-                if self.source.seen.contains(sparse_node.hash()) {
+                if sparse_node
+                    .hash()
+                    .is_some_and(|hash| self.source.seen.contains(hash))
+                {
                     continue;
                 }
                 // A settled node names no block of its own: its ops live in the
@@ -1440,14 +1457,16 @@ mod tests {
         let mut tree = TestTree::empty();
         let mut delta = Delta::zero();
         for (key, value) in keys {
-            tree = crate::TransientTree::with_manifest(
-                tree.root().clone(),
-                tree.node_cache(),
-                manifest,
-            )
-            .insert(key.to_le_bytes(), value, storage)
-            .await?
-            .persist(&mut delta)?;
+            let edit = match tree.stored_root() {
+                Some(root) => {
+                    crate::TransientTree::with_manifest(root.clone(), tree.node_cache(), manifest)
+                }
+                None => crate::TransientTree::empty_with_manifest(tree.node_cache(), manifest),
+            };
+            tree = edit
+                .insert(key.to_le_bytes(), value, storage)
+                .await?
+                .persist(&mut delta)?;
             for (_, buffer) in delta.flush() {
                 storage
                     .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
@@ -1619,11 +1638,7 @@ mod tests {
             ..Manifest::default()
         };
 
-        let mut edit = crate::TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
-            dialog_common::NULL_BLAKE3_HASH.clone(),
-            Default::default(),
-            custom,
-        );
+        let mut edit = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Default::default(), custom);
         for k in 0..30u32 {
             edit = edit
                 .insert(k.to_le_bytes(), vec![k as u8], &storage)
@@ -1634,11 +1649,7 @@ mod tests {
         flush(&mut delta, &mut storage).await?;
 
         let mut delta = Delta::zero();
-        let emptied = crate::TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
-            dialog_common::NULL_BLAKE3_HASH.clone(),
-            Default::default(),
-            custom,
-        )
+        let emptied = crate::TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Default::default(), custom)
         .persist(&mut delta)?;
         flush(&mut delta, &mut storage).await?;
 
