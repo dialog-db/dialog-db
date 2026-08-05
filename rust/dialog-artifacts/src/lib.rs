@@ -77,6 +77,9 @@ pub use state::*;
 mod blob_index;
 pub use blob_index::*;
 
+mod collection;
+pub use collection::*;
+
 mod spill;
 pub use spill::*;
 

@@ -27,6 +27,9 @@ pub use update::{
 mod attribute;
 pub use attribute::*;
 
+mod symbol;
+pub use symbol::*;
+
 mod entity;
 pub use entity::*;
 
@@ -538,7 +541,8 @@ mod tests {
     use crate::tree::distribution;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStoreMutExt, Artifacts, Attribute,
-        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
+        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Symbol, Value,
+        make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]
@@ -1251,6 +1255,70 @@ mod tests {
                 .all(|fact| String::from(&fact.the).starts_with("person/")),
             "every selected fact carries the prefix"
         );
+        Ok(())
+    }
+
+    /// A domain selector is the typed form of an attribute-prefix
+    /// scan, and a name filter narrows any selection to one entry per
+    /// domain — combined they lower onto an exact attribute.
+    #[dialog_common::test]
+    async fn it_selects_by_domain_and_name() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+        let alice = Entity::new()?;
+
+        let data = vec![
+            Artifact {
+                the: Attribute::from_str("person/name")?,
+                of: alice.clone(),
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            Artifact {
+                the: Attribute::from_str("person/age")?,
+                of: alice.clone(),
+                is: Value::UnsignedInt(40),
+                cause: None,
+            },
+            Artifact {
+                the: Attribute::from_str("group/name")?,
+                of: alice.clone(),
+                is: Value::String("Admins".into()),
+                cause: None,
+            },
+        ];
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let person: Symbol = "person".parse()?;
+        let selected: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().with_domain(&person))
+            .try_collect()
+            .await?;
+        assert_eq!(selected.len(), 2, "two entries under the person domain");
+        assert!(
+            selected.iter().all(|fact| fact.the.domain() == "person"),
+            "every selected fact is under the domain"
+        );
+
+        // A name filter alone applies across domains (here anchored
+        // by the entity to keep the scan constrained).
+        let name: Symbol = "name".parse()?;
+        let named: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().of(alice).with_name(name.clone()))
+            .try_collect()
+            .await?;
+        assert_eq!(named.len(), 2, "person/name and group/name both match");
+        assert!(named.iter().all(|fact| fact.the.name() == "name"));
+
+        // Domain plus name tightens to an exact attribute.
+        let exact: Vec<Artifact> = facts
+            .select(ArtifactSelector::new().with_domain(&person).with_name(name))
+            .try_collect()
+            .await?;
+        assert_eq!(exact.len(), 1, "exactly person/name");
+        assert_eq!(String::from(&exact[0].the), "person/name");
         Ok(())
     }
 

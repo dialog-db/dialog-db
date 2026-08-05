@@ -112,18 +112,14 @@ impl PositionParts {
     /// One row for a position-bearing attribute; anything else
     /// projects nothing.
     pub fn compute(input: Input<Self>) -> Vec<Self> {
-        let text = input.of.as_str();
-        let Some((namespace, predicate)) = text.split_once('/') else {
-            return Vec::new();
-        };
-        if fractional::Position::try_from(predicate).is_err() {
-            return Vec::new();
+        match input.of.split() {
+            Ok((domain, dialog_artifacts::Name::Position(position))) => vec![PositionParts {
+                of: input.of.clone(),
+                namespace: domain.to_string(),
+                position: position.as_str().to_string(),
+            }],
+            _ => Vec::new(),
         }
-        vec![PositionParts {
-            of: input.of.clone(),
-            namespace: namespace.to_string(),
-            position: predicate.to_string(),
-        }]
     }
 }
 

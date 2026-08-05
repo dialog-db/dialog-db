@@ -132,6 +132,19 @@ pub fn match_selector_and_key_ref(
         }
     }
 
+    if let Some(name) = selector.attribute_name() {
+        let segment = key.attribute.as_ref();
+        let name_half = match segment.iter().position(|&byte| byte == b'/') {
+            Some(delimiter) => &segment[delimiter + 1..],
+            // Attributes always carry the delimiter; fail closed on a
+            // key that somehow lacks one.
+            None => return SelectorMatch::Excluded,
+        };
+        if name_half != name.as_str().as_bytes() {
+            return SelectorMatch::Excluded;
+        }
+    }
+
     if let Some(prefix) = selector.entity_prefix() {
         let bytes = prefix.as_bytes();
         let segment = key.entity.as_ref();
