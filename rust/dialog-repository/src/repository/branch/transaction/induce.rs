@@ -47,7 +47,9 @@ use futures_util::TryStreamExt;
 use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
-use crate::rules::{hydrate_inductive, on_attr, on_entity, source_attr, transient_attr};
+use crate::rules::{
+    hydrate_inductive, on_attr, on_entity, reads_attr, source_attr, transient_attr,
+};
 use crate::{Branch, CommitError, RemoteSite};
 
 /// Round bound for the induction loop: a cascade still emitting
@@ -99,7 +101,7 @@ where
         }
 
         // Probe keys straight off the instructions — no schema lookup.
-        let touched: BTreeSet<Attribute> = stimulus
+        let mut touched: BTreeSet<Attribute> = stimulus
             .iter()
             .map(|instruction| match instruction {
                 Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => {
@@ -117,6 +119,11 @@ where
         let overlay = QueryLayer::from(branch).with(view).overlay(&operator);
         let tombstones = tombstones_from(&overlay);
         let view = QueryEnv::new(vec![branch.clone()], overlay, tombstones, env);
+
+        // Close the touched set over derivation: a base-fact write
+        // reaches inductive rules premised on the derived concepts it
+        // (transitively) supports through deductive rules.
+        expand_through_deduction(&view, &mut touched).await?;
 
         // Trigger-indexed discovery: one `db.rule/on` lookup per
         // touched attribute. Nothing ever enumerates all rules.
@@ -149,6 +156,70 @@ where
         transient_overlay = emitted_transients;
     }
 
+    Ok(())
+}
+
+/// Close `touched` over the deductive support graph: for each touched
+/// attribute, `db.rule/reads` names the deductive rules whose bodies
+/// read it; their conclusions' attributes are *derived-touched* — a
+/// write to the base can flip them — and recurse until the frontier is
+/// exhausted. An inductive premise on a derived concept then probes
+/// exactly like one on a base concept.
+///
+/// The closure is composed fresh from per-rule facts at dispatch time,
+/// never stored, so a deductive rule installed after an inductive one
+/// is picked up automatically. Monotone over a finite attribute set,
+/// so termination is structural. Polarity is deliberately ignored
+/// across derived edges: through negation, an assertion of a base fact
+/// can retract a derived one, so any change to a support attribute
+/// counts.
+async fn expand_through_deduction<'a, Env>(
+    view: &QueryEnv<'a, Env>,
+    touched: &mut BTreeSet<Attribute>,
+) -> Result<(), CommitError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    let mut frontier: Vec<Attribute> = touched.iter().cloned().collect();
+    while let Some(attribute) = frontier.pop() {
+        let Some(on) = on_entity(&attribute) else {
+            continue;
+        };
+        let selector = ArtifactSelector::new()
+            .the(reads_attr())
+            .is(Value::Entity(on));
+        for claim in select(view, selector).await? {
+            let sources = select(
+                view,
+                ArtifactSelector::new().the(source_attr()).of(claim.of),
+            )
+            .await?;
+            let Some(bytes) = sources.into_iter().find_map(|artifact| match artifact.is {
+                Value::Bytes(bytes) => Some(bytes),
+                _ => None,
+            }) else {
+                continue;
+            };
+            // A `reads` entry only ever hangs off a deductive rule; a
+            // body that fails to decode is skipped like any dangling
+            // index entry.
+            let Ok(rule) = dialog_query::DeductiveRule::decode(&bytes) else {
+                continue;
+            };
+            for (_, field) in rule.conclusion().with().iter() {
+                let derived: Attribute = field.descriptor().the().clone().into();
+                if touched.insert(derived.clone()) {
+                    frontier.push(derived);
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -831,6 +902,129 @@ mod tests {
                 .await?
                 .is_empty(),
             "the rule watching an untouched attribute must not fire"
+        );
+        Ok(())
+    }
+
+    /// The inbox/duty scenario with the duty status *derived*: the
+    /// inductive rule's premise names `actor.status/duty`, which no
+    /// commit ever writes — a deductive rule concludes it from
+    /// `shift/duty`. A message arrives while the actor is off duty
+    /// (rule probed via the inbox attributes, join fails); then a
+    /// `shift/duty` write flips the derived status. The dispatch
+    /// closure must carry that base write through `db.rule/reads` to
+    /// the derived attribute so the inductive rule fires against the
+    /// message already in the store.
+    #[dialog_common::test]
+    async fn it_triggers_through_a_deductive_premise() -> Result<()> {
+        use crate::rules::Deduce;
+        use dialog_query::DeductiveRule;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // actor.status/duty of ?a is ?d  when  shift/duty of ?a is ?d
+        let status: DeductiveRule = serde_json::from_value(json!({
+            "deduce": {
+                "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "duty": { "the": "shift/duty", "as": "Text" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "duty": { "?": { "name": "duty" } }
+                }
+            }]
+        }))?;
+
+        // task/note when a message's actor is (derivedly) on duty.
+        let notify: InductiveRule = serde_json::from_value(json!({
+            "assert!": {
+                "with": { "note": { "the": "task/note", "as": "Text" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "actor": { "the": "inbox.message/actor", "as": "Entity" },
+                            "body": { "the": "inbox.message/body", "as": "Text" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "actor": { "?": { "name": "actor" } },
+                        "body": { "?": { "name": "note" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "actor" } },
+                        "duty": "on-duty"
+                    }
+                }
+            ]
+        }))?;
+
+        branch
+            .transaction()
+            .assert(Deduce(status))
+            .assert(Induct(notify))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // A message for an off-duty actor: probed via the inbox
+        // attributes, the derived-status premise fails, nothing fires.
+        let message: Entity = "msg:1".parse()?;
+        let actor: Entity = "actor:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("inbox.message/actor")
+                    .of(message.clone())
+                    .is(actor.clone()),
+            )
+            .assert(
+                dialog_query::the!("inbox.message/body")
+                    .of(message.clone())
+                    .is("hello".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            values(&branch, &operator, "task/note", &message)
+                .await?
+                .is_empty(),
+            "an off-duty actor's message must not fire the rule"
+        );
+
+        // The base-fact write that flips the derived status: touches
+        // only shift/duty, which the inductive rule never names — the
+        // deductive closure is what must carry it through.
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("shift/duty")
+                    .of(actor.clone())
+                    .is("on-duty".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "task/note", &message).await?,
+            vec![Value::String("hello".to_string())],
+            "the shift write must reach the rule through the derived premise"
         );
         Ok(())
     }

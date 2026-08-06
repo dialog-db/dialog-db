@@ -75,6 +75,17 @@ pub(crate) fn on_attr() -> Attribute {
     the!("db.rule/on").into()
 }
 
+/// The `db.rule/reads` reverse index for *deductive* rules: one claim
+/// per attribute the rule's body names, valued `on:<domain>/<name>`.
+/// Commit-time dispatch composes these at probe time to close the
+/// trigger footprint over derivation — a base-fact write reaches
+/// inductive rules premised on the concepts it (transitively)
+/// supports. Per-rule and derived from the rule's own immutable body,
+/// so an entry is never stale; the closure itself is never stored.
+pub(crate) fn reads_attr() -> Attribute {
+    the!("db.rule/reads").into()
+}
+
 /// The `db.concept/transient` marker attribute. A concept carrying it
 /// is a *command*: facts of it dispatched into a transaction (and heads
 /// of rules concluding it) live for one induction round and are never
@@ -90,16 +101,15 @@ pub(crate) fn on_entity(attribute: &Attribute) -> Option<Entity> {
     format!("on:{attribute}").parse().ok()
 }
 
-/// The trigger-index entities for an inductive rule: one per attribute
-/// named by any concept premise, `when` and `unless` alike. `unless`
-/// premises are indexed because a *retraction* can newly enable a rule
-/// (the guard it failed on clears). Formula and constraint premises
-/// contribute nothing; attribute-query premises can't occur in stored
-/// rules (they have no formal-notation encoding).
-pub(crate) fn on_entities(rule: &InductiveRule) -> BTreeSet<Entity> {
-    let descriptor = rule.descriptor();
+/// The `on:` entities for the attributes a set of propositions' concept
+/// premises name. Formula and constraint premises contribute nothing;
+/// attribute-query premises can't occur in stored rules (they have no
+/// formal-notation encoding).
+fn premise_trigger_entities<'p>(
+    propositions: impl Iterator<Item = &'p Proposition>,
+) -> BTreeSet<Entity> {
     let mut entities = BTreeSet::new();
-    for proposition in descriptor.when.iter().chain(descriptor.unless.iter()) {
+    for proposition in propositions {
         if let Proposition::Concept(query) = proposition {
             for (_, field) in query.predicate.with().iter() {
                 let attribute: Attribute = field.descriptor().the().clone().into();
@@ -110,6 +120,24 @@ pub(crate) fn on_entities(rule: &InductiveRule) -> BTreeSet<Entity> {
         }
     }
     entities
+}
+
+/// The trigger-index entities for an inductive rule: one per attribute
+/// named by any concept premise, `when` and `unless` alike. `unless`
+/// premises are indexed because a *retraction* can newly enable a rule
+/// (the guard it failed on clears).
+pub(crate) fn on_entities(rule: &InductiveRule) -> BTreeSet<Entity> {
+    let descriptor = rule.descriptor();
+    premise_trigger_entities(descriptor.when.iter().chain(descriptor.unless.iter()))
+}
+
+/// The reverse-index entities for a deductive rule's body: one per
+/// attribute any concept premise names. Stored as `db.rule/reads` so
+/// dispatch can walk base attribute → deductive rules reading it →
+/// their conclusions, closing the trigger footprint over derivation.
+pub(crate) fn reads_entities(rule: &DeductiveRule) -> BTreeSet<Entity> {
+    let descriptor = rule.descriptor();
+    premise_trigger_entities(descriptor.when.iter().chain(descriptor.unless.iter()))
 }
 
 /// Hydrate a compiled [`InductiveRule`] from a `db.rule/source` claim
@@ -167,6 +195,48 @@ impl Statement for Induct {
         );
         for on in on_entities(&self.0) {
             update.dissociate(on_attr(), rule_entity.clone(), Value::Entity(on));
+        }
+    }
+}
+
+/// [`Statement`] wrapper installing a [`DeductiveRule`] as `db.rule/*`
+/// facts: the `conclusion` discovery index, the `source` body, and the
+/// `reads` reverse index over the body's attributes that lets
+/// commit-time dispatch close its trigger footprint over derivation.
+pub struct Deduce(pub DeductiveRule);
+
+impl Statement for Deduce {
+    fn assert(self, update: &mut impl Update) {
+        let rule_entity = self.0.this();
+        update.associate(
+            conclusion_attr(),
+            rule_entity.clone(),
+            Value::Entity(self.0.conclusion().this()),
+        );
+        update.associate(
+            source_attr(),
+            rule_entity.clone(),
+            Value::Bytes(self.0.encode()),
+        );
+        for reads in reads_entities(&self.0) {
+            update.associate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
+        }
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        let rule_entity = self.0.this();
+        update.dissociate(
+            conclusion_attr(),
+            rule_entity.clone(),
+            Value::Entity(self.0.conclusion().this()),
+        );
+        update.dissociate(
+            source_attr(),
+            rule_entity.clone(),
+            Value::Bytes(self.0.encode()),
+        );
+        for reads in reads_entities(&self.0) {
+            update.dissociate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
         }
     }
 }

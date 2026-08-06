@@ -351,18 +351,21 @@ later — a new way to become on-duty would silently miss every
 inductive rule whose stored closure predates it, and repairing that
 means rewriting other rules' facts on every deductive-rule change.
 
-Instead the stored index stays at authored granularity, and the
-**effective footprint closes over the deductive support graph at
-cache-build time**: walk each inductive premise concept down through
-the deductive rules concluding it (facts — `db.rule/conclusion` plus
-hydrated bodies) to the base attributes supporting it, transitively.
-This is the same walk `program_analysis` already does for
-stratification; the closure folds into the head-keyed footprint cache
-and maintains in O(rule churn) like everything else. A `shift/ended`
-commit maps through the expansion to `actor/status`, probes the inbox
-rule, and the body's deductive resolution decides whether the
-circumstance completed. Late-installed deductive rules are picked up
-automatically at the next head advance.
+Instead every stored entry stays *per-rule and authored-level* — a
+pure function of that one rule's immutable body, so never stale — and
+the closure is **composed at dispatch time**. Deductive rules gain
+their own reverse index: `db.rule/reads` `is` `on:<domain>/<name>`,
+one entry per attribute the body names (written by the same
+`Statement` install path, `Deduce`). Dispatch then chains per-rule
+facts: touched attribute → `reads` probe → deductive rules whose
+bodies read it → their conclusions' attributes join the touched set →
+recurse. Monotone over a finite attribute set, so termination is
+structural. A `shift/duty` commit expands to `actor.status/duty`,
+probes the inbox rule, and the body's deductive resolution decides
+whether the circumstance completed. A deductive rule installed *after*
+the inductive one is picked up automatically — its `reads` entries are
+in the next probe's path. The per-head footprint cache later absorbs
+this walk exactly like the rest of discovery.
 
 Conservative degradations across derived edges, both correct:
 
@@ -642,12 +645,18 @@ The core loop is implemented:
   retraction, a cascade through a transient intermediate, runaway
   divergence, dispatch selectivity, and the unconsumed-command no-op.
 
+The deductive-support closure is implemented: `Deduce` installs
+deductive rules with `db.rule/reads` reverse-index entries, and
+dispatch closes the touched set over them (`expand_through_deduction`)
+before probing — pinned by the `it_triggers_through_a_deductive_premise`
+test, which runs the inbox/duty scenario with the status derived and
+verifies the `shift/duty` base write reaches the inductive rule.
+
 Not yet implemented (documented above): the trigger footprint and
-alpha-discrimination caches, the deductive-support closure (a premise
-concluded by a deductive rule does not yet trigger on its base
-facts), delta-restricted evaluation, `retract!` polarity, and the
-commit receipt. Discovery currently probes the index uncached each
-round; the head-keyed cache disciplines are the next step.
+alpha-discrimination caches, delta-restricted evaluation, `retract!`
+polarity, and the commit receipt. Discovery currently probes the index
+uncached each round; the head-keyed cache disciplines are the next
+step.
 
 ## Open questions
 
