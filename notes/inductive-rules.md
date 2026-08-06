@@ -264,6 +264,45 @@ Semantics:
   invisible. Induction completes before the batch is applied and
   sealed, so a failed induction aborts with nothing persisted.
 
+### Quiescence: rules that keep matching
+
+A rule whose body matches the settled state — and whose firing does
+not make the body stop matching — looks like it should run forever.
+It doesn't, and the distinction between the shapes matters:
+
+- **Idempotent re-match is the fixed point, not a loop.** A standing
+  rule (`assert! open{desc} when task{desc} unless done`) matches
+  forever once fired, but re-firing emits the same triples, the
+  novelty check drops them, the stimulus empties, the loop exits.
+  "Body matches and head holds" is exactly the state the system rests
+  at. Matching is not what drives work — the *delta of the match set*
+  is. Such rules behave as materialized invariants: re-checked at any
+  commit that could disturb them, re-firing only when their conclusion
+  actually stopped holding.
+- **Between commits a matching rule doesn't run at all.** There is no
+  daemon: a rule whose body holds costs nothing until a commit touches
+  a watched attribute, and then one probe + one body evaluation + a
+  not-novel verdict.
+- **Genuine divergence requires firing to produce *fresh* state that
+  re-enables the rule**, and only two shapes do: value generators
+  (`?c + 1` — every firing novel by construction) and polarity
+  oscillators (an `assert! X` rule and a `retract! X` rule flipping X's
+  presence each round, each flip novel; neither rule is individually
+  suspect). Excluding these statically is undecidable in general, so
+  the guards layer: the analysis-time tautology check for the trivial
+  shape, the `unless`-own-head idempotence idiom (which makes the
+  *body* stop matching, not just the emission go stale), and
+  `MAX_ROUNDS` failing the commit atomically as the hard backstop.
+
+A future install-time **productivity lint** falls out of rules being
+facts: `db.rule/induces` gives each rule's outputs, `db.rule/on` its
+inputs, so the trigger graph is a join. Cycles carrying a formula
+(value generator) or mixed assert/retract polarity — the two shapes
+that defeat the novelty fixed point — can be flagged at install as
+"needs an idempotence guard," the inductive analog of stratification
+checking on the deductive side. Necessarily incomplete (it is the
+halting problem), but it catches the shapes people actually write.
+
 ### Keeping dispatch flat in the number of rules
 
 The footprint makes discovery O(touched attributes), but two places
