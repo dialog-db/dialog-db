@@ -799,6 +799,41 @@ transaction's own delta is a system-provided transient relation** —
 tonk turned DOM events into transient facts; this turns every
 commit's instructions into them.
 
+Event premises do **not** retire `unless`. The taxonomy: positive
+premises are state *presence*, `unless` is state *absence* (a
+standing condition — the queue's "nothing active," every idempotence
+guard; no event formulation expresses it), events are *transitions*.
+Events take over only the transition-shaped work absence was doing
+badly; the non-monotone zone shrinks, its core remains.
+
+**Across replicas, edge-triggered effects do not self-heal.** An
+event happens at one commit at one site; if that site's slice misses
+join partners (tokens for the user held elsewhere), the effect is
+partial *permanently* — no later commit re-presents the trigger.
+Layered answer, weakest to strongest:
+
+1. *Demand-fetch at fire time*: the commit path already reads through
+   `NetworkedIndex`, and a body's evaluation is a demand expression —
+   the join can fault in the missing range when connected, sound to
+   the upstream's authority (the seal, again).
+2. *Convert edge to level*: the event mints a small durable monotone
+   **obligation** (`retracted(user/active){of: ?u}` ⇒ `assert!
+   cleanup/pending{user: ?u}`), which replicates like any fact; a
+   level-triggered consumer (`retract! session/token when
+   cleanup/pending{user}, session/token{user}`) fires wherever
+   obligation and token meet. Self-healing, idempotent (observed-
+   remove: a concurrently asserted token survives add-wins and the
+   standing obligation catches it later). Events are local;
+   intentions are replicated state.
+3. *…which is where pull-does-not-induce must grow an exception*: an
+   obligation arriving by pull won't trigger the consumer under the
+   blanket rule. Dedalus adjudicates — cross-site flow is `@async`;
+   arrival is an instant at the receiver whose rules may run. The
+   principled form: per-rule placement (`at: commit` default,
+   `at: replica` opt-in) admitting **certified-idempotent rules
+   only** to induce on pull — the green-zone certification's second
+   job. Classify, don't force, again.
+
 ### Merge types extend `cardinality`; counters are contribution sets
 
 `cardinality` is already the merge-type field: `one` is a causal LWW
