@@ -607,6 +607,55 @@ performance one: use a command when the trigger should be ephemeral,
 local, and non-replicating; use durable triggers when the machine
 should run wherever the state change commits.
 
+## Prior art
+
+Every efficient system in this space **incrementally maintains derived
+state**; this design re-derives lazily, and the reads-closure is the
+tax for that. What each ancestor contributes:
+
+- **Rete** (OPS5 → Drools): the alpha network is our discrimination
+  stage, and the compiled network topology is the ahead-of-time form
+  of "which rules can this change affect." Rete never faces the
+  derived-premise problem because it materializes everything — Drools'
+  `insertLogical` + truth maintenance turns a deductive rule into a
+  production whose conclusions auto-retract when support fades, after
+  which derived changes trigger like any others. The price is beta
+  memories plus justification state. **TREAT** (Miranker) is the
+  stateless counter-position we took — no join memories, recompute
+  from indexed state on activation — and it frequently won under high
+  churn.
+- **Dedalus**: the semantics we already borrowed (`P@next :- body,
+  ¬P@now`; commit = instant). An inductive premise on a derived
+  predicate means "read at this instant's deductive fixpoint" — which
+  legitimizes lazy resolution in the body — but the formalism has no
+  efficiency story.
+- **Bloom/Bud**: the operational answer under in-memory assumptions —
+  each tick is stratified semi-naïve evaluation where *derived*
+  collections' deltas fall out of the incremental fixpoint and flow to
+  consumers. The trigger question dissolves into dataflow. Its
+  full-strength modern form is **differential dataflow / DBSP**
+  (persistent arrangements = industrialized beta memories); the
+  `dialog-dbsp` crate is an unwired sketch of exactly this.
+- **Active databases** — HiPAC, Starburst, and especially Hanson's
+  **Ariel** (A-TREAT: a discrimination network over a persistent
+  store with *selective* memory materialization) — are the closest
+  problem statement: triggers whose conditions span joins over
+  durable data.
+- **Magic sets / demand transformation**: the established machinery
+  for pushing constants through derived premises (the
+  constant-discrimination gap across derived edges); dialog's
+  adornment infrastructure is already half of it.
+
+What none of them face: branching, merging, partial replication, and
+rules as content-addressed facts. A beta memory or arrangement would
+have to fork with a branch and reconcile on merge. Hence the outlier
+position — stateless closure-based dispatch as the sound default —
+with the pragmatic endgame the prior art suggests: when a specific
+rule's re-join provably hurts, give *that rule* materialized support,
+either Drools-style (materialize the derived concept) or DBSP-style
+through the subscription fixpoint continuation, the arrangement-shaped
+state dialog already maintains per head.
+
 ## Divergences from tonk's implementation
 
 | tonk | dialog native | why |
