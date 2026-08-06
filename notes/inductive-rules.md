@@ -294,14 +294,45 @@ It doesn't, and the distinction between the shapes matters:
   *body* stop matching, not just the emission go stale), and
   `MAX_ROUNDS` failing the commit atomically as the hard backstop.
 
+The instructive divergent example is the **unguarded durable
+increment** — `assert! counter{?c + 1} when doc/edit{...},
+counter{?c}` with a *durable* edit premise. In tonk's transient-only
+model this shape is safe: the command expires after round 1, the body
+fails, done. Durably triggered, the rule's own body reads
+`counter/count`, so its head lands in its own watched set; the edit
+fact is still in the view at round 2, the body re-matches, and the
+formula makes every emission fresh — `MAX_ROUNDS`. Neither
+delta-restriction nor the novelty check helps (each round's delta and
+value are genuinely new). The lesson: an expiring premise is a
+*termination device*, not just an optimization — a durably-triggered
+rule deriving from its own output needs the `unless` guard instead.
+
+**Across commits the engine cannot self-perpetuate.** Induction runs
+inside a commit and nothing else: when the loop exits, no work is
+scheduled. A rule fires in the next commit only if an external actor
+makes that commit and it touches a watched attribute. "Fires on every
+commit" across time is therefore either intended (an audit-log rule
+watching what every commit writes — cost proportional to real
+firings), or inert re-match (probe + not-novel, cost only). Oscillator
+pairs cannot spread across commits either: the commit that enables the
+second rule has both live in its own induce loop, so the ping-pong is
+caught there by the round bound. The one true escape is a *host*
+feedback loop — subscription delta → application write-back → trigger
+— which no depth limit can see because each cycle is a genuine
+external commit. The echo-shaped version starves for free: writing
+back already-derived facts settles to a no-op batch, no revision is
+minted, and the subscription never re-fires.
+
 A future install-time **productivity lint** falls out of rules being
 facts: `db.rule/induces` gives each rule's outputs, `db.rule/on` its
 inputs, so the trigger graph is a join. Cycles carrying a formula
 (value generator) or mixed assert/retract polarity — the two shapes
 that defeat the novelty fixed point — can be flagged at install as
 "needs an idempotence guard," the inductive analog of stratification
-checking on the deductive side. Necessarily incomplete (it is the
-halting problem), but it catches the shapes people actually write.
+checking on the deductive side. The unguarded increment above is
+precisely a trigger-graph self-loop through a formula. Necessarily
+incomplete (it is the halting problem), but it catches the shapes
+people actually write.
 
 ### Keeping dispatch flat in the number of rules
 
