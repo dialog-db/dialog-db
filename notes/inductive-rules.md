@@ -334,6 +334,58 @@ precisely a trigger-graph self-loop through a formula. Necessarily
 incomplete (it is the halting problem), but it catches the shapes
 people actually write.
 
+### Derived premises: closing the footprint over deduction
+
+An inductive premise may name a concept that is itself *concluded by a
+deductive rule* — `actor/status{on-duty}` derived from `shift/*` facts
+rather than written. No commit ever touches `actor/status`, so the
+authored `on:actor/status` entry alone would never match a probe and
+the rule would silently never fire. Evaluation is not the problem —
+once probed, the body resolves deductive rules through the standard
+`QueryEnv` — the trigger is.
+
+The fix is *where the expansion lives*: *not* in the stored index.
+Expanding `db.rule/on` at install time (storing `on:shift/ended` on
+the inbox rule) goes stale the moment a deductive rule is installed
+later — a new way to become on-duty would silently miss every
+inductive rule whose stored closure predates it, and repairing that
+means rewriting other rules' facts on every deductive-rule change.
+
+Instead the stored index stays at authored granularity, and the
+**effective footprint closes over the deductive support graph at
+cache-build time**: walk each inductive premise concept down through
+the deductive rules concluding it (facts — `db.rule/conclusion` plus
+hydrated bodies) to the base attributes supporting it, transitively.
+This is the same walk `program_analysis` already does for
+stratification; the closure folds into the head-keyed footprint cache
+and maintains in O(rule churn) like everything else. A `shift/ended`
+commit maps through the expansion to `actor/status`, probes the inbox
+rule, and the body's deductive resolution decides whether the
+circumstance completed. Late-installed deductive rules are picked up
+automatically at the next head advance.
+
+Conservative degradations across derived edges, both correct:
+
+- **Polarity discrimination switches off.** Through negation, an
+  assertion of `vacation/day` can *retract* derived on-duty status —
+  base-change polarity no longer predicts derived-change polarity, so
+  derived premises trigger on any change to their support attributes.
+- **Constant discrimination weakens to attribute granularity** unless
+  constants are pushed through rule bodies (magic-sets-style constant
+  propagation — later, if ever).
+
+One footgun to lint loudly: a premise transitively supported by the
+built-in revision concepts is supported by `dialog.db/revision`, which
+*every commit writes* — such a rule triggers on every commit. That is
+semantically coherent ("react to any commit") but should be an
+explicit opt-in, not a quiet cost.
+
+Future precision: subscriptions already record **demand** — the base
+ranges an evaluation actually read through deductive resolution. A
+fired rule's demand could narrow the static closure (an
+over-approximation) to the ranges that matter: static closure for
+soundness before first firing, demand for precision after.
+
 ### Keeping dispatch flat in the number of rules
 
 The footprint makes discovery O(touched attributes), but two places
@@ -591,10 +643,11 @@ The core loop is implemented:
   divergence, dispatch selectivity, and the unconsumed-command no-op.
 
 Not yet implemented (documented above): the trigger footprint and
-alpha-discrimination caches, delta-restricted evaluation, `retract!`
-polarity, and the commit receipt. Discovery currently probes the index
-uncached each round; the head-keyed cache disciplines are the next
-step.
+alpha-discrimination caches, the deductive-support closure (a premise
+concluded by a deductive rule does not yet trigger on its base
+facts), delta-restricted evaluation, `retract!` polarity, and the
+commit receipt. Discovery currently probes the index uncached each
+round; the head-keyed cache disciplines are the next step.
 
 ## Open questions
 
