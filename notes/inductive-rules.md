@@ -365,9 +365,12 @@ rules genuinely might fire:
   probe plus the wildcard walk — O(delta rows), independent of how
   many constant-pinned rules watch the attribute. A rule watching
   `status = "done"` costs nothing when the delta writes `"failed"`.
-  This is the alpha network of Rete, minus its stateful memories:
-  nothing persists across commits, which is what fits dialog's branch
-  model.
+  The map discriminates on **polarity** too: a positive premise is
+  only newly enabled by an *assertion* of its matching value, an
+  `unless` premise only by a *retraction* — half the probes on a
+  watched attribute die on polarity alone. This is the alpha network
+  of Rete, minus its stateful memories: nothing persists across
+  commits, which is what fits dialog's branch model.
 - *Stage 4 — the delta-join*, only for surviving (rule, row) pairs,
   and grouped: rules are content-addressed, so identical triggering
   premises are recognizable — the shared premise-against-delta match
@@ -378,6 +381,40 @@ rules genuinely might fire:
 Net cost per commit ≈ O(touched attributes + actual firings), with a
 hash probe per (delta row, hot attribute) as the ceiling for
 everything that doesn't fire.
+
+**Worked example — inbox and duty status.** `assert! task when
+inbox/message{actor: ?a}, actor/status{this: ?a, status: "on-duty"}`,
+with a message present but the actor off duty — a half-satisfied join,
+the shape where "waiting" could be expensive. What each commit costs:
+
+- *Unrelated commit*: neither watched attribute touched — the rule is
+  never probed. There is **no polling of pending conditions**; nothing
+  records "waiting on status" as runtime state. The `on:actor/status`
+  index entry *is* that knowledge, stored declaratively, free until
+  relevant.
+- *New message, still off duty*: probed via `on:inbox/message`, body
+  evaluates, join dies on the status premise. One bounded failed
+  evaluation, only on commits touching a watched attribute.
+- *Actor goes on duty*: probed via `on:actor/status`, the join
+  completes against the message already sitting in the store — the
+  rule fires at exactly the commit that completes the circumstance,
+  however much earlier the message arrived. No queue, no scheduler.
+- *A different actor's status changes*: probed; the prototype re-runs
+  the full join and the novelty check drops re-derivations. Alpha
+  discrimination kills the non-`"on-duty"` writes before evaluation;
+  delta restriction narrows the rest to the changed actor's messages.
+
+The final notch — remembering the partial match itself so the status
+change completes it without re-joining — is Rete's beta memory, and
+the design declines it (state that must survive commits, branches,
+and merges); re-derivation from indexes at the commits that matter is
+the stateless answer, with the subscription fixpoint continuation as
+the unification point if cross-commit join state ever proves out.
+
+Note the semantics the example also fixes: when the actor goes *off*
+duty, the asserted tasks stay — inductive heads are transitions, not
+memberships. "Task exists only while on duty" is a deductive rule (a
+view), or a paired `retract!` rule.
 
 For (2): the head-advance tree diff (already computed for subscription
 maintenance) names exactly which `db.rule/*` facts changed, so the
