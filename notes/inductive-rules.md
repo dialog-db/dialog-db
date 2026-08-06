@@ -656,6 +656,75 @@ either Drools-style (materialize the derived concept) or DBSP-style
 through the subscription fixpoint continuation, the arrangement-shaped
 state dialog already maintains per head.
 
+### The store is the arrangement
+
+The DBSP comparison sharpens into a reframe rather than a rejection.
+Of the two reasons not to adopt it, "the circuit is static and our
+rules are data" is the weaker: Materialize instantiates differential
+dataflows dynamically per view (backfill from a snapshot, then
+stream), and because rules here are content-addressed facts, compiled
+dispatch artifacts — plans, discrimination maps, closure edges — are
+content-addressed too: recompilation on rule arrival is O(rule churn)
+and the results are shareable across branches and replicas. The
+objection that holds is **state**: an arrangement is a function of
+complete input history, which partial replication falsifies (missing
+≠ absent), demand-widening would have to backfill retroactively, and
+fork/merge of arrangements is undefined.
+
+But an arrangement is just an indexed collection of tuples — and the
+EAV/AEV/VAE prolly trees *are* that, already CoW-forkable, already
+demand-replicable, already the merge substrate. **Dialog is DBSP
+where the only arrangements are the base indexes** and intermediate
+results are recomputed per firing — TREAT's position exactly. The
+gap opens only for deep multi-way joins and aggregates, where
+selective per-rule materialization re-enters.
+
+### Scaling roadmap, in order
+
+1. **Bud's evaluation discipline**: semi-naive delta-joins — stimulus
+   rows bind the triggering premise, remaining premises probe the
+   tree indexes. Cost per firing ∝ delta join fan-out, never relation
+   size; the prolly tree plays the role Bud's in-memory collections
+   play.
+2. **Dispatch caches** (footprint, discrimination, reads-closure),
+   head-keyed, recompiled on rule churn, content-address-shared.
+3. **Parallel candidates**: frozen-round semantics — chosen for
+   determinism — make sibling evaluation within a round embarrassingly
+   parallel for free.
+4. **CALM as the replication-safety criterion**: a monotone body (no
+   `unless`) evaluated over a partial replica is sound but incomplete;
+   a non-monotone body needs the slice to be *authoritative* for its
+   negated ranges. So: a rule is safely evaluable at a replica iff its
+   demand covers the body's positive ranges and is authoritative for
+   the negated ones. And a rule's body **is** a demand expression — a
+   replica hosting a rule subscribes to its support ranges. Rules
+   generate their own demand; demand-based replication is what makes a
+   partial replica *sufficient* for the rules it hosts.
+5. **Selective materialization** only where a specific re-join
+   provably hurts, per rule, via the subscription continuation.
+
+### The propagator lens
+
+The system is a propagator network read off the database (Radul &
+Sussman): cells = (entity, attribute) pairs; a propagator's
+attachment list = `db.rule/on`; the alert queue drained to quiescence
+= the induce loop; "did the cell gain information" = the novelty
+check; quiescence = empty stimulus. Propagator networks need no round
+bound because cell merges are monotone moves up a finite information
+lattice; dialog's cells are not all monotone (`Replace` is an LWW
+register, retraction is anti-monotone) — which is exactly why
+`MAX_ROUNDS` exists. The divergence from the classic design: their
+network is wired in memory ahead of time; ours is a **view of the
+rule facts per head**, rewired by rule churn.
+
+The lens points forward too: propagator cells hold *partial
+information* merged monotonically — Bloom^L's lattice move. Typed
+per-attribute merge semantics (sets, counters, causal LWW) would
+widen both the CALM-safe zone for replication and the
+guard-free-termination zone for rules; that converges with the
+existing divergence-clock and merge work rather than adding a new
+track.
+
 ## Divergences from tonk's implementation
 
 | tonk | dialog native | why |
