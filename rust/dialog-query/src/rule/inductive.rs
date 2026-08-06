@@ -17,6 +17,7 @@
 /// Serializable inductive-rule descriptor.
 pub mod descriptor;
 
+use crate::artifact::Entity;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
 use crate::negation::Negation;
@@ -93,6 +94,53 @@ impl InductiveRule {
     /// resulting proposition.
     pub fn apply(&self, parameters: Parameters) -> Result<Proposition, TypeError> {
         self.conclusion().apply(parameters)
+    }
+
+    /// Canonical dag-cbor encoding of this rule's descriptor, if the
+    /// body is expressible in formal notation. Mirrors
+    /// [`DeductiveRule::try_encode`](crate::rule::DeductiveRule::try_encode):
+    /// rules built directly from raw [`AttributeQuery`](crate::AttributeQuery)
+    /// premises encode to nothing, because `Proposition`'s
+    /// formal-notation `Serialize` rejects attribute propositions.
+    pub fn try_encode(&self) -> Option<Vec<u8>> {
+        serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
+    }
+
+    /// This rule's content-addressed identity, if it has a canonical
+    /// encoding: `rule:<base58(blake3(dag-cbor(descriptor)))>`. The
+    /// `assert!` head field is part of the encoding, so an inductive
+    /// rule never collides with the deductive rule of the same body.
+    pub fn try_this(&self) -> Option<Entity> {
+        use base58::ToBase58;
+        let hash = blake3::hash(&self.try_encode()?);
+        let encoded = hash.as_bytes().as_ref().to_base58();
+        format!("rule:{encoded}").parse().ok()
+    }
+
+    /// Canonical dag-cbor encoding, panicking if the rule has no
+    /// encodable body. Use on the storage path where the rule is known
+    /// to be storable (concept/formula bodies); prefer
+    /// [`try_encode`](Self::try_encode) otherwise.
+    pub fn encode(&self) -> Vec<u8> {
+        self.try_encode()
+            .expect("rule body must encode in formal notation")
+    }
+
+    /// Content-addressed identity, panicking if the rule has no
+    /// encodable body. Use on the storage path; prefer
+    /// [`try_this`](Self::try_this) otherwise.
+    pub fn this(&self) -> Entity {
+        self.try_this()
+            .expect("storable rule must have a content-addressed identity")
+    }
+
+    /// Rebuild a rule from its canonical dag-cbor [`encode`](Self::encode)
+    /// bytes. `Err` carries a human-readable reason — either the cbor
+    /// decode failed or the decoded descriptor didn't compile.
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let descriptor: InductiveRuleDescriptor = serde_ipld_dagcbor::from_slice(bytes)
+            .map_err(|e| format!("dag-cbor decode failed: {e}"))?;
+        descriptor.compile().map_err(|e| e.to_string())
     }
 
     /// Round-trip this rule back to its serializable form.

@@ -459,6 +459,36 @@ should run wherever the state change commits.
 | Reactor in `dialog-reactor::Commit::perform` (host) | step 0 of dialog's `Commit::perform` | native means no host loop; atomic with the seal |
 | `effect:system` well-known anchor | not adopted | tonk itself documents it as vestigial convention |
 
+## Prototype
+
+The core loop is implemented:
+
+- `dialog-query`: `InductiveRule` gained `encode`/`decode`/`this`
+  (content addressing, mirroring `DeductiveRule`).
+- `dialog-repository/src/rules.rs`: the `db.rule/induces` and
+  `db.rule/on` conventions, `on`-entity derivation from concept
+  premises (`when` + `unless`), and the `Induct` / `Transient`
+  statement wrappers.
+- `dialog-repository/.../transaction.rs`: `Transaction` gained a
+  transient bucket and `dispatch()`; `commit()` returns a
+  `TransactionCommit` that runs induction before delegating to
+  `Branch::commit`. Transients layer into `tx.query()`.
+- `dialog-repository/.../transaction/induce.rs`: the round loop —
+  touched-attribute probe of `db.rule/on` against the layered
+  transaction view, content-addressed hydration, body evaluation via
+  the standard planner/evaluator, head emission by cardinality,
+  `db.concept/transient` head routing, per-instruction novelty check,
+  `MAX_ROUNDS = 16`. End-to-end tests cover the command-triggered
+  increment, durable triggering with an `unless` guard enabled by a
+  retraction, a cascade through a transient intermediate, runaway
+  divergence, dispatch selectivity, and the unconsumed-command no-op.
+
+Not yet implemented (documented above): the trigger footprint and
+alpha-discrimination caches, delta-restricted evaluation, `retract!`
+polarity, and the commit receipt. Discovery currently probes the index
+uncached each round; the head-keyed cache disciplines are the next
+step.
+
 ## Open questions
 
 - **Delta-restriction mechanics.** Reusing the subscription

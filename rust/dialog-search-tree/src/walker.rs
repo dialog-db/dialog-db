@@ -754,7 +754,7 @@ mod walker_novelty_tests {
             expected.push((key, value));
 
             // Every write so far must be readable, by scan and by point read.
-            expected.sort_by(|(a, _), (b, _)| a.cmp(b));
+            expected.sort_by_key(|(k, _)| *k);
             let mut seen = Vec::new();
             {
                 let stream = tree.stream_range(.., &storage);

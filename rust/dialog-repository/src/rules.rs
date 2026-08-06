@@ -33,12 +33,14 @@
 //!   the overlay in its own layer is what makes the "overlay rule masked
 //!   by a head-keyed cache" bug structurally impossible.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
 
 use dialog_artifacts::history::REVISION_ATTRIBUTE;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{Artifact, ArtifactSelector, Attribute, Changes, Entity, Value};
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, Attribute, Changes, Entity, Statement, Update, Value,
+};
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, PlanCache};
 use dialog_query::error::EvaluationError;
@@ -46,8 +48,8 @@ use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
 use dialog_query::type_system::Type as Kind;
 use dialog_query::types::Any;
 use dialog_query::{
-    AttributeQuery, Cardinality, ConceptQuery, DeductiveRule, Descriptor, FormulaQuery, Parameters,
-    Premise, Proposition, Term, the,
+    AttributeQuery, Cardinality, ConceptQuery, DeductiveRule, Descriptor, FormulaQuery,
+    InductiveRule, Parameters, Premise, Proposition, Term, the,
 };
 use parking_lot::RwLock;
 
@@ -58,8 +60,136 @@ fn conclusion_attr() -> Attribute {
     the!("db.rule/conclusion").into()
 }
 
+/// The `db.rule/induces` index attribute — the inductive sibling of
+/// `db.rule/conclusion`, kept separate so deductive resolution never
+/// hydrates (and discards) inductive rules concluding a queried
+/// concept.
+pub(crate) fn induces_attr() -> Attribute {
+    the!("db.rule/induces").into()
+}
+
+/// The `db.rule/on` trigger-index attribute: one claim per attribute an
+/// inductive rule's concept premises name, valued `on:<domain>/<name>`.
+/// This is the index commit-time dispatch probes by touched attribute.
+pub(crate) fn on_attr() -> Attribute {
+    the!("db.rule/on").into()
+}
+
+/// The `db.concept/transient` marker attribute. A concept carrying it
+/// is a *command*: facts of it dispatched into a transaction (and heads
+/// of rules concluding it) live for one induction round and are never
+/// committed.
+pub(crate) fn transient_attr() -> Attribute {
+    the!("db.concept/transient").into()
+}
+
+/// The `on:<domain>/<name>` trigger-index entity for an attribute.
+/// Derivable from a runtime instruction alone — no schema lookup —
+/// which is what keeps dispatch probing cheap.
+pub(crate) fn on_entity(attribute: &Attribute) -> Option<Entity> {
+    format!("on:{attribute}").parse().ok()
+}
+
+/// The trigger-index entities for an inductive rule: one per attribute
+/// named by any concept premise, `when` and `unless` alike. `unless`
+/// premises are indexed because a *retraction* can newly enable a rule
+/// (the guard it failed on clears). Formula and constraint premises
+/// contribute nothing; attribute-query premises can't occur in stored
+/// rules (they have no formal-notation encoding).
+pub(crate) fn on_entities(rule: &InductiveRule) -> BTreeSet<Entity> {
+    let descriptor = rule.descriptor();
+    let mut entities = BTreeSet::new();
+    for proposition in descriptor.when.iter().chain(descriptor.unless.iter()) {
+        if let Proposition::Concept(query) = proposition {
+            for (_, field) in query.predicate.with().iter() {
+                let attribute: Attribute = field.descriptor().the().clone().into();
+                if let Some(entity) = on_entity(&attribute) {
+                    entities.insert(entity);
+                }
+            }
+        }
+    }
+    entities
+}
+
+/// Hydrate a compiled [`InductiveRule`] from a `db.rule/source` claim
+/// value (the canonical dag-cbor
+/// [`InductiveRuleDescriptor`](dialog_query::rule::inductive::descriptor::InductiveRuleDescriptor)).
+pub(crate) fn hydrate_inductive(source: &[u8]) -> Result<InductiveRule, EvaluationError> {
+    InductiveRule::decode(source)
+        .map_err(|reason| EvaluationError::Store(format!("inductive rule hydrate: {reason}")))
+}
+
+/// [`Statement`] wrapper installing an [`InductiveRule`] as `db.rule/*`
+/// facts: the `source` body (shared attribute with deductive rules —
+/// hydration dispatches on the head field), the `induces` head index,
+/// and the `on` trigger index dispatch probes by touched attribute.
+///
+/// ```no_run
+/// # use dialog_repository::{Branch, Induct};
+/// # use dialog_query::InductiveRule;
+/// # fn example(branch: &Branch, rule: InductiveRule) {
+/// let tx = branch.transaction().assert(Induct(rule));
+/// # let _ = tx;
+/// # }
+/// ```
+pub struct Induct(pub InductiveRule);
+
+impl Statement for Induct {
+    fn assert(self, update: &mut impl Update) {
+        let rule_entity = self.0.this();
+        update.associate(
+            source_attr(),
+            rule_entity.clone(),
+            Value::Bytes(self.0.encode()),
+        );
+        update.associate(
+            induces_attr(),
+            rule_entity.clone(),
+            Value::Entity(self.0.conclusion().this()),
+        );
+        for on in on_entities(&self.0) {
+            update.associate(on_attr(), rule_entity.clone(), Value::Entity(on));
+        }
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        let rule_entity = self.0.this();
+        update.dissociate(
+            source_attr(),
+            rule_entity.clone(),
+            Value::Bytes(self.0.encode()),
+        );
+        update.dissociate(
+            induces_attr(),
+            rule_entity.clone(),
+            Value::Entity(self.0.conclusion().this()),
+        );
+        for on in on_entities(&self.0) {
+            update.dissociate(on_attr(), rule_entity.clone(), Value::Entity(on));
+        }
+    }
+}
+
+/// [`Statement`] wrapper declaring a concept transient: facts of it are
+/// commands, dispatched rather than asserted, living for one induction
+/// round and never committed. The marker is a branch-level fact — it is
+/// deliberately not part of the concept's content address, so the same
+/// descriptor is durable on one branch and transient on another.
+pub struct Transient(pub Entity);
+
+impl Statement for Transient {
+    fn assert(self, update: &mut impl Update) {
+        update.associate(transient_attr(), self.0, Value::Boolean(true));
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        update.dissociate(transient_attr(), self.0, Value::Boolean(true));
+    }
+}
+
 /// The `db.rule/source` body attribute, validated at compile time.
-fn source_attr() -> Attribute {
+pub(crate) fn source_attr() -> Attribute {
     the!("db.rule/source").into()
 }
 

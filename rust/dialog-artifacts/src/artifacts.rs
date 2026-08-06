@@ -1142,13 +1142,10 @@ mod tests {
             cause: None,
         };
         let after_root = facts
-            .commit(
-                vec![
-                    Instruction::Assert(transient.clone()),
-                    Instruction::Retract(transient.clone()),
-                ]
-                .into_iter(),
-            )
+            .commit(vec![
+                Instruction::Assert(transient.clone()),
+                Instruction::Retract(transient.clone()),
+            ])
             .await?;
 
         // No tree churn: the novel fact left no key at all.
