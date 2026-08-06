@@ -725,6 +725,54 @@ guard-free-termination zone for rules; that converges with the
 existing divergence-clock and merge work rather than adding a new
 track.
 
+### Monotonicity: exploit the layer that already has it
+
+Dialog does not need to *become* monotone — the layering already is:
+the history index is an append-only log of caused claim records and
+revision records (a grow-only set), and the active EAV/AEV/VAE
+indexes are a *fold* over it — the current frontier. Dropping
+superseded values from active indexes is view maintenance, not
+information loss; the supersession survives in history *as a fact*.
+Likewise the non-monotone semantics are already lattices in disguise:
+a cardinality-one attribute with causal supersession is a causal
+register (monotone in version even as the readout flips); caused
+retraction over cardinality-many is an OR-set. The opportunities are
+about declaring and exploiting this, not restructuring:
+
+1. **Let rules read the monotone face.** Every non-monotone state
+   change has a monotone shadow: "X was retracted" is anti-monotone
+   over active state but a positive, append-only fact in history —
+   Dedalus's `del`-event move, with the event facts already
+   materialized and indexed. A rule premised on a history/event
+   concept (the built-in `Revision` projections are the precedent)
+   instead of an `unless` over active state becomes monotone: it
+   enters the CALM-safe zone for partial replicas, and polarity
+   discrimination works again because only assertions of event facts
+   exist.
+2. **Declare per-attribute merge types** (Bloom^L): causal register
+   and OR-set as the defaults dialog effectively has, plus counters,
+   min/max, bounded enums, thresholds. Branch merge becomes pointwise
+   lattice join computed from history causes — deterministic and
+   coordination-free — and threshold guards (`when count >= 3` over a
+   grow-only counter) are monotone where absence guards are not:
+   prefer thresholds over absence wherever the quantity only accrues.
+3. **Termination needs height, not just monotonicity.** An
+   inflationary rule over an infinite-height lattice (`?c + 1`; a
+   causal register's ever-advancing version) still diverges. Typed
+   lattices therefore don't retire `MAX_ROUNDS`; they give the
+   productivity lint a *sound green zone*: a rule concluding only
+   finite-height cells (booleans, bounded enums, sets over bounded
+   domains) is provably quiescent at install. Classify, don't force.
+
+Unifying observation: `unless` is sound locally because the frozen
+round view is a **seal** — the instant is known-complete. The
+replication criterion ("authoritative for negated ranges") is the
+same seal distributed: "range complete through context C," with the
+divergence clock as the natural watermark carrier. Frozen rounds,
+branch heads, and replication authority are one concept at three
+scopes; making sealing first-class lets non-monotone rules run at
+replicas exactly when their negated ranges are sealed.
+
 ## Divergences from tonk's implementation
 
 | tonk | dialog native | why |
