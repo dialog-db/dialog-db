@@ -773,6 +773,85 @@ branch heads, and replication authority are one concept at three
 scopes; making sealing first-class lets non-monotone rules run at
 replicas exactly when their negated ranges are sealed.
 
+### Event premises are instant-scoped, and evaluate against the stimulus
+
+The mechanism for "rules read the monotone face" is *not* scanning
+the history region: an event premise over all of history would
+re-match every old event at every probe (novelty would suppress the
+duplicates at O(history) cost). The right semantics is Dedalus's
+`del@now`: **an event premise refers to the current instant's events
+only** — and the instant's events are exactly the round's stimulus.
+So the implementation reifies the round's instruction delta as one
+more queryable overlay layer (the same mechanism the transient
+overlay uses), with event-shaped facts per touched attribute; an
+event premise queries that layer and never touches stored history.
+History remains the durable record of the same events for audit and
+retroactive deductive queries — a different consumer.
+
+The dispatch entries for event premises carry polarity in the key
+(`on:retract:<attr>` / `on:assert:<attr>`), which gives polarity
+discrimination at the index level for free. Cascade cleanup phrases
+positively — `retract! session/token when
+retracted(user/active){of: ?u}, session/token{user: ?u}` — no
+`unless`, so the body is monotone: CALM-safe and it fires exactly at
+the commit containing the retraction. The unifying framing: **the
+transaction's own delta is a system-provided transient relation** —
+tonk turned DOM events into transient facts; this turns every
+commit's instructions into them.
+
+### Merge types extend `cardinality`; counters are contribution sets
+
+`cardinality` is already the merge-type field: `one` is a causal LWW
+register, `many` an OR-set — its first two lattices. Counters and
+aggregators extend the same axis rather than overloading `as:` (the
+value type — the readout stays an integer):
+
+```yaml
+attribute: &votes
+  the: poll.option/votes
+  as: UnsignedInteger
+  cardinality: sum        # one | many | sum | max | min | count …
+```
+
+A `sum` attribute stores **contribution facts** (cardinality-many
+under the hood); the value is a readout fold over them. Branch merge
+is then set union of contributions — the existing many-merge, no
+numeric merge path, PN-counter semantics with negative contributions.
+A rule head "incrementing" emits a contribution whose entity is
+content-derived from (rule, bindings): re-derivation produces the
+same fact and novelty dedups it structurally — exactly-once per
+distinct trigger. Threshold guards over sums are monotone. The
+engineering lift is the readout: aggregation in the query engine
+(fold over the contribution scan; incremental maintenance later).
+`avg` is not a lattice but `(sum, count)` is, divided at readout.
+Merge types live inside content addresses, so new types are for new
+attributes.
+
+### The quiescence green zone is a syntactic check
+
+Monotone is not enough for guard-free termination — the lattice also
+needs **finite height** (`?c + 1` is inflationary and never
+arrives). But finite height reduces to Datalog's classic condition,
+**no value invention**: a head that only recombines premise-bound
+values has a finite reachable fact space, and inflationary
+derivation over it must quiesce. Install-time certification is a
+taint walk over the existing `AnalyzedRule` dependency graph:
+
+- **proven** — durable, assert-polarity head (transient and retract
+  heads excluded: expiry and removal are the anti-monotone devices)
+  with no head variable tainted by a formula output. No guard
+  needed; exempt from the round budget.
+- **guarded** — carries the `unless`-own-head idempotence guard;
+  quiescent by construction.
+- **bounded** — everything else, under `MAX_ROUNDS`, with the lint
+  naming the taint path ("`count` flows through `math/sum` and the
+  rule reads `counter/count`").
+
+The merge-type design feeds this: an increment written as a
+`cardinality: sum` contribution has no formula-tainted head — the
+arithmetic moved into the readout — so the counter migrates from
+`bounded` to `proven` by changing where the addition lives.
+
 ## Divergences from tonk's implementation
 
 | tonk | dialog native | why |
