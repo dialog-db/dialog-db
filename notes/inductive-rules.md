@@ -42,9 +42,13 @@ Standing answers to recurring questions:
 
 - *Cross-replica effects*: two rules — the event mints a durable
   obligation (replicates), a level-triggered consumer applies it
-  against each replica's slice. No engine change; a host bridges
-  remote application via subscription → dispatch until pull-induction
-  exists.
+  against each replica's slice. Under the watermark model the
+  consumer fires natively as the marker arrives by pull; until then a
+  host bridges via subscription → dispatch.
+- *Completion-by-merge* (P at replica A, Q at replica B, body needs
+  both): resolved by the watermark model — induction follows a
+  durable per-branch watermark and every head advance, commit or
+  pull, is an instant.
 - *Rules that keep matching*: quiescence is the novelty fixed point;
   no polling exists between commits; only value-generating or
   polarity-oscillating cascades diverge, and `MAX_ROUNDS` fails the
@@ -532,16 +536,17 @@ structure.
 Two deliberate restrictions, both inherited from tonk and kept even
 though durable triggers would make the alternatives tempting:
 
-- **Pull does not induce.** Rules fire at the peer that *commits* the
+- **Pull does not induce** *(v1 stance — superseded by the watermark
+  model, below).* Rules fire at the peer that *commits* the
   triggering change; the derived facts then replicate as ordinary
-  facts. Firing on pull would double-fire every rule at every replica
-  (divergence for non-idempotent heads, wasted work for idempotent
-  ones) and would break partial replication — a peer holding a slice of
-  the data cannot soundly evaluate bodies that join beyond its slice.
-  The consequence to document loudly: an effect's rule must be
-  installed on (or reachable by) the branch where the triggering writes
-  are committed. A "reactor peer" that pulls, and whose own commits
-  then induce, is a host-level topology, not a dialog mechanism.
+  facts. This is the conservative simplification: it avoids
+  double-firing and never evaluates a body over a slice the replica
+  doesn't hold — but it is structurally blind to completion-by-merge,
+  and the watermark model ("every head advance is an instant")
+  resolves both concerns more precisely: novelty dedups deterministic
+  heads across replicas, and the CALM/seal criterion — not the pull
+  boundary — is what actually gates non-monotone bodies on partial
+  slices.
 - **Installation is not retroactive.** Installing a rule does not fire
   it against pre-existing matching state — triggers fire on changes,
   and installation changes only `db.rule/*`. Backfill is an explicit
@@ -842,6 +847,52 @@ standing condition — the queue's "nothing active," every idempotence
 guard; no event formulation expresses it), events are *transitions*.
 Events take over only the transition-shaped work absence was doing
 badly; the non-monotone zone shrinks, its core remains.
+
+Commands unify into this picture as sugar: tonk's sweep is a system
+rule `retract! C when C` installed by the `transient` marker; the
+engine's transient bucket is then an optimization (skip the
+assert-and-cancel history noise), not a semantic primitive.
+
+### The watermark model: every head advance is an instant
+
+Commit-time-only induction has a structural blind spot:
+**completion-by-merge is nobody's commit.** Replica A asserts P,
+replica B asserts Q, and the body P ∧ Q first becomes true at the
+merge — a pull, which does not induce, so the rule never fires
+anywhere.
+
+The fix generalizes "expose the revision": every datum is already
+version-tagged, so induction keeps a **durable per-branch watermark**
+— the last revision through which rules have evaluated — and the
+stimulus is always *facts with version in (watermark, head]*. A
+commit advances the head by its own delta; a pull advances it by the
+merged-in novelty; both flow through the same induce and advance the
+watermark. Consequences:
+
+- Completion-by-merge fires exactly where the conjunction first
+  exists. "Fires at the committing peer" becomes "fires at every
+  replica as facts arrive," idempotently.
+- `asserted:` / `retracted:` premises are version-range constraints
+  against already-tagged data; the in-memory round delta is an
+  optimization of the range read.
+- The obligation pattern needs no host bridge: a marker arriving by
+  pull advances the watermark and triggers its consumer natively.
+- Crash-safety and resumability fall out: watermark behind head ⇒
+  catch up at next open. (This is differential dataflow's *frontier*
+  / a consumer offset — reconverging with DBSP vocabulary from the
+  stateless side.)
+- Cross-replica double-firing largely self-resolves: replicas derive
+  the *same* head triples from the same bindings and the novelty
+  check dedups on merge — deterministic heads are convergent.
+
+Still gated, watermark or not: `unless`-rules at partial replicas
+(the CALM/seal criterion decides who may evaluate absence), and
+external side effects at the host seam need receipt-dedup, since two
+replicas may both observe a firing.
+
+This supersedes the blanket "pull does not induce" stance: the
+principled statement is **induction follows the watermark, and every
+head advance — commit or pull — is an instant**.
 
 **Across replicas, edge-triggered effects do not self-heal.** An
 event happens at one commit at one site; if that site's slice misses
