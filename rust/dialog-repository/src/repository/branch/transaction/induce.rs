@@ -152,6 +152,41 @@ where
         // earlier rounds).
         let overlay = OverlayTriggers::scan(changes);
 
+        // Installation handles current state: a rule is itself a fact,
+        // so the circumstance "rule exists ∧ premises hold" completes
+        // at the commit that installs it — the same instant semantics
+        // as any other conjunction, and the propagator discipline
+        // (attaching alerts once over current contents). An installed
+        // inductive rule (its `db.rule/on` rows in this stimulus —
+        // whether staged here or arriving through the watermark lag)
+        // becomes a full-evaluation candidate; an installed deductive
+        // rule (its `db.rule/reads` rows) makes its conclusions
+        // derived-touched, so rules premised on the newly derivable
+        // concepts re-evaluate.
+        let on = on_attr();
+        let reads = reads_attr();
+        let mut installed: BTreeSet<Entity> = BTreeSet::new();
+        let mut installed_deductive: BTreeSet<Entity> = BTreeSet::new();
+        for instruction in &stimulus {
+            if let Instruction::Assert(a) | Instruction::Replace(a) = instruction {
+                if a.the == on {
+                    installed.insert(a.of.clone());
+                } else if a.the == reads {
+                    installed_deductive.insert(a.of.clone());
+                }
+            }
+        }
+        for entity in &installed_deductive {
+            let Some(body) = dispatch.deductive(entity, &overlay, env).await? else {
+                continue;
+            };
+            for (_, field) in body.conclusion().with().iter() {
+                // Inserted after the `direct` snapshot, so these land
+                // in the expanded set and force full evaluation.
+                touched.insert(field.descriptor().the().clone().into());
+            }
+        }
+
         // The frozen round view: branch ⊕ durable changes ⊕ this
         // round's transients, through the same layered QueryEnv a
         // transaction query uses, so rule bodies read exactly what a
@@ -181,6 +216,7 @@ where
             };
             candidates.extend(dispatch.triggers(&on, &overlay, env).await?);
         }
+        candidates.extend(installed.iter().cloned());
 
         // Attributes only reachable through the deductive closure: a
         // candidate premised on one changed *derivedly*, which a base
@@ -205,9 +241,10 @@ where
             // a retracted or superseded fact) and premises that
             // changed derivedly through the deductive closure.
             let (positive_attrs, unless_attrs) = premise_attrs(&rule);
-            let full = expanded
-                .iter()
-                .any(|a| positive_attrs.contains(a) || unless_attrs.contains(a))
+            let full = installed.contains(&entity)
+                || expanded
+                    .iter()
+                    .any(|a| positive_attrs.contains(a) || unless_attrs.contains(a))
                 || retract_attrs.iter().any(|a| unless_attrs.contains(a))
                 || replace_attrs.iter().any(|a| unless_attrs.contains(a));
             if full {
@@ -488,25 +525,7 @@ impl<'a> Dispatch<'a> {
             readers.retain(|entity| !overlay.removed.contains(entity));
 
             for reader in readers {
-                // Hydrate the deductive body: content-addressed cache,
-                // then overlay bytes, then the committed source claim.
-                // A dangling or undecodable entry is skipped like any
-                // dangling index entry.
-                let body = match cache.body(&reader) {
-                    Some(body) => Some(body),
-                    None => {
-                        let bytes = match overlay.sources.get(&reader) {
-                            Some(bytes) => Some(bytes.clone()),
-                            None => self.source_bytes(&reader, env).await?,
-                        };
-                        bytes
-                            .and_then(|bytes| hydrate(&bytes).ok())
-                            .inspect(|body| {
-                                cache.record_body(reader.clone(), body.clone());
-                            })
-                    }
-                };
-                let Some(body) = body else {
+                let Some(body) = self.deductive(&reader, overlay, env).await? else {
                     continue;
                 };
                 for (_, field) in body.conclusion().with().iter() {
@@ -518,6 +537,40 @@ impl<'a> Dispatch<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Hydrate a deductive body: content-addressed cache, then overlay
+    /// bytes, then the committed source claim. A dangling or
+    /// undecodable entry yields `None`, skipped like any dangling
+    /// index entry.
+    async fn deductive<Env>(
+        &self,
+        entity: &Entity,
+        overlay: &OverlayTriggers,
+        env: &Env,
+    ) -> Result<Option<dialog_query::DeductiveRule>, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let cache = self.branch.rule_cache();
+        if let Some(body) = cache.body(entity) {
+            return Ok(Some(body));
+        }
+        let bytes = match overlay.sources.get(entity) {
+            Some(bytes) => Some(bytes.clone()),
+            None => self.source_bytes(entity, env).await?,
+        };
+        Ok(bytes
+            .and_then(|bytes| hydrate(&bytes).ok())
+            .inspect(|body| {
+                cache.record_body(entity.clone(), body.clone());
+            }))
     }
 
     /// Hydrate the inductive rule stored at `entity`:
@@ -1854,6 +1907,177 @@ mod tests {
             values(&branch, &operator, "result.second/target", &command).await?,
             vec![Value::Entity(target)],
             "the rule installed after the cache warmed must fire too"
+        );
+        Ok(())
+    }
+
+    /// Installation handles current state: a rule installed *after*
+    /// its premises already hold fires at the install commit — the
+    /// circumstance "rule exists ∧ premises hold" completes there.
+    #[dialog_common::test]
+    async fn it_applies_an_installed_rule_to_current_state() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // The matching state exists first.
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("hello".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // Installing the rule is the completing transition.
+        branch
+            .transaction()
+            .assert(Induct(tagger()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "derived/tag", &doc).await?,
+            vec![Value::String("hello".to_string())],
+            "an installed rule must fire over already-matching state"
+        );
+        Ok(())
+    }
+
+    /// Installing a consumption rule drains the backlog: existing
+    /// facts matching the body are retracted at the install commit.
+    #[dialog_common::test]
+    async fn it_drains_a_backlog_when_a_consumption_rule_installs() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let drain: InductiveRule = serde_json::from_value(json!({
+            "retract!": {
+                "with": { "body": { "the": "queue.item/body", "as": "Text" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "body": { "the": "queue.item/body", "as": "Text" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "body": { "?": { "name": "body" } }
+                }
+            }]
+        }))?;
+
+        let item: Entity = "item:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("queue.item/body")
+                    .of(item.clone())
+                    .is("pending".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(Induct(drain))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            values(&branch, &operator, "queue.item/body", &item)
+                .await?
+                .is_empty(),
+            "installing a consumption rule must drain the existing backlog"
+        );
+        Ok(())
+    }
+
+    /// Installing a *deductive* rule makes concepts newly derivable
+    /// over existing base facts; inductive rules premised on them must
+    /// re-evaluate at that install commit.
+    #[dialog_common::test]
+    async fn it_reevaluates_when_a_deductive_rule_installs() -> Result<()> {
+        use crate::rules::Deduce;
+        use dialog_query::DeductiveRule;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alert: InductiveRule = serde_json::from_value(json!({
+            "assert!": {
+                "with": { "duty": { "the": "alert/duty", "as": "Text" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "duty": { "?": { "name": "duty" } }
+                }
+            }]
+        }))?;
+
+        // The inductive rule and the base fact exist; the status
+        // concept is not derivable yet, so nothing fires.
+        let actor: Entity = "actor:1".parse()?;
+        branch
+            .transaction()
+            .assert(Induct(alert))
+            .assert(
+                dialog_query::the!("shift/duty")
+                    .of(actor.clone())
+                    .is("on-duty".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            values(&branch, &operator, "alert/duty", &actor)
+                .await?
+                .is_empty(),
+            "nothing derives the status yet"
+        );
+
+        // Installing the projection is the completing transition: the
+        // status becomes derivable over the existing shift fact.
+        let status: DeductiveRule = serde_json::from_value(json!({
+            "deduce": {
+                "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "duty": { "the": "shift/duty", "as": "Text" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "duty": { "?": { "name": "duty" } }
+                }
+            }]
+        }))?;
+        branch
+            .transaction()
+            .assert(Deduce(status))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "alert/duty", &actor).await?,
+            vec![Value::String("on-duty".to_string())],
+            "installing the deductive rule must re-evaluate its dependents"
         );
         Ok(())
     }

@@ -79,6 +79,10 @@ Standing answers to recurring questions:
   one command), use the `unless`-own-head guard as the edge detector
   ("once per novel value"), and ask retroactive transition questions
   deductively against history.
+- *Installing a rule over matching state*: it fires at the install
+  commit — the rule is a fact, and "rule ∧ premises" completes there
+  (implemented; installing a consumption rule drains the backlog).
+  Watermark adoption stays fire-forward.
 - *Rules that keep matching*: quiescence is the novelty fixed point;
   no polling exists between commits; only value-generating or
   polarity-oscillating cascades diverge, and `MAX_ROUNDS` fails the
@@ -577,17 +581,26 @@ though durable triggers would make the alternatives tempting:
   heads across replicas, and the CALM/seal criterion — not the pull
   boundary — is what actually gates non-monotone bodies on partial
   slices.
-- **Installation is not retroactive.** Installing a rule does not fire
-  it against pre-existing matching state — triggers fire on changes,
-  and installation changes only `db.rule/*`. Backfill is an explicit
-  act: a one-shot transaction (or command-triggered rule) that touches
-  the relevant state, or a deductive rule when the conclusion should
-  simply *be* the view of existing facts. This is also what keeps
-  branch-open cheap: no scan for a backlog of pending triggers.
+- **Installation handles current state** *(v1 said "not retroactive"
+  — reversed, and the reversal is the model applied honestly)*. A rule
+  is itself a fact, so the circumstance "rule exists ∧ premises hold"
+  *completes at the install commit* — the same instant semantics as
+  any other conjunction, and the propagator discipline: attaching a
+  propagator alerts it once over current cell contents. Implemented:
+  a rule whose `db.rule/on` rows appear in the round's stimulus
+  (staged in this commit or arriving through the watermark lag — so
+  rules delivered by pull apply at the receiving replica) becomes a
+  full-evaluation candidate; an installed *deductive* rule's
+  conclusions join the touched set as derived, re-evaluating its
+  dependents. A pleasant consequence: installing a consumption rule
+  drains the existing backlog. What stays fire-forward is watermark
+  *adoption* (`None` → head): turning the engine on over an old
+  branch is not an installation instant.
 
 The line between the two kinds stays sharp: **deductive rules answer
-"what is true now" retroactively and everywhere; inductive rules answer
-"what happens next" at the commit that causes it.**
+"what is true now" retroactively and everywhere; inductive rules
+answer "what happens next" at the commit that causes it** — with
+installation itself counting as a cause.
 
 ### Caching
 
@@ -1124,9 +1137,9 @@ quiescence lint, `at: replica` placement, and the commit receipt.
   a write transient (tonk tags at the wire: `{"kind": "transient"}`).
   Probably a `dispatch` sibling of `assert` in the transaction
   notation rather than anything on the concept reference.
-- **Backfill API.** Is fire-forward-only + manual backfill enough, or
-  should there be an explicit `induce(rule)` operation that runs one
-  rule against current state once, transactionally?
+- ~~**Backfill API.**~~ Resolved: installation handles current state
+  (the install commit is the completing transition), so there is
+  nothing to backfill manually.
 - **Footprint representation.** Exact set vs. bloom filter; whether it
   should live beside `node_cache`/`RuleCache` on `Branch` (it should)
   and how it folds in overlay-staged rules (read fresh, like all
