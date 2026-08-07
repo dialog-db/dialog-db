@@ -40,9 +40,12 @@ ends in "keep it, add X later." The X's, in order:
    (planned under the seeded scope); the full-body fallback covers
    removal-enabled firings (`unless` over retracted or superseded
    facts) and candidates probed through the deductive closure.
-4. **Event premises** (`asserted:`/`retracted:` over the round's
-   stimulus, generalizing to version ranges under the watermark
-   model) — monotone transition triggers, first-class. Next.
+4. **The watermark model** — induction driven by a durable per-branch
+   watermark over version-tagged facts, so every head advance (commit
+   *or* pull) is an instant. Fixes completion-by-merge and makes
+   invariant rules self-healing across replicas. Next.
+   (~~Event premises~~ — withdrawn: commands, guards, and consumption
+   cover every transition-shaped use; see "No event premises" below.)
 5. **`cardinality: sum`** — counters as contribution facts with a
    readout fold.
 6. Only on demonstrated pain: alpha discrimination, the quiescence
@@ -51,15 +54,21 @@ ends in "keep it, add X later." The X's, in order:
 
 Standing answers to recurring questions:
 
-- *Cross-replica effects*: two rules — the event mints a durable
-  obligation (replicates), a level-triggered consumer applies it
-  against each replica's slice. Under the watermark model the
-  consumer fires natively as the marker arrives by pull; until then a
-  host bridges via subscription → dispatch.
+- *Cross-replica effects*: write them as **invariant rules** (state
+  condition + `unless` guard, e.g. "tokens exist only for active
+  users") — level-triggered, self-healing, each replica enforcing its
+  slice. Durable obligation facts remain the pattern for genuinely
+  edge-shaped work; until the watermark model lands, a host bridges
+  remote application via subscription → dispatch.
 - *Completion-by-merge* (P at replica A, Q at replica B, body needs
   both): resolved by the watermark model — induction follows a
   durable per-branch watermark and every head advance, commit or
   pull, is an instant.
+- *Reacting to transitions*: no event premises — premise on the
+  explicit command that requests the change (multiple rules may watch
+  one command), use the `unless`-own-head guard as the edge detector
+  ("once per novel value"), and ask retroactive transition questions
+  deductively against history.
 - *Rules that keep matching*: quiescence is the novelty fixed point;
   no polling exists between commits; only value-generating or
   polarity-oscillating cascades diverge, and `MAX_ROUNDS` fails the
@@ -792,16 +801,13 @@ register (monotone in version even as the readout flips); caused
 retraction over cardinality-many is an OR-set. The opportunities are
 about declaring and exploiting this, not restructuring:
 
-1. **Let rules read the monotone face.** Every non-monotone state
-   change has a monotone shadow: "X was retracted" is anti-monotone
-   over active state but a positive, append-only fact in history —
-   Dedalus's `del`-event move, with the event facts already
-   materialized and indexed. A rule premised on a history/event
-   concept (the built-in `Revision` projections are the precedent)
-   instead of an `unless` over active state becomes monotone: it
-   enters the CALM-safe zone for partial replicas, and polarity
-   discrimination works again because only assertions of event facts
-   exist.
+1. **Model change requests as commands** — the Dedalus `del_p` move
+   done faithfully: the *request* for a change is an explicit
+   transient fact rules premise on positively, rather than a
+   system-observed transition. (An earlier draft proposed inductive
+   event premises over history/the delta; withdrawn — see "No event
+   premises." History remains the monotone face for *deductive*,
+   retroactive questions about transitions.)
 2. **Declare per-attribute merge types** (Bloom^L): causal register
    and OR-set as the defaults dialog effectively has, plus counters,
    min/max, bounded enums, thresholds. Branch merge becomes pointwise
@@ -826,43 +832,100 @@ branch heads, and replication authority are one concept at three
 scopes; making sealing first-class lets non-monotone rules run at
 replicas exactly when their negated ranges are sealed.
 
-### Event premises are instant-scoped, and evaluate against the stimulus
+### No event premises: commands, guards, and consumption cover it
 
-The mechanism for "rules read the monotone face" is *not* scanning
-the history region: an event premise over all of history would
-re-match every old event at every probe (novelty would suppress the
-duplicates at O(history) cost). The right semantics is Dedalus's
-`del@now`: **an event premise refers to the current instant's events
-only** — and the instant's events are exactly the round's stimulus.
-So the implementation reifies the round's instruction delta as one
-more queryable overlay layer (the same mechanism the transient
-overlay uses), with event-shaped facts per touched attribute; an
-event premise queries that layer and never touches stored history.
-History remains the durable record of the same events for audit and
-retroactive deductive queries — a different consumer.
+An earlier revision of this note proposed `asserted:` / `retracted:`
+event premises (instant-scoped transition triggers). **Withdrawn** —
+worked through concretely, every use case is covered better by the
+three mechanisms the design already has, and the prior art agrees.
 
-The dispatch entries for event premises carry polarity in the key
-(`on:retract:<attr>` / `on:assert:<attr>`), which gives polarity
-discrimination at the index level for free. Cascade cleanup phrases
-positively — `retract! session/token when
-retracted(user/active){of: ?u}, session/token{user: ?u}` — no
-`unless`, so the body is monotone: CALM-safe and it fires exactly at
-the commit containing the retraction. The unifying framing: **the
-transaction's own delta is a system-provided transient relation** —
-tonk turned DOM events into transient facts; this turns every
-commit's instructions into them.
+The cleanup case, state-based, no events anywhere:
 
-Event premises do **not** retire `unless`. The taxonomy: positive
-premises are state *presence*, `unless` is state *absence* (a
-standing condition — the queue's "nothing active," every idempotence
-guard; no event formulation expresses it), events are *transitions*.
-Events take over only the transition-shaped work absence was doing
-badly; the non-monotone zone shrinks, its core remains.
+```yaml
+rule!:
+  description: Tokens exist only for active users
+  retract!: session/token
+  when:
+    - assert: session/token
+      where: { this: ?t, user: ?u, secret: ?s }
+  unless:
+    - assert: user/active
+      where: { this: ?u }
+```
 
-Commands unify into this picture as sugar: tonk's sweep is a system
-rule `retract! C when C` installed by the `transient` marker; the
-engine's transient bucket is then an optimization (skip the
-assert-and-cancel history noise), not a semantic primitive.
+Retracting `user/active` fires it in that same commit (the `unless`
+index entry catches the removal); a token asserted *later* for an
+inactive user is also cleaned — the rule is an **invariant**, which
+is what one almost always wants and what the event version silently
+fails to be. Handled once: the firing consumes its enabling premise.
+Self-healing across replicas: the retraction replicates as state and
+each replica enforces the invariant over its slice at its next
+induction — the entire cross-replica obligation dance existed only
+because events are edge-triggered; the invariant form doesn't need
+it.
+
+Reacting to a deletion is premising on the deletion *request* — an
+explicit command, tonk's existing idiom (`wiki/delete-page`):
+
+```yaml
+command!: &user/deactivate
+  with:
+    user: { the: cmd.deactivate/user, as: entity }
+
+rule!:
+  retract!: user/active
+  when:
+    - assert: user/deactivate
+      where: { user: ?this }
+    - assert: user/active
+      where: { this: ?this }
+
+rule!:
+  description: Audit the deactivation
+  assert!: audit/deactivated
+  when:
+    - assert: user/deactivate
+      where: { this: ?cmd, user: ?u }
+```
+
+Multiple rules watch one command; the command is the event. And edge
+detection ("when it changed") is the idempotence guard:
+
+```yaml
+rule!:
+  description: Log every title a doc has carried
+  assert!: audit/title            # cardinality many
+  when:
+    - assert: doc/title
+      where: { this: ?doc, title: ?t }
+  unless:
+    - assert: audit/title
+      where: { this: ?doc, title: ?t }
+```
+
+Fires exactly once per novel value — the conclusion's presence is the
+seen-marker. Retroactive transition questions ("when was X
+retracted") are deductive queries over the history index.
+
+The receipts from prior art: **Dedalus has no event premises** —
+`del_p` is an ordinary transient fact someone *asserts* (a deletion
+request), persistence is an explicit frame rule, and rules that care
+premise on `del_p` like any fact. **Bloom** likewise: deletions and
+channel arrivals are scratch collections — explicit transient
+relations. What the withdrawn proposal actually was is CDC (SQL
+triggers' OLD/NEW, subscription deltas) — a different lineage with
+infamous composability problems. **Propagators** have no events for
+the deepest reason: they never need to know *that* something changed,
+only *what is now known*; handling is idempotent merging, so
+re-running is free and "handled once" isn't even a question. Dialog's
+engine as built is that discipline — state conditions, novelty,
+guards, consumption — and commands are its one explicit event
+mechanism, exactly as in Dedalus/Bloom.
+
+Commands unify further: tonk's sweep is a system rule `retract! C
+when C` installed by the `transient` marker; the engine's transient
+bucket is then an optimization (skip the assert-and-cancel history
+noise), not a semantic primitive.
 
 ### The watermark model: every head advance is an instant
 
@@ -883,11 +946,9 @@ watermark. Consequences:
 - Completion-by-merge fires exactly where the conjunction first
   exists. "Fires at the committing peer" becomes "fires at every
   replica as facts arrive," idempotently.
-- `asserted:` / `retracted:` premises are version-range constraints
-  against already-tagged data; the in-memory round delta is an
-  optimization of the range read.
-- The obligation pattern needs no host bridge: a marker arriving by
-  pull advances the watermark and triggers its consumer natively.
+- Invariant rules become fully self-healing with no host bridge: a
+  retraction (or any enabling state) arriving by pull advances the
+  watermark and the invariant is enforced at that replica natively.
 - Crash-safety and resumability fall out: watermark behind head ⇒
   catch up at next open. (This is differential dataflow's *frontier*
   / a consumer offset — reconverging with DBSP vocabulary from the
@@ -905,33 +966,20 @@ This supersedes the blanket "pull does not induce" stance: the
 principled statement is **induction follows the watermark, and every
 head advance — commit or pull — is an instant**.
 
-**Across replicas, edge-triggered effects do not self-heal.** An
-event happens at one commit at one site; if that site's slice misses
-join partners (tokens for the user held elsewhere), the effect is
-partial *permanently* — no later commit re-presents the trigger.
-Layered answer, weakest to strongest:
-
-1. *Demand-fetch at fire time*: the commit path already reads through
-   `NetworkedIndex`, and a body's evaluation is a demand expression —
-   the join can fault in the missing range when connected, sound to
-   the upstream's authority (the seal, again).
-2. *Convert edge to level*: the event mints a small durable monotone
-   **obligation** (`retracted(user/active){of: ?u}` ⇒ `assert!
-   cleanup/pending{user: ?u}`), which replicates like any fact; a
-   level-triggered consumer (`retract! session/token when
-   cleanup/pending{user}, session/token{user}`) fires wherever
-   obligation and token meet. Self-healing, idempotent (observed-
-   remove: a concurrently asserted token survives add-wins and the
-   standing obligation catches it later). Events are local;
-   intentions are replicated state.
-3. *…which is where pull-does-not-induce must grow an exception*: an
-   obligation arriving by pull won't trigger the consumer under the
-   blanket rule. Dedalus adjudicates — cross-site flow is `@async`;
-   arrival is an instant at the receiver whose rules may run. The
-   principled form: per-rule placement (`at: commit` default,
-   `at: replica` opt-in) admitting **certified-idempotent rules
-   only** to induce on pull — the green-zone certification's second
-   job. Classify, don't force, again.
+**Cross-replica effects, restated without events.** State-condition
+(level-triggered) rules are self-healing by construction: the
+enabling state replicates, and each replica enforces the rule over
+its slice when its watermark advances past the arrival. Commands are
+deliberately local (they never replicate); work that must cross
+replicas is expressed as durable state — either directly as an
+invariant rule, or, when the work is genuinely edge-shaped, as a
+durable **obligation** fact a command mints and a level-triggered
+consumer retires. Demand-fetch at fire time (`NetworkedIndex`
+faulting in a body's missing range) assists the connected case. What
+remains gated per replica is `unless` over a partial slice — the
+CALM/seal criterion — and pull-induction of a replica's rules should
+admit certified-idempotent rules first (the green-zone
+certification's second job).
 
 ### Merge types extend `cardinality`; counters are contribution sets
 
@@ -1037,9 +1085,9 @@ order"): `retract!` polarity, the head-keyed dispatch caches behind a
 `Dispatch` handle, and delta-restricted evaluation
 (`fire_seeded` / `premise_attrs` with the full-body fallback).
 
-Not yet implemented (documented above): event premises and the
-watermark model, alpha discrimination, `cardinality: sum`, the
-quiescence lint, `at: replica` placement, and the commit receipt.
+Not yet implemented (documented above): the watermark model, alpha
+discrimination, `cardinality: sum`, the quiescence lint,
+`at: replica` placement, and the commit receipt.
 
 ## Open questions
 
