@@ -582,11 +582,14 @@ though durable triggers would make the alternatives tempting:
   boundary — is what actually gates non-monotone bodies on partial
   slices.
 - **Installation handles current state** *(v1 said "not retroactive"
-  — reversed, and the reversal is the model applied honestly)*. A rule
-  is itself a fact, so the circumstance "rule exists ∧ premises hold"
-  *completes at the install commit* — the same instant semantics as
-  any other conjunction, and the propagator discipline: attaching a
-  propagator alerts it once over current cell contents. Implemented:
+  — reversed, and the reversal is the model applied honestly)*. There
+  is no install operation: "installing" a rule **is asserting its
+  facts** (`Induct` is an ordinary `Statement`), and uninstalling is
+  retracting them. A rule is itself a fact, so the circumstance "rule
+  exists ∧ premises hold" *completes at the commit that asserts the
+  rule* — the same instant semantics as any other conjunction, and the
+  propagator discipline: attaching a propagator alerts it once over
+  current cell contents. Implemented:
   a rule whose `db.rule/on` rows appear in the round's stimulus
   (staged in this commit or arriving through the watermark lag — so
   rules delivered by pull apply at the receiving replica) becomes a
