@@ -40,14 +40,24 @@ ends in "keep it, add X later." The X's, in order:
    (planned under the seeded scope); the full-body fallback covers
    removal-enabled firings (`unless` over retracted or superseded
    facts) and candidates probed through the deductive closure.
-4. **The watermark model** — induction driven by a durable per-branch
-   watermark over version-tagged facts, so every head advance (commit
-   *or* pull) is an instant. Fixes completion-by-merge and makes
-   invariant rules self-healing across replicas. Next.
+4. **The watermark model** — done: a replica-local `induction` cell
+   per branch records the last revision rules evaluated through; every
+   transaction commit catches up over the `(watermark, head]` tree
+   diff (EAV region, reserved namespace excluded) before its own
+   delta, and `Branch::induce` is the explicit no-changes instant to
+   call after a pull or raw commit. A `None` watermark adopts the head
+   fire-forward (no retroactive firing). Pinned by the raw-commit
+   catch-up, cross-instant conjunction completion, and
+   fire-forward-adoption tests.
    (~~Event premises~~ — withdrawn: commands, guards, and consumption
    cover every transition-shaped use; see "No event premises" below.)
-5. **`cardinality: sum`** — counters as contribution facts with a
-   readout fold.
+5. **Counters / aggregators — design needs a rethink.** The
+   contribution-facts representation (grow-only set + readout fold,
+   free set-union merge, exactly-once rule contributions) stands, but
+   `cardinality: sum` was the wrong surface: sum is not a cardinality.
+   The merge/aggregation discipline likely deserves its own axis in
+   the attribute descriptor, separate from both `as:` (value type)
+   and `cardinality:` (one/many). Unscheduled until that's settled.
 6. Only on demonstrated pain: alpha discrimination, the quiescence
    lint, `at: replica` placement / pull-induction, further lattice
    types.
@@ -981,7 +991,13 @@ CALM/seal criterion — and pull-induction of a replica's rules should
 admit certified-idempotent rules first (the green-zone
 certification's second job).
 
-### Merge types extend `cardinality`; counters are contribution sets
+### Merge types and counters — representation stands, surface under rethink
+
+*(The `cardinality: sum` surface proposed below is withdrawn — sum is
+not a cardinality. The contribution-set representation and its
+properties stand; the declaration likely deserves its own
+merge/aggregation axis in the attribute descriptor. Kept for the
+analysis until the axis is redesigned.)*
 
 `cardinality` is already the merge-type field: `one` is a causal LWW
 register, `many` an OR-set — its first two lattices. Counters and
@@ -1085,9 +1101,17 @@ order"): `retract!` polarity, the head-keyed dispatch caches behind a
 `Dispatch` handle, and delta-restricted evaluation
 (`fire_seeded` / `premise_attrs` with the full-body fallback).
 
-Not yet implemented (documented above): the watermark model, alpha
-discrimination, `cardinality: sum`, the quiescence lint,
-`at: replica` placement, and the commit receipt.
+The watermark model is implemented: a replica-local `induction` cell
+per branch, lag catch-up over the `(watermark, head]` tree diff in
+`induce` (`lag_delta`), watermark advance after every transaction
+commit, and `Branch::induce` as the explicit post-pull instant —
+pinned by `it_catches_up_over_a_raw_commit`,
+`it_completes_a_conjunction_across_instants`, and
+`it_adopts_a_branch_without_retroactive_firing`.
+
+Not yet implemented (documented above): alpha discrimination, the
+merge/aggregation axis (needs redesign — see decisions), the
+quiescence lint, `at: replica` placement, and the commit receipt.
 
 ## Open questions
 

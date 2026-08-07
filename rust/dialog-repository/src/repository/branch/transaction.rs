@@ -183,6 +183,48 @@ impl<'a> TransactionCommit<'a> {
         if self.canonicalize {
             commit = commit.canonicalize();
         }
-        Box::pin(commit.perform(env)).await
+        let revision = Box::pin(commit.perform(env)).await?;
+
+        // Advance the induction watermark: rules have now evaluated
+        // through this revision (induction ran over the commit's delta
+        // plus any lag, and the settled batch is what `revision`
+        // holds). A raced publish here at worst regresses the
+        // watermark, which re-induces a covered span — idempotent
+        // under the novelty check.
+        let cell = self.branch.induction_cell();
+        if cell.content().as_ref() != Some(&revision) {
+            cell.publish(revision.clone()).perform(env).await?;
+        }
+        Ok(revision)
+    }
+}
+
+impl Branch {
+    /// Run commit-time induction with no changes of this transaction's
+    /// own: catches inductive rules up over `(watermark, head]` — the
+    /// facts that entered the branch through pulls, raw commits, or a
+    /// crash-interrupted instant — and commits whatever durable
+    /// novelty they derive. A no-op (returning the unchanged head)
+    /// when the watermark is already at the head or the lag fires
+    /// nothing.
+    ///
+    /// This is the explicit post-pull instant: call it after
+    /// [`pull`](Self::pull) to let level-triggered rules enforce
+    /// themselves over the merged-in facts.
+    pub async fn induce<Env>(&self, env: &Env) -> Result<Revision, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        self.transaction().commit().perform(env).await
     }
 }

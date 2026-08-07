@@ -80,9 +80,14 @@ where
         + ConditionalSync
         + 'static,
 {
-    // Round 1 stimulus: everything the commit changes.
+    // Round 1 stimulus: everything the commit changes, plus the
+    // watermark lag — facts that entered the branch since the last
+    // inducing instant (a pull, a raw commit, a crash between publish
+    // and induce). Every head advance is an instant; the lag is how a
+    // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
     stimulus.extend(transients.clone().into_instructions());
+    stimulus.extend(lag_delta(branch, env).await?);
     if stimulus.is_empty() {
         return Ok(());
     }
@@ -620,6 +625,120 @@ impl<'a> Dispatch<'a> {
                 _ => None,
             }))
     }
+}
+
+/// The watermark lag: instructions for every fact that entered or
+/// left the branch between the induction watermark and the current
+/// head — arrivals as `Assert`, departures as `Retract`. Empty when
+/// the watermark is at the head (the steady state: the previous
+/// inducing instant advanced it).
+///
+/// A `None` watermark (this replica has never induced) adopts the
+/// current head *without* catch-up: induction is fire-forward — a
+/// newly installed rule does not fire retroactively over existing
+/// state, and neither does a newly adopted engine over an existing
+/// branch. Reserved-namespace facts (`dialog.*` version-control
+/// records, which every commit writes) are excluded from the lag, so
+/// catching up over N commits stimulates rules with the *data* those
+/// commits changed, not their bookkeeping.
+async fn lag_delta<Env>(branch: &Branch, env: &Env) -> Result<Vec<Instruction>, CommitError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    use crate::{RepositoryArchiveExt as _, RepositoryMemoryExt as _};
+    use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled};
+    use dialog_artifacts::{EntityKey, Key, KeyViewConstruct, State};
+    use dialog_common::Blake3Hash as NodeHash;
+    use dialog_search_tree::{Change as TreeChange, ContentAddressedStorage};
+
+    let Some(head) = branch.revision() else {
+        return Ok(Vec::new());
+    };
+    let cell = branch.induction_cell();
+    cell.resolve().perform(env).await?;
+    let Some(watermark) = cell.content() else {
+        // Never induced: adopt the head, fire-forward only.
+        return Ok(Vec::new());
+    };
+    if watermark.tree == head.tree {
+        return Ok(Vec::new());
+    }
+
+    // Walk the tree diff over the EAV region only — each changed fact
+    // surfaces once. Reads go through the networked store exactly as a
+    // select does: a pulled head's changed paths may reference
+    // remote-only blocks.
+    let upstreams = branch.upstreams();
+    let remote = match upstreams.remote_name() {
+        Some(name) => branch
+            .subject()
+            .remote(name.to_string())
+            .load()
+            .perform(env)
+            .await
+            .ok(),
+        None => None,
+    };
+    let store = crate::NetworkedIndex::new(env, branch.archive().index(), remote);
+    let raw_store = store.clone();
+    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    let previous = crate::Index::from_hash_with_cache(
+        NodeHash::from(*watermark.tree.hash()),
+        branch.node_cache(),
+    );
+    let next =
+        crate::Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), branch.node_cache());
+
+    let scope = vec![
+        <EntityKey<Key> as KeyViewConstruct>::min().into_key()
+            ..=<EntityKey<Key> as KeyViewConstruct>::max().into_key(),
+    ];
+    let diff = previous.differentiate_within(&next, &scope, &storage, &storage);
+    let mut diff = Box::pin(diff);
+
+    let mut lag = Vec::new();
+    let mut seen = BTreeSet::new();
+    while let Some(change) = diff
+        .try_next()
+        .await
+        .map_err(|error| CommitError::Induction(format!("watermark diff: {error}")))?
+    {
+        let (entry, arriving) = match &change {
+            TreeChange::Add(entry) => (entry, true),
+            TreeChange::Remove(entry) => (entry, false),
+        };
+        let State::Added(datum) = &entry.value else {
+            continue;
+        };
+        let spilled = fetch_spilled(&raw_store, &entry.key)
+            .await
+            .map_err(|error| CommitError::Induction(format!("watermark spilled: {error:?}")))?;
+        let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
+            .map_err(|error| CommitError::Induction(format!("watermark datum: {error:?}")))?;
+        if fact.the.to_string().starts_with("dialog.") {
+            continue;
+        }
+        if !seen.insert((
+            arriving,
+            fact.of.to_string(),
+            fact.the.to_string(),
+            fact.is.to_bytes(),
+        )) {
+            continue;
+        }
+        lag.push(if arriving {
+            Instruction::Assert(fact)
+        } else {
+            Instruction::Retract(fact)
+        });
+    }
+    Ok(lag)
 }
 
 /// Collect the artifacts a selector matches on the branch's committed
@@ -1735,6 +1854,238 @@ mod tests {
             values(&branch, &operator, "result.second/target", &command).await?,
             vec![Value::Entity(target)],
             "the rule installed after the cache warmed must fire too"
+        );
+        Ok(())
+    }
+
+    /// A rule watching a durable attribute; used by the watermark
+    /// tests below.
+    fn tagger() -> InductiveRule {
+        serde_json::from_value(json!({
+            "assert!": {
+                "with": { "tag": { "the": "derived/tag", "as": "Text" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "title": { "the": "doc/title", "as": "Text" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "title": { "?": { "name": "tag" } }
+                }
+            }]
+        }))
+        .expect("tagger rule compiles")
+    }
+
+    /// A raw [`Branch::commit`] bypasses induction — the model of a
+    /// pull. The watermark records the lag, and the next inducing
+    /// instant ([`Branch::induce`] here) catches up: the rule fires
+    /// over facts that arrived through the raw path. A second induce
+    /// is a no-op — the watermark is at the head.
+    #[dialog_common::test]
+    async fn it_catches_up_over_a_raw_commit() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction};
+        use futures_util::stream;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(Induct(tagger()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // Head advances without induction — the pull surrogate.
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "doc/title".parse()?,
+                of: doc.clone(),
+                is: Value::String("hello".into()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            values(&branch, &operator, "derived/tag", &doc)
+                .await?
+                .is_empty(),
+            "a raw commit must not induce by itself"
+        );
+
+        // The next inducing instant catches up over the lag.
+        let induced = branch.induce(&operator).await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "derived/tag", &doc).await?,
+            vec![Value::String("hello".to_string())],
+            "catch-up must fire the rule over the raw commit's facts"
+        );
+
+        // Watermark at head: a second induce is a no-op.
+        let settled = branch.induce(&operator).await?;
+        assert_eq!(settled, induced, "a settled branch must not re-induce");
+        Ok(())
+    }
+
+    /// Completion across instants: neither fact alone satisfies the
+    /// two-premise body — P arrives through a raw commit (nobody's
+    /// transaction), Q through an ordinary one. The transaction's
+    /// induction sees its own delta *plus* the watermark lag, so the
+    /// conjunction completes at the instant it first exists.
+    #[dialog_common::test]
+    async fn it_completes_a_conjunction_across_instants() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction};
+        use futures_util::stream;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let pair: InductiveRule = serde_json::from_value(json!({
+            "assert!": {
+                "with": { "both": { "the": "derived/both", "as": "Text" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": { "p": { "the": "fact.p/v", "as": "Text" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "p": { "?": { "name": "both" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": { "q": { "the": "fact.q/v", "as": "Text" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "q": { "?": { "name": "_q" } }
+                    }
+                }
+            ]
+        }))?;
+
+        branch
+            .transaction()
+            .assert(Induct(pair))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // P arrives outside any transaction.
+        let subject: Entity = "pair:1".parse()?;
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "fact.p/v".parse()?,
+                of: subject.clone(),
+                is: Value::String("p".into()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // Q arrives through a transaction: its induction sees Q (own
+        // delta) and P (lag) and the conjunction completes.
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("fact.q/v")
+                    .of(subject.clone())
+                    .is("q".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "derived/both", &subject).await?,
+            vec![Value::String("p".to_string())],
+            "the conjunction must complete at the instant both facts exist"
+        );
+        Ok(())
+    }
+
+    /// A replica that has never induced adopts the head fire-forward:
+    /// pre-existing matching state does not fire retroactively; only
+    /// facts arriving after adoption do.
+    #[dialog_common::test]
+    async fn it_adopts_a_branch_without_retroactive_firing() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction};
+        use futures_util::stream;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // Rule and a matching fact both land through raw commits: the
+        // branch has state and rules, but no induction ever ran and no
+        // watermark exists.
+        let mut install = dialog_artifacts::Changes::new();
+        install.assert(Induct(tagger()));
+        let old: Entity = "doc:old".parse()?;
+        branch
+            .commit(install.into_stream())
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "doc/title".parse()?,
+                of: old.clone(),
+                is: Value::String("old".into()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // First inducing instant: adopts the head without retroactive
+        // firing over the pre-existing title.
+        branch.induce(&operator).await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            values(&branch, &operator, "derived/tag", &old)
+                .await?
+                .is_empty(),
+            "adoption must be fire-forward, not retroactive"
+        );
+
+        // From here on the watermark tracks: a new raw fact is caught
+        // up at the next instant.
+        let fresh: Entity = "doc:new".parse()?;
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "doc/title".parse()?,
+                of: fresh.clone(),
+                is: Value::String("new".into()),
+                cause: None,
+            })]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        branch.induce(&operator).await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "derived/tag", &fresh).await?,
+            vec![Value::String("new".to_string())],
+            "facts arriving after adoption must fire"
+        );
+        assert!(
+            values(&branch, &operator, "derived/tag", &old)
+                .await?
+                .is_empty(),
+            "the pre-adoption fact stays unfired"
         );
         Ok(())
     }
