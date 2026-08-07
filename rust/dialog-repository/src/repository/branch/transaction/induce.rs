@@ -30,17 +30,19 @@
 //! keep hot-attribute fan-out flat, delta-restricted body evaluation,
 //! and the `retract!` head polarity.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Changes, Entity, Instruction, Select, Statement, Value,
+    Artifact, ArtifactSelector, Attribute, Change, Changes, Entity, Instruction, Select, Statement,
+    Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
+use dialog_query::rule::inductive::Polarity;
 use dialog_query::{Any, Binding, Cardinality, Environment, InductiveRule, Match, Term};
 use futures_util::TryStreamExt;
 
@@ -48,9 +50,10 @@ use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
 use crate::rules::{
-    hydrate_inductive, on_attr, on_entity, reads_attr, source_attr, transient_attr,
+    TriggerFootprint, hydrate, hydrate_inductive, on_attr, on_entity, reads_attr, source_attr,
+    transient_attr,
 };
-use crate::{Branch, CommitError, RemoteSite};
+use crate::{Branch, CommitError, RemoteSite, Revision};
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -84,6 +87,14 @@ where
         return Ok(());
     }
 
+    // Committed trigger structures, resolved once per induction: the
+    // footprint (which `on:` keys exist at all — the O(1) gate) and
+    // the head it was scanned at, which keys every committed-slice
+    // cache lookup below. The overlay slice is never head-cached; it
+    // is re-scanned each round (cheap, in-memory) so rules installed
+    // by this very commit — or by a rule during induction — fire.
+    let dispatch = Dispatch::resolve(branch, env).await?;
+
     // The identity is resolved once: it only feeds the schema-metadata
     // overlay of the round view, which does not change across rounds.
     let operator = Identify.perform(env).await?;
@@ -101,6 +112,26 @@ where
         }
 
         // Probe keys straight off the instructions — no schema lookup.
+        // The rows are kept too: assert/replace rows seed
+        // delta-restricted evaluation; retract and replace *attributes*
+        // decide when a candidate needs the full-body fallback (a
+        // removal can newly enable a rule only through `unless`, which
+        // a seed cannot express).
+        let mut assert_rows: Vec<Artifact> = Vec::new();
+        let mut retract_attrs: BTreeSet<Attribute> = BTreeSet::new();
+        let mut replace_attrs: BTreeSet<Attribute> = BTreeSet::new();
+        for instruction in &stimulus {
+            match instruction {
+                Instruction::Assert(a) => assert_rows.push(a.clone()),
+                Instruction::Replace(a) => {
+                    assert_rows.push(a.clone());
+                    replace_attrs.insert(a.the.clone());
+                }
+                Instruction::Retract(a) => {
+                    retract_attrs.insert(a.the.clone());
+                }
+            }
+        }
         let mut touched: BTreeSet<Attribute> = stimulus
             .iter()
             .map(|instruction| match instruction {
@@ -109,41 +140,91 @@ where
                 }
             })
             .collect();
+        let direct = touched.clone();
+
+        // The overlay's trigger slice: rules, markers, and support
+        // edges staged in this transaction (including novelty from
+        // earlier rounds).
+        let overlay = OverlayTriggers::scan(changes);
 
         // The frozen round view: branch ⊕ durable changes ⊕ this
         // round's transients, through the same layered QueryEnv a
         // transaction query uses, so rule bodies read exactly what a
         // mid-transaction query would.
-        let mut view = changes.clone();
-        transient_overlay.clone().assert(&mut view);
-        let overlay = QueryLayer::from(branch).with(view).overlay(&operator);
-        let tombstones = tombstones_from(&overlay);
-        let view = QueryEnv::new(vec![branch.clone()], overlay, tombstones, env);
+        let mut view_changes = changes.clone();
+        transient_overlay.clone().assert(&mut view_changes);
+        let layered = QueryLayer::from(branch)
+            .with(view_changes)
+            .overlay(&operator);
+        let tombstones = tombstones_from(&layered);
+        let view = QueryEnv::new(vec![branch.clone()], layered, tombstones, env);
 
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it
         // (transitively) supports through deductive rules.
-        expand_through_deduction(&view, &mut touched).await?;
+        dispatch
+            .expand_through_deduction(&mut touched, &overlay, env)
+            .await?;
 
-        // Trigger-indexed discovery: one `db.rule/on` lookup per
-        // touched attribute. Nothing ever enumerates all rules.
+        // Trigger-indexed discovery: footprint gate, then one
+        // `db.rule/on` lookup (head-cached) per surviving attribute.
+        // Nothing ever enumerates all rules.
         let mut candidates: BTreeSet<Entity> = BTreeSet::new();
         for attribute in &touched {
             let Some(on) = on_entity(attribute) else {
                 continue;
             };
-            let selector = ArtifactSelector::new().the(on_attr()).is(Value::Entity(on));
-            let claims = select(&view, selector).await?;
-            candidates.extend(claims.into_iter().map(|artifact| artifact.of));
+            candidates.extend(dispatch.triggers(&on, &overlay, env).await?);
         }
+
+        // Attributes only reachable through the deductive closure: a
+        // candidate premised on one changed *derivedly*, which a base
+        // row cannot seed.
+        let expanded: BTreeSet<Attribute> = touched.difference(&direct).cloned().collect();
 
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
         for entity in candidates {
-            let Some(rule) = load(&view, &entity).await? else {
+            let Some(rule) = dispatch.load(&entity, &overlay, env).await? else {
                 continue;
             };
-            fire(&rule, &view, &mut novelty, &mut emitted_transients).await?;
+            let transient_head = dispatch
+                .is_transient(&rule.conclusion().this(), &overlay, env)
+                .await?;
+
+            // Delta restriction: bind stimulus rows into the premises
+            // they match and evaluate with those bindings fixed, so
+            // cost follows the delta's join fan-out rather than
+            // relation size. The full-body fallback covers what a
+            // seed cannot express: enabling by removal (`unless` over
+            // a retracted or superseded fact) and premises that
+            // changed derivedly through the deductive closure.
+            let (positive_attrs, unless_attrs) = premise_attrs(&rule);
+            let full = expanded
+                .iter()
+                .any(|a| positive_attrs.contains(a) || unless_attrs.contains(a))
+                || retract_attrs.iter().any(|a| unless_attrs.contains(a))
+                || replace_attrs.iter().any(|a| unless_attrs.contains(a));
+            if full {
+                fire(
+                    &rule,
+                    transient_head,
+                    &view,
+                    &mut novelty,
+                    &mut emitted_transients,
+                )
+                .await?;
+            } else {
+                fire_seeded(
+                    &rule,
+                    transient_head,
+                    &assert_rows,
+                    &view,
+                    &mut novelty,
+                    &mut emitted_transients,
+                )
+                .await?;
+            }
         }
 
         // Fold durable novelty into the commit; promote this round's
@@ -159,24 +240,395 @@ where
     Ok(())
 }
 
-/// Close `touched` over the deductive support graph: for each touched
-/// attribute, `db.rule/reads` names the deductive rules whose bodies
-/// read it; their conclusions' attributes are *derived-touched* — a
-/// write to the base can flip them — and recurse until the frontier is
-/// exhausted. An inductive premise on a derived concept then probes
-/// exactly like one on a base concept.
-///
-/// The closure is composed fresh from per-rule facts at dispatch time,
-/// never stored, so a deductive rule installed after an inductive one
-/// is picked up automatically. Monotone over a finite attribute set,
-/// so termination is structural. Polarity is deliberately ignored
-/// across derived edges: through negation, an assertion of a base fact
-/// can retract a derived one, so any change to a support attribute
-/// counts.
-async fn expand_through_deduction<'a, Env>(
-    view: &QueryEnv<'a, Env>,
-    touched: &mut BTreeSet<Attribute>,
-) -> Result<(), CommitError>
+/// The committed side of trigger dispatch for one induction run: the
+/// branch, the head every cache entry is keyed by, and the trigger
+/// footprint (the O(1) gate). All committed lookups flow through the
+/// branch's shared [`RuleCache`](crate::RuleCache) under the
+/// established disciplines — discovery head-keyed, hydrated bodies
+/// content-addressed, the overlay never head-cached.
+struct Dispatch<'a> {
+    branch: &'a Branch,
+    head: Option<Revision>,
+    footprint: TriggerFootprint,
+}
+
+/// The transaction overlay's trigger slice, re-scanned each round:
+/// rules, support edges, transience markers, and their retractions
+/// staged (or derived) in this very commit.
+#[derive(Default)]
+struct OverlayTriggers {
+    /// `on:` entity → inductive-rule entities asserted in the overlay.
+    on: HashMap<Entity, Vec<Entity>>,
+    /// `on:` entity → deductive-rule entities asserted in the overlay.
+    reads: HashMap<Entity, Vec<Entity>>,
+    /// Rule entity → staged `db.rule/source` bytes.
+    sources: HashMap<Entity, Vec<u8>>,
+    /// Concepts marked transient in the overlay.
+    transient: BTreeSet<Entity>,
+    /// Concepts whose transient marker is retracted in the overlay.
+    unmarked: BTreeSet<Entity>,
+    /// Rule entities whose `db.rule/source` is retracted in the
+    /// overlay — excluded from dispatch even if the committed slice
+    /// still lists them.
+    removed: BTreeSet<Entity>,
+}
+
+impl OverlayTriggers {
+    fn scan(changes: &Changes) -> Self {
+        let on = on_attr();
+        let reads = reads_attr();
+        let source = source_attr();
+        let transient = transient_attr();
+
+        let mut slice = OverlayTriggers::default();
+        for (entity, attribute, change) in changes.iter() {
+            if *attribute == on {
+                if let Change::Assert(Value::Entity(key)) | Change::Replace(Value::Entity(key)) =
+                    change
+                {
+                    slice
+                        .on
+                        .entry(key.clone())
+                        .or_default()
+                        .push(entity.clone());
+                }
+            } else if *attribute == reads {
+                if let Change::Assert(Value::Entity(key)) | Change::Replace(Value::Entity(key)) =
+                    change
+                {
+                    slice
+                        .reads
+                        .entry(key.clone())
+                        .or_default()
+                        .push(entity.clone());
+                }
+            } else if *attribute == source {
+                match change {
+                    Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) => {
+                        slice.sources.insert(entity.clone(), bytes.clone());
+                    }
+                    Change::Retract(_) => {
+                        slice.removed.insert(entity.clone());
+                    }
+                    _ => {}
+                }
+            } else if *attribute == transient {
+                match change {
+                    Change::Assert(_) | Change::Replace(_) => {
+                        slice.transient.insert(entity.clone());
+                    }
+                    Change::Retract(_) => {
+                        slice.unmarked.insert(entity.clone());
+                    }
+                }
+            }
+        }
+        slice
+    }
+}
+
+impl<'a> Dispatch<'a> {
+    /// Resolve the committed dispatch state: the branch head and the
+    /// trigger footprint at it (cached per head; one range scan over
+    /// each of `db.rule/on` and `db.rule/reads` on a miss).
+    async fn resolve<Env>(branch: &'a Branch, env: &Env) -> Result<Dispatch<'a>, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let head = branch.revision();
+        let Some(head) = head else {
+            // A branch with no commits has no committed rules.
+            return Ok(Dispatch {
+                branch,
+                head: None,
+                footprint: TriggerFootprint::default(),
+            });
+        };
+
+        let cache = branch.rule_cache();
+        let footprint = match cache.footprint(&head) {
+            Some(footprint) => footprint,
+            None => {
+                let mut footprint = TriggerFootprint::default();
+                for claim in committed(branch, ArtifactSelector::new().the(on_attr()), env).await? {
+                    if let Value::Entity(key) = claim.is {
+                        footprint.on.insert(key);
+                    }
+                }
+                for claim in
+                    committed(branch, ArtifactSelector::new().the(reads_attr()), env).await?
+                {
+                    if let Value::Entity(key) = claim.is {
+                        footprint.reads.insert(key);
+                    }
+                }
+                cache.record_footprint(head.clone(), footprint.clone());
+                footprint
+            }
+        };
+        Ok(Dispatch {
+            branch,
+            head: Some(head),
+            footprint,
+        })
+    }
+
+    /// The inductive-rule entities watching `on`: the committed slice
+    /// (footprint-gated, head-cached) unioned with the overlay's,
+    /// minus rules the overlay retracts.
+    async fn triggers<Env>(
+        &self,
+        on: &Entity,
+        overlay: &OverlayTriggers,
+        env: &Env,
+    ) -> Result<Vec<Entity>, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let mut entities: Vec<Entity> = Vec::new();
+        if let Some(head) = &self.head
+            && self.footprint.on.contains(on)
+        {
+            let cache = self.branch.rule_cache();
+            let committed_entities = match cache.triggers(on, head) {
+                Some(entities) => entities,
+                None => {
+                    let selector = ArtifactSelector::new()
+                        .the(on_attr())
+                        .is(Value::Entity(on.clone()));
+                    let entities: Vec<Entity> = committed(self.branch, selector, env)
+                        .await?
+                        .into_iter()
+                        .map(|claim| claim.of)
+                        .collect();
+                    cache.record_triggers(on.clone(), head.clone(), entities.clone());
+                    entities
+                }
+            };
+            entities.extend(committed_entities);
+        }
+        if let Some(staged) = overlay.on.get(on) {
+            entities.extend(staged.iter().cloned());
+        }
+        entities.retain(|entity| !overlay.removed.contains(entity));
+        Ok(entities)
+    }
+
+    /// Close `touched` over the deductive support graph: for each
+    /// touched attribute, `db.rule/reads` names the deductive rules
+    /// whose bodies read it; their conclusions' attributes are
+    /// *derived-touched* and recurse until the frontier is exhausted.
+    /// Composed from per-rule facts at dispatch time, never stored, so
+    /// late-installed deductive rules are picked up automatically.
+    /// Polarity is deliberately ignored across derived edges: through
+    /// negation, an assertion of a base fact can retract a derived one.
+    async fn expand_through_deduction<Env>(
+        &self,
+        touched: &mut BTreeSet<Attribute>,
+        overlay: &OverlayTriggers,
+        env: &Env,
+    ) -> Result<(), CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let cache = self.branch.rule_cache();
+        let mut frontier: Vec<Attribute> = touched.iter().cloned().collect();
+        while let Some(attribute) = frontier.pop() {
+            let Some(on) = on_entity(&attribute) else {
+                continue;
+            };
+
+            let mut readers: Vec<Entity> = Vec::new();
+            if let Some(head) = &self.head
+                && self.footprint.reads.contains(&on)
+            {
+                let committed_readers = match cache.reads(&on, head) {
+                    Some(entities) => entities,
+                    None => {
+                        let selector = ArtifactSelector::new()
+                            .the(reads_attr())
+                            .is(Value::Entity(on.clone()));
+                        let entities: Vec<Entity> = committed(self.branch, selector, env)
+                            .await?
+                            .into_iter()
+                            .map(|claim| claim.of)
+                            .collect();
+                        cache.record_reads(on.clone(), head.clone(), entities.clone());
+                        entities
+                    }
+                };
+                readers.extend(committed_readers);
+            }
+            if let Some(staged) = overlay.reads.get(&on) {
+                readers.extend(staged.iter().cloned());
+            }
+            readers.retain(|entity| !overlay.removed.contains(entity));
+
+            for reader in readers {
+                // Hydrate the deductive body: content-addressed cache,
+                // then overlay bytes, then the committed source claim.
+                // A dangling or undecodable entry is skipped like any
+                // dangling index entry.
+                let body = match cache.body(&reader) {
+                    Some(body) => Some(body),
+                    None => {
+                        let bytes = match overlay.sources.get(&reader) {
+                            Some(bytes) => Some(bytes.clone()),
+                            None => self.source_bytes(&reader, env).await?,
+                        };
+                        bytes
+                            .and_then(|bytes| hydrate(&bytes).ok())
+                            .inspect(|body| {
+                                cache.record_body(reader.clone(), body.clone());
+                            })
+                    }
+                };
+                let Some(body) = body else {
+                    continue;
+                };
+                for (_, field) in body.conclusion().with().iter() {
+                    let derived: Attribute = field.descriptor().the().clone().into();
+                    if touched.insert(derived.clone()) {
+                        frontier.push(derived);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Hydrate the inductive rule stored at `entity`:
+    /// content-addressed cache, then overlay bytes, then the committed
+    /// source claim. A dangling trigger-index entry is skipped rather
+    /// than failing the commit.
+    async fn load<Env>(
+        &self,
+        entity: &Entity,
+        overlay: &OverlayTriggers,
+        env: &Env,
+    ) -> Result<Option<InductiveRule>, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let cache = self.branch.rule_cache();
+        if let Some(rule) = cache.inductive(entity) {
+            return Ok(Some(rule));
+        }
+        let bytes = match overlay.sources.get(entity) {
+            Some(bytes) => Some(bytes.clone()),
+            None => self.source_bytes(entity, env).await?,
+        };
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let rule =
+            hydrate_inductive(&bytes).map_err(|error| CommitError::Induction(error.to_string()))?;
+        cache.record_inductive(entity.clone(), rule.clone());
+        Ok(Some(rule))
+    }
+
+    /// Whether the concept at `entity` carries the
+    /// `db.concept/transient` marker: the overlay's verdict wins
+    /// (marked or unmarked in this very commit), else the committed
+    /// slice, head-cached.
+    async fn is_transient<Env>(
+        &self,
+        concept: &Entity,
+        overlay: &OverlayTriggers,
+        env: &Env,
+    ) -> Result<bool, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        if overlay.transient.contains(concept) {
+            return Ok(true);
+        }
+        if overlay.unmarked.contains(concept) {
+            return Ok(false);
+        }
+        let Some(head) = &self.head else {
+            return Ok(false);
+        };
+        let cache = self.branch.rule_cache();
+        if let Some(verdict) = cache.transient(concept, head) {
+            return Ok(verdict);
+        }
+        let selector = ArtifactSelector::new()
+            .the(transient_attr())
+            .of(concept.clone());
+        let verdict = !committed(self.branch, selector, env).await?.is_empty();
+        cache.record_transient(concept.clone(), head.clone(), verdict);
+        Ok(verdict)
+    }
+
+    /// The committed `db.rule/source` bytes for a rule entity, if any.
+    async fn source_bytes<Env>(
+        &self,
+        entity: &Entity,
+        env: &Env,
+    ) -> Result<Option<Vec<u8>>, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        if self.head.is_none() {
+            return Ok(None);
+        }
+        let selector = ArtifactSelector::new()
+            .the(source_attr())
+            .of(entity.clone());
+        Ok(committed(self.branch, selector, env)
+            .await?
+            .into_iter()
+            .find_map(|claim| match claim.is {
+                Value::Bytes(bytes) => Some(bytes),
+                _ => None,
+            }))
+    }
+}
+
+/// Collect the artifacts a selector matches on the branch's committed
+/// tree (no overlay — the cacheable slice).
+async fn committed<Env>(
+    branch: &Branch,
+    selector: ArtifactSelector<Constrained>,
+    env: &Env,
+) -> Result<Vec<Artifact>, CommitError>
 where
     Env: Provider<Get>
         + Provider<Put>
@@ -186,41 +638,16 @@ where
         + ConditionalSync
         + 'static,
 {
-    let mut frontier: Vec<Attribute> = touched.iter().cloned().collect();
-    while let Some(attribute) = frontier.pop() {
-        let Some(on) = on_entity(&attribute) else {
-            continue;
-        };
-        let selector = ArtifactSelector::new()
-            .the(reads_attr())
-            .is(Value::Entity(on));
-        for claim in select(view, selector).await? {
-            let sources = select(
-                view,
-                ArtifactSelector::new().the(source_attr()).of(claim.of),
-            )
-            .await?;
-            let Some(bytes) = sources.into_iter().find_map(|artifact| match artifact.is {
-                Value::Bytes(bytes) => Some(bytes),
-                _ => None,
-            }) else {
-                continue;
-            };
-            // A `reads` entry only ever hangs off a deductive rule; a
-            // body that fails to decode is skipped like any dangling
-            // index entry.
-            let Ok(rule) = dialog_query::DeductiveRule::decode(&bytes) else {
-                continue;
-            };
-            for (_, field) in rule.conclusion().with().iter() {
-                let derived: Attribute = field.descriptor().the().clone().into();
-                if touched.insert(derived.clone()) {
-                    frontier.push(derived);
-                }
-            }
-        }
-    }
-    Ok(())
+    let stream = branch
+        .claims()
+        .select(selector)
+        .perform(env)
+        .await
+        .map_err(|error| CommitError::Induction(format!("committed probe: {error}")))?;
+    stream
+        .try_collect()
+        .await
+        .map_err(|error| CommitError::Induction(format!("committed probe: {error}")))
 }
 
 /// Collect the artifacts a selector matches in the layered view.
@@ -246,43 +673,12 @@ where
         .map_err(|error| CommitError::Induction(format!("dispatch probe: {error}")))
 }
 
-/// Hydrate the inductive rule stored at `entity` from its
-/// `db.rule/source` claim in the view. A dangling trigger-index entry
-/// (source retracted, index entry surviving) is skipped rather than
-/// failing the commit.
-async fn load<'a, Env>(
-    view: &QueryEnv<'a, Env>,
-    entity: &Entity,
-) -> Result<Option<InductiveRule>, CommitError>
-where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
-    let selector = ArtifactSelector::new()
-        .the(source_attr())
-        .of(entity.clone());
-    let claims = select(view, selector).await?;
-    let Some(bytes) = claims.into_iter().find_map(|artifact| match artifact.is {
-        Value::Bytes(bytes) => Some(bytes),
-        _ => None,
-    }) else {
-        return Ok(None);
-    };
-    hydrate_inductive(&bytes)
-        .map(Some)
-        .map_err(|error| CommitError::Induction(error.to_string()))
-}
-
 /// Evaluate one rule's body against the frozen round view and emit its
 /// head for every binding: transient heads into `transients`, durable
 /// heads (novelty-checked against the view) into `novelty`.
 async fn fire<'a, Env>(
     rule: &InductiveRule,
+    transient_head: bool,
     view: &QueryEnv<'a, Env>,
     novelty: &mut Changes,
     transients: &mut Changes,
@@ -305,10 +701,160 @@ where
     if matches.is_empty() {
         return Ok(());
     }
+    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+}
 
+/// The attributes a rule's concept premises name, split by polarity:
+/// positive premise attributes (seedable by an assert/replace row) and
+/// `unless` attributes (only enabled by removal — never seedable).
+fn premise_attrs(rule: &InductiveRule) -> (BTreeSet<Attribute>, BTreeSet<Attribute>) {
+    use dialog_query::{Negation, Premise, Proposition};
+
+    let mut positive = BTreeSet::new();
+    let mut unless = BTreeSet::new();
+    for premise in &rule.analysis().premises {
+        let (target, query) = match premise {
+            Premise::Assert(Proposition::Concept(query)) => (&mut positive, query),
+            Premise::Unless(Negation(Proposition::Concept(query))) => (&mut unless, query),
+            _ => continue,
+        };
+        for (_, field) in query.predicate.with().iter() {
+            target.insert(field.descriptor().the().clone().into());
+        }
+    }
+    (positive, unless)
+}
+
+/// Delta-restricted firing: bind each stimulus row into every positive
+/// concept premise that names its attribute, then evaluate the body
+/// with those bindings fixed — the remaining premises join against the
+/// frozen view through the planner as usual. Every new match this
+/// round must bind at least one new row into at least one positive
+/// premise (removal-enabled and derived-premise firings take the
+/// full-body path instead), so seeding is complete for this candidate
+/// class while costing the delta's join fan-out, not relation size.
+async fn fire_seeded<'a, Env>(
+    rule: &InductiveRule,
+    transient_head: bool,
+    rows: &[Artifact],
+    view: &QueryEnv<'a, Env>,
+    novelty: &mut Changes,
+    transients: &mut Changes,
+) -> Result<(), CommitError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    use dialog_query::{Premise, Proposition};
+
+    let mut matches: Vec<Match> = Vec::new();
+    for premise in &rule.analysis().premises {
+        let Premise::Assert(Proposition::Concept(query)) = premise else {
+            continue;
+        };
+        for row in rows {
+            // The premise fields this row's attribute matches — the
+            // row's value binds there, its subject binds `this`.
+            let mut matched = Match::new();
+            let mut scope = Environment::new();
+            let mut seeded = false;
+            let mut compatible = true;
+            for (name, field) in query.predicate.with().iter() {
+                let attribute: Attribute = field.descriptor().the().clone().into();
+                if attribute != row.the {
+                    continue;
+                }
+                if !bind_seed(
+                    &mut matched,
+                    &mut scope,
+                    query.terms.get(name),
+                    row.is.clone(),
+                ) {
+                    compatible = false;
+                    break;
+                }
+                seeded = true;
+            }
+            if !seeded || !compatible {
+                continue;
+            }
+            if !bind_seed(
+                &mut matched,
+                &mut scope,
+                query.terms.get("this"),
+                Value::Entity(row.of.clone()),
+            ) {
+                continue;
+            }
+
+            let plan = rule.plan(&scope);
+            let seeded_matches: Vec<Match> = plan
+                .evaluate(matched.seed(), view)
+                .try_collect()
+                .await
+                .map_err(|error| CommitError::Induction(format!("seeded rule body: {error}")))?;
+            matches.extend(seeded_matches);
+        }
+    }
+    if matches.is_empty() {
+        return Ok(());
+    }
+    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+}
+
+/// Bind a seed value into a premise term: a named variable binds (and
+/// enters the planning scope), a constant must agree, an anonymous or
+/// absent term constrains nothing. Returns `false` when the row is
+/// incompatible with the premise.
+fn bind_seed(
+    matched: &mut Match,
+    scope: &mut Environment,
+    term: Option<&Term<Any>>,
+    value: Value,
+) -> bool {
+    match term {
+        Some(
+            term @ Term::Variable {
+                name: Some(name), ..
+            },
+        ) => {
+            if matched.bind(term, value).is_err() {
+                return false;
+            }
+            scope.add(name);
+            true
+        }
+        Some(Term::Constant(expected)) => *expected == value,
+        Some(Term::Variable { name: None, .. }) | None => true,
+    }
+}
+
+/// Emit a rule's head for every produced match: transient heads into
+/// `transients`, durable heads (novelty-checked against the frozen
+/// view) into `novelty`.
+async fn emit_matches<'a, Env>(
+    rule: &InductiveRule,
+    transient_head: bool,
+    matches: Vec<Match>,
+    view: &QueryEnv<'a, Env>,
+    novelty: &mut Changes,
+    transients: &mut Changes,
+) -> Result<(), CommitError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
     let conclusion = rule.conclusion();
-    let transient_head = is_transient(view, &conclusion.this()).await?;
-
     for matched in matches {
         // The head subject. A rule whose premises leave `this` unbound
         // has no cell to write; skip the binding.
@@ -325,18 +871,30 @@ where
                 continue;
             };
             let attribute: Attribute = field.descriptor().the().clone().into();
-            match field.descriptor().cardinality() {
-                Cardinality::One => {
-                    dialog_artifacts::Update::associate_unique(
-                        &mut head,
-                        attribute,
-                        this.clone(),
-                        value,
-                    );
+            match rule.polarity() {
+                // A retracting head dissociates the exact bound
+                // triple, cardinality-independent.
+                Polarity::Retract => {
+                    dialog_artifacts::Update::dissociate(&mut head, attribute, this.clone(), value);
                 }
-                Cardinality::Many => {
-                    dialog_artifacts::Update::associate(&mut head, attribute, this.clone(), value);
-                }
+                Polarity::Assert => match field.descriptor().cardinality() {
+                    Cardinality::One => {
+                        dialog_artifacts::Update::associate_unique(
+                            &mut head,
+                            attribute,
+                            this.clone(),
+                            value,
+                        );
+                    }
+                    Cardinality::Many => {
+                        dialog_artifacts::Update::associate(
+                            &mut head,
+                            attribute,
+                            this.clone(),
+                            value,
+                        );
+                    }
+                },
             }
         }
 
@@ -361,28 +919,6 @@ where
         }
     }
     Ok(())
-}
-
-/// Whether the concept at `entity` carries the `db.concept/transient`
-/// marker in the view (branch or overlay — a command declared in the
-/// same commit as its first use counts).
-async fn is_transient<'a, Env>(
-    view: &QueryEnv<'a, Env>,
-    concept: &Entity,
-) -> Result<bool, CommitError>
-where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
-    let selector = ArtifactSelector::new()
-        .the(transient_attr())
-        .of(concept.clone());
-    Ok(!select(view, selector).await?.is_empty())
 }
 
 /// Whether applying `instruction` would change the view: asserting a
@@ -906,6 +1442,94 @@ mod tests {
         Ok(())
     }
 
+    /// The mailbox-with-ack pattern: the message is durable (it
+    /// replicates), the ack is a dispatched command, and consumption
+    /// is a `retract!` rule joining the ack to its message. The
+    /// message's facts are gone after the ack commit; the ack itself
+    /// never lands.
+    #[dialog_common::test]
+    async fn it_consumes_a_message_via_a_retract_rule() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let consume: InductiveRule = serde_json::from_value(json!({
+            "retract!": {
+                "with": {
+                    "body": { "the": "mailbox.message/body", "as": "Text" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "message": { "the": "cmd.ack/message", "as": "Entity" }
+                        }
+                    },
+                    "where": {
+                        "message": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "body": { "the": "mailbox.message/body", "as": "Text" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "body": { "?": { "name": "body" } }
+                    }
+                }
+            ]
+        }))?;
+
+        let message: Entity = "msg:1".parse()?;
+        let other: Entity = "msg:2".parse()?;
+        branch
+            .transaction()
+            .assert(Induct(consume))
+            .assert(
+                dialog_query::the!("mailbox.message/body")
+                    .of(message.clone())
+                    .is("first".to_string()),
+            )
+            .assert(
+                dialog_query::the!("mailbox.message/body")
+                    .of(other.clone())
+                    .is("second".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.ack/message")
+                    .of("cmd:ack".parse::<Entity>()?)
+                    .is(message.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert!(
+            values(&branch, &operator, "mailbox.message/body", &message)
+                .await?
+                .is_empty(),
+            "the acked message must be consumed"
+        );
+        assert_eq!(
+            values(&branch, &operator, "mailbox.message/body", &other).await?,
+            vec![Value::String("second".to_string())],
+            "the shared ?this join must scope consumption to the acked message"
+        );
+        Ok(())
+    }
+
     /// The inbox/duty scenario with the duty status *derived*: the
     /// inductive rule's premise names `actor.status/duty`, which no
     /// commit ever writes — a deductive rule concludes it from
@@ -1025,6 +1649,92 @@ mod tests {
             values(&branch, &operator, "task/note", &message).await?,
             vec![Value::String("hello".to_string())],
             "the shift write must reach the rule through the derived premise"
+        );
+        Ok(())
+    }
+
+    /// Trigger discovery is head-cached: a rule installed *after* a
+    /// dispatch at an earlier head must still be found when the same
+    /// attribute is touched again — the head advance invalidates the
+    /// cached discovery and the re-scan picks the new rule up.
+    #[dialog_common::test]
+    async fn it_rescans_triggers_after_a_head_advance() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let stamp = |result: &str| -> InductiveRule {
+            serde_json::from_value(json!({
+                "assert!": {
+                    "with": { "target": { "the": result, "as": "Entity" } }
+                },
+                "when": [{
+                    "assert": {
+                        "with": { "target": { "the": "cmd.z/target", "as": "Entity" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "target": { "?": { "name": "target" } }
+                    }
+                }]
+            }))
+            .expect("stamp rule compiles")
+        };
+
+        // First rule installed; a dispatch warms the discovery cache
+        // at this head.
+        branch
+            .transaction()
+            .assert(Induct(stamp("result.first/target")))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let target: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.z/target")
+                    .of("cmd:z1".parse::<Entity>()?)
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // Second rule on the same attribute — the head advances, so
+        // the cached discovery for on:cmd.z/target is stale now.
+        branch
+            .transaction()
+            .assert(Induct(stamp("result.second/target")))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:z2".parse()?;
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.z/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            values(&branch, &operator, "result.first/target", &command).await?,
+            vec![Value::Entity(target.clone())],
+            "the first rule must still fire"
+        );
+        assert_eq!(
+            values(&branch, &operator, "result.second/target", &command).await?,
+            vec![Value::Entity(target)],
+            "the rule installed after the cache warmed must fire too"
         );
         Ok(())
     }

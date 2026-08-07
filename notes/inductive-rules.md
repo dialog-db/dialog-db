@@ -24,14 +24,25 @@ the only state, stateless per-commit induction, dispatch structures
 as head-keyed views of rule facts. Every design thread in this note
 ends in "keep it, add X later." The X's, in order:
 
-1. **`retract!` head polarity.** Blocks queue consumption, mailbox
-   acks, and the cross-replica obligation pattern. Next engine work.
-2. **Head-keyed dispatch caches** (trigger footprint + discovery),
-   replacing the prototype's uncached per-round probes.
-3. **Delta-restricted body evaluation** — the main evaluation-cost
-   lever (Bud's semi-naive discipline against the tree indexes).
+1. **`retract!` head polarity** — done: descriptor field beside
+   `assert!` (exactly one required), `Polarity` on `InductiveRule`,
+   dissociate-exact-triple emission, pinned by the mailbox-ack
+   consumption test.
+2. **Head-keyed dispatch caches** — done: `TriggerFootprint` (the
+   O(1) gate) plus trigger/reads discovery keyed `(on, head)`,
+   content-addressed inductive bodies, and transience verdicts, all
+   on the branch's `RuleCache`; the overlay slice is scanned fresh
+   per round, never head-cached. Head-advance invalidation pinned by
+   `it_rescans_triggers_after_a_head_advance`.
+3. **Delta-restricted body evaluation** — done: assert/replace
+   stimulus rows bind into the positive premises naming their
+   attribute and the body evaluates with those bindings fixed
+   (planned under the seeded scope); the full-body fallback covers
+   removal-enabled firings (`unless` over retracted or superseded
+   facts) and candidates probed through the deductive closure.
 4. **Event premises** (`asserted:`/`retracted:` over the round's
-   stimulus) — monotone transition triggers, first-class.
+   stimulus, generalizing to version ranges under the watermark
+   model) — monotone transition triggers, first-class. Next.
 5. **`cardinality: sum`** — counters as contribution facts with a
    readout fold.
 6. Only on demonstrated pain: alpha discrimination, the quiescence
@@ -1015,16 +1026,20 @@ The core loop is implemented:
 
 The deductive-support closure is implemented: `Deduce` installs
 deductive rules with `db.rule/reads` reverse-index entries, and
-dispatch closes the touched set over them (`expand_through_deduction`)
-before probing — pinned by the `it_triggers_through_a_deductive_premise`
-test, which runs the inbox/duty scenario with the status derived and
-verifies the `shift/duty` base write reaches the inductive rule.
+dispatch closes the touched set over them
+(`Dispatch::expand_through_deduction`) before probing — pinned by the
+`it_triggers_through_a_deductive_premise` test, which runs the
+inbox/duty scenario with the status derived and verifies the
+`shift/duty` base write reaches the inductive rule.
 
-Not yet implemented (documented above): the trigger footprint and
-alpha-discrimination caches, delta-restricted evaluation, `retract!`
-polarity, and the commit receipt. Discovery currently probes the index
-uncached each round; the head-keyed cache disciplines are the next
-step.
+Build-order items 1–3 are implemented (see "Decisions and build
+order"): `retract!` polarity, the head-keyed dispatch caches behind a
+`Dispatch` handle, and delta-restricted evaluation
+(`fire_seeded` / `premise_attrs` with the full-body fallback).
+
+Not yet implemented (documented above): event premises and the
+watermark model, alpha discrimination, `cardinality: sum`, the
+quiescence lint, `at: replica` placement, and the commit receipt.
 
 ## Open questions
 

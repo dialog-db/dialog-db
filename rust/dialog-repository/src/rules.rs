@@ -440,6 +440,18 @@ pub struct RuleCache {
     inner: RwLock<RuleCacheInner>,
 }
 
+/// The committed trigger footprint at a branch head: every `on:`
+/// entity present in `db.rule/on` (inductive triggers) and
+/// `db.rule/reads` (deductive support edges). The O(1) gate commit-time
+/// dispatch intersects touched attributes against before any probe.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct TriggerFootprint {
+    /// `on:` entities some inductive rule watches.
+    pub(crate) on: BTreeSet<Entity>,
+    /// `on:` entities some deductive rule's body reads.
+    pub(crate) reads: BTreeSet<Entity>,
+}
+
 #[derive(Debug, Default)]
 struct RuleCacheInner {
     /// Which rule entities conclude a concept, as of a branch head.
@@ -450,6 +462,19 @@ struct RuleCacheInner {
     /// Never stale (the key is a content hash), so this survives head
     /// changes and is shared across concepts.
     bodies: HashMap<Entity, DeductiveRule>,
+    /// The committed trigger footprint, as of a branch head.
+    footprint: Option<(Revision, TriggerFootprint)>,
+    /// Committed inductive-rule entities watching an `on:` entity, as
+    /// of a branch head.
+    triggers: HashMap<Entity, (Revision, Vec<Entity>)>,
+    /// Committed deductive-rule entities whose bodies read an `on:`
+    /// entity, as of a branch head.
+    reads: HashMap<Entity, (Revision, Vec<Entity>)>,
+    /// Hydrated inductive bodies, content-addressed — never stale.
+    inductive: HashMap<Entity, InductiveRule>,
+    /// Whether a concept carries the committed `db.concept/transient`
+    /// marker, as of a branch head.
+    transient: HashMap<Entity, (Revision, bool)>,
 }
 
 impl RuleCache {
@@ -484,6 +509,78 @@ impl RuleCache {
     /// Cache a hydrated body under its content-addressed entity.
     pub(crate) fn record_body(&self, rule: Entity, body: DeductiveRule) {
         self.inner.write().bodies.insert(rule, body);
+    }
+
+    /// The committed trigger footprint if scanned at `head`; `None` if
+    /// absent or stale.
+    pub(crate) fn footprint(&self, head: &Revision) -> Option<TriggerFootprint> {
+        match &self.inner.read().footprint {
+            Some((scanned_at, footprint)) if scanned_at == head => Some(footprint.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the committed trigger footprint at `head`.
+    pub(crate) fn record_footprint(&self, head: Revision, footprint: TriggerFootprint) {
+        self.inner.write().footprint = Some((head, footprint));
+    }
+
+    /// Cached committed inductive-rule entities watching `on` if
+    /// scanned at `head`.
+    pub(crate) fn triggers(&self, on: &Entity, head: &Revision) -> Option<Vec<Entity>> {
+        match self.inner.read().triggers.get(on) {
+            Some((scanned_at, entities)) if scanned_at == head => Some(entities.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the committed inductive-rule entities watching `on` at
+    /// `head`.
+    pub(crate) fn record_triggers(&self, on: Entity, head: Revision, entities: Vec<Entity>) {
+        self.inner.write().triggers.insert(on, (head, entities));
+    }
+
+    /// Cached committed deductive-rule entities reading `on` if
+    /// scanned at `head`.
+    pub(crate) fn reads(&self, on: &Entity, head: &Revision) -> Option<Vec<Entity>> {
+        match self.inner.read().reads.get(on) {
+            Some((scanned_at, entities)) if scanned_at == head => Some(entities.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the committed deductive-rule entities reading `on` at
+    /// `head`.
+    pub(crate) fn record_reads(&self, on: Entity, head: Revision, entities: Vec<Entity>) {
+        self.inner.write().reads.insert(on, (head, entities));
+    }
+
+    /// A cached hydrated inductive body by rule entity, if present.
+    pub(crate) fn inductive(&self, rule: &Entity) -> Option<InductiveRule> {
+        self.inner.read().inductive.get(rule).cloned()
+    }
+
+    /// Cache a hydrated inductive body under its content-addressed
+    /// entity.
+    pub(crate) fn record_inductive(&self, rule: Entity, body: InductiveRule) {
+        self.inner.write().inductive.insert(rule, body);
+    }
+
+    /// The cached committed transience verdict for `concept` if
+    /// scanned at `head`.
+    pub(crate) fn transient(&self, concept: &Entity, head: &Revision) -> Option<bool> {
+        match self.inner.read().transient.get(concept) {
+            Some((scanned_at, verdict)) if scanned_at == head => Some(*verdict),
+            _ => None,
+        }
+    }
+
+    /// Record the committed transience verdict for `concept` at `head`.
+    pub(crate) fn record_transient(&self, concept: Entity, head: Revision, verdict: bool) {
+        self.inner
+            .write()
+            .transient
+            .insert(concept, (head, verdict));
     }
 }
 
