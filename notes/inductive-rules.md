@@ -17,6 +17,43 @@ attributes named by their premises are the tables they watch, and a
 stored reverse index is the trigger catalog. Dispatch is a point lookup
 keyed by what the commit touched, never a scan over all rules.
 
+## Decisions and build order
+
+The prototype (see "Prototype" below) is the architecture: store as
+the only state, stateless per-commit induction, dispatch structures
+as head-keyed views of rule facts. Every design thread in this note
+ends in "keep it, add X later." The X's, in order:
+
+1. **`retract!` head polarity.** Blocks queue consumption, mailbox
+   acks, and the cross-replica obligation pattern. Next engine work.
+2. **Head-keyed dispatch caches** (trigger footprint + discovery),
+   replacing the prototype's uncached per-round probes.
+3. **Delta-restricted body evaluation** — the main evaluation-cost
+   lever (Bud's semi-naive discipline against the tree indexes).
+4. **Event premises** (`asserted:`/`retracted:` over the round's
+   stimulus) — monotone transition triggers, first-class.
+5. **`cardinality: sum`** — counters as contribution facts with a
+   readout fold.
+6. Only on demonstrated pain: alpha discrimination, the quiescence
+   lint, `at: replica` placement / pull-induction, further lattice
+   types.
+
+Standing answers to recurring questions:
+
+- *Cross-replica effects*: two rules — the event mints a durable
+  obligation (replicates), a level-triggered consumer applies it
+  against each replica's slice. No engine change; a host bridges
+  remote application via subscription → dispatch until pull-induction
+  exists.
+- *Rules that keep matching*: quiescence is the novelty fixed point;
+  no polling exists between commits; only value-generating or
+  polarity-oscillating cascades diverge, and `MAX_ROUNDS` fails the
+  commit atomically.
+- *Derived premises*: closed over `db.rule/reads` at dispatch
+  (implemented).
+- *Negation*: `unless` stays for state absence; events cover
+  transitions only.
+
 ## What exists today
 
 **In dialog:** `InductiveRule` / `InductiveRuleDescriptor`
