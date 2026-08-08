@@ -7,12 +7,12 @@
 //! and the union of those — plus the implicit per-descriptor rule built
 //! once — is what the query engine plans.
 //!
-//! # Storage shape (`db.rule/*`)
+//! # Storage shape (`dialog.rule/*`)
 //!
 //! A deductive rule is stored as facts:
-//! - `db.rule/conclusion` `of` rule-entity `is` the concept entity it
+//! - `dialog.rule/conclusion` `of` rule-entity `is` the concept entity it
 //!   concludes — the index a layer looks rules up by.
-//! - `db.rule/source` `of` rule-entity `is` the canonical dag-cbor
+//! - `dialog.rule/source` `of` rule-entity `is` the canonical dag-cbor
 //!   `DeductiveRuleDescriptor` (a `Value::Bytes`) — the body, hydrated
 //!   via `DeductiveRule::decode`. (Bytes, not Record: `Value::Record`
 //!   isn't yet supported end-to-end through the index; the bytes are
@@ -55,27 +55,27 @@ use parking_lot::RwLock;
 
 use crate::{Revision, schema};
 
-/// The `db.rule/conclusion` index attribute, validated at compile time.
+/// The `dialog.rule/conclusion` index attribute, validated at compile time.
 fn conclusion_attr() -> Attribute {
-    the!("db.rule/conclusion").into()
+    the!("dialog.rule/conclusion").into()
 }
 
-/// The `db.rule/induces` index attribute — the inductive sibling of
-/// `db.rule/conclusion`, kept separate so deductive resolution never
+/// The `dialog.rule/induces` index attribute — the inductive sibling of
+/// `dialog.rule/conclusion`, kept separate so deductive resolution never
 /// hydrates (and discards) inductive rules concluding a queried
 /// concept.
 pub(crate) fn induces_attr() -> Attribute {
-    the!("db.rule/induces").into()
+    the!("dialog.rule/induces").into()
 }
 
-/// The `db.rule/on` trigger-index attribute: one claim per attribute an
+/// The `dialog.rule/on` trigger-index attribute: one claim per attribute an
 /// inductive rule's concept premises name, valued `on:<domain>/<name>`.
 /// This is the index commit-time dispatch probes by touched attribute.
 pub(crate) fn on_attr() -> Attribute {
-    the!("db.rule/on").into()
+    the!("dialog.rule/on").into()
 }
 
-/// The `db.rule/reads` reverse index for *deductive* rules: one claim
+/// The `dialog.rule/reads` reverse index for *deductive* rules: one claim
 /// per attribute the rule's body names, valued `on:<domain>/<name>`.
 /// Commit-time dispatch composes these at probe time to close the
 /// trigger footprint over derivation — a base-fact write reaches
@@ -83,15 +83,15 @@ pub(crate) fn on_attr() -> Attribute {
 /// supports. Per-rule and derived from the rule's own immutable body,
 /// so an entry is never stale; the closure itself is never stored.
 pub(crate) fn reads_attr() -> Attribute {
-    the!("db.rule/reads").into()
+    the!("dialog.rule/reads").into()
 }
 
-/// The `db.concept/transient` marker attribute. A concept carrying it
+/// The `dialog.concept/transient` marker attribute. A concept carrying it
 /// is a *command*: facts of it dispatched into a transaction (and heads
 /// of rules concluding it) live for one induction round and are never
 /// committed.
 pub(crate) fn transient_attr() -> Attribute {
-    the!("db.concept/transient").into()
+    the!("dialog.concept/transient").into()
 }
 
 /// The `on:<domain>/<name>` trigger-index entity for an attribute.
@@ -132,7 +132,7 @@ pub(crate) fn on_entities(rule: &InductiveRule) -> BTreeSet<Entity> {
 }
 
 /// The reverse-index entities for a deductive rule's body: one per
-/// attribute any concept premise names. Stored as `db.rule/reads` so
+/// attribute any concept premise names. Stored as `dialog.rule/reads` so
 /// dispatch can walk base attribute → deductive rules reading it →
 /// their conclusions, closing the trigger footprint over derivation.
 pub(crate) fn reads_entities(rule: &DeductiveRule) -> BTreeSet<Entity> {
@@ -140,7 +140,7 @@ pub(crate) fn reads_entities(rule: &DeductiveRule) -> BTreeSet<Entity> {
     premise_trigger_entities(descriptor.when.iter().chain(descriptor.unless.iter()))
 }
 
-/// Hydrate a compiled [`InductiveRule`] from a `db.rule/source` claim
+/// Hydrate a compiled [`InductiveRule`] from a `dialog.rule/source` claim
 /// value (the canonical dag-cbor
 /// [`InductiveRuleDescriptor`](dialog_query::rule::inductive::descriptor::InductiveRuleDescriptor)).
 pub(crate) fn hydrate_inductive(source: &[u8]) -> Result<InductiveRule, EvaluationError> {
@@ -148,7 +148,7 @@ pub(crate) fn hydrate_inductive(source: &[u8]) -> Result<InductiveRule, Evaluati
         .map_err(|reason| EvaluationError::Store(format!("inductive rule hydrate: {reason}")))
 }
 
-/// [`Statement`] wrapper installing an [`InductiveRule`] as `db.rule/*`
+/// [`Statement`] wrapper installing an [`InductiveRule`] as `dialog.rule/*`
 /// facts: the `source` body (shared attribute with deductive rules —
 /// hydration dispatches on the head field), the `induces` head index,
 /// and the `on` trigger index dispatch probes by touched attribute.
@@ -199,7 +199,7 @@ impl Statement for Induct {
     }
 }
 
-/// [`Statement`] wrapper installing a [`DeductiveRule`] as `db.rule/*`
+/// [`Statement`] wrapper installing a [`DeductiveRule`] as `dialog.rule/*`
 /// facts: the `conclusion` discovery index, the `source` body, and the
 /// `reads` reverse index over the body's attributes that lets
 /// commit-time dispatch close its trigger footprint over derivation.
@@ -258,12 +258,12 @@ impl Statement for Transient {
     }
 }
 
-/// The `db.rule/source` body attribute, validated at compile time.
+/// The `dialog.rule/source` body attribute, validated at compile time.
 pub(crate) fn source_attr() -> Attribute {
-    the!("db.rule/source").into()
+    the!("dialog.rule/source").into()
 }
 
-/// Selector for `db.rule/conclusion is = <concept>` — finds the rule
+/// Selector for `dialog.rule/conclusion is = <concept>` — finds the rule
 /// entities concluding a concept.
 pub(crate) fn conclusion_selector(concept: &Entity) -> ArtifactSelector<Constrained> {
     ArtifactSelector::new()
@@ -271,25 +271,25 @@ pub(crate) fn conclusion_selector(concept: &Entity) -> ArtifactSelector<Constrai
         .is(Value::Entity(concept.clone()))
 }
 
-/// Selector for `db.rule/source of = <rule>` — fetches a rule's body.
+/// Selector for `dialog.rule/source of = <rule>` — fetches a rule's body.
 pub(crate) fn source_selector(rule: &Entity) -> ArtifactSelector<Constrained> {
     ArtifactSelector::new().the(source_attr()).of(rule.clone())
 }
 
-/// Hydrate a compiled [`DeductiveRule`] from a `db.rule/source` claim
+/// Hydrate a compiled [`DeductiveRule`] from a `dialog.rule/source` claim
 /// value (the canonical dag-cbor [`DeductiveRuleDescriptor`]).
 pub(crate) fn hydrate(source: &[u8]) -> Result<DeductiveRule, EvaluationError> {
     DeductiveRule::decode(source)
         .map_err(|reason| EvaluationError::Store(format!("rule hydrate: {reason}")))
 }
 
-/// Extract the rule entities from a batch of `db.rule/conclusion`
+/// Extract the rule entities from a batch of `dialog.rule/conclusion`
 /// artifacts — each artifact's `of` is a rule entity.
 pub(crate) fn rule_entities(conclusion_claims: Vec<Artifact>) -> Vec<Entity> {
     conclusion_claims.into_iter().map(|a| a.of).collect()
 }
 
-/// Extract the source bytes from a `db.rule/source` artifact batch.
+/// Extract the source bytes from a `dialog.rule/source` artifact batch.
 pub(crate) fn source_bytes(source_claims: Vec<Artifact>) -> Option<Vec<u8>> {
     source_claims.into_iter().find_map(|a| match a.is {
         Value::Bytes(bytes) => Some(bytes),
@@ -441,8 +441,8 @@ pub struct RuleCache {
 }
 
 /// The committed trigger footprint at a branch head: every `on:`
-/// entity present in `db.rule/on` (inductive triggers) and
-/// `db.rule/reads` (deductive support edges). The O(1) gate commit-time
+/// entity present in `dialog.rule/on` (inductive triggers) and
+/// `dialog.rule/reads` (deductive support edges). The O(1) gate commit-time
 /// dispatch intersects touched attributes against before any probe.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct TriggerFootprint {
@@ -472,7 +472,7 @@ struct RuleCacheInner {
     reads: HashMap<Entity, (Revision, Vec<Entity>)>,
     /// Hydrated inductive bodies, content-addressed — never stale.
     inductive: HashMap<Entity, InductiveRule>,
-    /// Whether a concept carries the committed `db.concept/transient`
+    /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
 }
@@ -608,8 +608,8 @@ pub(crate) fn assemble(
 /// Read rules from an overlay [`Changes`] batch concluding `concept`.
 ///
 /// The overlay is in-memory, so this is cheap and done fresh every
-/// query (never cached). Walks the batch for `db.rule/conclusion`
-/// pointing at `concept`, then their `db.rule/source` bodies.
+/// query (never cached). Walks the batch for `dialog.rule/conclusion`
+/// pointing at `concept`, then their `dialog.rule/source` bodies.
 pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<DeductiveRule> {
     use dialog_artifacts::Change;
 

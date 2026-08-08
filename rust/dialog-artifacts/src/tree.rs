@@ -1137,12 +1137,20 @@ where
         // `history::RevisionRecord`), which writes through
         // [`ArtifactTreeExt::record`] rather than instructions. At the
         // library level lineage therefore cannot be corrupted through
-        // the ordinary write path.
+        // the ordinary write path. Two prefixes are carved out:
+        // `dialog.rule/*` (rule storage) and `dialog.concept/*`
+        // (concept markers), whose integrity is semantic rather than
+        // positional — rules are content-addressed, so a forged rule
+        // fact fails the hydration check upstream and is inert.
         {
             let (Instruction::Assert(artifact)
             | Instruction::Replace(artifact)
             | Instruction::Retract(artifact)) = &instruction;
-            if artifact.the.as_str().starts_with("dialog.") {
+            let the = artifact.the.as_str();
+            if the.starts_with("dialog.")
+                && !the.starts_with("dialog.rule/")
+                && !the.starts_with("dialog.concept/")
+            {
                 return Err(DialogArtifactsError::ReservedAttribute(
                     artifact.the.to_string(),
                 ));

@@ -437,7 +437,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    /// Read a `db.rule/*` selector against a single branch's committed
+    /// Read a `dialog.rule/*` selector against a single branch's committed
     /// tree only (NOT the overlay) and collect the matching artifacts.
     /// The durable layer's reads must be tree-only so the head-keyed
     /// discovery cache stays correct — overlay rules are handled
@@ -461,7 +461,7 @@ where
     }
 
     /// The durable rules concluding `concept` on `branch`: the committed
-    /// `db.rule/*` rules, read from the tree and cached by branch head
+    /// `dialog.rule/*` rules, read from the tree and cached by branch head
     /// (re-scanned only when the head moves), with hydrated bodies
     /// cached by content-addressed rule entity.
     async fn durable_rules(
@@ -492,7 +492,7 @@ where
         };
 
         // Hydration: reuse cached bodies (content-addressed, never stale),
-        // fetch + compile the rest from each rule's `db.rule/source`.
+        // fetch + compile the rest from each rule's `dialog.rule/source`.
         let mut rules = Vec::with_capacity(rule_entities.len());
         for rule_entity in rule_entities {
             if let Some(body) = cache.body(&rule_entity) {
@@ -527,8 +527,8 @@ where
         + 'static,
 {
     /// Resolve a concept's deductive rules by unioning across layers:
-    /// each branch is a durable layer (committed `db.rule/*`, head-cached),
-    /// the overlay is a transient layer (uncommitted `db.rule/*`, fresh).
+    /// each branch is a durable layer (committed `dialog.rule/*`, head-cached),
+    /// the overlay is a transient layer (uncommitted `dialog.rule/*`, fresh).
     /// The implicit per-descriptor rule is assembled once on top.
     ///
     /// The resolved rule set is checked against the program analysis
@@ -720,7 +720,7 @@ mod rule_tests {
         d.compile().expect("rule compiles")
     }
 
-    /// The `db.rule/*` facts that store `rule`: a `conclusion` index
+    /// The `dialog.rule/*` facts that store `rule`: a `conclusion` index
     /// pointing at the concept it concludes, and the `source` body.
     /// Asserting these makes the durable/transient layer resolve it.
     fn rule_statements(
@@ -729,10 +729,10 @@ mod rule_tests {
         let rule_entity = rule.this();
         let conclusion = rule.conclusion().this();
         (
-            the!("db.rule/conclusion")
+            the!("dialog.rule/conclusion")
                 .of(rule_entity.clone())
                 .is(conclusion),
-            the!("db.rule/source").of(rule_entity).is(rule.encode()),
+            the!("dialog.rule/source").of(rule_entity).is(rule.encode()),
         )
     }
 
@@ -1249,7 +1249,7 @@ mod rule_tests {
 
     // A committed rule that is later RETRACTED must stop resolving: the
     // retract moves the head, so the discovery cache re-scans and finds
-    // the rule's `db.rule/*` facts gone. The inverse of the
+    // the rule's `dialog.rule/*` facts gone. The inverse of the
     // head-move-adds case.
 
     #[dialog_common::test]

@@ -10,7 +10,7 @@ the same way. This note records how that works and why.
 Each layer in the stack is a query source:
 
 - **Durable layer** — one per branch in scope. Facts come from the
-  branch's committed tree; rules come from `db.rule/*` facts on that
+  branch's committed tree; rules come from `dialog.rule/*` facts on that
   tree.
 - **Transient layer** — the per-query `Changes` overlay (`.with(...)`
   and a transaction's pending writes). Facts and rules both come from
@@ -22,13 +22,13 @@ the branches + overlay and implements `Provider<Select>` (facts) and
 single-branch `QueryEnv`, so committed and mid-transaction reads share
 one implementation and cannot diverge.
 
-## Rule storage (`db.rule/*`)
+## Rule storage (`dialog.rule/*`)
 
 A deductive rule is stored as two facts (see `rules.rs`):
 
-- `db.rule/conclusion` `of` rule-entity `is` concept-entity — the index;
+- `dialog.rule/conclusion` `of` rule-entity `is` concept-entity — the index;
   "which rules conclude concept X".
-- `db.rule/source` `of` rule-entity `is` the rule body as canonical
+- `dialog.rule/source` `of` rule-entity `is` the rule body as canonical
   dag-cbor `DeductiveRuleDescriptor` (a `Value::Bytes`), hydrated with
   `DeductiveRule::decode`.
 
@@ -51,7 +51,7 @@ These attribute names are a dialog-repository convention, like
    It reads the concept's attributes directly; it is not stored and has
    no content identity.
 2. For each branch, gather its **durable** rules: look up
-   `db.rule/conclusion = concept` against the tree, hydrate each body.
+   `dialog.rule/conclusion = concept` against the tree, hydrate each body.
 3. Gather **transient** rules from the overlay `Changes`.
 4. Install the durable + transient rules onto the implicit one and
    return the `ConceptRules`.
@@ -111,7 +111,7 @@ caller's names. Proven by `it_plans_independently_of_caller_variable_names`.
 ## Writes
 
 `tx.assert(rule)`, `tx.retract(rule)`, and `.with(rule)` all go through
-the existing `Statement` impl that writes/removes the `db.rule/*` facts.
+the existing `Statement` impl that writes/removes the `dialog.rule/*` facts.
 There is no separate rule-write path: the layer holding the facts
 (committed → durable, overlay → transient) surfaces them via resolution.
 

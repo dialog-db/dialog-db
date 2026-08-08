@@ -7,7 +7,7 @@
 //! round loop:
 //!
 //! 1. The round's stimulus yields the set of *touched attributes*; each
-//!    probes the `db.rule/on` trigger index (against the transaction
+//!    probes the `dialog.rule/on` trigger index (against the transaction
 //!    view, so rules installed in the same commit fire). Rules that
 //!    don't watch a touched attribute are never loaded, planned, or
 //!    evaluated — dispatch cost follows the delta, not the rule
@@ -17,7 +17,7 @@
 //!    rules in a round read identical state.
 //! 3. Bound heads emit facts by cardinality (`Replace` for one,
 //!    `Assert` for many). A head concept carrying the
-//!    `db.concept/transient` marker routes to the next round's
+//!    `dialog.concept/transient` marker routes to the next round's
 //!    stimulus and is never committed; a durable head passes a novelty
 //!    check (an instruction that leaves the view unchanged contributes
 //!    nothing) and folds into the commit.
@@ -157,10 +157,10 @@ where
         // at the commit that installs it — the same instant semantics
         // as any other conjunction, and the propagator discipline
         // (attaching alerts once over current contents). An installed
-        // inductive rule (its `db.rule/on` rows in this stimulus —
+        // inductive rule (its `dialog.rule/on` rows in this stimulus —
         // whether staged here or arriving through the watermark lag)
         // becomes a full-evaluation candidate; an installed deductive
-        // rule (its `db.rule/reads` rows) makes its conclusions
+        // rule (its `dialog.rule/reads` rows) makes its conclusions
         // derived-touched, so rules premised on the newly derivable
         // concepts re-evaluate.
         let on = on_attr();
@@ -207,7 +207,7 @@ where
             .await?;
 
         // Trigger-indexed discovery: footprint gate, then one
-        // `db.rule/on` lookup (head-cached) per surviving attribute.
+        // `dialog.rule/on` lookup (head-cached) per surviving attribute.
         // Nothing ever enumerates all rules.
         let mut candidates: BTreeSet<Entity> = BTreeSet::new();
         for attribute in &touched {
@@ -303,13 +303,13 @@ struct OverlayTriggers {
     on: HashMap<Entity, Vec<Entity>>,
     /// `on:` entity → deductive-rule entities asserted in the overlay.
     reads: HashMap<Entity, Vec<Entity>>,
-    /// Rule entity → staged `db.rule/source` bytes.
+    /// Rule entity → staged `dialog.rule/source` bytes.
     sources: HashMap<Entity, Vec<u8>>,
     /// Concepts marked transient in the overlay.
     transient: BTreeSet<Entity>,
     /// Concepts whose transient marker is retracted in the overlay.
     unmarked: BTreeSet<Entity>,
-    /// Rule entities whose `db.rule/source` is retracted in the
+    /// Rule entities whose `dialog.rule/source` is retracted in the
     /// overlay — excluded from dispatch even if the committed slice
     /// still lists them.
     removed: BTreeSet<Entity>,
@@ -372,7 +372,7 @@ impl OverlayTriggers {
 impl<'a> Dispatch<'a> {
     /// Resolve the committed dispatch state: the branch head and the
     /// trigger footprint at it (cached per head; one range scan over
-    /// each of `db.rule/on` and `db.rule/reads` on a miss).
+    /// each of `dialog.rule/on` and `dialog.rule/reads` on a miss).
     async fn resolve<Env>(branch: &'a Branch, env: &Env) -> Result<Dispatch<'a>, CommitError>
     where
         Env: Provider<Get>
@@ -469,7 +469,7 @@ impl<'a> Dispatch<'a> {
     }
 
     /// Close `touched` over the deductive support graph: for each
-    /// touched attribute, `db.rule/reads` names the deductive rules
+    /// touched attribute, `dialog.rule/reads` names the deductive rules
     /// whose bodies read it; their conclusions' attributes are
     /// *derived-touched* and recurse until the frontier is exhausted.
     /// Composed from per-rule facts at dispatch time, never stored, so
@@ -568,6 +568,9 @@ impl<'a> Dispatch<'a> {
         };
         Ok(bytes
             .and_then(|bytes| hydrate(&bytes).ok())
+            // Content-address check: forged bytes stored under a
+            // mismatching entity are inert.
+            .filter(|body| body.try_this() == Some(entity.clone()))
             .inspect(|body| {
                 cache.record_body(entity.clone(), body.clone());
             }))
@@ -603,14 +606,23 @@ impl<'a> Dispatch<'a> {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        let rule =
-            hydrate_inductive(&bytes).map_err(|error| CommitError::Induction(error.to_string()))?;
+        // Undecodable bytes, or bytes whose content address is not the
+        // entity they were stored under, are forged or corrupt entries
+        // in the carved-out namespace — inert, like any dangling index
+        // entry. This check is what makes the `dialog.rule/*`
+        // reserved-namespace carve-out safe.
+        let Ok(rule) = hydrate_inductive(&bytes) else {
+            return Ok(None);
+        };
+        if rule.try_this() != Some(entity.clone()) {
+            return Ok(None);
+        }
         cache.record_inductive(entity.clone(), rule.clone());
         Ok(Some(rule))
     }
 
     /// Whether the concept at `entity` carries the
-    /// `db.concept/transient` marker: the overlay's verdict wins
+    /// `dialog.concept/transient` marker: the overlay's verdict wins
     /// (marked or unmarked in this very commit), else the committed
     /// slice, head-cached.
     async fn is_transient<Env>(
@@ -649,7 +661,7 @@ impl<'a> Dispatch<'a> {
         Ok(verdict)
     }
 
-    /// The committed `db.rule/source` bytes for a rule entity, if any.
+    /// The committed `dialog.rule/source` bytes for a rule entity, if any.
     async fn source_bytes<Env>(
         &self,
         entity: &Entity,
@@ -774,7 +786,15 @@ where
             .map_err(|error| CommitError::Induction(format!("watermark spilled: {error:?}")))?;
         let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
             .map_err(|error| CommitError::Induction(format!("watermark datum: {error:?}")))?;
-        if fact.the.to_string().starts_with("dialog.") {
+        // Version-control records (which every commit writes) are
+        // excluded from the lag; the carved-out rule and marker
+        // prefixes pass through, so a rule arriving by pull or raw
+        // commit installs at this instant.
+        let the = fact.the.to_string();
+        if the.starts_with("dialog.")
+            && !the.starts_with("dialog.rule/")
+            && !the.starts_with("dialog.concept/")
+        {
             continue;
         }
         if !seen.insert((
@@ -1376,7 +1396,7 @@ mod tests {
         Ok(())
     }
 
-    /// A rule's transient head (marked `db.concept/transient`) becomes
+    /// A rule's transient head (marked `dialog.concept/transient`) becomes
     /// the next round's stimulus instead of durable novelty: commands
     /// cascade through rounds, only the final durable head lands, and
     /// neither command leaves a trace.
@@ -1708,7 +1728,7 @@ mod tests {
     /// `shift/duty`. A message arrives while the actor is off duty
     /// (rule probed via the inbox attributes, join fails); then a
     /// `shift/duty` write flips the derived status. The dispatch
-    /// closure must carry that base write through `db.rule/reads` to
+    /// closure must carry that base write through `dialog.rule/reads` to
     /// the derived attribute so the inductive rule fires against the
     /// message already in the store.
     #[dialog_common::test]
@@ -1907,6 +1927,165 @@ mod tests {
             values(&branch, &operator, "result.second/target", &command).await?,
             vec![Value::Entity(target)],
             "the rule installed after the cache warmed must fire too"
+        );
+        Ok(())
+    }
+
+    /// Retracting a rule's facts uninstalls it: commits after the
+    /// retraction no longer fire it, while facts derived before the
+    /// retraction stay (an inductive head is a transition, not a
+    /// membership).
+    #[dialog_common::test]
+    async fn it_stops_firing_a_retracted_rule() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(Induct(tagger()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let before: Entity = "doc:before".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(before.clone())
+                    .is("before".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "derived/tag", &before).await?,
+            vec![Value::String("before".to_string())],
+            "the rule fires while installed"
+        );
+
+        branch
+            .transaction()
+            .retract(Induct(tagger()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let after: Entity = "doc:after".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(after.clone())
+                    .is("after".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            values(&branch, &operator, "derived/tag", &after)
+                .await?
+                .is_empty(),
+            "a retracted rule must not fire"
+        );
+        assert_eq!(
+            values(&branch, &operator, "derived/tag", &before).await?,
+            vec![Value::String("before".to_string())],
+            "facts derived before the retraction stay"
+        );
+        Ok(())
+    }
+
+    /// A rule retracted in the same commit that would have triggered
+    /// it does not fire: the overlay's retraction wins over the
+    /// committed slice within the very commit.
+    #[dialog_common::test]
+    async fn it_suppresses_a_rule_retracted_in_the_triggering_commit() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(Induct(tagger()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .retract(Induct(tagger()))
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("hello".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            values(&branch, &operator, "derived/tag", &doc)
+                .await?
+                .is_empty(),
+            "the same-commit retraction must suppress the firing"
+        );
+        Ok(())
+    }
+
+    /// Forged facts in the carved-out `dialog.rule/*` namespace are
+    /// inert: bytes stored under an entity that is not their content
+    /// address fail the hydration check and never fire — the semantic
+    /// integrity that makes the reserved-namespace carve-out safe.
+    #[dialog_common::test]
+    async fn it_ignores_forged_rule_facts() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // A real rule body stored under a *wrong* entity, with a
+        // trigger-index entry pointing at it — the shape a buggy or
+        // malicious writer could produce now that dialog.rule/* is
+        // writable.
+        let forged: Entity = "rule:forged".parse()?;
+        let on: Entity = "on:doc/title".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("dialog.rule/source")
+                    .of(forged.clone())
+                    .is(tagger().encode()),
+            )
+            .assert(dialog_query::the!("dialog.rule/on").of(forged).is(on))
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("hello".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            values(&branch, &operator, "derived/tag", &doc)
+                .await?
+                .is_empty(),
+            "a forged rule fact must never fire"
         );
         Ok(())
     }

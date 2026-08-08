@@ -124,7 +124,7 @@ impl DeductiveRule {
     /// directly from raw [`AttributeQuery`] premises encode to nothing,
     /// because `Proposition`'s formal-notation `Serialize` rejects
     /// attribute propositions. Only rules with concept/formula bodies
-    /// (what `rule!:` notation and stored `db.rule/*` rules produce)
+    /// (what `rule!:` notation and stored `dialog.rule/*` rules produce)
     /// have a canonical encoding.
     ///
     /// dag-cbor canonicalizes map keys per the spec, so the encoding is

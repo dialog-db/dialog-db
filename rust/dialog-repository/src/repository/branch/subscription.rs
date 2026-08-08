@@ -101,7 +101,7 @@ use crate::{
 pub struct Demand {
     /// Ranges read by fact scans: the query's data demand.
     facts: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
-    /// Ranges read by rule-discovery scans (`db.rule/*`). Kept
+    /// Ranges read by rule-discovery scans (`dialog.rule/*`). Kept
     /// apart because a change here can install a rule, which can
     /// affect any row — it invalidates the whole result, not one
     /// entity's slice.
@@ -1705,7 +1705,7 @@ mod tests {
         }
     }
 
-    /// Stage the `db.rule/*` facts that persist a deductive rule
+    /// Stage the `dialog.rule/*` facts that persist a deductive rule
     /// durably (the storage shape from `crate::rules`).
     fn with_rule<'t>(
         transaction: crate::Transaction<'t>,
@@ -1714,11 +1714,11 @@ mod tests {
         let entity = rule.this();
         transaction
             .assert(
-                the!("db.rule/conclusion")
+                the!("dialog.rule/conclusion")
                     .of(entity.clone())
                     .is(rule.conclusion().this()),
             )
-            .assert(the!("db.rule/source").of(entity).is(rule.encode()))
+            .assert(the!("dialog.rule/source").of(entity).is(rule.encode()))
     }
 
     /// A rule `conclusion :- Concept(target, terms)` built from

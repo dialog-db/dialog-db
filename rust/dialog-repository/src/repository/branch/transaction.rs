@@ -94,7 +94,7 @@ impl<'a> Transaction<'a> {
     ///
     /// [`TransactionCommit::perform`] first runs commit-time induction:
     /// the commit's delta (durable changes and dispatched transients
-    /// alike) probes the `db.rule/on` trigger index, matching inductive
+    /// alike) probes the `dialog.rule/on` trigger index, matching inductive
     /// rules fire against the transaction view, and their durable
     /// novelty folds into the commit while transient heads seed further
     /// rounds. Only then is the durable batch committed; transients are

@@ -87,10 +87,21 @@ Standing answers to recurring questions:
   no polling exists between commits; only value-generating or
   polarity-oscillating cascades diverge, and `MAX_ROUNDS` fails the
   commit atomically.
-- *Derived premises*: closed over `db.rule/reads` at dispatch
+- *Derived premises*: closed over `dialog.rule/reads` at dispatch
   (implemented).
 - *Negation*: `unless` stays for state absence; events cover
   transitions only.
+- *Rule storage namespace*: `dialog.rule/*` and
+  `dialog.concept/transient` — inside the reserved `dialog.`
+  namespace, carved out of the write guard, with integrity enforced
+  *semantically*: rules are content-addressed, so hydration verifies
+  the decoded body's identity against the entity it was stored under
+  and treats forged or corrupt entries as inert dangling entries
+  (pinned by `it_ignores_forged_rule_facts`). Retracting the rule
+  facts uninstalls: same-commit retraction suppresses via the overlay,
+  committed retraction drops the rule at the head rescan, and
+  previously derived facts stay (heads are transitions, not
+  memberships).
 
 ## What exists today
 
@@ -100,7 +111,7 @@ analysis pipeline; the `assert!` head marks transaction-time semantics
 and the self-negation idempotence guard (Dedalus `P@next :- body, not
 P@now`) is permitted, unlike deductive rules. But nothing evaluates
 them: there is no reactor, no trigger index, no storage convention, no
-transient facts. Deductive rules are stored as `db.rule/*` facts with
+transient facts. Deductive rules are stored as `dialog.rule/*` facts with
 layered resolution and head-keyed discovery caching (`rules.rs`,
 `layered-rule-resolution.md`).
 
@@ -162,7 +173,7 @@ layered resolution and head-keyed discovery caching (`rules.rs`,
 ### Transience is a concept property, stored as a fact
 
 ```
-db.concept/transient  of  concept:<hash>  is  true
+dialog.concept/transient  of  concept:<hash>  is  true
 ```
 
 Declared when a command concept is installed; not part of the concept's
@@ -202,22 +213,22 @@ no durable novelty produces **no commit at all** (the existing
 empty-commit short-circuit applies) — unlike tonk, where a
 transient-only commit mints a revision with an identical tree hash.
 
-### Storage: `db.rule/*` grows two attributes
+### Storage: `dialog.rule/*` grows two attributes
 
 An inductive rule is content-addressed like a deductive one
 (`rule:<base58(blake3(dag-cbor(descriptor)))>`; the `assert!` /
 `retract!` head field is in the encoding, so kinds and polarities get
 distinct entities). Stored as:
 
-- `db.rule/source` — canonical dag-cbor descriptor, shared attribute
+- `dialog.rule/source` — canonical dag-cbor descriptor, shared attribute
   with deductive rules; hydration dispatches on the head field.
-- `db.rule/induces` `is` head-concept-entity — the inductive sibling of
-  `db.rule/conclusion`. **Deliberately a separate attribute**: deductive
-  resolution scans `db.rule/conclusion` on every concept query, and
+- `dialog.rule/induces` `is` head-concept-entity — the inductive sibling of
+  `dialog.rule/conclusion`. **Deliberately a separate attribute**: deductive
+  resolution scans `dialog.rule/conclusion` on every concept query, and
   sharing it would make every query hydrate-and-discard the inductive
   rules concluding that concept. Separate index ⇒ the deductive path is
   untouched by any number of installed effects.
-- `db.rule/on` `is` `on:<domain>/<name>` — cardinality many, the
+- `dialog.rule/on` `is` `on:<domain>/<name>` — cardinality many, the
   trigger index. One entry per attribute named by any concept premise,
   `when` **and** `unless`, derived syntactically from the descriptor as
   tonk's `Effect::on_entities` does. With durable triggers these
@@ -238,7 +249,7 @@ transient bucket being empty. Once durable writes can trigger, every
 commit has a non-empty stimulus — so the gate moves one level down:
 
 Per branch head, maintain the **trigger footprint**: the set of `on:`
-keys present in `db.rule/on` (equivalently: the set of attributes any
+keys present in `dialog.rule/on` (equivalently: the set of attributes any
 inductive rule watches). Rules are facts, so this is one range read
 over the `on:` value space at head advance, cached like rule discovery
 (head-keyed; overlay-staged rules folded in fresh). Represent it as a
@@ -250,7 +261,7 @@ Dispatch then gates per attribute in memory:
   skip the loop entirely. Zero I/O, a few set probes. This is the
   common case for the vast majority of commits and preserves tonk's
   property in spirit: cost is O(touched attributes), not O(rules).
-- Non-empty intersection ⇒ probe `db.rule/on` only for the
+- Non-empty intersection ⇒ probe `dialog.rule/on` only for the
   intersecting attributes, hydrate only those candidates.
 
 The footprint is an over-approximation twice over (attribute
@@ -279,7 +290,7 @@ while !stimulus.is_empty() {
     let watched = footprint.intersect(&touched);
     if watched.is_empty() { break; }
 
-    // 2. Trigger-indexed discovery: one db.rule/on lookup per watched
+    // 2. Trigger-indexed discovery: one dialog.rule/on lookup per watched
     //    attribute, against the tx view (committed slice via the
     //    head-keyed cache, overlay fresh). Nothing ever enumerates
     //    all rules.
@@ -331,7 +342,7 @@ Semantics:
   `unless`-own-head idempotence guard is the recommended idiom for
   everything else, and `retract! C when C`-shaped rules stay legal —
   that is the consumption pattern.
-- **Head routing** consults `db.concept/transient` for the head concept
+- **Head routing** consults `dialog.concept/transient` for the head concept
   (cached per head revision): marked ⇒ ephemeral, next-stimulus only;
   unmarked ⇒ durable novelty.
 - **Atomicity and observability.** One commit ⇒ one revision ⇒ one
@@ -399,7 +410,7 @@ back already-derived facts settles to a no-op batch, no revision is
 minted, and the subscription never re-fires.
 
 A future install-time **productivity lint** falls out of rules being
-facts: `db.rule/induces` gives each rule's outputs, `db.rule/on` its
+facts: `dialog.rule/induces` gives each rule's outputs, `dialog.rule/on` its
 inputs, so the trigger graph is a join. Cycles carrying a formula
 (value generator) or mixed assert/retract polarity — the two shapes
 that defeat the novelty fixed point — can be flagged at install as
@@ -420,7 +431,7 @@ once probed, the body resolves deductive rules through the standard
 `QueryEnv` — the trigger is.
 
 The fix is *where the expansion lives*: *not* in the stored index.
-Expanding `db.rule/on` at install time (storing `on:shift/ended` on
+Expanding `dialog.rule/on` at install time (storing `on:shift/ended` on
 the inbox rule) goes stale the moment a deductive rule is installed
 later — a new way to become on-duty would silently miss every
 inductive rule whose stored closure predates it, and repairing that
@@ -429,7 +440,7 @@ means rewriting other rules' facts on every deductive-rule change.
 Instead every stored entry stays *per-rule and authored-level* — a
 pure function of that one rule's immutable body, so never stale — and
 the closure is **composed at dispatch time**. Deductive rules gain
-their own reverse index: `db.rule/reads` `is` `on:<domain>/<name>`,
+their own reverse index: `dialog.rule/reads` `is` `on:<domain>/<name>`,
 one entry per attribute the body names (written by the same
 `Statement` install path, `Deduce`). Dispatch then chains per-rule
 facts: touched attribute → `reads` probe → deductive rules whose
@@ -469,7 +480,7 @@ soundness before first firing, demand for precision after.
 The footprint makes discovery O(touched attributes), but two places
 still scale with rule population and need clamping:
 
-1. **Per-attribute fan-out.** The `db.rule/on` probe returns *every*
+1. **Per-attribute fan-out.** The `dialog.rule/on` probe returns *every*
    rule watching an attribute. Five hundred rules watching `job/status`
    — each pinning a different constant (`"done"`, `"failed"`, a
    specific entity) — would mean five hundred hydrations and body
@@ -547,7 +558,7 @@ memberships. "Task exists only while on duty" is a deductive rule (a
 view), or a paired `retract!` rule.
 
 For (2): the head-advance tree diff (already computed for subscription
-maintenance) names exactly which `db.rule/*` facts changed, so the
+maintenance) names exactly which `dialog.rule/*` facts changed, so the
 footprint and discrimination maps update incrementally in O(rule
 churn) — a full rebuild happens only on cold open, and hydration is
 content-address-cached, so even that is one-time per rule. The whole
@@ -590,7 +601,7 @@ though durable triggers would make the alternatives tempting:
   rule* — the same instant semantics as any other conjunction, and the
   propagator discipline: attaching a propagator alerts it once over
   current cell contents. Implemented:
-  a rule whose `db.rule/on` rows appear in the round's stimulus
+  a rule whose `dialog.rule/on` rows appear in the round's stimulus
   (staged in this commit or arriving through the watermark lag — so
   rules delivered by pull apply at the receiving replica) becomes a
   full-evaluation candidate; an installed *deductive* rule's
@@ -795,7 +806,7 @@ selective per-rule materialization re-enters.
 
 The system is a propagator network read off the database (Radul &
 Sussman): cells = (entity, attribute) pairs; a propagator's
-attachment list = `db.rule/on`; the alert queue drained to quiescence
+attachment list = `dialog.rule/on`; the alert queue drained to quiescence
 = the induce loop; "did the cell gain information" = the novelty
 check; quiescence = empty stimulus. Propagator networks need no round
 bound because cell merges are monotone moves up a finite information
@@ -1075,7 +1086,7 @@ arithmetic moved into the readout — so the counter migrates from
 | Termination = no transients emitted | Termination = no novelty (delta-empty), `MAX_ROUNDS` backstop | durable novelty can enable further rules |
 | Durable `on` entries indexed but dead | Load-bearing, including `unless` (retraction-enables) | this *is* the durable trigger tier |
 | Transients integrated then swept via inverse instructions | Separate bucket, never committed | no cancellation trick; true no-op commits; simpler crash story |
-| Effects share discovery machinery but use `dialog.effect/*` | `db.rule/{source,induces,on}` | one rule store; `induces` kept separate from `conclusion` so deductive queries never touch effects |
+| Effects share discovery machinery but use `dialog.effect/*` | `dialog.rule/{source,induces,on}` | one rule store; `induces` kept separate from `conclusion` so deductive queries never touch effects |
 | `dialog.effect/polarity` fact | polarity in the descriptor (`assert!`/`retract!` field) | source is decoded anyway; content address already distinguishes |
 | Reactor in `dialog-reactor::Commit::perform` (host) | step 0 of dialog's `Commit::perform` | native means no host loop; atomic with the seal |
 | `effect:system` well-known anchor | not adopted | tonk itself documents it as vestigial convention |
@@ -1086,8 +1097,8 @@ The core loop is implemented:
 
 - `dialog-query`: `InductiveRule` gained `encode`/`decode`/`this`
   (content addressing, mirroring `DeductiveRule`).
-- `dialog-repository/src/rules.rs`: the `db.rule/induces` and
-  `db.rule/on` conventions, `on`-entity derivation from concept
+- `dialog-repository/src/rules.rs`: the `dialog.rule/induces` and
+  `dialog.rule/on` conventions, `on`-entity derivation from concept
   premises (`when` + `unless`), and the `Induct` / `Transient`
   statement wrappers.
 - `dialog-repository/.../transaction.rs`: `Transaction` gained a
@@ -1095,17 +1106,17 @@ The core loop is implemented:
   `TransactionCommit` that runs induction before delegating to
   `Branch::commit`. Transients layer into `tx.query()`.
 - `dialog-repository/.../transaction/induce.rs`: the round loop —
-  touched-attribute probe of `db.rule/on` against the layered
+  touched-attribute probe of `dialog.rule/on` against the layered
   transaction view, content-addressed hydration, body evaluation via
   the standard planner/evaluator, head emission by cardinality,
-  `db.concept/transient` head routing, per-instruction novelty check,
+  `dialog.concept/transient` head routing, per-instruction novelty check,
   `MAX_ROUNDS = 16`. End-to-end tests cover the command-triggered
   increment, durable triggering with an `unless` guard enabled by a
   retraction, a cascade through a transient intermediate, runaway
   divergence, dispatch selectivity, and the unconsumed-command no-op.
 
 The deductive-support closure is implemented: `Deduce` installs
-deductive rules with `db.rule/reads` reverse-index entries, and
+deductive rules with `dialog.rule/reads` reverse-index entries, and
 dispatch closes the touched set over them
 (`Dispatch::expand_through_deduction`) before probing — pinned by the
 `it_triggers_through_a_deductive_premise` test, which runs the

@@ -584,7 +584,7 @@ mod tests {
         Ok(())
     }
 
-    /// A rule whose `db.rule/*` facts are pending in the transaction
+    /// A rule whose `dialog.rule/*` facts are pending in the transaction
     /// resolves as a transient overlay rule: the uncommitted view
     /// derives through it without the rule (or the data) ever being
     /// committed.
@@ -619,11 +619,11 @@ mod tests {
         let tx = branch
             .transaction()
             .assert(
-                the!("db.rule/conclusion")
+                the!("dialog.rule/conclusion")
                     .of(rule.this())
                     .is(employee.this()),
             )
-            .assert(the!("db.rule/source").of(rule.this()).is(rule.encode()))
+            .assert(the!("dialog.rule/source").of(rule.this()).is(rule.encode()))
             .assert(
                 the!("org/person-name")
                     .of(alice.clone())
