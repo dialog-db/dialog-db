@@ -1,0 +1,43 @@
+[package]
+name = "wbg-pool"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Pooled-browser test runner for wasm-bindgen: one shared headless Chrome, a unique origin per test, nextest-compatible"
+repository = "https://github.com/dialog-db/wbg-pool"
+keywords = ["wasm", "wasm-bindgen", "testing", "nextest", "headless"]
+categories = ["development-tools::testing", "wasm"]
+
+# wasm-bindgen-cli-support must match the wasm-bindgen version used by the
+# crates under test, exactly like wasm-bindgen-test-runner itself. Bump this
+# pin (and release) in lockstep with wasm-bindgen.
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+  "macros",
+  "rt-multi-thread",
+  "net",
+  "process",
+  "io-util",
+  "time",
+  "sync",
+  "signal",
+  "fs",
+] }
+tokio-tungstenite = "0.26"
+ureq = { version = "2", features = ["json"] }
+wasm-bindgen-cli-support = "=0.2.126"
+wasmparser = "0.229"
+
+[profile.release]
+strip = true
+
+# Standalone workspace: keeps this crate independent when the source tree is
+# vendored inside another cargo workspace (e.g. dialog-db's tools/ dir).
+[workspace]
