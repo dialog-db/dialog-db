@@ -86,6 +86,7 @@
           cargoChecks
           rustToolchain
           wasm-bindgen-cli
+          wbg-pool
           ;
 
         developmentBuildInputs =
@@ -98,6 +99,9 @@
               rustToolchain
               chrome
               chromedriver
+              # The wasm32 target runner (see .cargo/config.toml); nextest
+              # invokes it once per test against a single shared browser.
+              wbg-pool
             ]
           );
 
@@ -109,6 +113,11 @@
             "CHROME_PATH" = "${chromePath}";
             "CHROME" = "${chromePath}";
             "CHROMEDRIVER" = "${chromedriver}/bin/chromedriver";
+
+            # The Chrome sandbox cannot initialize under the CI runner, so
+            # wbg-pool's headless Chrome exits before opening a tab. Test code
+            # is trusted, so disable the sandbox for the pooled browser.
+            "WBG_POOL_NO_SANDBOX" = "1";
           }
           // lib.optionalAttrs stdenv.isDarwin {
             "WASM_BINDGEN_TEST_WEBDRIVER_JSON" = webdriverConfig;
@@ -268,7 +277,7 @@
 
           "test:web:release" = menuTestCommand {
             description = "Unit and integration tests (wasm32-unknown-unknown, release)";
-            package = "tests-web-debug";
+            package = "tests-web-release";
           };
 
           "test:cross:integration" = menuTestCommand {
@@ -325,7 +334,7 @@
           };
 
           tests-web-release = buildTestArchive {
-            name = "web-debug";
+            name = "web-release";
             target = "wasm32-unknown-unknown";
             args = "--release";
           };
