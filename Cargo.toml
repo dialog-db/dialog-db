@@ -37,3 +37,7 @@ wasmparser = "0.229"
 
 [profile.release]
 strip = true
+
+# Standalone workspace: keeps this crate independent when the source tree is
+# vendored inside another cargo workspace (e.g. dialog-db's tools/ dir).
+[workspace]
