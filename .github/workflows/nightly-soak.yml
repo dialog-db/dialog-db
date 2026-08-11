@@ -1,0 +1,84 @@
+name: 'Nightly Soak'
+
+# The standing convergence soak: the same tests CI runs at bounded scale,
+# nightly at the heavy knobs — many-seed adversarial manifests, the
+# artifacts-level fuzz, and a deep SE-log convergence replay. Every arm
+# runs the canonical-form validator at its checkpoints, so a red night
+# localizes to a level and node (see rust/dialog-search-tree/src/
+# validate.rs); an ignored minimizer test in tests/adversarial.rs shrinks
+# a caught divergence to its exact op prefix.
+
+on:
+  workflow_dispatch:
+    inputs:
+      adversarial_seeds:
+        description: 'Adversarial soak seed count'
+        required: false
+        default: '200'
+      fuzz_seeds:
+        description: 'Artifact fuzz seed count'
+        required: false
+        default: '200'
+  schedule:
+    # 03:17 UTC nightly — off the busy on-the-hour spike.
+    - cron: '17 3 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: '${{ matrix.name }}'
+    runs-on: 'ubuntu-latest'
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each arm is a dev-shell menu command (see the `soak:*` entries in
+        # flake.nix) carrying its own heavy-knob defaults; the matrix only
+        # wires the workflow_dispatch overrides through as env vars.
+        include:
+          - name: 'adversarial manifests'
+            command: 'soak:adversarial'
+            env_name: 'DIALOG_ADVERSARIAL_SEEDS'
+            env_value_input: 'adversarial_seeds'
+          - name: 'program surfaces'
+            command: 'soak:program'
+            env_name: ''
+            env_value_input: ''
+          - name: 'artifact fuzz'
+            command: 'soak:artifacts'
+            env_name: 'DIALOG_ARTIFACT_FUZZ_SEEDS'
+            env_value_input: 'fuzz_seeds'
+          - name: 'SE convergence deep'
+            command: 'soak:converge'
+            env_name: ''
+            env_value_input: ''
+    steps:
+      - uses: cisagov/action-disable-apparmor@v1
+      - uses: actions/checkout@v4
+      - uses: wimpysworld/nothing-but-nix@main
+        with:
+          root-safe-haven: '16384'
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v16
+        with:
+          name: tonk-ops
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+      # Knobs exported here are inherited by the menu command inside
+      # `nix develop`; without an override the command's own defaults apply.
+      - name: 'Run soak arm'
+        shell: bash
+        run: |
+          override="${{ github.event.inputs[matrix.env_value_input] }}"
+          if [ -n "${{ matrix.env_name }}" ] && [ -n "$override" ]; then
+            export ${{ matrix.env_name }}="$override"
+            echo "soak arm: ${{ matrix.name }} (${{ matrix.env_name }}=$override)"
+          else
+            echo "soak arm: ${{ matrix.name }} (default knobs)"
+          fi
+          nix develop \
+            --accept-flake-config \
+            --command ${{ matrix.command }}

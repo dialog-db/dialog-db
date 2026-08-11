@@ -165,6 +165,7 @@ mod storage;
 pub use storage::*;
 
 mod tree;
+mod validate;
 pub use tree::*;
 
 mod hitchhiker;
