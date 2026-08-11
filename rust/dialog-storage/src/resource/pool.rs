@@ -63,6 +63,33 @@ impl<Address: Eq + Hash, R> Pool<Address, R> {
     pub fn insert(&self, address: Address, resource: R) -> Option<R> {
         self.resources.write().insert(address, resource)
     }
+
+    /// Insert `resource` only if the address is vacant, reporting what was
+    /// already there otherwise.
+    ///
+    /// Returns `None` when the insert happened, or `Some(existing)` when it
+    /// did not. Unlike a `contains` followed by an `insert`, the check and
+    /// the insert are one locked step, so two callers racing for the same
+    /// address cannot both observe it as vacant.
+    pub fn claim(&self, address: Address, resource: R) -> Option<R>
+    where
+        R: Clone,
+    {
+        use std::collections::hash_map::Entry;
+
+        match self.resources.write().entry(address) {
+            Entry::Occupied(entry) => Some(entry.get().clone()),
+            Entry::Vacant(entry) => {
+                entry.insert(resource);
+                None
+            }
+        }
+    }
+
+    /// Remove the resource at the given address, returning it if present.
+    pub fn remove(&self, address: &Address) -> Option<R> {
+        self.resources.write().remove(address)
+    }
 }
 
 #[cfg(test)]

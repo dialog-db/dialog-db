@@ -183,6 +183,96 @@ mod tests {
         );
     }
 
+    // Two concurrent creates of one location, on real threads. Without the
+    // `Mount::Claimed` state both pass the mounts check while the table is
+    // still empty and both register, leaving two DIDs mounted for one
+    // location: the name resolves to whichever landed last, while the other
+    // stays live in the routing pool over a different backing store.
+    // Exactly one create must win.
+    //
+    // Deliberately `#[tokio::test(flavor = "multi_thread")]` rather than the
+    // usual `#[dialog_common::test]`, which is the one place in this crate
+    // that departs from it. `Create` has no yield point between its checks
+    // and its register, so cooperative interleaving alone never separates
+    // them: under the default current-thread runtime the racing pair runs to
+    // completion one after the other and the bug is invisible. Measured on
+    // the unfixed code, two OS threads reproduce it in ~43% of iterations
+    // while a single-threaded version reproduces it in 0% — so a
+    // rule-conforming version of this test would pass against the very bug
+    // it exists to pin. The cost is that this test does not run under wasm,
+    // where there are no worker threads to race on.
+    //
+    // The loop is for the same reason: one iteration only samples one
+    // interleaving, so a handful of unlucky-but-passing runs would look
+    // green. 500 makes a regression essentially certain to show up.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn it_admits_one_create_when_two_race_for_a_location() {
+        for i in 0..500 {
+            let env = Storage::volatile();
+            let clone = env.clone();
+            let (a, b) = (test_credential().await, test_credential().await);
+            let name = format!("raced-{i}");
+
+            let (ea, eb, na, nb) = (env.clone(), clone, name.clone(), name.clone());
+            let ta =
+                tokio::spawn(async move { StorageFx::profile(&na).create(a).perform(&ea).await });
+            let tb =
+                tokio::spawn(async move { StorageFx::profile(&nb).create(b).perform(&eb).await });
+            let (ra, rb) = (ta.await.unwrap(), tb.await.unwrap());
+
+            assert!(
+                ra.is_ok() != rb.is_ok(),
+                "exactly one create must win, got a={:?} b={:?}",
+                ra.map(|c| c.did()).ok(),
+                rb.map(|c| c.did()).ok(),
+            );
+
+            // And the survivor is the one the location resolves to.
+            let winner = ra.or(rb).unwrap();
+            let loaded = StorageFx::profile(&name)
+                .load()
+                .perform(&env)
+                .await
+                .unwrap();
+            assert_eq!(loaded.did(), winner.did());
+        }
+    }
+
+    // A create that claims a location and then fails must release the claim.
+    // Here the second create is rejected for reusing a mounted DID, which
+    // happens after the claim is published; if that path left `Claimed`
+    // behind, the location would be permanently uncreatable.
+    #[dialog_common::test]
+    async fn it_frees_a_location_when_create_fails_after_claiming() {
+        let env = Storage::volatile();
+        let credential = test_credential().await;
+
+        // Mount this credential's DID under some other location first.
+        StorageFx::profile("elsewhere")
+            .create(credential.clone())
+            .perform(&env)
+            .await
+            .unwrap();
+
+        // Now a create at "retry" claims the location, then fails the
+        // already-mounted-DID check.
+        let failed = StorageFx::profile("retry")
+            .create(credential)
+            .perform(&env)
+            .await;
+        assert!(failed.is_err(), "reusing a mounted DID must fail");
+
+        // The location must still be creatable with a different credential.
+        let fresh = test_credential().await;
+        let expected = fresh.did();
+        let created = StorageFx::profile("retry")
+            .create(fresh)
+            .perform(&env)
+            .await
+            .expect("a failed create must not poison the location");
+        assert_eq!(created.did(), expected);
+    }
+
     #[dialog_common::test]
     async fn it_creates_profile_with_sugar() {
         let env = Storage::volatile();
