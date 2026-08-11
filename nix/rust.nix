@@ -113,10 +113,14 @@ let
     CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
   };
 
+  # wbg-pool is a native host binary (the wasm test runner); its dependency
+  # tree (mio, tokio net/process/signal, ...) does not build for wasm32, so
+  # keep it out of the wasm dependency build.
   wasmArtifacts = craneLib.buildDepsOnly (
     wasmAttributes
     // {
       pname = "dialog-db-workspace-wasm-deps";
+      cargoExtraArgs = "--workspace --exclude wbg-pool";
     }
   );
 
@@ -131,6 +135,16 @@ let
       }
       // attributes
     );
+
+  # The wasm test runner. A native workspace binary that nextest invokes once
+  # per test via the wasm32 target runner; it keeps one headless Chrome alive
+  # and hands each test a fresh origin. Built from the workspace source so it
+  # tracks the same wasm-bindgen pin as the crates under test.
+  wbg-pool = buildCrate {
+    pname = "wbg-pool";
+    cargoExtraArgs = "--locked -p wbg-pool";
+    doCheck = false;
+  };
 
   buildWasmCrate =
     attributes:
@@ -172,9 +186,15 @@ let
       target ? null,
     }:
     let
-      targetAttributes = if target == "wasm32-unknown-unknown" then wasmAttributes else commonAttributes;
+      isWasm = target == "wasm32-unknown-unknown";
 
-      targetArtifacts = if target == "wasm32-unknown-unknown" then wasmArtifacts else nativeArtifacts;
+      targetAttributes = if isWasm then wasmAttributes else commonAttributes;
+
+      targetArtifacts = if isWasm then wasmArtifacts else nativeArtifacts;
+
+      # wbg-pool is a native host binary and does not build for wasm32, so keep
+      # it out of the wasm test archive.
+      excludeArgs = if isWasm then "--workspace --exclude wbg-pool" else "";
     in
     craneLib.mkCargoDerivation (
       targetAttributes
@@ -184,6 +204,7 @@ let
 
         buildPhaseCargoCommand = ''
           cargo nextest archive \
+            ${excludeArgs} \
             ${args} \
             --archive-file ./tests-${name}.tar.zst
         '';
@@ -234,5 +255,6 @@ in
     rustToolchain
     cargoChecks
     wasm-bindgen-cli
+    wbg-pool
     ;
 }
