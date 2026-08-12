@@ -47,25 +47,26 @@ impl Certificate for UcanCertificate {
     fn verify(&self, access: &Scope) -> Result<TimeRange, AuthorizeError> {
         // Command attenuation: delegation command must be a prefix of requested command
         if !access.command.starts_with(self.0.command()) {
-            return Err(AuthorizeError::Denied(format!(
-                "command '{}' not covered by delegation '{}'",
-                access.command,
-                self.0.command()
-            )));
+            return Err(AuthorizeError::CommandEscalation {
+                claimed: access.command.to_string(),
+                authorized: self.0.command().to_string(),
+            });
         }
 
-        // Policy predicates: all must pass against the access parameters
+        // Policy predicates: all must pass against the access parameters.
+        // `find` rather than `all` so the failing predicate can be named --
+        // "policy rejected this" without saying which is hard to act on.
         let args = ipld_core::ipld::Ipld::Map(access.parameters.as_map().clone());
-        let all_pass = self
+        let failed = self
             .0
             .policy()
             .iter()
-            .all(|pred| pred.clone().run(&args).unwrap_or(false));
+            .find(|pred| !(*pred).clone().run(&args).unwrap_or(false));
 
-        if !all_pass {
-            return Err(AuthorizeError::Denied(
-                "policy predicates not satisfied".into(),
-            ));
+        if let Some(predicate) = failed {
+            return Err(AuthorizeError::PolicyViolation {
+                predicate: format!("{predicate:?}"),
+            });
         }
 
         Ok(TimeRange {
@@ -76,12 +77,12 @@ impl Certificate for UcanCertificate {
 
     fn encode(&self) -> Result<Vec<u8>, AuthorizeError> {
         serde_ipld_dagcbor::to_vec(&self.0)
-            .map_err(|e| AuthorizeError::Configuration(format!("Failed to encode proof: {e}")))
+            .map_err(|e| AuthorizeError::Malformed(format!("failed to encode proof: {e}")))
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, AuthorizeError> {
         serde_ipld_dagcbor::from_slice(bytes)
-            .map_err(|e| AuthorizeError::Configuration(format!("Failed to decode proof: {e}")))
+            .map_err(|e| AuthorizeError::Malformed(format!("failed to decode proof: {e}")))
     }
 }
 
@@ -155,7 +156,7 @@ impl Proof<Ucan> for UcanProof {
                 for proof in iter {
                     chain = chain
                         .push(proof.0)
-                        .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+                        .map_err(|e| AuthorizeError::Malformed(e.to_string()))?;
                 }
                 Some(chain)
             }
@@ -196,9 +197,10 @@ impl Authorization<Ucan> for UcanAuthorization {
         if let Some(nbf) = self.duration.not_before
             && timestamp < nbf
         {
-            return Err(AuthorizeError::Denied(format!(
-                "cannot set not_before to {timestamp}, proof is not valid before {nbf}"
-            )));
+            return Err(AuthorizeError::NotValidBefore {
+                not_before: nbf,
+                at: timestamp,
+            });
         }
         self.duration.not_before = Some(timestamp);
         Ok(self)
@@ -208,9 +210,10 @@ impl Authorization<Ucan> for UcanAuthorization {
         if let Some(exp) = self.duration.expiration
             && timestamp > exp
         {
-            return Err(AuthorizeError::Denied(format!(
-                "cannot set expiration to {timestamp}, proof expires at {exp}"
-            )));
+            return Err(AuthorizeError::Expired {
+                expiration: exp,
+                at: timestamp,
+            });
         }
         self.duration.expiration = Some(timestamp);
         Ok(self)
@@ -238,12 +241,12 @@ impl Authorization<Ucan> for UcanAuthorization {
         let delegation = builder
             .try_build()
             .await
-            .map_err(|e| AuthorizeError::Configuration(format!("{e:?}")))?;
+            .map_err(|e| AuthorizeError::Malformed(format!("{e:?}")))?;
 
         let chain = match &self.chain {
             Some(chain) => chain
                 .push(delegation)
-                .map_err(|e| AuthorizeError::Configuration(format!("{e}")))?,
+                .map_err(|e| AuthorizeError::Malformed(format!("{e}")))?,
             None => DelegationChain::new(delegation),
         };
 
@@ -284,7 +287,7 @@ impl Authorization<Ucan> for UcanAuthorization {
             .proofs(proofs)
             .try_build()
             .await
-            .map_err(|e| AuthorizeError::Denied(format!("{e:?}")))?;
+            .map_err(|e| AuthorizeError::Malformed(format!("{e:?}")))?;
 
         let chain = InvocationChain::new(invocation, delegations_map);
 
@@ -363,14 +366,93 @@ mod tests {
         audience: &Did,
         subject: &Did,
     ) -> Delegation<Ed25519Signature> {
+        build_delegation_for(issuer, audience, subject, vec![]).await
+    }
+
+    async fn build_delegation_for(
+        issuer: Ed25519Signer,
+        audience: &Did,
+        subject: &Did,
+        command: Vec<String>,
+    ) -> Delegation<Ed25519Signature> {
         DelegationBuilder::new()
             .issuer(issuer)
             .audience(audience)
             .subject(UcanSubject::Specific(subject.clone()))
-            .command(vec![])
+            .command(command)
             .try_build()
             .await
             .unwrap()
+    }
+
+    // These drive a real `Certificate::verify` against a real delegation
+    // rather than constructing the error by hand, so they fail if the
+    // mapping from "what went wrong" to "which variant" is ever wrong --
+    // which asserting on hand-built values cannot catch.
+    mod verify_reports_why {
+        use super::*;
+        use dialog_ucan_core::command::Command;
+
+        /// A scope asking for `ability` against `subject`, with no policy.
+        fn scope_for(subject: &Did, ability: &str) -> crate::Scope {
+            crate::Scope {
+                subject: UcanSubject::Specific(subject.clone()),
+                command: Command::parse(ability).unwrap(),
+                parameters: Default::default(),
+            }
+        }
+
+        // A delegation granting `/archive/get` must not authorize
+        // `/archive/put`, and the error has to name both sides so a caller
+        // can see what it holds versus what it asked for.
+        #[dialog_common::test]
+        async fn it_names_both_abilities_when_one_does_not_cover_the_other() {
+            let issuer = signer(1).await;
+            let audience = signer(2).await.did();
+            let subject = signer(9).await.did();
+
+            let delegation = build_delegation_for(
+                issuer,
+                &audience,
+                &subject,
+                vec!["archive".into(), "get".into()],
+            )
+            .await;
+            let certificate = UcanCertificate(delegation);
+
+            // Ask for a sibling ability the delegation does not cover.
+            let scope = scope_for(&subject, "/archive/put");
+
+            match certificate.verify(&scope) {
+                Err(AuthorizeError::CommandEscalation {
+                    claimed,
+                    authorized,
+                }) => {
+                    assert_eq!(claimed, "/archive/put");
+                    assert_eq!(authorized, "/archive/get");
+                }
+                other => panic!("expected CommandEscalation, got {other:?}"),
+            }
+        }
+
+        // A delegation whose command the invocation *does* fall under must
+        // verify -- the guard above must not reject a legitimate narrowing.
+        #[dialog_common::test]
+        async fn it_accepts_an_ability_the_delegation_covers() {
+            let issuer = signer(1).await;
+            let audience = signer(2).await.did();
+            let subject = signer(9).await.did();
+
+            let delegation =
+                build_delegation_for(issuer, &audience, &subject, vec!["archive".into()]).await;
+            let certificate = UcanCertificate(delegation);
+
+            let scope = scope_for(&subject, "/archive/get");
+
+            certificate
+                .verify(&scope)
+                .expect("a delegation must authorize abilities beneath its own");
+        }
     }
 
     /// `UcanProof::from_chain` must yield proofs in root-to-leaf

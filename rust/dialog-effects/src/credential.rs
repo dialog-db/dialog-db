@@ -185,9 +185,11 @@ impl From<StorageError> for CredentialError {
     }
 }
 
+/// A credential that could not be loaded is not an access decision: nothing
+/// was weighed and refused, the material needed to decide was unavailable.
 impl From<CredentialError> for AuthorizeError {
     fn from(e: CredentialError) -> Self {
-        Self::Denied(e.to_string())
+        Self::Malformed(e.to_string())
     }
 }
 
