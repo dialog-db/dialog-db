@@ -5,7 +5,7 @@
 //! provider adds a `Range` header from the effect's range); an `Import` is a
 //! PUT.
 
-use super::S3Request;
+use super::{RequestMethod, S3Request};
 use base58::ToBase58;
 use dialog_capability::Capability;
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
@@ -25,6 +25,10 @@ impl From<&Capability<Read>> for S3Request {
     }
 }
 
+impl RequestMethod for Capability<Read> {
+    const METHOD: &'static str = "GET";
+}
+
 impl From<&Capability<Import>> for S3Request {
     fn from(capability: &Capability<Import>) -> Self {
         S3Request {
@@ -37,4 +41,8 @@ impl From<&Capability<Import>> for S3Request {
             ..S3Request::default()
         }
     }
+}
+
+impl RequestMethod for Capability<Import> {
+    const METHOD: &'static str = "PUT";
 }

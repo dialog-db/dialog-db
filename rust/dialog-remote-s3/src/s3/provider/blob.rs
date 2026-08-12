@@ -88,6 +88,11 @@ impl Provider<S3Invocation<Read>> for S3 {
                 input.capability.digest().as_bytes().to_base58(),
             ));
         }
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(BlobError::AuthorizationError(format!(
+                "blob read failed: {status}"
+            )));
+        }
         if !status.is_success() {
             return Err(BlobError::Storage(format!("blob read failed: {status}")));
         }
@@ -184,6 +189,14 @@ impl BlobSink for S3BlobSink {
             .map_err(|e| BlobError::Storage(e.to_string()))?;
         if response.status().is_success() {
             Ok(hash)
+        } else if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            Err(BlobError::AuthorizationError(format!(
+                "blob import failed: {}",
+                response.status()
+            )))
         } else {
             Err(BlobError::Storage(format!(
                 "blob import failed: {}",
