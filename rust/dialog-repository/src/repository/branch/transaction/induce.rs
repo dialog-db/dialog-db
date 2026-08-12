@@ -1153,7 +1153,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::helpers::{test_operator_with_profile, test_repo};
-    use crate::rules::{Induct, Transient, on_entities};
+    use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactSelector, Entity, Value};
@@ -1161,6 +1161,7 @@ mod tests {
     use dialog_common::ConditionalSync;
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::memory::Resolve;
+    use dialog_query::rule::statement::on_entities;
     use dialog_query::{ConceptDescriptor, InductiveRule};
     use futures_util::StreamExt as _;
     use serde_json::json;
@@ -1264,7 +1265,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Induct(increment_rule()))
+            .assert(increment_rule())
             .assert(
                 dialog_query::the!("counter/count")
                     .of(counter.clone())
@@ -1350,7 +1351,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Induct(rule))
+            .assert(rule)
             .commit()
             .perform(&operator)
             .await?;
@@ -1457,8 +1458,8 @@ mod tests {
         branch
             .transaction()
             .assert(Transient(intermediate.this()))
-            .assert(Induct(stage))
-            .assert(Induct(finish))
+            .assert(stage)
+            .assert(finish)
             .commit()
             .perform(&operator)
             .await?;
@@ -1546,8 +1547,8 @@ mod tests {
             .transaction()
             .assert(Transient(ping.this()))
             .assert(Transient(pong.this()))
-            .assert(Induct(ping_to_pong))
-            .assert(Induct(pong_to_ping))
+            .assert(ping_to_pong)
+            .assert(pong_to_ping)
             .commit()
             .perform(&operator)
             .await?;
@@ -1599,8 +1600,8 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Induct(stamp("cmd.x/target", "result.x/target")))
-            .assert(Induct(stamp("cmd.y/target", "result.y/target")))
+            .assert(stamp("cmd.x/target", "result.x/target"))
+            .assert(stamp("cmd.y/target", "result.y/target"))
             .commit()
             .perform(&operator)
             .await?;
@@ -1680,7 +1681,7 @@ mod tests {
         let other: Entity = "msg:2".parse()?;
         branch
             .transaction()
-            .assert(Induct(consume))
+            .assert(consume)
             .assert(
                 dialog_query::the!("mailbox.message/body")
                     .of(message.clone())
@@ -1733,7 +1734,6 @@ mod tests {
     /// message already in the store.
     #[dialog_common::test]
     async fn it_triggers_through_a_deductive_premise() -> Result<()> {
-        use crate::rules::Deduce;
         use dialog_query::DeductiveRule;
 
         let (operator, profile) = test_operator_with_profile().await;
@@ -1789,8 +1789,8 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Deduce(status))
-            .assert(Induct(notify))
+            .assert(status)
+            .assert(notify)
             .commit()
             .perform(&operator)
             .await?;
@@ -1877,7 +1877,7 @@ mod tests {
         // at this head.
         branch
             .transaction()
-            .assert(Induct(stamp("result.first/target")))
+            .assert(stamp("result.first/target"))
             .commit()
             .perform(&operator)
             .await?;
@@ -1899,7 +1899,7 @@ mod tests {
         // the cached discovery for on:cmd.z/target is stale now.
         branch
             .transaction()
-            .assert(Induct(stamp("result.second/target")))
+            .assert(stamp("result.second/target"))
             .commit()
             .perform(&operator)
             .await?;
@@ -1943,7 +1943,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Induct(tagger()))
+            .assert(tagger())
             .commit()
             .perform(&operator)
             .await?;
@@ -1969,7 +1969,7 @@ mod tests {
 
         branch
             .transaction()
-            .retract(Induct(tagger()))
+            .retract(tagger())
             .commit()
             .perform(&operator)
             .await?;
@@ -2012,7 +2012,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Induct(tagger()))
+            .assert(tagger())
             .commit()
             .perform(&operator)
             .await?;
@@ -2021,7 +2021,7 @@ mod tests {
         let doc: Entity = "doc:1".parse()?;
         branch
             .transaction()
-            .retract(Induct(tagger()))
+            .retract(tagger())
             .assert(
                 dialog_query::the!("doc/title")
                     .of(doc.clone())
@@ -2116,7 +2116,7 @@ mod tests {
         // Installing the rule is the completing transition.
         branch
             .transaction()
-            .assert(Induct(tagger()))
+            .assert(tagger())
             .commit()
             .perform(&operator)
             .await?;
@@ -2167,7 +2167,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Induct(drain))
+            .assert(drain)
             .commit()
             .perform(&operator)
             .await?;
@@ -2186,7 +2186,6 @@ mod tests {
     /// re-evaluate at that install commit.
     #[dialog_common::test]
     async fn it_reevaluates_when_a_deductive_rule_installs() -> Result<()> {
-        use crate::rules::Deduce;
         use dialog_query::DeductiveRule;
 
         let (operator, profile) = test_operator_with_profile().await;
@@ -2213,7 +2212,7 @@ mod tests {
         let actor: Entity = "actor:1".parse()?;
         branch
             .transaction()
-            .assert(Induct(alert))
+            .assert(alert)
             .assert(
                 dialog_query::the!("shift/duty")
                     .of(actor.clone())
@@ -2248,7 +2247,7 @@ mod tests {
         }))?;
         branch
             .transaction()
-            .assert(Deduce(status))
+            .assert(status)
             .commit()
             .perform(&operator)
             .await?;
@@ -2297,7 +2296,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Induct(tagger()))
+            .assert(tagger())
             .commit()
             .perform(&operator)
             .await?;
@@ -2379,7 +2378,7 @@ mod tests {
 
         branch
             .transaction()
-            .assert(Induct(pair))
+            .assert(pair)
             .commit()
             .perform(&operator)
             .await?;
@@ -2435,7 +2434,7 @@ mod tests {
         // branch has state and rules, but no induction ever ran and no
         // watermark exists.
         let mut install = dialog_artifacts::Changes::new();
-        install.assert(Induct(tagger()));
+        install.assert(tagger());
         let old: Entity = "doc:old".parse()?;
         branch
             .commit(install.into_stream())

@@ -1706,19 +1706,13 @@ mod tests {
     }
 
     /// Stage the `dialog.rule/*` facts that persist a deductive rule
-    /// durably (the storage shape from `crate::rules`).
+    /// durably — a rule is a [`Statement`](dialog_artifacts::Statement),
+    /// so installing it is asserting it.
     fn with_rule<'t>(
         transaction: crate::Transaction<'t>,
         rule: &dialog_query::DeductiveRule,
     ) -> crate::Transaction<'t> {
-        let entity = rule.this();
-        transaction
-            .assert(
-                the!("dialog.rule/conclusion")
-                    .of(entity.clone())
-                    .is(rule.conclusion().this()),
-            )
-            .assert(the!("dialog.rule/source").of(entity).is(rule.encode()))
+        transaction.assert(rule)
     }
 
     /// A rule `conclusion :- Concept(target, terms)` built from

@@ -30,6 +30,8 @@ pub mod deductive;
 pub mod inductive;
 /// Premises collection type.
 pub mod premises;
+/// Rules as statements: `dialog.rule/*` vocabulary and install-by-assert.
+pub mod statement;
 /// Type inference over a rule's premises.
 pub mod types;
 /// When trait and tuple implementations.

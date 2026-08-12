@@ -55,36 +55,13 @@ use parking_lot::RwLock;
 
 use crate::{Revision, schema};
 
-/// The `dialog.rule/conclusion` index attribute, validated at compile time.
-fn conclusion_attr() -> Attribute {
-    the!("dialog.rule/conclusion").into()
-}
-
-/// The `dialog.rule/induces` index attribute — the inductive sibling of
-/// `dialog.rule/conclusion`, kept separate so deductive resolution never
-/// hydrates (and discards) inductive rules concluding a queried
-/// concept.
-pub(crate) fn induces_attr() -> Attribute {
-    the!("dialog.rule/induces").into()
-}
-
-/// The `dialog.rule/on` trigger-index attribute: one claim per attribute an
-/// inductive rule's concept premises name, valued `on:<domain>/<name>`.
-/// This is the index commit-time dispatch probes by touched attribute.
-pub(crate) fn on_attr() -> Attribute {
-    the!("dialog.rule/on").into()
-}
-
-/// The `dialog.rule/reads` reverse index for *deductive* rules: one claim
-/// per attribute the rule's body names, valued `on:<domain>/<name>`.
-/// Commit-time dispatch composes these at probe time to close the
-/// trigger footprint over derivation — a base-fact write reaches
-/// inductive rules premised on the concepts it (transitively)
-/// supports. Per-rule and derived from the rule's own immutable body,
-/// so an entry is never stale; the closure itself is never stored.
-pub(crate) fn reads_attr() -> Attribute {
-    the!("dialog.rule/reads").into()
-}
+// The `dialog.rule/*` vocabulary and the Statement lowerings that
+// install/uninstall a rule by plain assertion/retraction live with the
+// rule types themselves; this module re-uses them for its selectors,
+// caches, and dispatch probing.
+pub(crate) use dialog_query::rule::statement::{
+    conclusion_attr, on_attr, on_entity, reads_attr, source_attr,
+};
 
 /// The `dialog.concept/transient` marker attribute. A concept carrying it
 /// is a *command*: facts of it dispatched into a transaction (and heads
@@ -94,151 +71,12 @@ pub(crate) fn transient_attr() -> Attribute {
     the!("dialog.concept/transient").into()
 }
 
-/// The `on:<domain>/<name>` trigger-index entity for an attribute.
-/// Derivable from a runtime instruction alone — no schema lookup —
-/// which is what keeps dispatch probing cheap.
-pub(crate) fn on_entity(attribute: &Attribute) -> Option<Entity> {
-    format!("on:{attribute}").parse().ok()
-}
-
-/// The `on:` entities for the attributes a set of propositions' concept
-/// premises name. Formula and constraint premises contribute nothing;
-/// attribute-query premises can't occur in stored rules (they have no
-/// formal-notation encoding).
-fn premise_trigger_entities<'p>(
-    propositions: impl Iterator<Item = &'p Proposition>,
-) -> BTreeSet<Entity> {
-    let mut entities = BTreeSet::new();
-    for proposition in propositions {
-        if let Proposition::Concept(query) = proposition {
-            for (_, field) in query.predicate.with().iter() {
-                let attribute: Attribute = field.descriptor().the().clone().into();
-                if let Some(entity) = on_entity(&attribute) {
-                    entities.insert(entity);
-                }
-            }
-        }
-    }
-    entities
-}
-
-/// The trigger-index entities for an inductive rule: one per attribute
-/// named by any concept premise, `when` and `unless` alike. `unless`
-/// premises are indexed because a *retraction* can newly enable a rule
-/// (the guard it failed on clears).
-pub(crate) fn on_entities(rule: &InductiveRule) -> BTreeSet<Entity> {
-    let descriptor = rule.descriptor();
-    premise_trigger_entities(descriptor.when.iter().chain(descriptor.unless.iter()))
-}
-
-/// The reverse-index entities for a deductive rule's body: one per
-/// attribute any concept premise names. Stored as `dialog.rule/reads` so
-/// dispatch can walk base attribute → deductive rules reading it →
-/// their conclusions, closing the trigger footprint over derivation.
-pub(crate) fn reads_entities(rule: &DeductiveRule) -> BTreeSet<Entity> {
-    let descriptor = rule.descriptor();
-    premise_trigger_entities(descriptor.when.iter().chain(descriptor.unless.iter()))
-}
-
 /// Hydrate a compiled [`InductiveRule`] from a `dialog.rule/source` claim
 /// value (the canonical dag-cbor
 /// [`InductiveRuleDescriptor`](dialog_query::rule::inductive::descriptor::InductiveRuleDescriptor)).
 pub(crate) fn hydrate_inductive(source: &[u8]) -> Result<InductiveRule, EvaluationError> {
     InductiveRule::decode(source)
         .map_err(|reason| EvaluationError::Store(format!("inductive rule hydrate: {reason}")))
-}
-
-/// [`Statement`] wrapper installing an [`InductiveRule`] as `dialog.rule/*`
-/// facts: the `source` body (shared attribute with deductive rules —
-/// hydration dispatches on the head field), the `induces` head index,
-/// and the `on` trigger index dispatch probes by touched attribute.
-///
-/// ```no_run
-/// # use dialog_repository::{Branch, Induct};
-/// # use dialog_query::InductiveRule;
-/// # fn example(branch: &Branch, rule: InductiveRule) {
-/// let tx = branch.transaction().assert(Induct(rule));
-/// # let _ = tx;
-/// # }
-/// ```
-pub struct Induct(pub InductiveRule);
-
-impl Statement for Induct {
-    fn assert(self, update: &mut impl Update) {
-        let rule_entity = self.0.this();
-        update.associate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(self.0.encode()),
-        );
-        update.associate(
-            induces_attr(),
-            rule_entity.clone(),
-            Value::Entity(self.0.conclusion().this()),
-        );
-        for on in on_entities(&self.0) {
-            update.associate(on_attr(), rule_entity.clone(), Value::Entity(on));
-        }
-    }
-
-    fn retract(self, update: &mut impl Update) {
-        let rule_entity = self.0.this();
-        update.dissociate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(self.0.encode()),
-        );
-        update.dissociate(
-            induces_attr(),
-            rule_entity.clone(),
-            Value::Entity(self.0.conclusion().this()),
-        );
-        for on in on_entities(&self.0) {
-            update.dissociate(on_attr(), rule_entity.clone(), Value::Entity(on));
-        }
-    }
-}
-
-/// [`Statement`] wrapper installing a [`DeductiveRule`] as `dialog.rule/*`
-/// facts: the `conclusion` discovery index, the `source` body, and the
-/// `reads` reverse index over the body's attributes that lets
-/// commit-time dispatch close its trigger footprint over derivation.
-pub struct Deduce(pub DeductiveRule);
-
-impl Statement for Deduce {
-    fn assert(self, update: &mut impl Update) {
-        let rule_entity = self.0.this();
-        update.associate(
-            conclusion_attr(),
-            rule_entity.clone(),
-            Value::Entity(self.0.conclusion().this()),
-        );
-        update.associate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(self.0.encode()),
-        );
-        for reads in reads_entities(&self.0) {
-            update.associate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
-        }
-    }
-
-    fn retract(self, update: &mut impl Update) {
-        let rule_entity = self.0.this();
-        update.dissociate(
-            conclusion_attr(),
-            rule_entity.clone(),
-            Value::Entity(self.0.conclusion().this()),
-        );
-        update.dissociate(
-            source_attr(),
-            rule_entity.clone(),
-            Value::Bytes(self.0.encode()),
-        );
-        for reads in reads_entities(&self.0) {
-            update.dissociate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
-        }
-    }
 }
 
 /// [`Statement`] wrapper declaring a concept transient: facts of it are
@@ -256,11 +94,6 @@ impl Statement for Transient {
     fn retract(self, update: &mut impl Update) {
         update.dissociate(transient_attr(), self.0, Value::Boolean(true));
     }
-}
-
-/// The `dialog.rule/source` body attribute, validated at compile time.
-pub(crate) fn source_attr() -> Attribute {
-    the!("dialog.rule/source").into()
 }
 
 /// Selector for `dialog.rule/conclusion is = <concept>` — finds the rule

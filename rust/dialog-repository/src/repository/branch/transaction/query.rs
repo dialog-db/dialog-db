@@ -616,19 +616,11 @@ mod tests {
         let employee = rule.conclusion().clone();
 
         let alice: Entity = "id:alice".parse()?;
-        let tx = branch
-            .transaction()
-            .assert(
-                the!("dialog.rule/conclusion")
-                    .of(rule.this())
-                    .is(employee.this()),
-            )
-            .assert(the!("dialog.rule/source").of(rule.this()).is(rule.encode()))
-            .assert(
-                the!("org/person-name")
-                    .of(alice.clone())
-                    .is("Alice".to_string()),
-            );
+        let tx = branch.transaction().assert(&rule).assert(
+            the!("org/person-name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
 
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
