@@ -178,8 +178,9 @@ async fn live_footprint(tree: &Tree, storage: &Storage) -> Footprint {
             .unwrap()
             .expect("live node present");
         let size = bytes.len() as u64;
-        let node: PersistentNode<Key, Vec<u8>> = PersistentNode::new(Buffer::from(bytes));
-        match node.body().unwrap() {
+        let node: PersistentNode<Key, Vec<u8>> =
+            PersistentNode::try_from(Buffer::from(bytes)).unwrap();
+        match node.body() {
             ArchivedNodeBody::Index(index) => {
                 footprint.index_nodes += 1;
                 footprint.index_bytes += size;

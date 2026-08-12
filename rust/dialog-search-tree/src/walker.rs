@@ -65,7 +65,7 @@ where
 {
     let mut winners: Vec<(Vec<u8>, NoveltyOp<Value>)> = Vec::new();
     for (node, descended) in path {
-        let ArchivedNodeBody::Index(index) = node.body()? else {
+        let ArchivedNodeBody::Index(index) = node.body() else {
             continue;
         };
         let Some(at) = *descended else { continue };
@@ -146,7 +146,7 @@ where
         + ConditionalSync,
 {
     for layer in path {
-        let ArchivedNodeBody::Index(index) = layer.host.body()? else {
+        let ArchivedNodeBody::Index(index) = layer.host.body() else {
             continue;
         };
         let Some(buffer) = index.buffer_for(layer.index) else {
@@ -240,7 +240,7 @@ where
             let mut entered_range = false;
 
             while let Some((node, maybe_index)) = search_path.pop() {
-                let body = node.body()?;
+                let body = node.body();
                 let is_segment = matches!(body, ArchivedNodeBody::Segment(_));
                 if !is_segment {
                     let ArchivedNodeBody::Index(index) = body else {
@@ -325,7 +325,7 @@ where
                             let segment = match &segment {
                                 Some(segment) => segment,
                                 None => {
-                                    let ArchivedNodeBody::Segment(resolved) = node.body()? else {
+                                    let ArchivedNodeBody::Segment(resolved) = node.body() else {
                                         unreachable!("segment checked above")
                                     };
                                     segment.insert(resolved)
@@ -344,7 +344,7 @@ where
                         }
                     }
                 } else {
-                    let ArchivedNodeBody::Segment(segment) = node.body()? else {
+                    let ArchivedNodeBody::Segment(segment) = node.body() else {
                         unreachable!("segment checked above")
                     };
                     let mut keys = segment.keys::<Key>()?;
@@ -436,7 +436,7 @@ where
 
             let node = accessor.get_node(&next_node).await?;
 
-            match node.body()? {
+            match node.body() {
                 ArchivedNodeBody::Index(index) => {
                     // Descend into the last child whose separator is at or
                     // below the key (a probe equal to a separator belongs to
@@ -520,7 +520,7 @@ where
 
     let right_leaf = loop {
         let node: PersistentNode<Key, Value> = accessor.get_node(&next_hash).await?;
-        match node.body()? {
+        match node.body() {
             ArchivedNodeBody::Index(index) => {
                 if index.is_empty() {
                     return Err(DialogSearchTreeError::Node(
