@@ -198,8 +198,8 @@ pub struct ManifestSummary {
 /// Decode the node behind `bytes` into its [`NodeSummary`].
 pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogArtifactsError> {
     let size = bytes.len() as u64;
-    let node = ArtifactNode::new(Buffer::from(bytes));
-    let scale = node.scale()?.as_u8() as u64;
+    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
+    let scale = node.scale().as_u8() as u64;
 
     Ok(match node.as_index() {
         Ok(index) => NodeSummary {
@@ -226,7 +226,7 @@ pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogArtifactsError>
 /// span, in key order. A segment has no spans and yields an empty
 /// vector (not an error — queries union over mixed levels).
 pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogArtifactsError> {
-    let node = ArtifactNode::new(Buffer::from(bytes));
+    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
     let Ok(index) = node.as_index() else {
         return Ok(Vec::new());
     };
@@ -267,7 +267,7 @@ pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogArtifacts
 /// entry, in entry order. An index node has no entries and yields an
 /// empty vector.
 pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogArtifactsError> {
-    let node = ArtifactNode::new(Buffer::from(bytes));
+    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -290,7 +290,7 @@ pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogArtifactsEr
 /// (with empty metadata) so counts line up. An index node yields an
 /// empty vector.
 pub fn inspect_entries(bytes: Vec<u8>) -> Result<Vec<EntrySummary>, DialogArtifactsError> {
-    let node = ArtifactNode::new(Buffer::from(bytes));
+    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -353,7 +353,7 @@ pub fn inspect_entries(bytes: Vec<u8>) -> Result<Vec<EntrySummary>, DialogArtifa
 /// per blob-index entry. Non-blob entries (and index nodes) yield no
 /// rows.
 pub fn inspect_blob_records(bytes: Vec<u8>) -> Result<Vec<BlobEntrySummary>, DialogArtifactsError> {
-    let node = ArtifactNode::new(Buffer::from(bytes));
+    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
@@ -380,7 +380,7 @@ pub fn inspect_blob_records(bytes: Vec<u8>) -> Result<Vec<BlobEntrySummary>, Dia
 
 /// Decode the manifest embedded in the node behind `bytes`.
 pub fn inspect_manifest(bytes: Vec<u8>) -> Result<ManifestSummary, DialogArtifactsError> {
-    let node = ArtifactNode::new(Buffer::from(bytes));
+    let node = ArtifactNode::try_from(Buffer::from(bytes))?;
     let manifest: Manifest = node.manifest()?;
     Ok(ManifestSummary {
         version: manifest.version as u64,
