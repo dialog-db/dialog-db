@@ -431,7 +431,7 @@ where
     }
 }
 
-// The idempotent block-load behind procedure premises (`tree/node` &
+// The idempotent block-load behind resolver premises (`tree/node` &
 // co). No demand is recorded: the block behind a hash is
 // content-addressed and can never change, so no tree diff could ever
 // invalidate a row derived from it — the soundness argument lives in
@@ -1408,7 +1408,7 @@ mod rule_tests {
 }
 
 #[cfg(test)]
-mod procedure_tests {
+mod resolver_tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -1419,7 +1419,7 @@ mod procedure_tests {
     use dialog_operator::Operator;
     use dialog_query::query::Output as _;
     use dialog_query::{
-        ProcedureConclusion, ProcedureQuery, Term, TreeEntryQuery, TreeKeyQuery, TreeNodeQuery,
+        ResolverConclusion, ResolverQuery, Term, TreeEntryQuery, TreeKeyQuery, TreeNodeQuery,
         TreeSpanQuery, TreeValueQuery, the,
     };
     use dialog_storage::provider::storage::VolatileSpace;
@@ -1449,8 +1449,8 @@ mod procedure_tests {
     }
 
     /// `tree/node` with every output free, over a constant reference.
-    fn tree_node(reference: &str) -> ProcedureQuery {
-        ProcedureQuery::TreeNode(TreeNodeQuery {
+    fn tree_node(reference: &str) -> ResolverQuery {
+        ResolverQuery::TreeNode(TreeNodeQuery {
             of: Term::from(Value::String(reference.into())).into(),
             kind: Term::var("kind"),
             size: Term::var("size"),
@@ -1460,8 +1460,8 @@ mod procedure_tests {
         })
     }
 
-    fn tree_span(reference: &str) -> ProcedureQuery {
-        ProcedureQuery::TreeSpan(TreeSpanQuery {
+    fn tree_span(reference: &str) -> ResolverQuery {
+        ResolverQuery::TreeSpan(TreeSpanQuery {
             of: Term::from(Value::String(reference.into())).into(),
             at: Term::var("at"),
             node: Term::var("node"),
@@ -1473,8 +1473,8 @@ mod procedure_tests {
         })
     }
 
-    fn tree_entry(reference: &str) -> ProcedureQuery {
-        ProcedureQuery::TreeEntry(TreeEntryQuery {
+    fn tree_entry(reference: &str) -> ResolverQuery {
+        ResolverQuery::TreeEntry(TreeEntryQuery {
             of: Term::from(Value::String(reference.into())).into(),
             at: Term::var("at"),
             key: Term::var("key"),
@@ -1489,16 +1489,16 @@ mod procedure_tests {
         })
     }
 
-    fn tree_value(reference: &str) -> ProcedureQuery {
-        ProcedureQuery::TreeValue(TreeValueQuery {
+    fn tree_value(reference: &str) -> ResolverQuery {
+        ResolverQuery::TreeValue(TreeValueQuery {
             of: Term::from(Value::String(reference.into())).into(),
             size: Term::var("size"),
             bytes: Term::var("bytes"),
         })
     }
 
-    fn tree_key(reference: &str) -> ProcedureQuery {
-        ProcedureQuery::TreeKey(TreeKeyQuery {
+    fn tree_key(reference: &str) -> ResolverQuery {
+        ResolverQuery::TreeKey(TreeKeyQuery {
             of: Term::from(Value::String(reference.into())).into(),
             at: Term::var("at"),
             key: Term::var("key"),
@@ -1506,14 +1506,14 @@ mod procedure_tests {
         })
     }
 
-    fn unsigned(row: &ProcedureConclusion, slot: &str) -> u128 {
+    fn unsigned(row: &ResolverConclusion, slot: &str) -> u128 {
         match row.get(slot) {
             Some(Value::UnsignedInt(value)) => *value,
             other => panic!("expected unsigned `{slot}`, got {other:?}"),
         }
     }
 
-    fn text(row: &ProcedureConclusion, slot: &str) -> String {
+    fn text(row: &ResolverConclusion, slot: &str) -> String {
         match row.get(slot) {
             Some(Value::String(value)) => value.clone(),
             other => panic!("expected string `{slot}`, got {other:?}"),
@@ -1523,12 +1523,12 @@ mod procedure_tests {
     /// The committed root answers `tree/node` through the ordinary
     /// query path: one row, a real kind, a positive size, and a count.
     #[dialog_common::test]
-    async fn it_reads_the_root_node_through_procedures() -> anyhow::Result<()> {
+    async fn it_reads_the_root_node_through_resolvers() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
-        let rows: Vec<ProcedureConclusion> = branch
+        let rows: Vec<ResolverConclusion> = branch
             .query()
             .select(tree_node(&root))
             .perform(&operator)
@@ -1543,7 +1543,7 @@ mod procedure_tests {
         Ok(())
     }
 
-    /// Structure is consistent between procedures: a segment's
+    /// Structure is consistent between resolvers: a segment's
     /// `tree/key` rows match its count and `tree/span` yields nothing;
     /// an index's `tree/span` rows match its count, chain into
     /// contiguous ranges, and each child answers `tree/node` in turn
@@ -1554,7 +1554,7 @@ mod procedure_tests {
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
-        let node: Vec<ProcedureConclusion> = branch
+        let node: Vec<ResolverConclusion> = branch
             .query()
             .select(tree_node(&root))
             .perform(&operator)
@@ -1562,13 +1562,13 @@ mod procedure_tests {
             .await?;
         let count = unsigned(&node[0], "count") as usize;
 
-        let spans: Vec<ProcedureConclusion> = branch
+        let spans: Vec<ResolverConclusion> = branch
             .query()
             .select(tree_span(&root))
             .perform(&operator)
             .try_vec()
             .await?;
-        let keys: Vec<ProcedureConclusion> = branch
+        let keys: Vec<ResolverConclusion> = branch
             .query()
             .select(tree_key(&root))
             .perform(&operator)
@@ -1597,7 +1597,7 @@ mod procedure_tests {
                     );
                 }
                 let child = text(&spans[0], "node");
-                let child_node: Vec<ProcedureConclusion> = branch
+                let child_node: Vec<ResolverConclusion> = branch
                     .query()
                     .select(tree_node(&child))
                     .perform(&operator)
@@ -1620,7 +1620,7 @@ mod procedure_tests {
 
         let absent = ToBase58::to_base58(&[7u8; 32][..]);
         for reference in [absent.as_str(), "not-base58-!!!", ""] {
-            let rows: Vec<ProcedureConclusion> = branch
+            let rows: Vec<ResolverConclusion> = branch
                 .query()
                 .select(tree_node(reference))
                 .perform(&operator)
@@ -1651,7 +1651,7 @@ mod procedure_tests {
         assert_ne!(first, second, "the root moved");
 
         for reference in [&first, &second] {
-            let rows: Vec<ProcedureConclusion> = branch
+            let rows: Vec<ResolverConclusion> = branch
                 .query()
                 .select(tree_node(reference))
                 .perform(&operator)
@@ -1663,15 +1663,15 @@ mod procedure_tests {
     }
 
     /// Transaction queries construct the same `QueryEnv`, so the tree
-    /// procedures are available in the as-if-committed view too.
+    /// resolvers are available in the as-if-committed view too.
     #[dialog_common::test]
-    async fn it_serves_procedures_in_transaction_queries() -> anyhow::Result<()> {
+    async fn it_serves_resolvers_in_transaction_queries() -> anyhow::Result<()> {
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;
         let (branch, root) = committed_branch(&repo, &operator).await?;
 
         let tx = branch.transaction();
-        let rows: Vec<ProcedureConclusion> = tx
+        let rows: Vec<ResolverConclusion> = tx
             .query()
             .select(tree_node(&root))
             .perform(&operator)
@@ -1706,7 +1706,7 @@ mod procedure_tests {
         // Walk every segment reachable from the root, collecting entry
         // rows — shape-agnostic (the root may be a segment or index).
         let mut queue = vec![root];
-        let mut entries: Vec<ProcedureConclusion> = Vec::new();
+        let mut entries: Vec<ResolverConclusion> = Vec::new();
         while let Some(node) = queue.pop() {
             entries.extend(
                 branch
@@ -1743,7 +1743,7 @@ mod procedure_tests {
             })
             .expect("the 10 KiB value spilled");
 
-        let values: Vec<ProcedureConclusion> = branch
+        let values: Vec<ResolverConclusion> = branch
             .query()
             .select(tree_value(&spill))
             .perform(&operator)

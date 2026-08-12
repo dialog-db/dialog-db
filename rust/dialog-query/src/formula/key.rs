@@ -1,6 +1,6 @@
 //! Formulas decomposing index keys into their components.
 //!
-//! The tree procedures (`tree/span`, `tree/key`) surface raw key and
+//! The tree resolvers (`tree/span`, `tree/key`) surface raw key and
 //! separator bytes; these formulas make them legible: apply
 //! [`KeyPart`] to a full entry key (from `tree/key`) or
 //! [`SeparatorPart`] to a span boundary (a `tree/span` row's

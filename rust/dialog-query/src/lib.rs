@@ -59,10 +59,10 @@ pub mod predicate;
 /// Premise trait for rule conditions and pattern matching.
 pub mod premise;
 
-/// Procedure premises resolved by idempotent effects.
-pub mod procedure;
 /// Query trait and store abstractions for polymorphic querying.
 pub mod query;
+/// Resolver premises resolved by idempotent effects.
+pub mod resolver;
 /// Rule-based deduction system for deriving facts.
 pub mod rule;
 /// Schema system for describing parameter signatures.
@@ -109,9 +109,9 @@ pub use parameters::*;
 pub use planner::*;
 pub use predicate::*;
 pub use premise::*;
-pub use procedure::*;
 pub use proposition::*;
 pub use query::*;
+pub use resolver::*;
 pub use rule::*;
 pub use schema::*;
 pub use scope::*;

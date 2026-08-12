@@ -2473,7 +2473,7 @@ mod history_tests {
     /// differential carries no remove for the old value (the base never
     /// covered it). The superseded claim lives at *different* keys than the
     /// record's own value (keys embed the value hash), so coverage must scan
-    /// the record's (entity, attribute) slot, not probe the record's keys.
+    /// the record's (entity, attribute) slot, not resolver the record's keys.
     #[dialog_common::test]
     async fn it_retires_a_replaced_value_on_an_empty_base_pull() -> Result<()> {
         use dialog_artifacts::ArtifactSelector;

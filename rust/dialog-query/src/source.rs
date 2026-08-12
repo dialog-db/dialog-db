@@ -73,7 +73,7 @@ pub(crate) mod test {
         }
     }
 
-    // Raw node loads for procedure premises, local archive only.
+    // Raw node loads for resolver premises, local archive only.
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
     impl Provider<Load> for TestEnv<'_> {

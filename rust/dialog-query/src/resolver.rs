@@ -1,24 +1,36 @@
-//! Procedure premises: moded, multi-row premises resolved by performing
-//! an idempotent effect through the evaluation environment.
+//! Resolver premises: moded, multi-row premises resolved by selecting
+//! from content-addressed storage through the evaluation environment.
 //!
-//! A procedure is a premise kind of its own — the resemblance to
-//! formulas begins and ends at the parameter machinery (named slots
-//! with [`Requirement::Required`](crate::Requirement) inputs, and the
-//! `estimate() → None` protocol that keeps an unbound-input premise
-//! unschedulable until a join binds it). Everything past the cells
-//! differs: where a formula computes in-process and a scan streams a
-//! demand-recorded selector, a procedure performs an *idempotent*
-//! effect — one whose result is a pure function of its bound inputs
-//! and the immutable, content-addressed universe — and projects rows
-//! from the result. Scans are procedures' closest relative: both are
-//! premises the environment answers; the difference is the effect
-//! ([`Select`](dialog_artifacts::Select) vs
-//! [`Load`](dialog_artifacts::inspect::Load)) and that an idempotent
-//! effect needs no demand recording, because nothing can ever
-//! invalidate its rows (see `dialog_artifacts::inspect` for the full
-//! soundness argument).
+//! Scans and resolvers are the same kind of thing — selects the
+//! environment answers — distinguished by the *address space* they
+//! select from, and every difference between them falls out of that
+//! one split:
 //!
-//! The first procedures expose the search tree's *logical model* (see
+//! - A **scan** selects by key range over the mutable head of the
+//!   indexes ([`Select`](dialog_artifacts::Select)). The head moves,
+//!   so its result set can be invalidated — hence demand covers,
+//!   recorded per scanned range. A range can also be enumerated, so
+//!   an unconstrained scan is expensive but defined.
+//! - A **resolver** selects by content address over the immutable block
+//!   universe ([`Load`](dialog_artifacts::inspect::Load)). A hash
+//!   resolves to the same bytes forever, so a resolver's rows are a pure
+//!   function of its bound inputs — no fact demand exists to record
+//!   (see `dialog_artifacts::inspect` for the full soundness
+//!   argument); what changes over time is *reachability* — which
+//!   root the branch head names — and the revision-anchored
+//!   subscription (`Demand::head`) tracks exactly that. A content
+//!   address cannot be enumerated, so an unbound resolver is non-viable
+//!   (`estimate() → None`) until a join binds it: the parameter
+//!   machinery it shares with formulas (named [`Cells`] slots,
+//!   [`Requirement::Required`](crate::Requirement) inputs) enforces
+//!   the mode.
+//!
+//! The admission rule for new resolvers is the address-space rule, not a
+//! case-by-case idempotency argument: a resolver may select only from
+//! content-addressed (immutable) storage. Anything addressed by
+//! mutable state is a scan and must record demand.
+//!
+//! The first resolvers expose the search tree's *logical model* (see
 //! `notes/tree-relations.md`): a node is an index (a table of spans)
 //! or a segment (a run of entries); an index's spans each delegate a
 //! key range `[separator, until)` to a child and carry the ops
@@ -53,17 +65,17 @@ use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::{Environment, Parameters, Schema, Scope, Value, try_stream};
 
-/// Base cost of a procedure step: one content-addressed block fetch
+/// Base cost of a resolver step: one content-addressed block fetch
 /// plus decode, scheduled after cheap in-memory premises but ahead of
 /// broad scans.
-pub const PROCEDURE_COST: usize = 200;
+pub const RESOLVER_COST: usize = 200;
 
 /// Serde default for omitted parameter slots.
 fn blank() -> Term<Any> {
     Term::blank()
 }
 
-/// The `tree/node` procedure: describe the node behind a reference.
+/// The `tree/node` resolver: describe the node behind a reference.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeNodeQuery {
     /// Node reference (base58 of the node's content hash) — required.
@@ -86,7 +98,7 @@ pub struct TreeNodeQuery {
     pub novelty: Term<Any>,
 }
 
-/// The `tree/span` procedure: one row per span of an index node — the
+/// The `tree/span` resolver: one row per span of an index node — the
 /// key range `[separator, until)` the node delegates to one child,
 /// with everything pending against it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -121,7 +133,7 @@ pub struct TreeSpanQuery {
     pub novelty: Term<Any>,
 }
 
-/// The `tree/key` procedure: one row per entry of a segment node.
+/// The `tree/key` resolver: one row per entry of a segment node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeKeyQuery {
     /// Node reference of the segment node — required.
@@ -139,7 +151,7 @@ pub struct TreeKeyQuery {
     pub rank: Term<Any>,
 }
 
-/// The `tree/entry` procedure: one row per entry of a segment node,
+/// The `tree/entry` resolver: one row per entry of a segment node,
 /// surfacing the entry's stored claim metadata — the *value* side; the
 /// fact content itself lives in the key (`tree/key` +
 /// `dialog/key-part`). This is what makes the history and coverage
@@ -183,7 +195,7 @@ pub struct TreeEntryQuery {
     pub spill: Term<Any>,
 }
 
-/// The `tree/value` procedure: read a spilled value's raw bytes by its
+/// The `tree/value` resolver: read a spilled value's raw bytes by its
 /// content-addressed block reference (a `tree/entry` row's `spill`).
 /// The block holds the value's raw bytes; the value's type is in the
 /// key (`dialog/key-part`'s `vtype` component).
@@ -200,7 +212,7 @@ pub struct TreeValueQuery {
     pub bytes: Term<Any>,
 }
 
-/// The `tree/blob` procedure: one row per blob-index entry of a
+/// The `tree/blob` resolver: one row per blob-index entry of a
 /// segment node — the content-derived metadata the tree stores about a
 /// referenced blob. The blob's bytes live in the blob store, outside
 /// the tree; sizes and hashes here are what replication and the
@@ -224,7 +236,7 @@ pub struct TreeBlobQuery {
     pub size: Term<Any>,
 }
 
-/// The `tree/manifest` procedure: the format manifest the node embeds,
+/// The `tree/manifest` resolver: the format manifest the node embeds,
 /// field for field. Every node carries one, so a bare reference is
 /// self-describing and mixed-format trees are visible per node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -258,38 +270,38 @@ pub struct TreeManifestQuery {
     pub anchor_selector: Term<Any>,
 }
 
-/// A procedure premise bound to specific term arguments.
+/// A resolver premise bound to specific term arguments.
 ///
 /// Serializes as `{"assert": "<name>", "where": <params>}`, the same
 /// tagged form formulas use — a bare-string `assert` whose name lives
-/// in the procedure registry rather than the formula registry.
-// Variant sizes track each procedure's term count, exactly as
+/// in the resolver registry rather than the formula registry.
+// Variant sizes track each resolver's term count, exactly as
 // `FormulaQuery`'s do; instances are transient planning values, never
 // bulk-stored, so boxing would cost more indirection than the size
 // skew costs memory.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "assert", content = "where")]
-pub enum ProcedureQuery {
-    /// Procedure `tree/node`.
+pub enum ResolverQuery {
+    /// Resolver `tree/node`.
     #[serde(rename = "tree/node")]
     TreeNode(TreeNodeQuery),
-    /// Procedure `tree/span`.
+    /// Resolver `tree/span`.
     #[serde(rename = "tree/span")]
     TreeSpan(TreeSpanQuery),
-    /// Procedure `tree/key`.
+    /// Resolver `tree/key`.
     #[serde(rename = "tree/key")]
     TreeKey(TreeKeyQuery),
-    /// Procedure `tree/entry`.
+    /// Resolver `tree/entry`.
     #[serde(rename = "tree/entry")]
     TreeEntry(TreeEntryQuery),
-    /// Procedure `tree/value`.
+    /// Resolver `tree/value`.
     #[serde(rename = "tree/value")]
     TreeValue(TreeValueQuery),
-    /// Procedure `tree/blob`.
+    /// Resolver `tree/blob`.
     #[serde(rename = "tree/blob")]
     TreeBlob(TreeBlobQuery),
-    /// Procedure `tree/manifest`.
+    /// Resolver `tree/manifest`.
     #[serde(rename = "tree/manifest")]
     TreeManifest(TreeManifestQuery),
 }
@@ -477,7 +489,7 @@ static TREE_MANIFEST_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     })
 });
 
-impl ProcedureQuery {
+impl ResolverQuery {
     /// Returns the formal notation name (e.g. `"tree/node"`).
     pub fn name(&self) -> &'static str {
         match self {
@@ -491,7 +503,7 @@ impl ProcedureQuery {
         }
     }
 
-    /// Returns the static cell definitions for this procedure.
+    /// Returns the static cell definitions for this resolver.
     pub(crate) fn cells(&self) -> &'static Cells {
         match self {
             Self::TreeNode(_) => &TREE_NODE_CELLS,
@@ -504,7 +516,7 @@ impl ProcedureQuery {
         }
     }
 
-    /// Returns the schema for this procedure.
+    /// Returns the schema for this resolver.
     pub fn schema(&self) -> Schema {
         self.cells().into()
     }
@@ -522,17 +534,17 @@ impl ProcedureQuery {
         }
     }
 
-    /// Estimate the cost of this procedure given the environment.
+    /// Estimate the cost of this resolver given the environment.
     ///
     /// `None` while the node-reference input is unbound: node hashes
     /// are not enumerable, and an unbound scan is the one shape that
     /// would degrade subscriptions — the planner refuses to schedule
     /// it until a join binds the input.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
-        self.of().is_bound(env).then_some(PROCEDURE_COST)
+        self.of().is_bound(env).then_some(RESOLVER_COST)
     }
 
-    /// Returns the parameters for this procedure application.
+    /// Returns the parameters for this resolver application.
     pub fn parameters(&self) -> Parameters {
         let mut params = Parameters::new();
         match self {
@@ -627,7 +639,7 @@ impl ProcedureQuery {
         }
     }
 
-    /// Evaluate this procedure over the incoming selection.
+    /// Evaluate this resolver over the incoming selection.
     ///
     /// Per input row: resolve the node reference, perform the
     /// idempotent [`Load`] effect through the environment, decode the
@@ -642,18 +654,18 @@ impl ProcedureQuery {
     where
         Env: Scope<'a>,
     {
-        let procedure = self;
+        let resolver = self;
         try_stream! {
             for await candidate in selection {
                 let base = candidate?;
-                let Some(reference) = procedure.node_reference(&base) else {
+                let Some(reference) = resolver.node_reference(&base) else {
                     continue;
                 };
                 let Some(bytes) = Provider::<Load>::execute(env, reference).await? else {
                     continue;
                 };
-                match &procedure {
-                    ProcedureQuery::TreeNode(query) => {
+                match &resolver {
+                    ResolverQuery::TreeNode(query) => {
                         let node = inspect::inspect_node(bytes)?;
                         let row = project(&base, &[
                             (&query.kind, Value::String(node.kind.into())),
@@ -666,7 +678,7 @@ impl ProcedureQuery {
                             yield row;
                         }
                     }
-                    ProcedureQuery::TreeSpan(query) => {
+                    ResolverQuery::TreeSpan(query) => {
                         for span in inspect::inspect_spans(bytes)? {
                             let row = project(&base, &[
                                 (&query.at, Value::UnsignedInt(span.at.into())),
@@ -682,7 +694,7 @@ impl ProcedureQuery {
                             }
                         }
                     }
-                    ProcedureQuery::TreeKey(query) => {
+                    ResolverQuery::TreeKey(query) => {
                         for (at, entry) in inspect::inspect_keys(bytes)?.into_iter().enumerate() {
                             let row = project(&base, &[
                                 (&query.at, Value::UnsignedInt(at as u128)),
@@ -694,7 +706,7 @@ impl ProcedureQuery {
                             }
                         }
                     }
-                    ProcedureQuery::TreeEntry(query) => {
+                    ResolverQuery::TreeEntry(query) => {
                         for entry in inspect::inspect_entries(bytes)? {
                             let spill = entry
                                 .spill
@@ -720,7 +732,7 @@ impl ProcedureQuery {
                             }
                         }
                     }
-                    ProcedureQuery::TreeValue(query) => {
+                    ResolverQuery::TreeValue(query) => {
                         // The loaded block IS the value: raw bytes, no
                         // node decode. Type information lives in the
                         // key the reference came from.
@@ -732,7 +744,7 @@ impl ProcedureQuery {
                             yield row;
                         }
                     }
-                    ProcedureQuery::TreeBlob(query) => {
+                    ResolverQuery::TreeBlob(query) => {
                         for record in inspect::inspect_blob_records(bytes)? {
                             let row = project(&base, &[
                                 (&query.at, Value::UnsignedInt(record.at.into())),
@@ -745,7 +757,7 @@ impl ProcedureQuery {
                             }
                         }
                     }
-                    ProcedureQuery::TreeManifest(query) => {
+                    ResolverQuery::TreeManifest(query) => {
                         let manifest = inspect::inspect_manifest(bytes)?;
                         let row = project(&base, &[
                             (&query.version, Value::UnsignedInt(manifest.version.into())),
@@ -806,12 +818,12 @@ fn project(base: &Match, fields: &[(&Term<Any>, Value)]) -> Result<Option<Match>
     Ok(Some(row))
 }
 
-/// A realized procedure row: the value each named slot bound.
+/// A realized resolver row: the value each named slot bound.
 /// Constant slots are echoed; slots the row did not bind are absent.
-pub type ProcedureConclusion = BTreeMap<String, Value>;
+pub type ResolverConclusion = BTreeMap<String, Value>;
 
-impl Application for ProcedureQuery {
-    type Conclusion = ProcedureConclusion;
+impl Application for ResolverQuery {
+    type Conclusion = ResolverConclusion;
 
     fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
@@ -838,7 +850,7 @@ impl Application for ProcedureQuery {
     }
 }
 
-impl Display for ProcedureQuery {
+impl Display for ResolverQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}(of: {})", self.name(), self.of())
     }
