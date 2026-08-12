@@ -211,17 +211,39 @@ mod tests {
         assert_eq!(resolved.unwrap().content, content);
     }
 
+    // A subject this environment cannot serve is its own condition, not a
+    // backend failure: the store is not broken, the subject was simply never
+    // loaded here. Callers need to tell "load it and retry" apart from "the
+    // backend is down".
+    //
+    // Asserted on the message rather than the variant because
+    // `From<StorageError> for ArchiveError` is `Self::Storage(e.to_string())`
+    // -- the typed variant is flattened to prose one layer up, so it cannot
+    // be matched from here. Fixing that is the effect-error rework; until
+    // then this pins the routing behaviour and the subject it names.
     #[dialog_common::test]
     async fn it_errors_for_unmounted_did() {
         let env = Storage::volatile();
+        let subject = did!("key:zUnknown");
 
-        let result = did!("key:zUnknown")
+        let result = subject
+            .clone()
             .archive()
             .catalog("index")
             .get([0u8; 32])
             .perform(&env)
             .await;
-        assert!(result.is_err());
+
+        let error = result.expect_err("an unserviceable subject must not resolve");
+        let message = error.to_string();
+        assert!(
+            message.contains(&subject.to_string()),
+            "the error must name the subject it cannot serve, got: {message}"
+        );
+        assert!(
+            message.contains("mounted"),
+            "the error must say what to do about it, not just that it failed: {message}"
+        );
     }
 
     #[dialog_common::test]
