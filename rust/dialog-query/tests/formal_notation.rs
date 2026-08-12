@@ -269,6 +269,58 @@ fn it_parses_equality_constraint_with_two_variables() {
     ));
 }
 
+// Range Constraints
+
+#[dialog_common::test]
+fn it_parses_range_constraints() {
+    for symbol in ["<", "<=", ">", ">="] {
+        let json = json!({
+            "assert": symbol,
+            "where": {
+                "of": { "?": { "name": "age" } },
+                "with": 21
+            }
+        });
+
+        let prop: Proposition = serde_json::from_value(json.clone()).unwrap();
+        let of = match (&prop, symbol) {
+            (Proposition::Constraint(Constraint::LessThan(c)), "<") => &c.of,
+            (Proposition::Constraint(Constraint::AtMost(c)), "<=") => &c.of,
+            (Proposition::Constraint(Constraint::GreaterThan(c)), ">") => &c.of,
+            (Proposition::Constraint(Constraint::AtLeast(c)), ">=") => &c.of,
+            (other, _) => panic!("Expected range constraint for {symbol}, got {other:?}"),
+        };
+        assert_eq!(of, &Term::<Any>::var("age"));
+
+        let reserialized = serde_json::to_value(&prop).unwrap();
+        assert_eq!(reserialized["assert"], symbol);
+        assert!(reserialized["where"]["of"].is_object());
+        assert_eq!(reserialized["where"]["with"], 21);
+    }
+}
+
+#[dialog_common::test]
+fn it_parses_string_range_constraint() {
+    // Datomic's `[(<= "Q" ?name)]` shape: a string bound on the
+    // constant side.
+    let json = json!({
+        "assert": "<=",
+        "where": {
+            "of": "Q",
+            "with": { "?": { "name": "name" } }
+        }
+    });
+
+    let prop: Proposition = serde_json::from_value(json).unwrap();
+    match &prop {
+        Proposition::Constraint(Constraint::AtMost(c)) => {
+            assert!(c.of.is_constant());
+            assert_eq!(c.with, Term::<Any>::var("name"));
+        }
+        other => panic!("Expected AtMost, got {:?}", other),
+    }
+}
+
 // Math Formulas
 
 #[dialog_common::test]

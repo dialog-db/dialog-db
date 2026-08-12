@@ -46,17 +46,19 @@ pub enum Constraint {
     /// string prefix, over the TEXTUAL kinds.
     #[serde(rename = "starts-with")]
     StartsWith(StartsWith),
-    /// Range predicate — strictly less than, over the NUMERIC kinds.
+    /// Range predicate — strictly less than, over the COMPARABLE
+    /// kinds.
     #[serde(rename = "<")]
     LessThan(LessThan),
-    /// Range predicate — less than or equal, over the NUMERIC kinds.
+    /// Range predicate — less than or equal, over the COMPARABLE
+    /// kinds.
     #[serde(rename = "<=")]
     AtMost(AtMost),
-    /// Range predicate — strictly greater than, over the NUMERIC
+    /// Range predicate — strictly greater than, over the COMPARABLE
     /// kinds.
     #[serde(rename = ">")]
     GreaterThan(GreaterThan),
-    /// Range predicate — greater than or equal, over the NUMERIC
+    /// Range predicate — greater than or equal, over the COMPARABLE
     /// kinds.
     #[serde(rename = ">=")]
     AtLeast(AtLeast),
