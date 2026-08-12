@@ -303,7 +303,10 @@ impl AttributeQueryAll {
 
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
                 for await artifact in stream {
-                    let artifact = artifact?;
+                    // Every admitted row becomes a binding, so each one
+                    // materializes exactly once here — the merge and
+                    // tombstone layers upstream never did.
+                    let artifact = artifact?.to_owned()?;
                     // A typed `is` slot filters facts whose value
                     // falls outside the kind.
                     if !selector.admits(&artifact.is) {

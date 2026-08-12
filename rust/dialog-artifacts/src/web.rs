@@ -41,9 +41,9 @@ use wasm_bindgen::{convert::TryFromJsValue, prelude::*};
 use wasm_bindgen_futures::js_sys::{self, Object, Reflect, Symbol, Uint8Array};
 
 use crate::{
-    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, Artifacts, Attribute, Cause,
-    DialogArtifactsError, Entity, HASH_SIZE, Instruction, Value, ValueDataType,
-    artifacts::selector::Constrained,
+    Artifact, ArtifactSelector, ArtifactStore, ArtifactStoreMutExt, ArtifactViewStream as _,
+    Artifacts, Attribute, Cause, DialogArtifactsError, Entity, HASH_SIZE, Instruction, Value,
+    ValueDataType, artifacts::selector::Constrained,
 };
 
 #[wasm_bindgen(typescript_custom_section)]
@@ -339,7 +339,13 @@ impl ArtifactIteratorBinding {
     pub async fn next(&mut self) -> Result<JsValue, JsError> {
         if self.stream.is_none() {
             self.stream = Some(Box::pin(
-                self.artifacts.read().await.select(self.selector.clone()),
+                self.artifacts
+                    .read()
+                    .await
+                    .select(self.selector.clone())
+                    // The JS binding hands each row across the wasm boundary
+                    // as a full `Artifact`, so materialize here.
+                    .owned(),
             ));
         }
 
