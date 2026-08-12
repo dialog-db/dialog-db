@@ -514,8 +514,8 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use crate::{
-        Buffer, ColumnData, Entry, Link, MIXED_LAYOUT, Manifest, NoveltyBuffer, NoveltyEntry,
-        NoveltyOp, PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment, Scale,
+        ColumnData, Entry, Link, MIXED_LAYOUT, Manifest, NoveltyBuffer, NoveltyEntry, NoveltyOp,
+        PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment, Scale,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -538,7 +538,7 @@ mod tests {
             })
             .collect();
         let body = PersistentNodeBody::segment_from_entries(entries, Manifest::default())?;
-        Ok(PersistentNode::new(Buffer::from(body.as_bytes()?)))
+        Ok(PersistentNode::try_from(&body)?)
     }
 
     fn index_node(separators: &[&[u8]]) -> Result<TestNode> {
@@ -560,7 +560,7 @@ mod tests {
             Vec::new(),
             Manifest::default(),
         )?;
-        Ok(PersistentNode::new(Buffer::from(body.as_bytes()?)))
+        Ok(PersistentNode::try_from(&body)?)
     }
 
     /// A serialized segment decodes back to exactly the entries it encoded:
@@ -765,7 +765,7 @@ mod tests {
             scales: vec![Scale::of(1), Scale::of(1)],
             novelty: Vec::new(),
         });
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
         assert!(node.as_index()?.separator(1).is_err());
         assert!(node.as_index()?.route(b"b").is_err());
 
@@ -779,7 +779,7 @@ mod tests {
             scales: vec![Scale::of(1)],
             novelty: Vec::new(),
         });
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
         assert!(node.as_index()?.separator(0).is_err());
         Ok(())
     }
@@ -798,7 +798,7 @@ mod tests {
             scales: vec![Scale::of(1)],
             novelty: Vec::new(),
         });
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
 
         assert!(node.as_index()?.scale_at(0).is_ok());
         assert!(
@@ -825,7 +825,7 @@ mod tests {
             }],
             values: vec![vec![1], vec![2]],
         });
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
         let segment = node.as_segment()?;
         // The streaming decoder constructs lazily, so its error surfaces on
         // the first key read; the materializing paths error outright. Each
@@ -928,9 +928,7 @@ mod tests {
             panic!("expected a segment body");
         };
         segment.count = 1;
-        let node = TestNode::new(Buffer::from(
-            PersistentNodeBody::Segment(segment).as_bytes()?,
-        ));
+        let node = TestNode::try_from(&PersistentNodeBody::Segment(segment))?;
         let segment = node.as_segment()?;
         assert!(segment.keys::<[u8; 8]>().is_err());
         assert!(segment.first_key::<[u8; 8]>().is_err());
@@ -950,7 +948,7 @@ mod tests {
             }],
             values: vec![],
         });
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
         let segment = node.as_segment()?;
         assert!(segment.keys::<[u8; 8]>().is_err());
         assert!(segment.first_key::<[u8; 8]>().is_err());
@@ -1044,7 +1042,7 @@ mod tests {
             })
             .collect();
         let body = PersistentNodeBody::segment_from_entries(entries, manifest)?;
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
         assert_eq!(node.manifest()?, manifest);
         Ok(())
     }
@@ -1077,7 +1075,7 @@ mod tests {
             .collect();
         let body: PersistentNodeBody<Vec<u8>> =
             PersistentNodeBody::index_from_links::<[u8; 8]>(links, novelty, Manifest::default())?;
-        Ok(PersistentNode::new(Buffer::from(body.as_bytes()?)))
+        Ok(PersistentNode::try_from(&body)?)
     }
 
     /// The novelty region round-trips through the columnar coded form exactly:
@@ -1278,8 +1276,7 @@ mod tests {
             >(
                 links, novelty.clone(), Manifest::default()
             )?;
-            let node: PersistentNode<TaggedKey, Vec<u8>> =
-                PersistentNode::new(Buffer::from(body.as_bytes()?));
+            let node: PersistentNode<TaggedKey, Vec<u8>> = PersistentNode::try_from(&body)?;
             assert_eq!(node.as_index()?.all_novelty::<TaggedKey>()?, novelty);
         }
         Ok(())
@@ -1310,7 +1307,7 @@ mod tests {
             );
             index.novelty = novelty;
             let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Index(index);
-            Ok(TestNode::new(Buffer::from(body.as_bytes()?)))
+            Ok(TestNode::try_from(&body)?)
         };
         let buffer = |child: u32| {
             NoveltyBuffer::from_entries::<[u8; 8]>(child, vec![assert_op("aa", vec![1])])

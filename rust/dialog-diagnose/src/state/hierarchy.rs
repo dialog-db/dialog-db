@@ -75,8 +75,9 @@ impl ArtifactsHierarchy {
                 return Ok(());
             };
 
-            let block: PersistentNode<Key, State<Datum>> = PersistentNode::new(Buffer::from(bytes));
-            let node = match block.body()? {
+            let block: PersistentNode<Key, State<Datum>> =
+                PersistentNode::try_from(Buffer::from(bytes))?;
+            let node = match block.body() {
                 ArchivedNodeBody::Index(index) => {
                     let links = index.links()?;
                     TreeNode::Branch {

@@ -4686,9 +4686,10 @@ mod tests {
                 .retrieve(hash)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
-            let node: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::new(Buffer::from(bytes));
+            let node: PersistentNode<[u8; 4], Vec<u8>> =
+                PersistentNode::try_from(Buffer::from(bytes))?;
 
-            match node.body()? {
+            match node.body() {
                 ArchivedNodeBody::Segment(segment) => {
                     let first: [u8; 4] = segment.first_key::<[u8; 4]>()?.as_slice().try_into()?;
                     let last: [u8; 4] = segment.last_key::<[u8; 4]>()?.as_slice().try_into()?;
@@ -7242,8 +7243,8 @@ mod buffer_edit_interaction_tests {
                 .await?
                 .unwrap();
             let node: PersistentNode<[u8; 4], Vec<u8>> =
-                PersistentNode::new(crate::Buffer::from(bytes));
-            match node.body()? {
+                PersistentNode::try_from(crate::Buffer::from(bytes))?;
+            match node.body() {
                 ArchivedNodeBody::Index(index) => {
                     // Separators are lower bounds, so the second child's
                     // separator IS the boundary key that ends the first child.
@@ -7299,8 +7300,8 @@ mod buffer_edit_interaction_tests {
                 .await?
                 .unwrap();
             let node: PersistentNode<[u8; 4], Vec<u8>> =
-                PersistentNode::new(crate::Buffer::from(bytes));
-            match node.body()? {
+                PersistentNode::try_from(crate::Buffer::from(bytes))?;
+            match node.body() {
                 ArchivedNodeBody::Index(index) => {
                     // Separators are lower bounds, so the second child's
                     // separator IS the boundary key that ends the first child.
@@ -7978,8 +7979,9 @@ mod buffer_edit_interaction_tests {
             let bytes = dialog_storage::StorageBackend::get(storage.backend(), &hash)
                 .await?
                 .expect("node present");
-            let node: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::new(Buffer::from(bytes));
-            match node.body()? {
+            let node: PersistentNode<[u8; 4], Vec<u8>> =
+                PersistentNode::try_from(Buffer::from(bytes))?;
+            match node.body() {
                 ArchivedNodeBody::Index(index) => {
                     for at in 0..index.len() {
                         frontier.push(index.hash_at(at)?.clone());
@@ -8225,14 +8227,14 @@ mod buffer_edit_interaction_tests {
             .retrieve(hash)
             .await?
             .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
-        Ok(PersistentNode::new(Buffer::from(bytes)))
+        Ok(PersistentNode::try_from(Buffer::from(bytes))?)
     }
 
     /// The buffered ops sealed into a stored node, owned.
     fn sealed_novelty(
         node: &PersistentNode<SpecKey, Vec<u8>>,
     ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
-        Ok(match node.body()? {
+        Ok(match node.body() {
             ArchivedNodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
             ArchivedNodeBody::Segment(_) => Vec::new(),
         })
