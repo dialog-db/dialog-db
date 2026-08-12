@@ -156,7 +156,7 @@ where
     fn is_loaded_index(&self) -> bool {
         match self {
             SparseTreeNode::Loaded { node, .. } => {
-                matches!(node.body(), Ok(ArchivedNodeBody::Index(_)))
+                matches!(node.body(), ArchivedNodeBody::Index(_))
             }
             SparseTreeNode::Ref(_)
             | SparseTreeNode::Pending { .. }
@@ -171,7 +171,7 @@ where
     fn links_contain(&self, hash: &Blake3Hash) -> bool {
         match self {
             SparseTreeNode::Loaded { node, .. } => match node.body() {
-                Ok(ArchivedNodeBody::Index(index)) => index.contains_hash(hash),
+                ArchivedNodeBody::Index(index) => index.contains_hash(hash),
                 _ => false,
             },
             SparseTreeNode::Ref(_)
@@ -221,7 +221,7 @@ where
         let bytes = storage.retrieve(hash).await?.ok_or_else(|| {
             DialogSearchTreeError::Node(format!("Blob not found in storage: {hash}"))
         })?;
-        Ok(PersistentNode::new(Buffer::from(bytes)))
+        PersistentNode::try_from(Buffer::from(bytes))
     }
 
     /// Initializes a sparse tree from a root hash. The root is not loaded;
@@ -242,7 +242,7 @@ where
             // rule the global leftmost chain is empty everywhere, so this
             // is the empty bound; a distribution with a different
             // reseparation rule (the test simulator) still aligns.
-            let lower_bound = match node.body()? {
+            let lower_bound = match node.body() {
                 ArchivedNodeBody::Index(index) if !index.is_empty() => index.separator(0)?,
                 _ => Vec::new(),
             };
@@ -308,7 +308,7 @@ where
             SparseTreeNode::Ref(_) | SparseTreeNode::Settled { .. } => Vec::new(),
         };
 
-        match node.body()? {
+        match node.body() {
             ArchivedNodeBody::Index(index) => {
                 let links = index.links()?;
                 let mut children = Vec::with_capacity(links.len());
@@ -430,7 +430,7 @@ where
         let (ours, theirs) = (ours.clone(), theirs.clone());
 
         let (ArchivedNodeBody::Index(ours_index), ArchivedNodeBody::Index(theirs_index)) =
-            (ours.body()?, theirs.body()?)
+            (ours.body(), theirs.body())
         else {
             return Ok(false);
         };
@@ -602,7 +602,7 @@ where
                         // out of scope; keep the node (over-retaining is safe,
                         // over-dropping loses changes) and let the read path
                         // surface the error.
-                        Ok(ArchivedNodeBody::Index(index)) => {
+                        ArchivedNodeBody::Index(index) => {
                             index.any_novelty_key::<Key>(in_scope).unwrap_or(true)
                         }
                         _ => false,
@@ -728,7 +728,7 @@ where
                 // The seed is whatever expansion already routed to this node.
                 let mut stack = vec![(node, routed)];
                 while let Some((node, inherited)) = stack.pop() {
-                    match node.body()? {
+                    match node.body() {
                         ArchivedNodeBody::Index(index) => {
                             let mut children = Vec::with_capacity(index.len());
                             for at in 0..index.len() {
@@ -3659,16 +3659,16 @@ mod tests {
             for hash in &level {
                 let bytes = StorageBackend::get(storage.backend(), hash).await?.unwrap();
                 let node: PersistentNode<[u8; 4], Vec<u8>> =
-                    PersistentNode::new(crate::Buffer::from(bytes));
-                if let Ok(crate::ArchivedNodeBody::Index(index)) = node.body() {
+                    PersistentNode::try_from(crate::Buffer::from(bytes))?;
+                if let crate::ArchivedNodeBody::Index(index) = node.body() {
                     let own = index.novelty_len();
                     let mut below = 0;
                     for at in 0..index.len() {
                         let h = index.hash_at(at)?.clone();
                         let b = StorageBackend::get(storage.backend(), &h).await?.unwrap();
                         let child: PersistentNode<[u8; 4], Vec<u8>> =
-                            PersistentNode::new(crate::Buffer::from(b));
-                        if let Ok(crate::ArchivedNodeBody::Index(ci)) = child.body() {
+                            PersistentNode::try_from(crate::Buffer::from(b))?;
+                        if let crate::ArchivedNodeBody::Index(ci) = child.body() {
                             below += ci.novelty_len();
                         }
                         next.push(h);
@@ -3779,8 +3779,8 @@ mod tests {
                     .await?
                     .unwrap();
                 let node: PersistentNode<[u8; 4], Vec<u8>> =
-                    PersistentNode::new(crate::Buffer::from(bytes));
-                if let Ok(crate::ArchivedNodeBody::Index(index)) = node.body() {
+                    PersistentNode::try_from(crate::Buffer::from(bytes))?;
+                if let crate::ArchivedNodeBody::Index(index) = node.body() {
                     // Separators are lower bounds, so a node's own table
                     // bounds its ops from BELOW: every buffered key must sort
                     // at or above the leftmost separator. The right end is

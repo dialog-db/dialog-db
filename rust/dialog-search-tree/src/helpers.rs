@@ -181,7 +181,7 @@ where
                 while let Some(hash) = queue.dequeue() {
                     let node = load_node::<Key, Value, Backend>(storage, &hash).await?;
 
-                    if let ArchivedNodeBody::Index(index) = node.body()? {
+                    if let ArchivedNodeBody::Index(index) = node.body() {
                         let children = index
                             .links()?
                             .into_iter()
@@ -215,7 +215,7 @@ where
         .retrieve(hash)
         .await?
         .ok_or_else(|| DialogSearchTreeError::Node(format!("Blob not found in storage: {hash}")))?;
-    Ok(PersistentNode::new(Buffer::from(bytes)))
+    PersistentNode::try_from(Buffer::from(bytes))
 }
 
 /// A stream of tree nodes.
@@ -692,7 +692,7 @@ impl TreeDescriptor {
     ) -> Result<SpecKey, DialogSearchTreeError> {
         let node = load_node::<SpecKey, Vec<u8>, JournaledBackend>(storage, hash).await?;
 
-        let upper_bound: SpecKey = match node.body()? {
+        let upper_bound: SpecKey = match node.body() {
             ArchivedNodeBody::Segment(segment) => {
                 SpecKey::try_from_bytes(&segment.last_key::<SpecKey>()?)?
             }
@@ -835,7 +835,7 @@ impl TreeSpec {
             // and by child count for indexes, whose links carry only
             // separators.
             let (key_str, rank) = match node.body() {
-                Ok(ArchivedNodeBody::Segment(segment)) => match segment.last_key::<SpecKey>() {
+                ArchivedNodeBody::Segment(segment) => match segment.last_key::<SpecKey>() {
                     Ok(upper_bound) => (
                         String::from_utf8_lossy(&decode_key(&upper_bound)).to_string(),
                         DistributionSimulator::rank(&upper_bound, &Manifest::default()),
@@ -845,11 +845,7 @@ impl TreeSpec {
                         return;
                     }
                 },
-                Ok(ArchivedNodeBody::Index(index)) => (format!("({} children)", index.len()), 0),
-                Err(_) => {
-                    output.push_str(&format!("{prefix}(malformed node {hash})\n"));
-                    return;
-                }
+                ArchivedNodeBody::Index(index) => (format!("({} children)", index.len()), 0),
             };
 
             let branch = if is_last { "└── " } else { "├── " };
@@ -869,7 +865,7 @@ impl TreeSpec {
                 ));
             }
 
-            if let Ok(ArchivedNodeBody::Index(index)) = node.body() {
+            if let ArchivedNodeBody::Index(index) = node.body() {
                 let new_prefix = format!("{}{}", prefix, if is_last { "    " } else { "│   " });
                 let child_count = index.len();
                 let Ok(links) = index.links() else {
