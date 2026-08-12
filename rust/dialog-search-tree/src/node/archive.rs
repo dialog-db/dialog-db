@@ -105,20 +105,18 @@ where
             .any(|candidate| <&Blake3Hash>::from(candidate) == hash)
     }
 
-    /// Index of the child whose subtree covers `key`: the last child whose
-    /// separator is at or below the key. A key below every separator (which
-    /// can only happen when the leftmost separator is non-empty) is clamped
-    /// to the leftmost child, whose subtree is the only place it could live.
+    /// Number of children whose separator is at or below `key`.
     ///
-    /// Compares the probe against the node prefix once, then against suffix
-    /// slices; no separator is reconstructed.
-    pub fn route(&self, key: &[u8]) -> Result<usize, DialogSearchTreeError> {
+    /// The shared core of [`route`](Self::route) and
+    /// [`children_spanning`](Self::children_spanning). Compares the probe
+    /// against the node prefix once, then binary-searches the suffix slices;
+    /// no separator is reconstructed. Because every separator starts with the
+    /// prefix, a probe that diverges from the prefix is decided for all
+    /// children at once.
+    fn children_at_or_below(&self, key: &[u8]) -> Result<usize, DialogSearchTreeError> {
         let prefix: &[u8] = &self.prefix;
         let shared = prefix.len().min(key.len());
-        // Children whose separator is <= key. Every separator starts with
-        // the prefix, so when the probe diverges from the prefix the
-        // comparison is decided for all children at once.
-        let below = match key[..shared].cmp(&prefix[..shared]) {
+        Ok(match key[..shared].cmp(&prefix[..shared]) {
             Ordering::Less => 0,
             Ordering::Greater => self.len(),
             Ordering::Equal if key.len() < prefix.len() => 0,
@@ -135,8 +133,78 @@ where
                 }
                 low
             }
+        })
+    }
+
+    /// Index of the child whose subtree covers `key`: the last child whose
+    /// separator is at or below the key. A key below every separator (which
+    /// can only happen when the leftmost separator is non-empty) is clamped
+    /// to the leftmost child, whose subtree is the only place it could live.
+    ///
+    /// Compares the probe against the node prefix once, then against suffix
+    /// slices; no separator is reconstructed.
+    pub fn route(&self, key: &[u8]) -> Result<usize, DialogSearchTreeError> {
+        Ok(self.children_at_or_below(key)?.saturating_sub(1))
+    }
+
+    /// The range of child indices whose subtrees can hold a key in the
+    /// half-open range `[lower, upper)`.
+    ///
+    /// The result is a **conservative superset**: it is exactly the children
+    /// whose separator span `[separator(i), separator(i+1))` intersects
+    /// `[lower, upper)`, which may include a child at either edge that holds
+    /// no key actually in the range (a child's true extent can stop short of
+    /// its next sibling's separator). Reading it never misses a child that
+    /// does hold a matching key, so a caller can prune every child outside the
+    /// returned range without descending, and at most over-reads the edges.
+    ///
+    /// The lower edge is the child covering `lower` ([`route`](Self::route)).
+    /// The upper edge is the last child whose separator is strictly below
+    /// `upper`, since only such a child can hold a key `< upper`. An empty
+    /// range (`upper <= lower`) yields an empty child range.
+    pub fn children_spanning(
+        &self,
+        lower: &[u8],
+        upper: &[u8],
+    ) -> Result<core::ops::Range<usize>, DialogSearchTreeError> {
+        if self.is_empty() || upper <= lower {
+            return Ok(0..0);
+        }
+
+        let start = self.route(lower)?;
+        // Children with separator strictly below `upper`. `children_at_or_below`
+        // counts those `<= upper`; a child whose separator equals `upper`
+        // holds only keys `>= upper`, which the half-open range excludes, so
+        // drop it. The count is already the exclusive end index.
+        let below_upper = self.children_at_or_below(upper)?;
+        let end = if self.separator(below_upper.saturating_sub(1))? == upper {
+            below_upper.saturating_sub(1)
+        } else {
+            below_upper
         };
-        Ok(below.saturating_sub(1))
+
+        // `start` is the covering child of `lower`, always a valid index; the
+        // end can never fall before it once the range is non-empty.
+        Ok(start..end.max(start + 1))
+    }
+
+    /// A rough estimate of how many entries in this node's subtrees fall in
+    /// the half-open key range `[lower, upper)`, read from this node alone.
+    ///
+    /// Sums the [`Scale`] of every child the range touches
+    /// ([`children_spanning`](Self::children_spanning)). Advisory only, and an
+    /// upper bound in two ways at once: each child scale is itself an upper
+    /// bound (see [`Scale`]), and the edge children may contribute their whole
+    /// subtree when the range only clips part of it. This is exactly the input
+    /// a planner wants to decide whether to scan a range or probe it, without
+    /// descending: one node read yields the estimate for the whole range.
+    pub fn range_scale(&self, lower: &[u8], upper: &[u8]) -> Result<Scale, DialogSearchTreeError> {
+        let children = self.children_spanning(lower, upper)?;
+        let mut scales = Vec::with_capacity(children.len());
+        for at in children {
+            scales.push(self.scale_at(at)?);
+        }
+        Ok(Scale::total(scales))
     }
 
     /// Total number of buffered ops across every link's buffer, read from the
@@ -474,12 +542,17 @@ mod tests {
     }
 
     fn index_node(separators: &[&[u8]]) -> Result<TestNode> {
+        index_node_with_scales(separators, &vec![Scale::EMPTY; separators.len()])
+    }
+
+    fn index_node_with_scales(separators: &[&[u8]], scales: &[Scale]) -> Result<TestNode> {
         let links: Vec<Link> = separators
             .iter()
-            .map(|separator| Link {
+            .zip(scales)
+            .map(|(separator, scale)| Link {
                 separator: separator.to_vec(),
                 node: Blake3Hash::hash(separator),
-                scale: Scale::EMPTY,
+                scale: *scale,
             })
             .collect();
         let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::index_from_links::<[u8; 8]>(
@@ -542,6 +615,139 @@ mod tests {
         assert_eq!(index.route(b"carpet")?, 2);
         assert_eq!(index.route(b"cat")?, 3);
         assert_eq!(index.route(b"zebra")?, 3);
+        Ok(())
+    }
+
+    /// `children_spanning` returns exactly the children whose separator span
+    /// intersects a query range, so a caller can prune the rest without
+    /// descending. The children in this node are:
+    ///   0: [   , car)   1: [car, carpet)   2: [carpet, cat)   3: [cat, +inf)
+    #[dialog_common::test]
+    async fn it_spans_the_children_a_range_touches() -> Result<()> {
+        let separators: Vec<&[u8]> = vec![b"", b"car", b"carpet", b"cat"];
+        let node = index_node(&separators)?;
+        let index = node.as_index()?;
+
+        // A range inside one child's span touches only that child.
+        assert_eq!(index.children_spanning(b"card", b"care")?, 1..2);
+
+        // A range straddling a separator touches both children.
+        assert_eq!(index.children_spanning(b"card", b"caz")?, 1..4);
+
+        // A range below every non-empty separator lands in the leftmost child.
+        assert_eq!(index.children_spanning(b"aardvark", b"ant")?, 0..1);
+
+        // A range above every separator touches only the last child.
+        assert_eq!(index.children_spanning(b"dog", b"emu")?, 3..4);
+
+        // The full key space touches every child.
+        assert_eq!(index.children_spanning(b"", b"\xff")?, 0..4);
+
+        // An empty or inverted range touches nothing.
+        assert_eq!(index.children_spanning(b"car", b"car")?, 0..0);
+        assert_eq!(index.children_spanning(b"cat", b"car")?, 0..0);
+        Ok(())
+    }
+
+    /// A separator exactly equal to the exclusive upper bound must not pull in
+    /// the child it opens: that child holds only keys `>= upper`, which the
+    /// half-open range excludes.
+    #[dialog_common::test]
+    async fn it_excludes_a_child_opened_by_the_exclusive_bound() -> Result<()> {
+        let separators: Vec<&[u8]> = vec![b"", b"m", b"t"];
+        let node = index_node(&separators)?; // 0:[,m) 1:[m,t) 2:[t,+inf)
+        let index = node.as_index()?;
+
+        // upper == "m": child 1 opens at "m" and holds nothing below it.
+        assert_eq!(index.children_spanning(b"a", b"m")?, 0..1);
+        // upper == "t": child 2 opens at "t"; excluded.
+        assert_eq!(index.children_spanning(b"a", b"t")?, 0..2);
+        // Just past "t" pulls the last child back in.
+        assert_eq!(index.children_spanning(b"a", b"t\x00")?, 0..3);
+        Ok(())
+    }
+
+    /// `range_scale` sums the scales of exactly the touched children, giving a
+    /// range cardinality estimate from a single node read.
+    #[dialog_common::test]
+    async fn it_estimates_range_cardinality_from_one_node() -> Result<()> {
+        let separators: Vec<&[u8]> = vec![b"", b"car", b"carpet", b"cat"];
+        // Child subtree sizes, exact in the exact region so the sums are
+        // predictable: 10, 20, 5, 40.
+        let scales = [Scale::of(10), Scale::of(20), Scale::of(5), Scale::of(40)];
+        let node = index_node_with_scales(&separators, &scales)?;
+        let index = node.as_index()?;
+
+        // One child: ~20.
+        assert_eq!(index.range_scale(b"card", b"care")?.estimate(), 20);
+
+        // Children 1..4: 20 + 5 + 40 = 65, then rounded up by the scale
+        // encoding, so at least 65 and within a step above.
+        let est = index.range_scale(b"card", b"caz")?.estimate();
+        assert!(
+            (65..=73).contains(&est),
+            "range scale was {est}, expected ~65"
+        );
+
+        // Whole space: 10 + 20 + 5 + 40 = 75.
+        let all = index.range_scale(b"", b"\xff")?.estimate();
+        assert!((75..=85).contains(&all), "full range scale was {all}");
+
+        // Empty range: zero.
+        assert_eq!(index.range_scale(b"car", b"car")?.estimate(), 0);
+        Ok(())
+    }
+
+    /// Soundness: `children_spanning` must never exclude a child that could
+    /// hold a key in the range. The invariant that guarantees a caller never
+    /// misses data is that for every child index `i`, if that child's span
+    /// intersects `[lo, hi)` then `i` is in `children_spanning(lo, hi)`. Here
+    /// we assert the contrapositive directly against `route`: every key that
+    /// routes into the range's interior lands inside the spanned children.
+    #[dialog_common::test]
+    async fn it_never_excludes_a_child_that_could_match() -> Result<()> {
+        let separators: Vec<&[u8]> = vec![b"", b"d", b"h", b"m", b"s", b"w"];
+        let node = index_node(&separators)?;
+        let index = node.as_index()?;
+
+        // Probe a spread of range endpoints, including ones that coincide with
+        // separators and ones that fall between them.
+        let points: &[&[u8]] = &[
+            b"a", b"c", b"d", b"da", b"g", b"h", b"k", b"m", b"ma", b"r", b"s", b"v", b"w", b"z",
+        ];
+
+        for (i, lo) in points.iter().enumerate() {
+            for hi in &points[i..] {
+                let span = index.children_spanning(lo, hi)?;
+
+                // Every key at or above lo and below hi must route into the
+                // span. Route(lo) is the lower witness; the child just below
+                // route(hi-ish) is the upper witness. Check both endpoints and
+                // a scattering of interior separators.
+                if lo < hi {
+                    let low_child = index.route(lo)?;
+                    assert!(
+                        span.contains(&low_child),
+                        "lo={lo:?} routes to child {low_child}, not in {span:?}"
+                    );
+
+                    // Any separator strictly inside [lo, hi) names a child that
+                    // holds keys in range; it must be spanned.
+                    for at in 0..index.len() {
+                        let sep = index.separator(at)?;
+                        if sep.as_slice() >= *lo && sep.as_slice() < *hi {
+                            assert!(
+                                span.contains(&at),
+                                "separator {sep:?} (child {at}) is in [{lo:?},{hi:?}) \
+                                 but child not spanned by {span:?}"
+                            );
+                        }
+                    }
+                } else {
+                    assert!(span.is_empty(), "empty range must span nothing");
+                }
+            }
+        }
         Ok(())
     }
 
