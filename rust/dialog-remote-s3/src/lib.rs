@@ -49,7 +49,7 @@ pub mod s3;
 #[cfg(feature = "helpers")]
 pub mod helpers;
 
-pub use error::{AuthorizationFormatError, S3Error};
-pub use request::{IntoRequest, Precondition, S3Request};
+pub use error::{AuthorizationFormatError, PermitRejection, S3Error};
+pub use request::{IntoRequest, Precondition, RequestMethod, S3Request};
 pub use request::{archive, memory};
 pub use s3::*;
