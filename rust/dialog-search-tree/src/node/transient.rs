@@ -846,7 +846,7 @@ where
         node: &PersistentNode<Key, Value>,
         separator: Vec<u8>,
     ) -> Result<Self, DialogSearchTreeError> {
-        match node.body()? {
+        match node.body() {
             ArchivedNodeBody::Index(_) => {
                 Ok(TransientNode::Index(TransientNode::open_index(node)?))
             }
@@ -921,7 +921,7 @@ where
             }
         };
 
-        let node = PersistentNode::new(Buffer::from(body.as_bytes()?));
+        let node = PersistentNode::try_from(&body)?;
         crate::distribution::audit::node(node.buffer().as_ref().len());
         if let Some(kind) = audit_kind {
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);

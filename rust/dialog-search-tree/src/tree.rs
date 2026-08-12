@@ -499,7 +499,7 @@ mod tests {
 
         let accessor = Accessor::new(tree.node_cache(), storage.clone());
         let root = accessor.get_node::<[u8; 4], Vec<u8>>(tree.root()).await?;
-        let estimate = root.scale()?.estimate();
+        let estimate = root.scale().estimate();
 
         assert!(
             estimate >= COUNT as u64,
@@ -541,11 +541,11 @@ mod tests {
 
         let accessor = Accessor::new(tree.node_cache(), storage.clone());
         let root = accessor.get_node::<[u8; 4], Vec<u8>>(tree.root()).await?;
-        let flushed = root.scale()?;
+        let flushed = root.scale();
 
         // A canonical tree carries no novelty, so its scale is a pure function
         // of stored entries: re-reading it is stable.
-        assert_eq!(root.scale()?, flushed, "scale must be deterministic");
+        assert_eq!(root.scale(), flushed, "scale must be deterministic");
         assert!(!flushed.is_empty());
 
         Ok(())
