@@ -42,7 +42,7 @@ pub use remote::*;
 // without linking `dialog-query` or the storage/transport stack.
 // Re-exported here at their historical
 // `dialog_repository::{Revision, TreeReference}` paths.
-pub use dialog_artifacts::{EMPTY_TREE_HASH, Revision, TreeReference};
+pub use dialog_artifacts::{Revision, TreeReference};
 
 /// A repository scoped to a specific subject.
 ///

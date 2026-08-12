@@ -934,7 +934,6 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
 
     let mut tree = ArtifactTree::empty();
-    let empty_root = tree.root().clone();
     let mut delta = Delta::zero();
     let changed = tree
         .apply_versioned(
@@ -945,7 +944,13 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
         )
         .await?;
     assert!(!changed, "retracting a nonexistent fact changes nothing");
-    assert_eq!(*tree.root(), empty_root, "the tree root must not move");
+    // The batch still persists the (untouched, empty) tree, which lands on
+    // its canonical persisted form: the derived empty root for the format.
+    assert_eq!(
+        *tree.root(),
+        ArtifactTree::empty_root(&dialog_search_tree::Manifest::default())?,
+        "the tree is still the empty tree"
+    );
     for (digest, buffer) in delta.flush() {
         store.set(*digest.as_bytes(), buffer.into_vec()).await?;
     }

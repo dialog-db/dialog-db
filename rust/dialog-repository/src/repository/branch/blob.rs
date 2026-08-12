@@ -60,8 +60,8 @@
 //! ```
 
 use crate::{
-    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, TreeReference, Upstream,
+    Branch, CommitError, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt as _, Revision, TreeReference, Upstream,
 };
 use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
 use dialog_artifacts::tree::ArtifactTreeExt as _;
@@ -425,11 +425,11 @@ where
         };
         let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
-        let base_tree_hash = base_revision
-            .as_ref()
-            .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPTY_TREE_HASH);
-        let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
+        let mut tree = match base_revision.as_ref() {
+            Some(base) => Index::from_hash(NodeHash::from(*base.tree.hash())),
+            // No revision yet: the write starts from the empty tree.
+            None => Index::empty(),
+        };
 
         let mut delta = Delta::zero();
         let index_hash: dialog_storage::Blake3Hash = *hash.as_bytes();
@@ -446,30 +446,43 @@ where
         let profile = authority.profile().clone();
 
         let parent = base_revision.as_ref().map(Revision::version);
-        let skips = match &parent {
-            Some(parent) => {
+        let skips = match base_revision.as_ref() {
+            Some(base) => {
                 let history = TreeHistory::from_root_with_cache(
-                    &base_tree_hash,
+                    base.tree.hash(),
                     store.clone(),
                     branch.node_cache(),
                 )
                 .with_record_cache(branch.records());
-                extend_skips(&history, parent).await?
+                extend_skips(&history, &base.version()).await?
             }
             None => Vec::new(),
         };
         let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
         let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
+        // The record's key carries its value through the tree's own
+        // inline-vs-spill threshold, so read the manifest off the tree
+        // rather than assuming the default.
+        let manifest = tree.format_manifest(store.clone(), &delta).await?;
+        // The revision's tree root is set after the record lands in the
+        // tree; until then it carries the tree the write started from —
+        // the base revision's root, or the derived empty tree for a
+        // genesis write.
+        let starting_tree = match base_revision.as_ref() {
+            Some(base) => base.tree.clone(),
+            None => TreeReference::from(
+                *Index::empty_root(&manifest)
+                    .map_err(DialogArtifactsError::from)?
+                    .as_bytes(),
+            ),
+        };
+        let starting_tree_hash = *starting_tree.hash();
         let mut revision = match base_revision {
-            Some(base) => base.advance(TreeReference::default(), branch_entity.clone(), issuer),
-            None => Revision::new(TreeReference::default(), branch_entity.clone(), issuer),
+            Some(base) => base.advance(starting_tree, branch_entity.clone(), issuer),
+            None => Revision::new(starting_tree, branch_entity.clone(), issuer),
         };
         let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
-        // The record's key carries its value through the tree's own
-        // inline-vs-spill threshold, so read it off the tree rather than
-        // assuming the default.
-        let manifest = tree.format_manifest(store.clone(), &delta).await?;
         tree.record(&mut store, &mut delta, record.entries(&manifest)?)
             .await?;
 
@@ -496,8 +509,11 @@ where
                 (Some(parent), None) => match contexts.cached(parent).await {
                     Some(context) => context,
                     None => {
+                        // The parent revision exists (parent is Some), so
+                        // the starting tree is its root — the history to
+                        // walk.
                         let history = TreeHistory::from_root_with_cache(
-                            &base_tree_hash,
+                            &starting_tree_hash,
                             store.clone(),
                             branch.node_cache(),
                         )

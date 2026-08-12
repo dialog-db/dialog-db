@@ -18,8 +18,8 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
 
 use crate::{
-    Branch, Checkpoint, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, PullError,
-    RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
+    Branch, Checkpoint, Index, NetworkedIndex, PublishError, PullError, RemoteSite,
+    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference, Upstream,
     UpstreamBranch,
 };
 
@@ -209,12 +209,12 @@ impl<'a> Pull<'a> {
             .map_err(dialog_artifacts::DialogArtifactsError::from)?;
 
         // `base` is the upstream tree at our last sync point with this
-        // particular upstream (the divergence marker). If it equals the
-        // upstream's current tree, the upstream hasn't moved and there's
-        // nothing to pull.
-        let base = upstream.tree().clone();
+        // particular upstream (the divergence marker), `None` before any
+        // sync. If it equals the upstream's current tree, the upstream
+        // hasn't moved and there's nothing to pull.
+        let base = upstream.tree().cloned();
 
-        if base == upstream_revision.tree {
+        if base.as_ref() == Some(&upstream_revision.tree) {
             return Ok(PreparedPull::NoOp);
         }
 
@@ -226,10 +226,9 @@ impl<'a> Pull<'a> {
         // new version and drop the commit (see `Cell::checkpoint`).
         let head = branch.revision.checkpoint();
         let local_revision = branch.revision();
-        let local_tree_hash = local_revision
+        let local_tree = local_revision
             .as_ref()
-            .map(|revision| *revision.tree.hash())
-            .unwrap_or(EMPTY_TREE_HASH);
+            .map(|revision| revision.tree.clone());
 
         // `NetworkedIndex` reads from the local archive first and,
         // when the upstream is remote, falls back to the remote
@@ -238,17 +237,19 @@ impl<'a> Pull<'a> {
         let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 
         // The three trees: last-sync base, the upstream revision we're
-        // merging in, and the local tree the merge integrates onto.
-        // Hydration is lazy; blocks load on demand as the differential
-        // walks them.
-        let base_tree =
-            Index::from_hash_with_cache(NodeHash::from(*base.hash()), branch.node_cache());
-        let upstream_tree = Index::from_hash_with_cache(
-            NodeHash::from(*upstream_revision.tree.hash()),
-            branch.node_cache(),
-        );
-        let mut merged =
-            Index::from_hash_with_cache(NodeHash::from(local_tree_hash), branch.node_cache());
+        // merging in, and the local tree the merge integrates onto — an
+        // absent base or local revision means that side is the empty
+        // index. Hydration is lazy; blocks load on demand as the
+        // differential walks them.
+        let index_at = |tree: Option<&TreeReference>| match tree {
+            Some(tree) => {
+                Index::from_hash_with_cache(NodeHash::from(*tree.hash()), branch.node_cache())
+            }
+            None => Index::empty_with_cache(branch.node_cache()),
+        };
+        let base_tree = index_at(base.as_ref());
+        let upstream_tree = index_at(Some(&upstream_revision.tree));
+        let mut merged = index_at(local_tree.as_ref());
 
         // The receiver's causal context: the per-origin watermark of the
         // local head's ancestry. This is the merge's memory of every
@@ -308,7 +309,10 @@ impl<'a> Pull<'a> {
             // keeps pull cost independent of upstream churn in regions
             // we never touch, and what makes adopting a deep history
             // free.
-            else if *base.hash() == local_tree_hash && theirs.includes(&local_context) {
+            else if base.as_ref().map(|base| base.hash())
+                == local_tree.as_ref().map(|tree| tree.hash())
+                && theirs.includes(&local_context)
+            {
                 contexts.insert(upstream_revision.version(), theirs.clone());
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
@@ -335,17 +339,19 @@ impl<'a> Pull<'a> {
             // whichever side is smaller) are strictly cheaper; the
             // graft's economics need bulk on both sides.
             else if let Some(local) = &local_revision
-                && base != TreeReference::default()
+                && let Some(base_sync) = &base
                 && local_context
                     .divergence(theirs)
                     .min(theirs.divergence(&local_context))
                     > SMALL_DIVERGENCE
             {
                 let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-                let base_tree =
-                    Index::from_hash_with_cache(NodeHash::from(*base.hash()), branch.node_cache());
+                let base_tree = Index::from_hash_with_cache(
+                    NodeHash::from(*base_sync.hash()),
+                    branch.node_cache(),
+                );
                 let local_tree = Index::from_hash_with_cache(
-                    NodeHash::from(local_tree_hash),
+                    NodeHash::from(*local.tree.hash()),
                     branch.node_cache(),
                 );
                 let upstream_tree = Index::from_hash_with_cache(
@@ -543,9 +549,11 @@ impl<'a> Pull<'a> {
                 let authority = Identify.perform(env).await?;
                 let branch_entity =
                     crate::branch_of(branch.of(), authority.profile(), branch.name());
+                // Mint at the merged tree as it stands; the root is
+                // finalized once the merge's own record is in the tree.
                 let mut revision = local.merge(
                     &upstream_revision,
-                    TreeReference::default(),
+                    merged_tree.clone(),
                     branch_entity.clone(),
                     authority.did(),
                 );
@@ -624,10 +632,9 @@ impl<'a> Pull<'a> {
                 && local_context.divergence(theirs) <= theirs.divergence(&local_context)
             {
                 let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-                let base_tree =
-                    Index::from_hash_with_cache(NodeHash::from(*base.hash()), branch.node_cache());
+                let base_tree = index_at(base.as_ref());
                 let local_tree = Index::from_hash_with_cache(
-                    NodeHash::from(local_tree_hash),
+                    NodeHash::from(*local.tree.hash()),
                     branch.node_cache(),
                 );
                 let mut merged = Index::from_hash_with_cache(
@@ -700,9 +707,11 @@ impl<'a> Pull<'a> {
                 let authority = Identify.perform(env).await?;
                 let branch_entity =
                     crate::branch_of(branch.of(), authority.profile(), branch.name());
+                // Mint at the merged tree as it stands; the root is
+                // finalized once the merge's own record is in the tree.
                 let mut revision = local.merge(
                     &upstream_revision,
-                    TreeReference::default(),
+                    merged_tree.clone(),
                     branch_entity.clone(),
                     authority.did(),
                 );
@@ -756,8 +765,7 @@ impl<'a> Pull<'a> {
         // base and upstream actually differ within its region.
         let tree_store = TreeStorage::new(TreeStorageBridge(store.clone()));
         let screen_store = TreeStorage::new(TreeStorageBridge(store.clone()));
-        let local_snapshot =
-            Index::from_hash_with_cache(NodeHash::from(local_tree_hash), branch.node_cache());
+        let local_snapshot = index_at(local_tree.as_ref());
 
         // History changes are screened + emitted first, data changes
         // second; chaining them into one stream integrated in a single
@@ -844,9 +852,11 @@ impl<'a> Pull<'a> {
                 let authority = Identify.perform(env).await?;
                 let branch_entity =
                     crate::branch_of(branch.of(), authority.profile(), branch.name());
+                // Mint at the merged tree as it stands; the root is
+                // finalized once the merge's own record is in the tree.
                 let mut revision = local.merge(
                     &upstream_revision,
-                    TreeReference::default(),
+                    merged_tree.clone(),
                     branch_entity.clone(),
                     authority.did(),
                 );
@@ -892,7 +902,7 @@ impl<'a> Pull<'a> {
         // base records may be in neither side is a branch with no head
         // but a stale nonempty sync base — an inconsistent state; skip
         // the memo and let the next pull derive by the walk.
-        if had_local_head || base == TreeReference::default() {
+        if had_local_head || base.is_none() {
             let mut context = merged_context;
             context.record(new_revision.version());
             contexts.insert(new_revision.version(), context);
@@ -952,9 +962,10 @@ pub struct Merged<'a> {
     /// to the tree merged in — the tracking state to upsert.
     sync: Upstream,
     /// The sync base the merge actually ran from — what the pulled entry's
-    /// tree looked like at prepare time. Lets the commit phase detect
-    /// whether a concurrent write advanced this same entry in the meantime.
-    base: TreeReference,
+    /// tree looked like at prepare time (`None` for a first sync). Lets the
+    /// commit phase detect whether a concurrent write advanced this same
+    /// entry in the meantime.
+    base: Option<TreeReference>,
 }
 
 impl PreparedPull<'_> {
@@ -1029,7 +1040,7 @@ impl PreparedPull<'_> {
             let mut upstreams = branch.upstreams();
             let ours_untouched = match upstreams.find(&sync) {
                 None => true,
-                Some(entry) => *entry.tree() == base,
+                Some(entry) => entry.tree() == base.as_ref(),
             };
             if !ours_untouched {
                 return Ok(branch.revision());
@@ -3929,7 +3940,7 @@ mod history_tests {
         assert!(
             upstreams.iter().any(|entry| matches!(
                 entry,
-                crate::Upstream::Local { branch, tree } if branch == "main" && *tree == main_head.tree
+                crate::Upstream::Local { branch, tree } if branch == "main" && tree.as_ref() == Some(&main_head.tree)
             )),
             "the pull's sync-base advance survives the race"
         );

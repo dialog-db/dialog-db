@@ -19,7 +19,7 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use rkyv::rancor::Error as RkyvError;
 use rkyv::{deserialize, to_bytes};
 
-use crate::{Datum, DialogArtifactsError, EMPTY_TREE_HASH, Key, State};
+use crate::{Datum, DialogArtifactsError, Key, State};
 
 /// Which of the two node forms a walked node is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,16 +69,17 @@ pub struct NodeStat {
 
 /// Walks the tree rooted at `root` breadth-first and measures every node.
 ///
-/// `root` is the raw 32-byte tree root as carried by a revision; the empty
-/// tree yields an empty capture. The store is the same hash-to-block backend
-/// the tree persists into, so spilled value blocks and history records
-/// outside the tree are never touched.
+/// `root` is the raw 32-byte tree root as carried by a revision; a tree
+/// that was never persisted (the null root) yields an empty capture. The
+/// store is the same hash-to-block backend the tree persists into, so
+/// spilled value blocks and history records outside the tree are never
+/// touched.
 pub async fn capture<S>(root: &Blake3Hash, store: &S) -> Result<Vec<NodeStat>, DialogArtifactsError>
 where
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
 {
     let mut stats: Vec<(usize, NodeStat)> = Vec::new();
-    if *root == EMPTY_TREE_HASH {
+    if root == dialog_common::NULL_BLAKE3_HASH.as_bytes() {
         return Ok(Vec::new());
     }
 

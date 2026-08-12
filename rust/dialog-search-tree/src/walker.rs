@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_storage::{DialogStorageError, StorageBackend};
 use futures_core::Stream;
 use nonempty::NonEmpty;
@@ -266,7 +266,10 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + ConditionalSync,
 {
-    root: Blake3Hash,
+    /// The root node to walk from, or `None` for a tree with no stored
+    /// root (an empty tree that was never persisted): every walk over it
+    /// yields nothing without touching storage.
+    root: Option<Blake3Hash>,
 
     key: PhantomData<Key>,
     value: PhantomData<Value>,
@@ -281,8 +284,9 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
 {
-    /// Creates a new [`TreeWalker`] with the given root hash and node fetcher.
-    pub fn new(root: Blake3Hash) -> Self {
+    /// Creates a new [`TreeWalker`] over the given stored root — `None`
+    /// walks the empty tree.
+    pub fn new(root: Option<Blake3Hash>) -> Self {
         Self {
             root,
 
@@ -521,15 +525,15 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
-        if &self.root == NULL_BLAKE3_HASH {
+        let Some(root) = &self.root else {
             return Ok(None);
-        }
+        };
 
         // Depth scales logarithmically with number of entries, so 32 is truly
         // overkill here
         const MAXIMUM_TREE_DEPTH: usize = 32;
 
-        let mut next_node = self.root.clone();
+        let mut next_node = root.clone();
         let mut path = vec![];
 
         loop {

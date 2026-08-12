@@ -36,7 +36,7 @@ use std::{
 };
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use dialog_storage::{DialogStorageError, JournaledStorage, MemoryStorageBackend, StorageBackend};
 use futures_core::Stream;
 use futures_util::StreamExt;
@@ -171,10 +171,10 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSend,
     {
-        let root = self.root().clone();
+        let root = self.stored_root().cloned();
 
         try_stream! {
-            if &root != NULL_BLAKE3_HASH {
+            if let Some(root) = root {
                 let mut queue = order.queue();
                 queue.enqueue([root]);
 
@@ -605,14 +605,16 @@ impl TreeDescriptor {
         for key in &collection {
             let leaf_rank = if leaf_boundaries.contains(key) { 2 } else { 1 };
             let seam_rank = seam_ranks.get(key).copied().unwrap_or(1);
-            tree = crate::TransientTree::with_manifest(
-                tree.root().clone(),
-                tree.node_cache(),
-                manifest,
-            )
-            .insert(encode_key(key, leaf_rank, seam_rank), key.clone(), &storage)
-            .await?
-            .persist(&mut delta)?;
+            let edit = match tree.stored_root() {
+                Some(root) => {
+                    crate::TransientTree::with_manifest(root.clone(), tree.node_cache(), manifest)
+                }
+                None => crate::TransientTree::empty_with_manifest(tree.node_cache(), manifest),
+            };
+            tree = edit
+                .insert(encode_key(key, leaf_rank, seam_rank), key.clone(), &storage)
+                .await?
+                .persist(&mut delta)?;
 
             // Flush after each persist so the next edit (and the differentials
             // that read afterwards) can load the nodes this persist created: a
@@ -630,7 +632,7 @@ impl TreeDescriptor {
         let max_height = self.0.len() - 1;
         let mut spec = vec![Vec::new(); self.0.len()];
 
-        if &root != NULL_BLAKE3_HASH {
+        if tree.stored_root().is_some() {
             Self::build_spec_from_node(&mut spec, &root, &storage, max_height, &expected_ops)
                 .await?;
         }
@@ -805,8 +807,8 @@ impl TreeSpec {
 
         let mut output = String::new();
 
-        if self.tree.root() != NULL_BLAKE3_HASH {
-            Self::visualize_node(&mut output, self.tree.root(), &self.storage, "", true).await;
+        if let Some(root) = self.tree.stored_root() {
+            Self::visualize_node(&mut output, root, &self.storage, "", true).await;
         } else {
             output.push_str("(empty tree)\n");
         }
