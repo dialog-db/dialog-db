@@ -1365,6 +1365,7 @@ dependencies = [
  "serde_bytes",
  "serde_ipld_dagcbor",
  "serde_json",
+ "sieve-cache",
  "signature",
  "thiserror 2.0.18",
  "tokio",
