@@ -113,6 +113,6 @@ impl From<AuthorizationFormatError> for dialog_effects::credential::CredentialEr
 
 impl From<AuthorizationFormatError> for dialog_capability::AuthorizeError {
     fn from(error: AuthorizationFormatError) -> Self {
-        Self::Configuration(error.to_string())
+        Self::Malformed(error.to_string())
     }
 }

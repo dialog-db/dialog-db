@@ -125,7 +125,7 @@ where
         let identity = authority::Identify
             .perform(env)
             .await
-            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+            .map_err(|e| AuthorizeError::Malformed(e.to_string()))?;
         let profile = identity.profile().clone();
         let operator = identity.did();
 
