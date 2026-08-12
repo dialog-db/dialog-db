@@ -64,7 +64,7 @@ where
 
     /// Retrieves the value associated with a key from this delta.
     pub fn get(&self, key: &K) -> Option<V> {
-        let contents = self.contents.write();
+        let contents = self.contents.read();
         contents.get(key).cloned()
     }
 

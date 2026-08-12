@@ -187,7 +187,16 @@ where
                 });
             }
             let segment = result.leaf.as_segment()?;
-            if let Some(at) = segment.find::<Key>(key.as_ref())? {
+            // A leaf probed once streams the front-coded keys (decode paid
+            // only as far as the probe); a leaf probed repeatedly — a hot key
+            // or a join landing on the same leaf per outer row — flips to the
+            // memoized flat decode and binary-searches it.
+            let at = if result.leaf.should_memoize_keys() {
+                result.leaf.memoized_keys()?.binary_search(key.as_ref())
+            } else {
+                segment.find::<Key>(key.as_ref())?
+            };
+            if let Some(at) = at {
                 into_owned(segment.value_at(at)?).map(Some)
             } else {
                 Ok(None)

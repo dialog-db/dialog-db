@@ -62,6 +62,66 @@ use crate::{
 /// [`HitchhikerTree::with_op_buf_size`].
 pub const DEFAULT_OP_BUF_SIZE: usize = 256;
 
+/// The op-buffer capacity trees open under: [`DEFAULT_OP_BUF_SIZE`] unless
+/// `DIALOG_TREE_OP_BUF` overrides it (experiment plumbing, read once per
+/// process, native only). The capacity is the per-commit-cost knob: a
+/// commit re-encodes and re-hashes the root frame, whose size the buffer
+/// dominates, while a smaller buffer flushes (and pushes novelty toward
+/// the leaves) proportionally more often — so the optimum balances
+/// O(capacity) per commit against O(flush)/capacity amortized, and it is
+/// a measurement question, not a constant to guess.
+/// Default op-buffer WEIGHT cap: the buffer flushes when its buffered
+/// weight (key bytes + value payloads + per-entry encoding overhead, the
+/// calibrated byte metering) exceeds this, whatever the op count. The
+/// count cap bounds how many ops a buffer holds; this bounds their BYTES,
+/// which is what actually rides the root frame into every per-commit
+/// rewrite and every pushed operational block — a byte-heavy workload can
+/// pack ~200 KB into 256 ops. 64 KiB (the pacing target's scale) bounds
+/// the operational root block for a measured +17% replay cost on the
+/// byte-heavy real workload; the metering's per-op overhead charge means
+/// this cap also implies a hard op-count bound, so it is the primary
+/// knob and the count cap is secondary.
+pub const DEFAULT_OP_BUF_BYTES: usize = 64 * 1024;
+
+/// The op-buffer byte cap trees open under: [`DEFAULT_OP_BUF_BYTES`]
+/// unless `DIALOG_TREE_OP_BUF_BYTES` overrides it (experiment plumbing,
+/// read once per process, native only; explicit 0 disables the byte
+/// trigger).
+fn default_op_buf_bytes() -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *BYTES.get_or_init(|| {
+            match std::env::var("DIALOG_TREE_OP_BUF_BYTES")
+                .ok()
+                .and_then(|raw| raw.parse().ok())
+            {
+                Some(0) => usize::MAX,
+                Some(bytes) => bytes,
+                None => DEFAULT_OP_BUF_BYTES,
+            }
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    DEFAULT_OP_BUF_BYTES
+}
+
+fn default_op_buf_size() -> usize {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *SIZE.get_or_init(|| {
+            std::env::var("DIALOG_TREE_OP_BUF")
+                .ok()
+                .and_then(|raw| raw.parse().ok())
+                .filter(|&size| size > 0)
+                .unwrap_or(DEFAULT_OP_BUF_SIZE)
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    DEFAULT_OP_BUF_SIZE
+}
+
 /// A boxed future returning an edited [`TransientNode`], the shape `enqueue`
 /// returns so its recursion can be expressed as a plain `async fn` body inside a
 /// `Box::pin`.
@@ -170,6 +230,7 @@ where
     root: HitchhikerRoot<Key, Value>,
     cache: Cache<Blake3Hash, Buffer>,
     op_buf_size: usize,
+    op_buf_bytes: usize,
     policy: FlushPolicy,
     trigger: FlushTrigger,
     /// The tree's format header, captured from the root node the first time a
@@ -207,7 +268,8 @@ where
         Self {
             root: HitchhikerRoot::Unloaded(tree.root().clone()),
             cache: tree.node_cache(),
-            op_buf_size: DEFAULT_OP_BUF_SIZE,
+            op_buf_size: default_op_buf_size(),
+            op_buf_bytes: default_op_buf_bytes(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
             manifest: None,
@@ -220,7 +282,8 @@ where
         Self {
             root: HitchhikerRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
             cache: Cache::new(),
-            op_buf_size: DEFAULT_OP_BUF_SIZE,
+            op_buf_size: default_op_buf_size(),
+            op_buf_bytes: default_op_buf_bytes(),
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
             manifest: None,
@@ -228,9 +291,35 @@ where
         }
     }
 
+    /// Pins the format [`Manifest`] this session writes under, instead of
+    /// reading it from the tree's root on first load.
+    ///
+    /// The manifest normally travels IN the tree (every node carries it),
+    /// which leaves one gap: an EMPTY tree has no node to carry it, so a
+    /// session opened over an empty root writes under [`Manifest::default`]
+    /// — even when the tree held a different format before its last entry
+    /// was deleted. A caller that configures a non-default format must
+    /// therefore re-impose it whenever it opens over a possibly-empty
+    /// tree, or an empty-and-refill lifecycle silently reverts the store
+    /// to the default format (and two replicas that emptied at different
+    /// points diverge on identical facts). This was found by the
+    /// adversarial convergence soak's delete-to-empty pattern.
+    pub fn with_manifest(mut self, manifest: Manifest) -> Self {
+        self.manifest = Some(manifest);
+        self
+    }
+
     /// Sets the per-node novelty capacity (the write-amplification knob).
     pub fn with_op_buf_size(mut self, op_buf_size: usize) -> Self {
         self.op_buf_size = op_buf_size.max(1);
+        self
+    }
+
+    /// Sets the per-node novelty WEIGHT cap: the buffer flushes when its
+    /// buffered weight (key bytes + value payloads) exceeds this, whatever
+    /// the op count. `usize::MAX` (the default) disables the byte trigger.
+    pub fn with_op_buf_bytes(mut self, op_buf_bytes: usize) -> Self {
+        self.op_buf_bytes = op_buf_bytes.max(1);
         self
     }
 
@@ -287,6 +376,76 @@ where
         .await
     }
 
+    /// Buffers an insert WITHOUT evaluating the flush policy: the deferred
+    /// half of batch writing. The op is routed into the root's novelty and
+    /// left there however full the buffer gets; the caller runs
+    /// [`settle`](Self::settle) once after the whole batch, so a batch
+    /// cascades into any given child at most once instead of re-flushing it
+    /// on every overflow the batch crosses. Reads are novelty-aware wherever
+    /// ops sit, so a deferred tree reads exactly like a settled one.
+    pub async fn insert_deferred<Backend>(
+        self,
+        key: Key,
+        value: Value,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        self.write_with(
+            vec![NoveltyEntry {
+                key: key.as_ref().to_vec(),
+                op: NoveltyOp::Assert(value),
+            }],
+            storage,
+            false,
+        )
+        .await
+    }
+
+    /// Buffers a delete WITHOUT evaluating the flush policy; see
+    /// [`insert_deferred`](Self::insert_deferred).
+    pub async fn delete_deferred<Backend>(
+        self,
+        key: Key,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        self.write_with(
+            vec![NoveltyEntry {
+                key: key.as_ref().to_vec(),
+                op: NoveltyOp::Retract,
+            }],
+            storage,
+            false,
+        )
+        .await
+    }
+
+    /// Applies the flush policy once over everything the deferred writes
+    /// accumulated: the settle half of batch writing. Buffers that ended the
+    /// batch over their trigger cascade now, top-down, each child receiving
+    /// its whole accumulated share in one flush.
+    pub async fn settle<Backend>(
+        self,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        match self.root {
+            // Nothing buffered in memory: nothing to settle. (A persisted
+            // root's stored buffers settle when a write next loads it.)
+            HitchhikerRoot::Unloaded(_) => Ok(self),
+            HitchhikerRoot::Loaded(_) => self.write_with(Vec::new(), storage, true).await,
+        }
+    }
+
     /// Enqueues a batch of ops into the tree, cascading buffers one level on
     /// overflow.
     ///
@@ -296,9 +455,27 @@ where
     /// [`TransientTree`] insert/delete path so leaf landings reshape exactly as
     /// a sequential edit would.
     async fn write<Backend>(
+        self,
+        msgs: Vec<NoveltyEntry<Value>>,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        self.write_with(msgs, storage, true).await
+    }
+
+    /// [`write`](Self::write) with the flush policy made optional: `settle`
+    /// false routes the ops and returns (deferred batch writing), true is
+    /// the classic behavior. Leaf-bound ops (an empty or segment-rooted
+    /// tree, the `Immediate` policy) always go to the canonical edit path
+    /// immediately — a leaf has no buffer to defer into.
+    async fn write_with<Backend>(
         mut self,
         msgs: Vec<NoveltyEntry<Value>>,
         storage: &ContentAddressedStorage<Backend>,
+        settle: bool,
     ) -> Result<Self, DialogSearchTreeError>
     where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -334,23 +511,100 @@ where
                 deferred = msgs;
                 Some(node)
             }
-            Some(node) => Some(
-                enqueue::<Key, Value, D, Backend>(
+            Some(node) => {
+                let node = enqueue::<Key, Value, D, Backend>(
                     node,
                     msgs,
-                    self.op_buf_size,
-                    self.policy,
-                    self.trigger,
+                    EnqueueConfig {
+                        op_buf_size: self.op_buf_size,
+                        op_buf_bytes: self.op_buf_bytes,
+                        policy: self.policy,
+                        trigger: self.trigger,
+                        settle,
+                    },
                     &mut deferred,
                     &accessor,
                 )
-                .await?,
-            ),
+                .await?;
+                Some(node)
+            }
             None => {
                 // No spine to buffer into yet: defer everything to the leaf path.
                 deferred = msgs;
                 None
             }
+        };
+
+        // Bulk-dominance rebuild: when the leaf-bound batch dwarfs the whole
+        // live tree — the bulk-load shape, where a batch's first instruction
+        // seeded a tiny root and everything since buffered behind it — the
+        // per-op canonical replay below is pure overhead. Resolve the tree's
+        // full logical state through the novelty-aware stream (bounded by
+        // the dominance ratio, so a genuinely large tree pays one aborted
+        // scan of at most `deferred/8` entries) and rebuild bottom-up with
+        // one plant. Exact: the stream yields the resolved pre-batch state,
+        // the deferred ops are strictly newer (a key's ops cascade as a
+        // whole link buffer, so no key straddles the two), and the plant's
+        // stable last-wins fold reproduces sequential application. History
+        // independence makes the bottom-up build byte-identical to the
+        // per-op replay's canonical outcome, which converge_check pins.
+        const PLANT_MIN: usize = 64;
+        const PLANT_DOMINANCE: usize = 8;
+        let node = if deferred.len() >= PLANT_MIN && node.is_some() {
+            let Some(live) = node else { unreachable!() };
+            self.root = HitchhikerRoot::Loaded(live);
+            let limit = deferred.len() / PLANT_DOMINANCE;
+            let existing = {
+                let stream = self.stream_range(.., storage);
+                futures_util::pin_mut!(stream);
+                let mut entries: Vec<Entry<Key, Value>> = Vec::new();
+                let mut small = true;
+                while let Some(entry) = futures_util::StreamExt::next(&mut stream).await {
+                    entries.push(entry?);
+                    if entries.len() > limit {
+                        small = false;
+                        break;
+                    }
+                }
+                small.then_some(entries)
+            };
+            match existing {
+                Some(entries) => {
+                    let mut oplist: Vec<NoveltyEntry<Value>> = entries
+                        .into_iter()
+                        .map(|entry| NoveltyEntry {
+                            key: entry.key.as_ref().to_vec(),
+                            op: NoveltyOp::Assert(entry.value),
+                        })
+                        .collect();
+                    oplist.extend(deferred);
+                    let edit = TransientTree::<Key, Value, D>::with_manifest(
+                        NULL_BLAKE3_HASH.clone(),
+                        self.cache.clone(),
+                        self.manifest.unwrap_or_default(),
+                    )
+                    .plant(oplist, storage)
+                    .await?;
+                    self.root = match edit.into_root() {
+                        TransientRootParts::Loaded(node) => HitchhikerRoot::Loaded(node),
+                        TransientRootParts::Unloaded(hash) => HitchhikerRoot::Unloaded(hash),
+                    };
+                    return Ok(self);
+                }
+                None => match std::mem::replace(
+                    &mut self.root,
+                    HitchhikerRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
+                ) {
+                    HitchhikerRoot::Loaded(node) => Some(node),
+                    HitchhikerRoot::Unloaded(_) => {
+                        return Err(DialogSearchTreeError::Node(
+                            "The bulk-dominance check lost the live spine".into(),
+                        ));
+                    }
+                },
+            }
+        } else {
+            node
         };
 
         // Apply the deferred (leaf-bound) ops to the live spine in memory through
@@ -495,8 +749,11 @@ where
                     }
                 }
                 TransientNode::Segment(segment) => {
-                    return match segment.entries.binary_search_by(|entry| entry.key.cmp(key)) {
-                        Ok(at) => Ok(Some(segment.entries[at].value.clone())),
+                    return match segment
+                        .entries()
+                        .binary_search_by(|entry| entry.key.cmp(key))
+                    {
+                        Ok(at) => Ok(Some(segment.entries()[at].value.clone())),
                         Err(_) => Ok(None),
                     };
                 }
@@ -679,12 +936,58 @@ where
             // manifest; a tree born empty in this process has no stored header
             // yet and takes the default, which is exactly what its first
             // canonical write would stamp.
-            HitchhikerRoot::Loaded(node) => Ok(node
-                .persist(delta, &self.manifest.unwrap_or_default())?
-                .hash()
-                .clone()),
+            HitchhikerRoot::Loaded(node) => {
+                let manifest = self.manifest.unwrap_or_default();
+                let node = node.persist(delta, &manifest)?;
+                // Seed the shared node cache with the frame just produced:
+                // the very next read of this root (a manifest lookup, a
+                // query descent) otherwise misses, re-fetches the bytes
+                // from storage, and pays a full blake3 re-verification of
+                // a frame this process just hashed.
+                self.cache
+                    .insert(node.hash().clone(), node.buffer().clone());
+                Ok(node.hash().clone())
+            }
         }
     }
+
+    /// Serializes the buffered tree as-is (buffers intact) into `delta`
+    /// WITHOUT consuming it, returning its root hash.
+    ///
+    /// Byte- and hash-identical to [`persist`](Self::persist); the
+    /// difference is retention: the live spine survives, so the caller can
+    /// keep committing into it instead of re-opening the root frame from
+    /// bytes on every batch (see [`TransientNode::persist_mut`] for what is
+    /// kept live and what collapses back to links).
+    pub fn persist_mut(
+        &mut self,
+        delta: &mut Delta<Blake3Hash, Buffer>,
+    ) -> Result<Blake3Hash, DialogSearchTreeError> {
+        match &mut self.root {
+            HitchhikerRoot::Unloaded(hash) => Ok(hash.clone()),
+            HitchhikerRoot::Loaded(node) => {
+                let manifest = self.manifest.unwrap_or_default();
+                let node = node.persist_mut(delta, &manifest)?;
+                // Same cache seeding as `persist`: the frame this commit
+                // just produced is what the next read resolves the root to.
+                self.cache
+                    .insert(node.hash().clone(), node.buffer().clone());
+                Ok(node.hash().clone())
+            }
+        }
+    }
+}
+
+/// The knobs one `enqueue` pass runs under: the buffer capacity, how far
+/// an overflow cascades, what makes it fire, and whether it is evaluated
+/// at all (`settle` false = deferred batch routing).
+#[derive(Clone, Copy)]
+struct EnqueueConfig {
+    op_buf_size: usize,
+    op_buf_bytes: usize,
+    policy: FlushPolicy,
+    trigger: FlushTrigger,
+    settle: bool,
 }
 
 /// Routes `msgs` into the subtree rooted at `node`, cascading one level on
@@ -706,9 +1009,7 @@ where
 fn enqueue<'a, Key, Value, D, Backend>(
     node: TransientNode<Key, Value>,
     msgs: Vec<NoveltyEntry<Value>>,
-    op_buf_size: usize,
-    policy: FlushPolicy,
-    trigger: FlushTrigger,
+    config: EnqueueConfig,
     deferred: &'a mut Vec<NoveltyEntry<Value>>,
     accessor: &'a Accessor<Backend>,
 ) -> NodeFuture<'a, Key, Value>
@@ -742,69 +1043,110 @@ where
             index.novelty.route::<Key>(&bounds, msgs)?;
         }
 
+        // Deferred batch mode: the ops stay routed and the flush decision
+        // waits for the caller's single `settle` pass over the whole batch.
+        if !config.settle {
+            return Ok(node);
+        }
+
         // Does this node flush? `Capacity` asks whether the buffer
         // overflowed; `PerChild` asks whether any one child now has a batch
         // worth writing, which scales the decision to this node's own
         // fan-out. Both read lengths the grouped buffer already tracks.
-        let flushes = match trigger {
-            FlushTrigger::Capacity => index.novelty.len() > op_buf_size,
+        // The byte cap fires regardless of the count trigger: op counts
+        // bound how many ops ride the frame, the weight cap bounds how many
+        // BYTES do (a value-heavy workload can pack ~200 KB into 256 ops,
+        // and buffered weight rides every per-commit root rewrite and every
+        // pushed operational block).
+        let over_bytes = config.op_buf_bytes != usize::MAX
+            && index.novelty.weight::<Key>()? > config.op_buf_bytes;
+        let per_child_threshold = match config.trigger {
+            FlushTrigger::Capacity => None,
             FlushTrigger::PerChild { floor } => {
-                // Never exceed the buffer's capacity, whatever the per-child
-                // threshold works out to.
-                if index.novelty.len() > op_buf_size {
-                    true
-                } else {
-                    let children = index.children.len().max(1);
-                    let threshold = (op_buf_size / children).max(floor).max(1);
-                    index.novelty.peak() >= threshold
-                }
+                let children = index.children.len().max(1);
+                Some((config.op_buf_size / children).max(floor).max(1))
             }
         };
+        let over_count = index.novelty.len() > config.op_buf_size
+            || per_child_threshold.is_some_and(|threshold| index.novelty.peak() >= threshold);
 
         // Room: the ops stay where routing put them.
-        if !flushes {
+        if !over_bytes && !over_count {
             return Ok(node);
         }
 
-        // Overflow: cascade one level into the children — lifting ON
-        // DEMAND, only where a non-empty buffer actually descends. A child
-        // with nothing to take stays `Node::Persistent`: at persist,
-        // `into_link` passes its link through with no decode, no re-encode,
-        // no re-hash, and no delta entry, where lifting every child up
-        // front turned each untouched sibling into a byte-identical
-        // re-store (the measured 24-26% duplicate-block share of sealed
-        // bytes; see bead dialog-db-59). Provenance is the cheap, exact
-        // signal here — store identity is not observable at persist time.
-        let child_count = index.children.len();
-        for at in 0..child_count {
-            let took = index.novelty.take_link::<Key>(at)?;
-            if took.is_empty() {
+        // Overflow: shed the HEAVIEST link buffers first and stop once the
+        // buffer is back under half of whichever bound fired, leaving the
+        // light buffers in place. Draining every non-empty link paid a
+        // child rewrite per couple of ops once the ops scattered across a
+        // wide node (measured on the real workload: ~2.3 leaf rewrites of
+        // ~90 KB per commit to move ~20 KB of ops); heaviest-first
+        // shedding concentrates each child touch on the fattest batch
+        // available, and the halfway low-water mark keeps the next few
+        // enqueues from re-firing immediately. Under `PerChild`, any link
+        // at or over its threshold holds a batch worth writing by that
+        // trigger's own definition and is shed regardless.
+        //
+        // Each shed link cascades one level into its child — lifting ON
+        // DEMAND, only where a buffer actually descends. A child with
+        // nothing to take stays `Node::Persistent`: at persist, `into_link`
+        // passes its link through with no decode, no re-encode, no re-hash,
+        // and no delta entry, where lifting every child up front turned
+        // each untouched sibling into a byte-identical re-store (the
+        // measured 24-26% duplicate-block share of sealed bytes; see bead
+        // dialog-db-59). Provenance is the cheap, exact signal here — store
+        // identity is not observable at persist time.
+        let mut measures = index.novelty.link_measures::<Key>()?;
+        measures.sort_by_key(|&(_, weight, ops)| std::cmp::Reverse((weight, ops)));
+        let mut buffered_weight = index.novelty.weight::<Key>()?;
+        let mut buffered_ops = index.novelty.len();
+        let weight_target = if over_bytes {
+            config.op_buf_bytes / 2
+        } else {
+            usize::MAX
+        };
+        let count_target = if over_count {
+            config.op_buf_size / 2
+        } else {
+            usize::MAX
+        };
+        for (at, link_weight, link_ops) in measures {
+            let batch_worth = per_child_threshold.is_some_and(|threshold| link_ops >= threshold);
+            if !batch_worth && buffered_weight <= weight_target && buffered_ops <= count_target {
                 continue;
             }
+            let took = index.novelty.take_link::<Key>(at)?;
+            buffered_weight -= link_weight;
+            buffered_ops -= link_ops;
             lift_child(&mut index.children[at], accessor).await?;
 
             let child = std::mem::replace(
                 &mut index.children[at],
-                Node::Transient(TransientNode::Segment(TransientSegment {
-                    entries: Vec::new(),
-                    separator: Vec::new(),
-                })),
+                Node::Transient(TransientNode::Segment(TransientSegment::new(
+                    Vec::new(),
+                    Vec::new(),
+                ))),
             )
             .into_transient()?;
             // Amortized cascades one level: the child buffers normally. Recursive
             // flushes through to the leaves: the child gets a zero-size buffer so
             // it overflows immediately and keeps pushing down until the ops land
             // in leaves.
-            let child_buf_size = match policy {
+            let child_buf_size = match config.policy {
                 FlushPolicy::Recursive => 0,
-                _ => op_buf_size,
+                _ => config.op_buf_size,
             };
             let updated = enqueue::<Key, Value, D, Backend>(
                 child,
                 took,
-                child_buf_size,
-                policy,
-                trigger,
+                EnqueueConfig {
+                    op_buf_size: child_buf_size,
+                    // A cascade always settles the child it flushes into:
+                    // the deferral applies only to the arriving batch's
+                    // routing.
+                    settle: true,
+                    ..config
+                },
                 deferred,
                 accessor,
             )
@@ -978,7 +1320,7 @@ fn collect_stored_plan<Key, Value, R>(
             }
         }
         TransientNode::Segment(segment) => {
-            for entry in &segment.entries {
+            for entry in segment.entries() {
                 if bounds.contains(&entry.key) {
                     plan.push(StoredStep::Entry(entry.clone()));
                 }
@@ -1034,6 +1376,13 @@ where
     Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + ConditionalSync,
 {
+    // Bulk-load fast path: a batch landing in an EMPTY tree builds the
+    // canonical tree bottom-up in one pass instead of one canonical edit
+    // per op — history independence guarantees the same bytes, and
+    // converge_check's single-commit arm pins that equality.
+    if edit.is_unplanted() && !ops.is_empty() {
+        return edit.plant(ops, storage).await;
+    }
     for entry in ops {
         // A buffered op carries raw key bytes; the canonical edit path takes a
         // typed key, so reconstruct it here (the same round trip a leaf read
@@ -1283,6 +1632,217 @@ mod tests {
         Ok(())
     }
 
+    /// A non-consuming persist must leave a spine that keeps producing
+    /// exactly the roots the persist-and-reopen cycle produces: byte
+    /// identity of the persisted frames is the whole contract behind
+    /// reusing the live spine across commits.
+    #[dialog_common::test]
+    async fn it_persists_identically_when_the_spine_stays_live() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // A canonical base wide enough for an index root with several
+        // children, so cascades touch subsets and re-sealed buffers mix
+        // with freshly encoded ones.
+        let keys: Vec<u32> = (0..1200).collect();
+        let base = sequential(&keys, &mut storage).await?;
+
+        // Live path: one spine held across every batch, serialized with
+        // `persist_mut` between batches. Oracle path: reopened from the
+        // persisted root before each batch, serialized with the consuming
+        // `persist`. The small buffer forces overflow cascades within the
+        // run, so both regimes (append and cascade) are covered.
+        let mut live = TestHitchhiker::open(&base).with_op_buf_size(8);
+        let mut oracle_root = base.root().clone();
+
+        for batch in 0..40u32 {
+            let batch_keys: Vec<u32> = (0..3).map(|i| (batch * 7 + i * 13) % 2000).collect();
+
+            let mut delta = Delta::zero();
+            for &k in &batch_keys {
+                live = live
+                    .insert(k.to_le_bytes(), vec![k as u8], &storage)
+                    .await?;
+            }
+            let live_root = live.persist_mut(&mut delta)?;
+            flush(&mut delta, &mut storage).await?;
+
+            let oracle_tree: TestTree = PersistentTree::seal(oracle_root, Cache::new());
+            let mut oracle = TestHitchhiker::open(&oracle_tree).with_op_buf_size(8);
+            for &k in &batch_keys {
+                oracle = oracle
+                    .insert(k.to_le_bytes(), vec![k as u8], &storage)
+                    .await?;
+            }
+            let mut delta = Delta::zero();
+            oracle_root = oracle.persist(&mut delta)?;
+            flush(&mut delta, &mut storage).await?;
+
+            assert_eq!(
+                live_root, oracle_root,
+                "live-spine persist diverged from persist-and-reopen at batch {batch}"
+            );
+        }
+
+        // The two paths must also agree on the canonical form.
+        let mut delta = Delta::zero();
+        let live_canonical = live.canonicalize(&storage, &mut delta).await?;
+        let oracle_tree: TestTree = PersistentTree::seal(oracle_root, Cache::new());
+        let mut delta = Delta::zero();
+        let oracle_canonical = TestHitchhiker::open(&oracle_tree)
+            .canonicalize(&storage, &mut delta)
+            .await?;
+        assert_eq!(live_canonical.root(), oracle_canonical.root());
+        Ok(())
+    }
+
+    /// A variable-length opaque key for the small-frame reshape fixture:
+    /// long shared prefixes past the separator bound are what veto seams
+    /// and push frames into the forced-split regime, which fixed-width
+    /// `[u8; 4]` keys can never reach.
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct VarKey(Vec<u8>);
+
+    impl AsRef<[u8]> for VarKey {
+        fn as_ref(&self) -> &[u8] {
+            &self.0
+        }
+    }
+
+    impl crate::Key for VarKey {
+        fn try_from_bytes(bytes: &[u8]) -> Result<Self, crate::DialogSearchTreeError> {
+            Ok(VarKey(bytes.to_vec()))
+        }
+        fn min() -> Self {
+            VarKey(Vec::new())
+        }
+        fn max() -> Self {
+            VarKey(vec![u8::MAX; 64])
+        }
+    }
+
+    type VarHitchhiker = HitchhikerTree<VarKey, Vec<u8>>;
+    type VarPersistent = PersistentTree<VarKey, Vec<u8>>;
+
+    /// One deterministic pseudo-random op for the small-frame fixture: keys
+    /// come from three long-prefix clusters (34 bytes sharing a 30-byte
+    /// prefix, past the 24-byte separator bound, so in-cluster seams are
+    /// vetoed and frames grow toward the forced-split ceiling) plus a short
+    /// tail; a slice of the writes are deletes of previously written keys
+    /// and the rest overwrite freely (the supersession shape).
+    fn cluster_key(cluster: u32, n: u32) -> VarKey {
+        // Forty distinct cluster labels: each head's left seam carries a
+        // distinct short separator, so across the labels the seam ranks
+        // vary — some punch index-level cuts, and those heads are where a
+        // delete can dissolve one.
+        let mut bytes = vec![b'L', b'A' + (cluster % 40) as u8];
+        bytes.extend(vec![b'p'; 40]);
+        bytes.extend(format!("{n:04}").into_bytes());
+        VarKey(bytes)
+    }
+
+    fn small_frame_op(rng: &mut Rng) -> (VarKey, Option<Vec<u8>>) {
+        let roll = rng.next_u32();
+        // Cluster HEADS churn hardest: a head's separator is short (the
+        // cluster's own long shared prefix starts at its successor), so the
+        // head is where index-level cuts punch — and deleting it re-derives
+        // the seam from the long vetoed successor, which is what DISSOLVES
+        // a punched cut and forces the leftward fusion under test.
+        if roll % 8 == 2 {
+            return (cluster_key(roll / 8, 0), None);
+        }
+        if roll % 8 == 6 {
+            let value = vec![b'v'; 8 + (rng.next_u32() % 64) as usize];
+            return (cluster_key(roll / 8, 0), Some(value));
+        }
+        let key = if roll % 4 == 3 {
+            VarKey(format!("s{:03}", roll % 96).into_bytes())
+        } else {
+            cluster_key(roll % 40, (roll / 8) % 24)
+        };
+        // A quarter of the remaining ops delete: supersession churn drives
+        // boundary deletes into the vetoed clusters, where the forced-run
+        // widenings cross the main path.
+        if roll % 4 == 1 {
+            (key, None)
+        } else {
+            let value = vec![b'v'; 8 + (rng.next_u32() % 64) as usize];
+            (key, Some(value))
+        }
+    }
+
+    /// Buffered commits over a small-frame manifest must keep every reshape
+    /// path consistent. This is the scaled-down deterministic form of a
+    /// field failure: replaying the real Stack Exchange log through the
+    /// buffered commit path with `max_segment = 16384` fails during a
+    /// commit with "Re-shape path child index out of range", and with
+    /// `max_segment = 8192` during canonicalize with "Re-shape path
+    /// descended into a node that was not lifted". Small frames make the
+    /// forced-split regime routine, and the buffered flush replays ops
+    /// through the canonical edit machinery against nodes carrying
+    /// novelty — the interaction under test.
+    #[dialog_common::test]
+    async fn it_survives_buffered_commits_under_a_small_frame_ceiling() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = Manifest {
+            fanout_n: 4,
+            max_separator: 24,
+            max_segment: 512,
+            // A tight ceiling makes FORCE-SPLIT INDEX frames routine: the
+            // field failure's stale path crossed an index-level forced-run
+            // merge, which needs index frames that exceed the ceiling.
+            frame_ceiling_factor: 1,
+            ..Manifest::default()
+        };
+
+        // Seed a canonical base under the small manifest so every stored
+        // node carries it and the buffered path below runs under it.
+        let mut delta = Delta::zero();
+        let mut seed = TransientTree::<VarKey, Vec<u8>>::with_manifest(
+            NULL_BLAKE3_HASH.clone(),
+            Cache::new(),
+            manifest,
+        );
+        let mut rng = Rng::new(11);
+        for _ in 0..96 {
+            let (key, value) = small_frame_op(&mut rng);
+            let value = value.unwrap_or_default();
+            seed = seed.insert(key, value, &storage).await?;
+        }
+        let base = seed.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        // Buffered commits, exactly the store's commit lifecycle: open the
+        // buffered tree over the persisted root, apply a few ops, persist
+        // the buffered form, flush, reopen. The small op buffer makes the
+        // cascade (the flush into reshaping children) routine rather than
+        // rare.
+        let cache = Cache::new();
+        let mut root = base.root().clone();
+        for _ in 0..1500 {
+            let tree: VarPersistent = PersistentTree::seal(root.clone(), cache.clone());
+            let mut buffered = VarHitchhiker::open(&tree).with_op_buf_size(16);
+            for _ in 0..8 {
+                let (key, value) = small_frame_op(&mut rng);
+                buffered = match value {
+                    Some(value) => buffered.insert(key, value, &storage).await?,
+                    None => buffered.delete(key, &storage).await?,
+                };
+            }
+            let mut delta = Delta::zero();
+            root = buffered.persist(&mut delta)?;
+            flush(&mut delta, &mut storage).await?;
+        }
+
+        // The canonicalize half of the field failure: a full drain of every
+        // buffer through the same reshape machinery.
+        let tree: VarPersistent = PersistentTree::seal(root, cache);
+        let mut delta = Delta::zero();
+        VarHitchhiker::open(&tree)
+            .canonicalize(&storage, &mut delta)
+            .await?;
+        Ok(())
+    }
+
     /// Canonicalizing an empty buffered tree yields the null (empty) root.
     #[dialog_common::test]
     async fn it_canonicalizes_empty_to_null_root() -> Result<()> {
@@ -1510,7 +2070,7 @@ mod tests {
         for seed in 0..50u64 {
             let mut rng = Rng::new(seed);
             let mut ops: Vec<(bool, u32)> = Vec::new();
-            for _ in 0..400 {
+            for _ in 0..1500 {
                 let is_insert = !(rng.next_u32()).is_multiple_of(3);
                 let key = rng.next_u32() % 150;
                 ops.push((is_insert, key));
@@ -1570,7 +2130,7 @@ mod tests {
         for seed in 0..50u64 {
             let mut rng = Rng::new(seed);
             let mut ops: Vec<(bool, u32)> = Vec::new();
-            for _ in 0..400 {
+            for _ in 0..1500 {
                 let is_insert = !(rng.next_u32()).is_multiple_of(3);
                 let key = rng.next_u32() % 150;
                 ops.push((is_insert, key));
@@ -1634,7 +2194,7 @@ mod tests {
         for seed in 0..25u64 {
             let mut rng = Rng::new(seed);
             let mut ops: Vec<(bool, u32)> = Vec::new();
-            for _ in 0..400 {
+            for _ in 0..1500 {
                 let is_insert = !(rng.next_u32()).is_multiple_of(3);
                 ops.push((is_insert, rng.next_u32() % 150));
             }
@@ -2172,6 +2732,74 @@ mod tests {
             Some(5000u32.to_le_bytes().to_vec()),
             "canonicalizing first must reach the same result"
         );
+        Ok(())
+    }
+
+    /// Randomized reconcile convergence over DISJOINT key sets: replica A
+    /// edits even keys, replica B odd keys (inserts, rewrites, and deletes
+    /// of base keys), each with its own buffer size and possibly still
+    /// buffered at the sync boundary. Reconciling in either direction and
+    /// applying both op sets directly to the base must all canonicalize to
+    /// the same root — and that root must pass canonical-form validation.
+    /// (Overlapping key sets are deliberately out of scope here: the
+    /// integrate direction then decides winners, so order-independence is
+    /// not the property.)
+    #[dialog_common::test]
+    async fn it_reconciles_disjoint_replicas_order_independently() -> Result<()> {
+        for seed in 0..12u64 {
+            let mut rng = Rng::new(0x5851F42D4C957F2D ^ seed);
+            let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+            let base_keys: Vec<u32> = (0..200).map(|_| rng.next_u32() % 4000).collect();
+            let base = sequential(&base_keys, &mut storage).await?;
+
+            // Disjoint by parity: replica A touches even keys, B odd.
+            let mut a_ops: Vec<(bool, u32)> = Vec::new();
+            let mut b_ops: Vec<(bool, u32)> = Vec::new();
+            for _ in 0..80 {
+                let key = (rng.next_u32() % 4000) & !1;
+                a_ops.push((!rng.next_u32().is_multiple_of(3), key));
+                let key = (rng.next_u32() % 4000) | 1;
+                b_ops.push((!rng.next_u32().is_multiple_of(3), key));
+            }
+
+            // Replica A stays buffered at the sync boundary (large buffer);
+            // replica B cascades aggressively (tiny buffer).
+            let a = buffered_replica(&base, &a_ops, 100_000, &storage).await?;
+            let a_tree = persist_buffered(a, &mut storage).await?;
+            let b = buffered_replica(&base, &b_ops, 4, &storage).await?;
+            let b_tree = persist_buffered(b, &mut storage).await?;
+
+            let merged_ab = reconcile(&base, &a_tree, &b_tree, &mut storage).await?;
+            let merged_ba = reconcile(&base, &b_tree, &a_tree, &mut storage).await?;
+
+            // The reference: both op sets applied straight to the base.
+            let mut all_ops = a_ops.clone();
+            all_ops.extend(b_ops.iter().copied());
+            let direct = buffered_replica(&base, &all_ops, 64, &storage).await?;
+            let direct_tree = canonicalize_flushed(direct, &mut storage).await?;
+
+            let ab = canonicalize_flushed(TestHitchhiker::open(&merged_ab), &mut storage).await?;
+            let ba = canonicalize_flushed(TestHitchhiker::open(&merged_ba), &mut storage).await?;
+
+            assert_eq!(
+                ab.root(),
+                ba.root(),
+                "seed {seed}: reconcile direction changed the canonical result"
+            );
+            assert_eq!(
+                ab.root(),
+                direct_tree.root(),
+                "seed {seed}: reconcile disagrees with direct application"
+            );
+
+            let divergences = ab.canonical_divergences(&storage).await?;
+            assert_eq!(
+                divergences,
+                Vec::<String>::new(),
+                "seed {seed}: merged canonical tree failed canonical-form validation"
+            );
+        }
         Ok(())
     }
 
