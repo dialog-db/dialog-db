@@ -72,10 +72,12 @@ where
     async fn execute(&self, input: Capability<Load<Secret>>) -> Result<Secret, CredentialError> {
         let key = self.scoped_key(&format!("site/{}", input.address()));
 
+        // Save keys the session by subject; look only in that session so
+        // one subject's secrets are invisible to another.
         let sessions = self.sessions.read();
         sessions
-            .values()
-            .find_map(|session| session.secrets.get(&key).cloned())
+            .get(input.subject())
+            .and_then(|session| session.secrets.get(&key).cloned())
             .map(Secret::from)
             .ok_or(CredentialError::NotFound(key))
     }
@@ -108,11 +110,10 @@ where
     async fn execute(&self, input: Capability<Retract<Secret>>) -> Result<(), CredentialError> {
         let key = self.scoped_key(&format!("site/{}", input.address()));
 
-        // Save keys the session by subject but Load searches every
-        // session, so retract must clear the key wherever Load would
-        // have found it.
+        // Clear only the subject's own session, mirroring Save and Load:
+        // retracting must never touch another subject's secrets.
         let mut sessions = self.sessions.write();
-        for session in sessions.values_mut() {
+        if let Some(session) = sessions.get_mut(input.subject()) {
             session.secrets.remove(&key);
         }
         Ok(())
@@ -166,6 +167,54 @@ mod tests {
             .perform(&provider)
             .await?;
 
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_isolates_site_secrets_by_subject() -> anyhow::Result<()> {
+        let provider = Volatile::new();
+        let alice = unique_did().await;
+        let bob = unique_did().await;
+
+        alice
+            .clone()
+            .credential()
+            .site("example.com")
+            .save(Secret::from(vec![1u8]))
+            .perform(&provider)
+            .await?;
+        bob.clone()
+            .credential()
+            .site("example.com")
+            .save(Secret::from(vec![2u8]))
+            .perform(&provider)
+            .await?;
+
+        // One subject's secret at an address is invisible to another subject.
+        let theirs = alice
+            .clone()
+            .credential()
+            .site("example.com")
+            .load()
+            .perform(&provider)
+            .await?;
+        assert_eq!(theirs.as_bytes(), &[1u8]);
+
+        // Retracting under one subject leaves the other subject's secret.
+        alice
+            .credential()
+            .site("example.com")
+            .retract()
+            .perform(&provider)
+            .await?;
+
+        let survivor = bob
+            .credential()
+            .site("example.com")
+            .load()
+            .perform(&provider)
+            .await?;
+        assert_eq!(survivor.as_bytes(), &[2u8]);
         Ok(())
     }
 
