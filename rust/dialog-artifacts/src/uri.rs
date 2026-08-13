@@ -89,6 +89,13 @@ impl Uri {
     /// therefore holds a valid canonical URI by construction on every path,
     /// stored reads included.
     pub(crate) fn from_stored(s: &str) -> Result<Self, DialogArtifactsError> {
+        // The cheap proof first: for the common entity shapes (did:key,
+        // user:, blob: — opaque-path non-special URIs) canonicality is
+        // PROVEN by a single byte scan, ~free per row. Everything else
+        // takes the real parse below. Same invariant either way.
+        if is_provably_canonical(s) {
+            return Ok(Self(s.into()));
+        }
         let url: Url = s.parse().map_err(|error| {
             DialogArtifactsError::CorruptEntry(format!("stored entity is not a URI: {error}"))
         })?;
@@ -136,6 +143,83 @@ impl Uri {
     }
 }
 
+/// Proves — without parsing — that `url::Url::parse(s)` would succeed and
+/// render exactly `s`, for a conservative subset of URIs: a lowercase
+/// non-special scheme followed by a non-empty OPAQUE path (no leading `/`)
+/// made of unreserved/sub-delim ASCII. For that subset the WHATWG parse is
+/// the identity function:
+///
+/// - the scheme is already lowercase, so scheme normalization changes
+///   nothing;
+/// - the scheme is not special (`http`/`https`/`ws`/`wss`/`ftp`/`file`), so
+///   no host/port/path normalization applies;
+/// - the path does not start with `/`, so it parses as a cannot-be-a-base
+///   opaque path, which the parser copies verbatim (percent-encoding only
+///   C0 controls and non-ASCII — both excluded from the accepted alphabet);
+/// - `%`, `?`, `#`, `\`, `[`, `]`, whitespace, and controls are all
+///   excluded, so no percent-decoding, query/fragment, or stripping rules
+///   can fire.
+///
+/// This covers the entity shapes this crate itself generates (`did:key:…`,
+/// `user:…`, `blob:…`) at the cost of one byte scan; anything else — real
+/// `https://` URLs included — simply returns `false` and the caller runs
+/// the genuine parse. A `false` here is NEVER a verdict, only a fallback.
+/// The equivalence claim is pinned against `url` itself by a generative
+/// test below.
+fn is_provably_canonical(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let Some(colon) = bytes.iter().position(|&b| b == b':') else {
+        return false;
+    };
+    let (scheme, rest) = (&bytes[..colon], &bytes[colon + 1..]);
+    let scheme_ok = match scheme.split_first() {
+        Some((&first, tail)) => {
+            first.is_ascii_lowercase()
+                && tail.iter().all(|&b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'.' | b'-')
+                })
+        }
+        None => false,
+    };
+    if !scheme_ok
+        || matches!(
+            scheme,
+            b"http" | b"https" | b"ws" | b"wss" | b"ftp" | b"file"
+        )
+    {
+        return false;
+    }
+    // A leading `/` selects a hierarchical (non-opaque) path, where dot
+    // segments collapse; `//` selects an authority. Only opaque paths are
+    // provable, so both fall back.
+    if rest.is_empty() || rest[0] == b'/' {
+        return false;
+    }
+    rest.iter().all(|&b| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b':' | b'/'
+                    | b'.'
+                    | b'-'
+                    | b'_'
+                    | b'~'
+                    | b'+'
+                    | b'='
+                    | b'@'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b','
+                    | b';'
+            )
+    })
+}
+
 impl Display for Uri {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.write_str(&self.0)
@@ -179,6 +263,12 @@ impl FromStr for Uri {
                 "URI must not contain whitespace or control characters: {s:?}"
             )));
         }
+        // A provably canonical input IS its own normalized rendering, so the
+        // parse below would return it unchanged: skip it. Same proof (and
+        // the same fallback) as the stored-read path in `from_stored`.
+        if is_provably_canonical(s) {
+            return Ok(Uri(s.into()));
+        }
         // Parse plainly, with no memo. A memo here looks attractive (joins
         // re-parse the same entity per outer binding) but any bounded,
         // admit-on-miss cache inverts into pure overhead the moment a scan
@@ -217,6 +307,83 @@ mod tests {
 
     use super::Uri;
     use crate::DialogArtifactsError;
+
+    /// The canonicality prover accepts exactly the opaque non-special
+    /// shapes it documents, and refuses everything whose WHATWG handling
+    /// is non-trivial — including the hierarchical case the parser really
+    /// does rewrite, proving the fallback matters.
+    #[test]
+    fn it_proves_only_opaque_non_special_shapes() {
+        use super::is_provably_canonical;
+        assert!(is_provably_canonical("did:key:z6MkExample"));
+        assert!(is_provably_canonical("user:alice"));
+        assert!(is_provably_canonical("blob:3vQB7B6MrGQZaxCuFg4oh"));
+        assert!(is_provably_canonical("user:alice/profile"));
+        // Not provable — each falls back to the real parse:
+        assert!(!is_provably_canonical("https://google.com/")); // special scheme
+        assert!(!is_provably_canonical("wss:x")); // special scheme
+        assert!(!is_provably_canonical("a:/x")); // hierarchical path
+        assert!(!is_provably_canonical("a://h")); // authority
+        assert!(!is_provably_canonical("A:b")); // uppercase scheme
+        assert!(!is_provably_canonical("a:%41")); // percent escape
+        assert!(!is_provably_canonical("a:b c")); // whitespace
+        assert!(!is_provably_canonical("a:")); // empty path
+        assert!(!is_provably_canonical("noscheme"));
+        // The refused hierarchical shape is genuinely rewritten by the
+        // parser (dot segments collapse), so refusing it is load-bearing:
+        let url: url::Url = "a:/b/../c".parse().expect("parses");
+        assert_eq!(url.as_str(), "a:/c");
+    }
+
+    /// The prover is SOUND: every string it accepts parses via `url::Url`
+    /// to exactly itself. (Completeness is not claimed — `false` only means
+    /// the caller runs the real parse.) Deterministic generative pin
+    /// against `url` itself, over an alphabet that straddles the accepted
+    /// set with the characters whose WHATWG handling is non-trivial.
+    #[test]
+    fn it_never_proves_a_non_canonical_string() {
+        use super::is_provably_canonical;
+        const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/.-_~+=@!$&'()*,;%?#\\[] <>\"^`{|}";
+        const SCHEMES: &[&str] = &[
+            "did:key:", "user:", "blob:", "a:", "x-y.z+w:", "wss:", "file:",
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let mut proved = 0u32;
+        for round in 0..200_000u32 {
+            let len = (next() % 24 + 1) as usize;
+            let tail: String = (0..len)
+                .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize] as char)
+                .collect();
+            // Half the rounds force a plausible scheme so the accept path is
+            // exercised heavily; half probe raw noise.
+            let s = if round % 2 == 0 {
+                format!(
+                    "{}{}",
+                    SCHEMES[(next() % SCHEMES.len() as u64) as usize],
+                    tail
+                )
+            } else {
+                tail
+            };
+            if is_provably_canonical(&s) {
+                proved += 1;
+                let url: url::Url = s.parse().unwrap_or_else(|error| {
+                    panic!("prover accepted an unparseable string {s:?}: {error}")
+                });
+                assert_eq!(url.as_str(), s, "prover accepted a non-canonical string");
+            }
+        }
+        assert!(
+            proved > 5_000,
+            "the accept path was barely exercised: {proved}"
+        );
+    }
 
     /// `from_stored` admits exactly the canonical renderings `from_str`
     /// stores, and rejects both non-URIs and valid-but-non-canonical
