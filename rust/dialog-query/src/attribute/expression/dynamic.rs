@@ -5,15 +5,11 @@ use crate::attribute::statement::AttributeStatement;
 use crate::negation::Negation;
 use crate::query::Output;
 use crate::schema::Cardinality;
-use crate::source::SelectRules;
 use crate::statement::Statement;
 use crate::term::Term;
 use crate::types::{Scalar, Typed};
 use crate::{Claim, Premise, Proposition};
-use dialog_artifacts::Select;
 use dialog_artifacts::Update;
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
 use std::ops::Not;
 
 /// Converts a value into a [`Term`], resolving the type unambiguously
@@ -143,7 +139,7 @@ where
     /// Execute this expression as a query, returning a stream of claims.
     pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Claim> + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         let query: AttributeQuery = self.into();
         query.perform(env)

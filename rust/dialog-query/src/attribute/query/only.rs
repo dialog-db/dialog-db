@@ -8,13 +8,11 @@ use crate::query::Application;
 use crate::query::Output;
 use crate::schema::Cardinality;
 use crate::selection::{Match, Selection};
-use crate::source::SelectRules;
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
 use dialog_artifacts::{Artifact, Cause, Select};
 use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 
@@ -51,7 +49,7 @@ fn challenge<'a, Env>(
     candidate: Match,
 ) -> impl Selection + 'a
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     try_stream! {
         // The candidate fact is cited on the row by `merge`; read it
@@ -199,7 +197,7 @@ impl AttributeQueryOnly {
         selection: M,
     ) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         let selector = self.query;
         try_stream! {
@@ -282,7 +280,7 @@ impl AttributeQueryOnly {
     /// Execute this query, returning a stream of claims.
     pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Claim> + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
         Self: Sized,
     {
         Application::perform(self, env)
@@ -294,7 +292,7 @@ impl Application for AttributeQueryOnly {
 
     fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         self.evaluate(env, selection)
     }

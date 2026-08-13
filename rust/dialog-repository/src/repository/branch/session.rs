@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Entity, Select,
@@ -18,6 +19,7 @@ use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
+use dialog_storage::{Blake3Hash, StorageBackend};
 use futures_util::TryStreamExt as _;
 use std::sync::Arc;
 
@@ -27,7 +29,9 @@ use crate::rules::{
     source_selector,
 };
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
-use crate::{Branch, NetworkedIndex, RemoteSite, RepositoryMemoryExt, Upstream};
+use crate::{
+    Branch, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Upstream,
+};
 
 /// A composable query over one or more branches plus an in-memory
 /// overlay.
@@ -424,6 +428,48 @@ where
         streams.push(Provider::<Select<'a>>::execute(&self.changes, input).await?);
 
         Ok(merge_grouped(streams))
+    }
+}
+
+// The idempotent block-load behind procedure premises (`tree/node` &
+// co). No demand is recorded: the block behind a hash is
+// content-addressed and can never change, so no tree diff could ever
+// invalidate a row derived from it — the soundness argument lives in
+// `dialog_artifacts::inspect`. Reads go through each branch's archive
+// catalog capability with the same remote fallback a fact scan uses;
+// the first branch that has the block wins (content addressing makes
+// them interchangeable), and a block absent everywhere contributes
+// nothing.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<'a, Env> Provider<Load> for QueryEnv<'a, Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
+        for branch in &self.branches {
+            let remote = match branch.upstream() {
+                Some(Upstream::Remote { remote: name, .. }) => branch
+                    .subject()
+                    .remote(name)
+                    .load()
+                    .perform(self.env)
+                    .await
+                    .ok(),
+                _ => None,
+            };
+            let store = NetworkedIndex::new(self.env, branch.archive().index(), remote);
+            if let Some(bytes) = StorageBackend::get(&store, &input).await? {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -1357,6 +1403,245 @@ mod rule_tests {
             employees.contains(&carol),
             "v2 resolves its agent input via its own body, not v1's cached one"
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod procedure_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::{Branch, Repository};
+    use base58::ToBase58;
+    use dialog_artifacts::{Entity, Value};
+    use dialog_operator::Operator;
+    use dialog_query::query::Output as _;
+    use dialog_query::{
+        ProcedureConclusion, ProcedureQuery, Term, TreeKeyQuery, TreeLinkQuery, TreeNodeQuery, the,
+    };
+    use dialog_storage::provider::storage::VolatileSpace;
+
+    /// Commit a handful of facts and return the branch + the committed
+    /// root's node reference (base58, exactly as `dialog.branch/tree`
+    /// carries it).
+    async fn committed_branch(
+        repo: &Repository<impl dialog_capability::Principal>,
+        operator: &Operator<VolatileSpace>,
+    ) -> anyhow::Result<(Branch, String)> {
+        let branch = repo.branch("main").open().perform(operator).await?;
+        let mut tx = branch.transaction();
+        for at in 0..8 {
+            tx = tx.assert(
+                the!("test/name")
+                    .of(Entity::new()?)
+                    .is(format!("entry-{at}")),
+            );
+        }
+        tx.commit().perform(operator).await?;
+        let revision = branch
+            .revision()
+            .expect("branch has a revision after commit");
+        let tree_bytes: &[u8] = revision.tree.hash();
+        Ok((branch, ToBase58::to_base58(tree_bytes)))
+    }
+
+    /// `tree/node` with every output free, over a constant reference.
+    fn tree_node(reference: &str) -> ProcedureQuery {
+        ProcedureQuery::TreeNode(TreeNodeQuery {
+            of: Term::from(Value::String(reference.into())).into(),
+            kind: Term::var("kind"),
+            size: Term::var("size"),
+            count: Term::var("count"),
+            bound: Term::var("bound"),
+            rank: Term::var("rank"),
+            scale: Term::var("scale"),
+            novelty: Term::var("novelty"),
+        })
+    }
+
+    fn tree_link(reference: &str) -> ProcedureQuery {
+        ProcedureQuery::TreeLink(TreeLinkQuery {
+            of: Term::from(Value::String(reference.into())).into(),
+            at: Term::var("at"),
+            node: Term::var("node"),
+            separator: Term::var("separator"),
+            scale: Term::var("scale"),
+            rank: Term::var("rank"),
+        })
+    }
+
+    fn tree_key(reference: &str) -> ProcedureQuery {
+        ProcedureQuery::TreeKey(TreeKeyQuery {
+            of: Term::from(Value::String(reference.into())).into(),
+            at: Term::var("at"),
+            key: Term::var("key"),
+        })
+    }
+
+    fn unsigned(row: &ProcedureConclusion, slot: &str) -> u128 {
+        match row.get(slot) {
+            Some(Value::UnsignedInt(value)) => *value,
+            other => panic!("expected unsigned `{slot}`, got {other:?}"),
+        }
+    }
+
+    fn text(row: &ProcedureConclusion, slot: &str) -> String {
+        match row.get(slot) {
+            Some(Value::String(value)) => value.clone(),
+            other => panic!("expected string `{slot}`, got {other:?}"),
+        }
+    }
+
+    /// The committed root answers `tree/node` through the ordinary
+    /// query path: one row, a real kind, a positive size, and a count.
+    #[dialog_common::test]
+    async fn it_reads_the_root_node_through_procedures() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        let rows: Vec<ProcedureConclusion> = branch
+            .query()
+            .select(tree_node(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "one row per node: {rows:?}");
+        let row = &rows[0];
+        let kind = text(row, "kind");
+        assert!(kind == "index" || kind == "segment", "kind set: {row:?}");
+        assert!(unsigned(row, "size") > 0, "node has a byte size");
+        assert!(unsigned(row, "count") > 0, "node has slots");
+        Ok(())
+    }
+
+    /// Structure is consistent between procedures: a segment's
+    /// `tree/key` rows match its count and `tree/link` yields nothing;
+    /// an index's `tree/link` rows match its count and each child
+    /// answers `tree/node` in turn (the descent chain).
+    #[dialog_common::test]
+    async fn it_descends_consistently() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        let node: Vec<ProcedureConclusion> = branch
+            .query()
+            .select(tree_node(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let count = unsigned(&node[0], "count") as usize;
+
+        let links: Vec<ProcedureConclusion> = branch
+            .query()
+            .select(tree_link(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let keys: Vec<ProcedureConclusion> = branch
+            .query()
+            .select(tree_key(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+
+        match text(&node[0], "kind").as_str() {
+            "segment" => {
+                assert_eq!(keys.len(), count, "one key row per entry");
+                assert!(links.is_empty(), "a segment has no links");
+                assert!(
+                    keys.iter().all(|row| matches!(row.get("key"), Some(Value::Bytes(bytes)) if !bytes.is_empty())),
+                    "keys carry bytes: {keys:?}"
+                );
+            }
+            "index" => {
+                assert_eq!(links.len(), count, "one link row per child");
+                assert!(keys.is_empty(), "an index has no entries");
+                let child = text(&links[0], "node");
+                let child_node: Vec<ProcedureConclusion> = branch
+                    .query()
+                    .select(tree_node(&child))
+                    .perform(&operator)
+                    .try_vec()
+                    .await?;
+                assert_eq!(child_node.len(), 1, "the child answers tree/node");
+            }
+            other => panic!("unexpected kind {other}"),
+        }
+        Ok(())
+    }
+
+    /// Absent (well-formed but unknown) and malformed references
+    /// contribute nothing — zero rows, no error.
+    #[dialog_common::test]
+    async fn it_yields_nothing_for_absent_or_malformed_references() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _root) = committed_branch(&repo, &operator).await?;
+
+        let absent = ToBase58::to_base58(&[7u8; 32][..]);
+        for reference in [absent.as_str(), "not-base58-!!!", ""] {
+            let rows: Vec<ProcedureConclusion> = branch
+                .query()
+                .select(tree_node(reference))
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert!(rows.is_empty(), "no rows for {reference:?}: {rows:?}");
+        }
+        Ok(())
+    }
+
+    /// Content addressing keeps history navigable: after a second
+    /// commit the old root still answers, and the new root differs.
+    #[dialog_common::test]
+    async fn it_keeps_old_roots_queryable() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, first) = committed_branch(&repo, &operator).await?;
+
+        branch
+            .transaction()
+            .assert(the!("test/name").of(Entity::new()?).is("later".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+        let revision = branch.revision().expect("second revision");
+        let tree_bytes: &[u8] = revision.tree.hash();
+        let second = ToBase58::to_base58(tree_bytes);
+        assert_ne!(first, second, "the root moved");
+
+        for reference in [&first, &second] {
+            let rows: Vec<ProcedureConclusion> = branch
+                .query()
+                .select(tree_node(reference))
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(rows.len(), 1, "root {reference} answers");
+        }
+        Ok(())
+    }
+
+    /// Transaction queries construct the same `QueryEnv`, so the tree
+    /// procedures are available in the as-if-committed view too.
+    #[dialog_common::test]
+    async fn it_serves_procedures_in_transaction_queries() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        let tx = branch.transaction();
+        let rows: Vec<ProcedureConclusion> = tx
+            .query()
+            .select(tree_node(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "tx query serves tree/node: {rows:?}");
         Ok(())
     }
 }

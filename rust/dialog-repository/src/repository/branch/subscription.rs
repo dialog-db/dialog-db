@@ -64,6 +64,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
@@ -106,6 +107,41 @@ pub struct Demand {
     /// affect any row — it invalidates the whole result, not one
     /// entity's slice.
     rules: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
+    /// Whether the evaluation read a revision-bearing metadata
+    /// attribute (`dialog.branch/tree` & co). Those facts are
+    /// overlay-injected — never in the tree — so no tree diff can
+    /// register that they changed; the flag routes the poll straight
+    /// to re-evaluation when the head moves. See
+    /// [`Subscription::poll`].
+    head: Arc<AtomicBool>,
+}
+
+/// The overlay-injected attributes whose values change whenever the
+/// branch head moves. `dialog.branch/name` and `dialog.branch/replica`
+/// are deliberately NOT here: they are stable per branch, so a query
+/// reading only them need not re-evaluate per commit.
+const HEAD_ATTRIBUTES: [&str; 3] = [
+    "dialog.branch/tree",
+    "dialog.branch/edition",
+    "dialog.branch/revision",
+];
+
+/// Whether a selector could read a head-bearing metadata attribute:
+/// an exact `the` match, a covering `the` prefix, or no attribute
+/// constraint at all (an unconstrained-attribute scan reads
+/// everything, the metadata included).
+fn selects_head(selector: &ArtifactSelector<Constrained>) -> bool {
+    if let Some(attribute) = selector.attribute() {
+        return HEAD_ATTRIBUTES.contains(&attribute.as_str());
+    }
+    if let Some(prefix) = selector.attribute_prefix() {
+        return HEAD_ATTRIBUTES
+            .iter()
+            .any(|attribute| attribute.starts_with(prefix));
+    }
+    // No attribute constraint: entity- or value-keyed scans can still
+    // surface the metadata facts.
+    true
 }
 
 /// Insert a range into a cover, merging overlaps: the cover stays a
@@ -159,6 +195,9 @@ impl Demand {
     /// scanned range would fail to invalidate the reader.
     pub(crate) fn record(&self, selector: &ArtifactSelector<Constrained>) {
         record_range(&self.facts, selector_range(selector, &default_manifest()));
+        if selects_head(selector) {
+            self.head.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Record a rule-discovery scan's demanded range.
@@ -205,6 +244,12 @@ impl Demand {
     /// Whether nothing was demanded.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Whether the evaluation read a revision-bearing metadata
+    /// attribute, making the result head-dependent.
+    pub fn depends_on_head(&self) -> bool {
+        self.head.load(Ordering::Relaxed)
     }
 }
 
@@ -403,31 +448,38 @@ where
             if current == self.revision {
                 return Ok(None);
             }
-            match self.touched(env, &current).await? {
-                Touched::Nothing => {
-                    self.revision = current;
-                    return Ok(None);
-                }
-                Touched::Facts {
-                    subjects,
-                    facts,
-                    asserted,
-                    retracted,
-                } => {
-                    if let Some(delta) = self
-                        .maintain(env, &subjects, &facts, &asserted, &retracted)
-                        .await?
-                    {
-                        self.maintenances += 1;
+            // A head-dependent result — one that read
+            // `dialog.branch/tree` & co — changes on every commit by
+            // construction (the binding itself moves), and those
+            // metadata facts are overlay-injected, invisible to the
+            // tree diff below. Skip the gate and re-evaluate.
+            if !self.demand.depends_on_head() {
+                match self.touched(env, &current).await? {
+                    Touched::Nothing => {
                         self.revision = current;
-                        return Ok(Some(delta));
+                        return Ok(None);
                     }
-                    // Not maintainable for this query/rule shape:
-                    // fall through to a full recompute.
+                    Touched::Facts {
+                        subjects,
+                        facts,
+                        asserted,
+                        retracted,
+                    } => {
+                        if let Some(delta) = self
+                            .maintain(env, &subjects, &facts, &asserted, &retracted)
+                            .await?
+                        {
+                            self.maintenances += 1;
+                            self.revision = current;
+                            return Ok(Some(delta));
+                        }
+                        // Not maintainable for this query/rule shape:
+                        // fall through to a full recompute.
+                    }
+                    // A rule-range change can install or change a rule,
+                    // which can affect any row: recompute.
+                    Touched::Rules => {}
                 }
-                // A rule-range change can install or change a rule,
-                // which can affect any row: recompute.
-                Touched::Rules => {}
             }
         }
 
@@ -2239,6 +2291,76 @@ mod tests {
         assert_eq!(delta.retracted.len(), 1);
         assert_eq!(subscription.recomputes(), 1);
         assert_eq!(subscription.maintenances(), 2);
+        Ok(())
+    }
+
+    /// A head-dependent subscription — one that reads the
+    /// overlay-injected `BranchRevision` metadata — re-fires on every
+    /// commit. Those facts never live in the tree, so the demand-cover
+    /// diff can never register that they changed: without
+    /// [`Demand::depends_on_head`] routing the poll straight to
+    /// re-evaluation, this subscription would silently pin the stale
+    /// revision forever (the gap documented in
+    /// `notes/tree-relations.md`).
+    #[dialog_common::test]
+    async fn it_refires_head_dependent_subscriptions_on_commit() -> anyhow::Result<()> {
+        use crate::schema;
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let replica = schema::Replica::new(profile.did(), branch.of().clone());
+        let branch_concept = schema::Branch::new(&replica, "main");
+        let mut subscription = branch.subscribe(Query::<schema::BranchRevision> {
+            this: branch_concept.this.clone().into(),
+            tree: Term::var("tree"),
+            edition: Term::var("edition"),
+            revision: Term::var("revision"),
+        });
+
+        let initial = subscription
+            .poll(&operator)
+            .await?
+            .expect("first poll evaluates");
+        assert_eq!(initial.asserted.len(), 1, "one revision row");
+        let first_tree = initial.asserted[0].tree.clone();
+        assert!(
+            subscription.demand().depends_on_head(),
+            "reading BranchRevision marks the demand head-dependent"
+        );
+
+        // The commit's fact writes are irrelevant to the query; only
+        // the overlay-injected revision metadata moves.
+        branch
+            .transaction()
+            .assert(the!("person/name").of(Entity::new()?).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a head-dependent subscription re-fires on commit");
+        assert_eq!(delta.asserted.len(), 1, "the new revision row arrives");
+        assert_ne!(
+            delta.asserted[0].tree, first_tree,
+            "the tree binding moved to the new root"
+        );
+        assert_eq!(delta.retracted.len(), 1, "the old revision row retracts");
         Ok(())
     }
 }

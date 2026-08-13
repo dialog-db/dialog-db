@@ -4,18 +4,15 @@ use crate::constraint::Constraint;
 use crate::formula::query::FormulaQuery;
 use crate::negation::Negation;
 use crate::optional::OptionalAttributeQuery;
+use crate::procedure::ProcedureQuery;
 use crate::proposition::Proposition;
 use crate::query::Application;
 use crate::rule::types::TypeEnv;
 use crate::selection::Selection;
-use crate::source::SelectRules;
 use crate::try_stream;
 use crate::{Environment, Parameters, Premise, Term};
 use auto_enums::auto_enum;
 use core::pin::Pin;
-use dialog_artifacts::Select;
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
 use futures_util::TryStreamExt;
 
 /// Planning metadata shared by every [`Plan`] variant.
@@ -72,6 +69,9 @@ pub enum Plan {
     /// the wrapped [`ConceptQuery`] owns its own planning and
     /// evaluation of the underlying rule bodies.
     Concept(Header, ConceptQuery),
+    /// Procedure application: per input row, perform the procedure's
+    /// idempotent effect through the environment and project rows.
+    Procedure(Header, ProcedureQuery),
     /// Negation as a filter: a match passes only if evaluating the
     /// inner plan against it produces no rows.
     Negate(Header, Box<Plan>),
@@ -86,6 +86,7 @@ impl Plan {
             Plan::Formula(header, _) => header,
             Plan::Constraint(header, _) => header,
             Plan::Concept(header, _) => header,
+            Plan::Procedure(header, _) => header,
             Plan::Negate(header, _) => header,
         }
     }
@@ -108,6 +109,7 @@ impl Plan {
             Plan::Constraint(_, constraint) => {
                 Premise::Assert(Proposition::Constraint(constraint.clone()))
             }
+            Plan::Procedure(_, query) => Premise::Assert(Proposition::Procedure(query.clone())),
             Plan::Negate(_, inner) => match inner.as_premise() {
                 Premise::Assert(proposition) => Premise::Unless(Negation(proposition)),
                 // The inner plan is always lowered from a positive
@@ -154,6 +156,7 @@ impl Plan {
             Proposition::Concept(query) => Plan::Concept(header, query),
             Proposition::Formula(query) => Plan::Formula(header, query),
             Proposition::Constraint(constraint) => Plan::Constraint(header, constraint),
+            Proposition::Procedure(query) => Plan::Procedure(header, query),
         }
     }
 
@@ -171,7 +174,7 @@ impl Plan {
         env: &'a Env,
     ) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         match self {
             Plan::Scan(_, query) => Application::evaluate(*query, selection, env),
@@ -179,6 +182,7 @@ impl Plan {
             Plan::Concept(_, query) => query.evaluate(selection, env),
             Plan::Formula(_, query) => query.evaluate(selection),
             Plan::Constraint(_, constraint) => constraint.evaluate(selection),
+            Plan::Procedure(_, query) => query.evaluate(env, selection),
             Plan::Negate(_, inner) => negate(*inner, selection, env),
         }
     }
@@ -192,7 +196,7 @@ fn negate<'a, Env, M: Selection + 'a>(
     env: &'a Env,
 ) -> impl Selection + 'a
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     try_stream! {
         for await candidate in selection {

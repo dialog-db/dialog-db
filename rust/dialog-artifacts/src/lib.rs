@@ -90,6 +90,7 @@ pub use key::*;
 mod buffered;
 pub use buffered::*;
 
+pub mod inspect;
 pub mod merge;
 pub mod tree;
 

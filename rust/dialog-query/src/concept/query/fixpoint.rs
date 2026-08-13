@@ -51,9 +51,7 @@ use crate::types::{Any, Typed};
 use crate::{Entity, Environment, Value};
 use core::fmt;
 use core::{iter, mem};
-use dialog_artifacts::Select;
 use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
 use futures_util::TryStreamExt;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -334,7 +332,7 @@ async fn discover<'a, Env>(
     env: &'a Env,
 ) -> Result<HashMap<Entity, Member>, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     let root_entity = root.this();
     let mut members: HashMap<Entity, Member> = HashMap::new();
@@ -381,7 +379,7 @@ async fn collect_rule_rows<'a, Env>(
     env: &'a Env,
 ) -> Result<Vec<Row>, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     let results: Vec<Match> = if rest.is_empty() {
         vec![matched]
@@ -410,7 +408,7 @@ async fn stage_rule_rows<'a, Env>(
     env: &'a Env,
 ) -> Result<(), EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     for row in collect_rule_rows(member, split, rest, matched, scope, env).await? {
         table.insert(&member.descriptor.this(), row);
@@ -428,7 +426,7 @@ async fn delta_rounds<'a, Env>(
     env: &'a Env,
 ) -> Result<(), EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     let mut rounds = 0;
     while table.advance() {
@@ -509,7 +507,7 @@ pub async fn evaluate_table<'a, Env>(
     table: &mut InMemoryAnswerTable,
 ) -> Result<Vec<Row>, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     let root_entity = root.this();
     let members = discover(root, analysis, env).await?;
@@ -548,7 +546,7 @@ pub async fn evaluate<'a, Env>(
     env: &'a Env,
 ) -> Result<Vec<Row>, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     let mut table = InMemoryAnswerTable::default();
     evaluate_table(root, analysis, env, &mut table).await
@@ -580,7 +578,7 @@ async fn classify_base<'a, Env>(
     env: &'a Env,
 ) -> Result<BaseSource, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     fn slots(query: &crate::AttributeQuery) -> (Term<The>, Term<Entity>, Term<Any>) {
         (query.the().clone(), query.of().clone(), query.is().clone())
@@ -719,7 +717,7 @@ pub async fn extend<'a, Env>(
     additions: &[Artifact],
 ) -> Result<Option<Vec<Row>>, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     let root_entity = root.this();
     let members = discover(root, analysis, env).await?;
@@ -866,7 +864,7 @@ pub async fn retract<'a, Env>(
     deletions: &[Artifact],
 ) -> Result<Option<()>, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     let root_entity = root.this();
     let members = discover(root, analysis, env).await?;
@@ -1098,7 +1096,7 @@ async fn derivable<'a, Env>(
     env: &'a Env,
 ) -> Result<bool, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     for split in &member.rules {
         let mut seed = Match::new();
@@ -1217,7 +1215,7 @@ impl Continuation {
         env: &'a Env,
     ) -> Result<Vec<Row>, EvaluationError>
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         let prior = self.table.lock().expect("fixpoint table lock").take();
         let has_changes = !self.additions.is_empty() || !self.deletions.is_empty();

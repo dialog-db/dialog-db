@@ -70,4 +70,19 @@ pub(crate) mod test {
             self.rules.acquire(&input)
         }
     }
+
+    // Raw node loads for procedure premises, local archive only.
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<dialog_artifacts::inspect::Load> for TestEnv<'_> {
+        async fn execute(
+            &self,
+            input: dialog_storage::Blake3Hash,
+        ) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
+            use dialog_repository::{NetworkedIndex, RepositoryArchiveExt as _};
+            use dialog_storage::StorageBackend as _;
+            let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
+            Ok(store.get(&input).await?)
+        }
+    }
 }

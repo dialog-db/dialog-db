@@ -8,6 +8,7 @@ pub use crate::error::QueryResult;
 pub use crate::formula::query::FormulaQuery;
 use crate::optional::OptionalAttributeQuery;
 pub use crate::premise::{Negation, Premise};
+pub use crate::procedure::ProcedureQuery;
 pub use crate::{Environment, Parameters, Schema};
 use serde::de;
 use serde::ser;
@@ -43,6 +44,10 @@ pub enum Proposition {
     OptionalAttribute(Box<OptionalAttributeQuery>),
     /// Constraint between variables (equality, comparison, etc.)
     Constraint(Constraint),
+    /// Procedure application: a moded premise resolved by performing
+    /// an idempotent effect through the evaluation environment (e.g.
+    /// the `tree/*` inspection family).
+    Procedure(ProcedureQuery),
 }
 
 impl Proposition {
@@ -56,6 +61,7 @@ impl Proposition {
             Proposition::Concept(application) => application.estimate(env),
             Proposition::Formula(application) => application.estimate(env),
             Proposition::Constraint(constraint) => constraint.estimate(env),
+            Proposition::Procedure(application) => application.estimate(env),
         }
     }
 
@@ -67,6 +73,7 @@ impl Proposition {
             Proposition::Concept(application) => application.parameters(),
             Proposition::Formula(application) => application.parameters(),
             Proposition::Constraint(constraint) => constraint.parameters(),
+            Proposition::Procedure(application) => application.parameters(),
         }
     }
 
@@ -78,6 +85,7 @@ impl Proposition {
             Proposition::Concept(application) => application.schema(),
             Proposition::Formula(application) => application.schema(),
             Proposition::Constraint(constraint) => constraint.schema(),
+            Proposition::Procedure(application) => application.schema(),
         }
     }
 
@@ -99,6 +107,12 @@ impl From<FormulaQuery> for Proposition {
     }
 }
 
+impl From<ProcedureQuery> for Proposition {
+    fn from(application: ProcedureQuery) -> Self {
+        Proposition::Procedure(application)
+    }
+}
+
 impl Display for Proposition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -107,6 +121,7 @@ impl Display for Proposition {
             Proposition::Concept(application) => Display::fmt(application, f),
             Proposition::Formula(application) => Display::fmt(application, f),
             Proposition::Constraint(constraint) => Display::fmt(constraint, f),
+            Proposition::Procedure(application) => Display::fmt(application, f),
         }
     }
 }
@@ -123,6 +138,7 @@ impl Serialize for Proposition {
             Proposition::Concept(cq) => cq.serialize(serializer),
             Proposition::Formula(fq) => fq.serialize(serializer),
             Proposition::Constraint(c) => c.serialize(serializer),
+            Proposition::Procedure(pq) => pq.serialize(serializer),
             Proposition::Attribute(_) => Err(ser::Error::custom(
                 "Attribute propositions cannot be serialized in formal notation",
             )),
@@ -148,13 +164,15 @@ impl<'de> Deserialize<'de> for Proposition {
                 let cq: ConceptQuery = serde_json::from_value(raw).map_err(de::Error::custom)?;
                 Ok(Proposition::Concept(cq))
             }
-            // String → Constraint or FormulaQuery. Try Constraint
-            // first because its variants are named ("==", "coalesce",
-            // etc.); FormulaQuery is the catchall fallback for any
-            // other formula name.
+            // String → Constraint, procedure, or formula. Constraint
+            // and procedure names are fixed sets, tried in that order;
+            // FormulaQuery is the catchall fallback for any other
+            // formula name.
             serde_json::Value::String(_) => {
                 if let Ok(constraint) = serde_json::from_value::<Constraint>(raw.clone()) {
                     Ok(Proposition::Constraint(constraint))
+                } else if let Ok(pq) = serde_json::from_value::<ProcedureQuery>(raw.clone()) {
+                    Ok(Proposition::Procedure(pq))
                 } else {
                     let fq: FormulaQuery =
                         serde_json::from_value(raw).map_err(de::Error::custom)?;
