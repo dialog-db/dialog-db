@@ -126,29 +126,6 @@ impl<C: Principal> Snapshot<'_, C> {
     }
 }
 
-/// What an export produced, and what it could not find.
-///
-/// `missing` is the point of this type: an export over a partially
-/// fetched branch succeeds, and the caller needs a way to tell a complete
-/// snapshot from a partial one without walking the tree again. Silent
-/// partial success would only surface much later, at read time.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Exported {
-    /// Blocks written to the sink.
-    pub blocks: u64,
-    /// Blobs written to the sink.
-    pub blobs: u64,
-    /// Leaf content the revision references that the source did not hold.
-    pub missing: Vec<NodeHash>,
-}
-
-impl Exported {
-    /// Whether everything the revision references was exported.
-    pub fn is_complete(&self) -> bool {
-        self.missing.is_empty()
-    }
-}
-
 /// One piece of a snapshot's content.
 ///
 /// Blocks and blobs are separate variants rather than one uniform item
@@ -197,7 +174,7 @@ pub enum Reach {
 
     /// Whatever is reachable from the root in local storage.
     ///
-    /// Gaps are recorded in [`Exported::missing`] and the walk continues
+    /// Gaps are skipped and the walk continues
     /// past them where it can -- a subtree under an absent node is
     /// unreachable, so what lies beneath it cannot be enumerated. Corrupt
     /// content is still fatal: a block whose stored bytes do not match
@@ -504,6 +481,7 @@ mod tests {
     use dialog_artifacts::{Artifact, Instruction, Value};
     use dialog_credentials::Credential;
     use dialog_effects::blob::BlobSource;
+    use dialog_search_tree::PersistentNode;
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use futures_util::stream;
 
@@ -788,6 +766,110 @@ mod tests {
             }
             other => panic!("expected a blob digest mismatch, got {other:?}"),
         }
+        Ok(())
+    }
+
+    // A replica holding the tree but not what its leaves point at.
+    //
+    // The absent-root case below stops the walk immediately, so it never
+    // reaches the leaf-content paths. This is the shape a real partial
+    // replica takes -- the tree is small and arrives first, blobs are
+    // large and lag -- and it is the only way to exercise the spill and
+    // blob arms of either reach.
+    //
+    // Built by importing just the tree nodes: a spilled value is a raw
+    // encoded value rather than an rkyv node, so parsing separates the two
+    // without depending on the order the export yields them in.
+    async fn tree_only_destination(
+        stage: &Stage,
+    ) -> Result<(dialog_operator::Operator<VolatileSpace>, crate::Repository)> {
+        let (blocks, _) = drain(
+            stage
+                .repository
+                .snapshot(stage.revision.clone())
+                .export()
+                .perform(&stage.env),
+        )
+        .await?;
+
+        let nodes: Vec<Block> = blocks
+            .into_iter()
+            .filter(|block| {
+                PersistentNode::<Key, State<Datum>>::try_from(block.content.clone()).is_ok()
+            })
+            .collect();
+        assert!(
+            !nodes.is_empty(),
+            "the staged revision has tree nodes to seed with"
+        );
+
+        let destination = destination_for(stage).await?;
+        let elsewhere = crate::Repository::from(stage.repository.credential().clone());
+        let imported = elsewhere
+            .import(stream::iter(nodes.into_iter().map(Item::Block).map(Ok)))
+            .perform(&destination)
+            .await?;
+        assert_eq!(imported.blobs, 0, "the blob was deliberately withheld");
+
+        Ok((destination, elsewhere))
+    }
+
+    // With the tree present, the walk runs to completion and reaches the
+    // leaf content -- so the default must fail on a spilled value or blob
+    // it cannot read, not merely on an absent root.
+    #[dialog_common::test]
+    async fn it_refuses_leaf_content_it_cannot_read() -> Result<()> {
+        let stage = stage().await?;
+        let (destination, elsewhere) = tree_only_destination(&stage).await?;
+
+        let refused = drain(
+            elsewhere
+                .snapshot(stage.revision.clone())
+                .export()
+                .perform(&destination),
+        )
+        .await;
+
+        match refused {
+            Err(error) => match error.downcast_ref::<SnapshotError>() {
+                Some(SnapshotError::MissingBlob { .. } | SnapshotError::MissingBlock { .. }) => {}
+                _ => panic!("expected a missing-content refusal, got {error:?}"),
+            },
+            Ok((blocks, blobs)) => panic!(
+                "a complete export must not omit leaf content it cannot read, \
+                 got {} blocks and {} blobs",
+                blocks.len(),
+                blobs.len()
+            ),
+        }
+        Ok(())
+    }
+
+    // And the same store under `sparse` is the case the reach exists for:
+    // the tree is walked and yielded, the unreadable leaf content is
+    // skipped rather than fatal.
+    #[dialog_common::test]
+    async fn it_skips_leaf_content_it_cannot_read_when_sparse() -> Result<()> {
+        let stage = stage().await?;
+        let (destination, elsewhere) = tree_only_destination(&stage).await?;
+
+        let (blocks, blobs) = drain(
+            elsewhere
+                .snapshot(stage.revision.clone())
+                .export()
+                .sparse()
+                .perform(&destination),
+        )
+        .await?;
+
+        assert!(
+            !blocks.is_empty(),
+            "sparse still yields the tree it can reach"
+        );
+        assert!(
+            blobs.is_empty(),
+            "the blob it cannot read is skipped, not fabricated"
+        );
         Ok(())
     }
 
