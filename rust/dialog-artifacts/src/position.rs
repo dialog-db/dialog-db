@@ -9,7 +9,7 @@
 //! already sorted. Structure:
 //!
 //! ```text
-//! position = major (1 byte, A–Z a–z)
+//! position = major (1 byte, A–Z: A–M negative, N–Z positive)
 //!          ‖ minor (capacity(major) bytes, base62 — integer part)
 //!          ‖ patch (variable, base62 — fractional tail)
 //! ```
@@ -57,8 +57,15 @@ pub const BIAS_DIGITS: usize = 6;
 
 /// Base62 digit ranges in byte order: `0-9 < A-Z < a-z`.
 const B62: [(u8, u8); 3] = [(b'0', b'9'), (b'A', b'Z'), (b'a', b'z')];
-/// Base52 (major) digit ranges in byte order: `A-Z < a-z`.
-const B52: [(u8, u8); 2] = [(b'A', b'Z'), (b'a', b'z')];
+/// Major digit ranges in byte order: `A-M` (negative side) and `N-Z`
+/// (positive side). Majors are deliberately UPPERCASE-ONLY: symbols
+/// (the user-named attribute halves, per the dictionary-concepts
+/// work) must start with a lowercase letter, so a name half is
+/// self-discriminating by its first byte — lowercase is a symbol,
+/// uppercase is a position — with no tag byte and no ambiguity
+/// between positions and ordinary words. Thirteen length classes per
+/// side still give base62^13 (≈ 2^77) integer headroom.
+const MAJORS: [(u8, u8); 2] = [(b'A', b'M'), (b'N', b'Z')];
 
 const B62_MIN: u8 = b'0';
 const B62_MAX: u8 = b'z';
@@ -95,7 +102,7 @@ impl From<PositionError> for DialogArtifactsError {
 }
 
 /// A fractional position: a non-empty ASCII string over `0-9A-Za-z`
-/// whose leading byte is a major (`A-Z a-z`), ordered by plain byte
+/// whose leading byte is a major (`A-Z`), ordered by plain byte
 /// comparison. Canonical: trailing minimum digits are trimmed, so
 /// logically equal positions are byte-identical.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -134,9 +141,9 @@ impl TryFrom<&str> for Position {
         let Some(&head) = bytes.first() else {
             return Err(PositionError::Invalid("empty".into()));
         };
-        if !in_ranges(head, &B52) {
+        if !in_ranges(head, &MAJORS) {
             return Err(PositionError::Invalid(format!(
-                "leading byte {:?} is not a major (A-Z a-z)",
+                "leading byte {:?} is not a major (A-Z)",
                 head as char
             )));
         }
@@ -260,7 +267,7 @@ fn after_position(bias: &Bias, position: &Position) -> Position {
         return create(major, &minor, &bias.0);
     }
     // …or move into the next (larger) major class…
-    if let Some(major) = digit_increment(major, &B52) {
+    if let Some(major) = digit_increment(major, &MAJORS) {
         let capacity = major::capacity(major);
         return create(major, &vec![B62_MIN; capacity], &bias.0);
     }
@@ -278,7 +285,7 @@ fn before_position(bias: &Bias, position: &Position) -> Result<Position, Positio
     if let Some(minor) = digits_decrement(&minor, &B62) {
         return Ok(create(major, &minor, &bias.0));
     }
-    if let Some(major) = digit_decrement(major, &B52) {
+    if let Some(major) = digit_decrement(major, &MAJORS) {
         let capacity = major::capacity(major);
         return Ok(create(major, &vec![B62_MAX; capacity], &bias.0));
     }
@@ -294,7 +301,7 @@ fn between(bias: &Bias, low: &Position, high: &Position) -> Result<Position, Pos
     let low_major = major::of(low);
     let high_major = major::of(high);
 
-    match digit_intermediate(low_major, high_major, &B52) {
+    match digit_intermediate(low_major, high_major, &MAJORS) {
         Digit::Some(major) => {
             let capacity = major::capacity(major);
             Ok(create(major, &vec![B62_MIN; capacity], &bias.0))
@@ -346,11 +353,11 @@ fn between(bias: &Bias, low: &Position, high: &Position) -> Result<Position, Pos
 /// Major-component arithmetic: the single leading byte encoding the
 /// minor's width class.
 mod major {
-    use super::{B52, Position};
+    use super::{MAJORS, Position};
 
-    /// The zero major: the innermost positive class (`a`, one-digit
+    /// The zero major: the innermost positive class (`N`, one-digit
     /// minor).
-    pub const ZERO: u8 = b'a';
+    pub const ZERO: u8 = b'N';
 
     /// The major byte of a position.
     pub fn of(position: &Position) -> u8 {
@@ -364,7 +371,7 @@ mod major {
         let [
             (outer_negative, inner_negative),
             (inner_positive, outer_positive),
-        ] = B52;
+        ] = MAJORS;
         if (inner_positive..=outer_positive).contains(&major) {
             (major - inner_positive + 1) as usize
         } else if (outer_negative..=inner_negative).contains(&major) {
@@ -762,10 +769,10 @@ mod tests {
     #[dialog_common::test]
     fn it_derives_first_positions() {
         let first = insert(&Bias::none(), ..).expect("derives");
-        assert_eq!(first.as_str(), "a");
+        assert_eq!(first.as_str(), "N");
         let biased = insert(&bias(b"member-1"), ..).expect("derives");
         assert!(
-            biased.as_str().starts_with("a0"),
+            biased.as_str().starts_with("N0"),
             "major + padded minor: {biased}"
         );
         assert!(biased.as_str().len() <= 2 + BIAS_DIGITS);
@@ -777,7 +784,7 @@ mod tests {
     #[dialog_common::test]
     fn it_preserves_order() {
         let b = bias(b"member");
-        let origin = position("a");
+        let origin = position("N");
         let after = insert(&b, &origin..).expect("after");
         assert!(after > origin, "{after} > {origin}");
         let before = insert(&b, ..&origin).expect("before");
@@ -824,7 +831,7 @@ mod tests {
     #[dialog_common::test]
     fn it_bounds_midpoint_growth() {
         let b = bias(b"wedge");
-        let mut low = position("a");
+        let mut low = position("N");
         let high = insert(&Bias::none(), &low..).expect("high");
         for _ in 0..24 {
             let mid = insert(&b, &low..&high).expect("between");
@@ -838,8 +845,8 @@ mod tests {
     /// byte-identical positions; distinct members disperse.
     #[dialog_common::test]
     fn it_converges_and_disperses() {
-        let low = position("a");
-        let high = position("b");
+        let low = position("N");
+        let high = position("O");
         let milk_here = insert(&bias(b"milk"), &low..&high).expect("derives");
         let milk_there = insert(&bias(b"milk"), &low..&high).expect("derives");
         assert_eq!(milk_here, milk_there, "replicas converge");
@@ -852,12 +859,12 @@ mod tests {
     /// swapped bounds are normalized.
     #[dialog_common::test]
     fn it_handles_degenerate_bounds() {
-        let at = position("m");
+        let at = position("R");
         let same = insert(&bias(b"x"), &at..&at).expect("derives");
         assert_eq!(same, at);
 
-        let low = position("d");
-        let high = position("q");
+        let low = position("P");
+        let high = position("T");
         let forward = insert(&bias(b"x"), &low..&high).expect("derives");
         let swapped = insert(&bias(b"x"), &high..&low).expect("derives");
         assert_eq!(forward, swapped, "bounds normalize");
@@ -868,8 +875,8 @@ mod tests {
     #[dialog_common::test]
     fn it_stays_canonical() {
         let b = bias(b"member");
-        let mut low = position("a");
-        let high = position("b");
+        let mut low = position("N");
+        let high = position("O");
         for _ in 0..12 {
             let mid = insert(&b, &low..&high).expect("between");
             assert_ne!(mid.as_bytes().last(), Some(&b'0'), "no trailing min: {mid}");
@@ -882,8 +889,8 @@ mod tests {
     /// (no sentinel leakage) and inside the attribute charset.
     #[dialog_common::test]
     fn it_never_leaks_sentinels() {
-        let mut low = position("a");
-        let high = position("b");
+        let mut low = position("N");
+        let high = position("O");
         for seed in 0..64u8 {
             let mid = insert(&bias(&[seed]), &low..&high).expect("between");
             for &byte in mid.as_bytes() {
