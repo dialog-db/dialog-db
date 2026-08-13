@@ -44,6 +44,7 @@
 
 use std::fmt::{self, Display};
 use std::iter::repeat_n;
+use std::ops::{Bound, RangeBounds};
 use std::str::from_utf8;
 
 use crate::DialogArtifactsError;
@@ -172,22 +173,44 @@ impl Bias {
     }
 }
 
-/// Derive the position for a member inserted between `after` and
-/// `before` (either side may be open). With both sides open the
-/// position is the zero major carrying the bias as its fractional
-/// tail. Deterministic: the same `(after, before, bias)` produces the
-/// same position on every replica.
+/// Derive the position for a member inserted into `range` — the
+/// bounds name the *neighbors*, and the derived position falls
+/// strictly between them, so range syntax reads as the insertion
+/// itself:
+///
+/// ```no_run
+/// # use dialog_artifacts::position::{insert, Bias, Position};
+/// # fn demo(first: &Position, second: &Position) {
+/// let bias = Bias::derive(b"member");
+/// let head = insert(&bias, ..).unwrap();               // empty collection
+/// let appended = insert(&bias, first..).unwrap();      // after the last
+/// let prepended = insert(&bias, ..first).unwrap();     // before the first
+/// let wedged = insert(&bias, first..second).unwrap();  // between neighbors
+/// # }
+/// ```
+///
+/// Since a position can only fall *between* neighbors, inclusive and
+/// exclusive bounds are equivalent here (`a..b` ≡ `a..=b`). Swapped
+/// bounds are normalized. With both sides unbounded the position is
+/// the zero major carrying the bias as its fractional tail.
+/// Deterministic: the same `(range, bias)` produces the same position
+/// on every replica.
 ///
 /// Inserting between two *equal* positions returns that position
 /// unchanged — a collision, which the `(position, member)` total order
 /// absorbs. Inserting before the absolute minimum position fails with
 /// [`PositionError::Exhausted`].
-pub fn insert(
-    bias: &Bias,
-    after: Option<&Position>,
-    before: Option<&Position>,
-) -> Result<Position, PositionError> {
-    match (after, before) {
+pub fn insert<Range>(bias: &Bias, range: Range) -> Result<Position, PositionError>
+where
+    Range: RangeBounds<Position>,
+{
+    fn neighbor(bound: Bound<&Position>) -> Option<&Position> {
+        match bound {
+            Bound::Unbounded => None,
+            Bound::Included(position) | Bound::Excluded(position) => Some(position),
+        }
+    }
+    match (neighbor(range.start_bound()), neighbor(range.end_bound())) {
         (Some(low), Some(high)) => {
             // Normalize swapped bounds: derivation is order-agnostic.
             if low.0 > high.0 {
@@ -738,9 +761,9 @@ mod tests {
     /// bias; without bias it is the bare origin.
     #[dialog_common::test]
     fn it_derives_first_positions() {
-        let first = insert(&Bias::none(), None, None).expect("derives");
+        let first = insert(&Bias::none(), ..).expect("derives");
         assert_eq!(first.as_str(), "a");
-        let biased = insert(&bias(b"member-1"), None, None).expect("derives");
+        let biased = insert(&bias(b"member-1"), ..).expect("derives");
         assert!(
             biased.as_str().starts_with("a0"),
             "major + padded minor: {biased}"
@@ -755,11 +778,11 @@ mod tests {
     fn it_preserves_order() {
         let b = bias(b"member");
         let origin = position("a");
-        let after = insert(&b, Some(&origin), None).expect("after");
+        let after = insert(&b, &origin..).expect("after");
         assert!(after > origin, "{after} > {origin}");
-        let before = insert(&b, None, Some(&origin)).expect("before");
+        let before = insert(&b, ..&origin).expect("before");
         assert!(before < origin, "{before} < {origin}");
-        let mid = insert(&b, Some(&before), Some(&after)).expect("between");
+        let mid = insert(&b, &before..&after).expect("between");
         assert!(before < mid && mid < after, "{before} < {mid} < {after}");
     }
 
@@ -767,10 +790,10 @@ mod tests {
     /// headroom rather than linearly through the fraction.
     #[dialog_common::test]
     fn it_appends_compactly() {
-        let mut positions = vec![insert(&Bias::none(), None, None).expect("first")];
+        let mut positions = vec![insert(&Bias::none(), ..).expect("first")];
         for _ in 0..1000 {
             let last = positions.last().expect("non-empty");
-            let next = insert(&Bias::none(), Some(last), None).expect("append");
+            let next = insert(&Bias::none(), last..).expect("append");
             assert!(&next > last);
             positions.push(next);
         }
@@ -784,10 +807,10 @@ mod tests {
     /// Repeated prepends stay compact through the negative majors.
     #[dialog_common::test]
     fn it_prepends_compactly() {
-        let mut positions = vec![insert(&Bias::none(), None, None).expect("first")];
+        let mut positions = vec![insert(&Bias::none(), ..).expect("first")];
         for _ in 0..1000 {
             let first = positions.last().expect("non-empty");
-            let next = insert(&Bias::none(), None, Some(first)).expect("prepend");
+            let next = insert(&Bias::none(), ..first).expect("prepend");
             assert!(&next < first);
             positions.push(next);
         }
@@ -802,9 +825,9 @@ mod tests {
     fn it_bounds_midpoint_growth() {
         let b = bias(b"wedge");
         let mut low = position("a");
-        let high = insert(&Bias::none(), Some(&low), None).expect("high");
+        let high = insert(&Bias::none(), &low..).expect("high");
         for _ in 0..24 {
-            let mid = insert(&b, Some(&low), Some(&high)).expect("between");
+            let mid = insert(&b, &low..&high).expect("between");
             assert!(low < mid && mid < high, "{low} < {mid} < {high}");
             low = mid;
         }
@@ -817,11 +840,11 @@ mod tests {
     fn it_converges_and_disperses() {
         let low = position("a");
         let high = position("b");
-        let milk_here = insert(&bias(b"milk"), Some(&low), Some(&high)).expect("derives");
-        let milk_there = insert(&bias(b"milk"), Some(&low), Some(&high)).expect("derives");
+        let milk_here = insert(&bias(b"milk"), &low..&high).expect("derives");
+        let milk_there = insert(&bias(b"milk"), &low..&high).expect("derives");
         assert_eq!(milk_here, milk_there, "replicas converge");
 
-        let bread = insert(&bias(b"bread"), Some(&low), Some(&high)).expect("derives");
+        let bread = insert(&bias(b"bread"), &low..&high).expect("derives");
         assert_ne!(milk_here, bread, "distinct members disperse");
     }
 
@@ -830,13 +853,13 @@ mod tests {
     #[dialog_common::test]
     fn it_handles_degenerate_bounds() {
         let at = position("m");
-        let same = insert(&bias(b"x"), Some(&at), Some(&at)).expect("derives");
+        let same = insert(&bias(b"x"), &at..&at).expect("derives");
         assert_eq!(same, at);
 
         let low = position("d");
         let high = position("q");
-        let forward = insert(&bias(b"x"), Some(&low), Some(&high)).expect("derives");
-        let swapped = insert(&bias(b"x"), Some(&high), Some(&low)).expect("derives");
+        let forward = insert(&bias(b"x"), &low..&high).expect("derives");
+        let swapped = insert(&bias(b"x"), &high..&low).expect("derives");
         assert_eq!(forward, swapped, "bounds normalize");
     }
 
@@ -848,7 +871,7 @@ mod tests {
         let mut low = position("a");
         let high = position("b");
         for _ in 0..12 {
-            let mid = insert(&b, Some(&low), Some(&high)).expect("between");
+            let mid = insert(&b, &low..&high).expect("between");
             assert_ne!(mid.as_bytes().last(), Some(&b'0'), "no trailing min: {mid}");
             Position::try_from(mid.as_str()).expect("round-trips");
             low = mid;
@@ -862,7 +885,7 @@ mod tests {
         let mut low = position("a");
         let high = position("b");
         for seed in 0..64u8 {
-            let mid = insert(&bias(&[seed]), Some(&low), Some(&high)).expect("between");
+            let mid = insert(&bias(&[seed]), &low..&high).expect("between");
             for &byte in mid.as_bytes() {
                 assert!(
                     in_ranges(byte, &B62),
@@ -881,7 +904,7 @@ mod tests {
         // "A" (major at the negative edge) with an all-minimum minor is
         // the smallest canonical position.
         let floor = position("A");
-        let result = insert(&Bias::none(), None, Some(&floor));
+        let result = insert(&Bias::none(), ..&floor);
         assert_eq!(result, Err(PositionError::Exhausted));
     }
 

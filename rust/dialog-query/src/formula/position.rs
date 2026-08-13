@@ -72,7 +72,12 @@ impl Position {
             return Vec::new();
         };
         let bias = Bias::derive(input.member.to_string().as_bytes());
-        match fractional::insert(&bias, after.as_ref(), before.as_ref()) {
+        use std::ops::Bound;
+        let bound = |position: &Option<fractional::Position>| match position {
+            Some(position) => Bound::Excluded(position.clone()),
+            None => Bound::Unbounded,
+        };
+        match fractional::insert(&bias, (bound(&after), bound(&before))) {
             Ok(position) => vec![Position {
                 member: input.member.clone(),
                 after: input.after.clone(),
