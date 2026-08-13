@@ -318,6 +318,50 @@ Concretely, the adapted plan:
   wire-compatible with everything above and migrates mechanically
   when the tagged types land.
 
+### What landed from the spike port
+
+The adapted plan above is now implemented on this branch, lowered
+onto the existing one-slot selector rather than the spike's two-slot
+reshape (which would have forced the storage-layer `AttributePattern`
+churn #338 itself walked back):
+
+- **`Symbol`** (`dialog-artifacts/src/artifacts/symbol.rs`): the
+  spike's validated identifier, unchanged rules (lowercase start;
+  lowercase/digits/hyphens/dots; no `/`; ≤63 bytes) — which, combined
+  with uppercase-only majors, makes the two name shapes disjoint by
+  first byte.
+- **`Name`** (same module): the name half of an attribute as a typed
+  sum — `Symbol` (named predicate) or `Position` (ordered member),
+  discriminated by the first byte with no tag. This is the interim,
+  text-encoded form of ADR 005's `name | position` attribute variants.
+- **`Attribute::domain()/name()/split()/compose()`**: lazy halves plus
+  fallible typed decomposition (`split` declines legacy shapes like
+  `person/display_name` rather than misclassify) and composition with
+  the joint 64-byte budget check. `dialog/position-parts` now rides
+  `split()` instead of hand-rolled string splitting.
+- **Selector sugar**: `with_domain(&Symbol)` lowers onto the existing
+  attribute-prefix range (`domain/` is a contiguous scan);
+  `with_name(Name)` is a per-entry filter on the name half (a name
+  alone is not a contiguous range, so it preserves the selector's
+  constrained-state, exactly the spike's state rule) — and when a
+  domain is already present the builder tightens the pair to an exact
+  attribute, a point lookup.
+- **`Directory<T>` / `Sequence<T>`**
+  (`dialog-artifacts/src/collection.rs`): the twin keyed views over a
+  domain scan — `BTreeMap<Symbol, T>` and `BTreeMap<Position, T>`,
+  each with an `admit(attribute, value)` classifier so one pass over
+  a mixed domain fills both. `Sequence` iterates in list order and
+  exposes `first_position`/`last_position` as the bounds for the next
+  `insert(&bias, last..)`.
+- **Not ported — `Composite::Directory`**: the spike's type-system
+  work targeted the pre-rewrite lattice (`Composite` set alongside
+  Product/Variant). The current lattice (`Primitive` bitfield +
+  `Refinement`) has no composite kinds, so the schema-level
+  `as: {"directory": "Entity"}` story is deferred until composites
+  return; `Directory`/`Sequence` live at the artifacts layer where
+  they are useful today, and concept-field aggregation remains the
+  realize-layer follow-up the spike itself deferred.
+
 ## Surfacing plan
 
 Phased so each step is useful alone:
