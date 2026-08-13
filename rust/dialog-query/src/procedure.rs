@@ -113,6 +113,9 @@ pub struct TreeLinkQuery {
     /// Seam rank of the separator under the node's embedded manifest.
     #[serde(default = "blank")]
     pub rank: Term<Any>,
+    /// Buffered hitchhiker ops pending against this subtree.
+    #[serde(default = "blank")]
+    pub novelty: Term<Any>,
 }
 
 /// The `tree/key` procedure: one row per entry key of a segment node.
@@ -204,6 +207,9 @@ static TREE_LINK_CELLS: LazyLock<Cells> = LazyLock::new(|| {
         builder
             .cell("rank", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Seam rank of the separator under the node's manifest.");
+        builder
+            .cell("novelty", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Buffered ops pending against this subtree.");
     })
 });
 
@@ -286,6 +292,7 @@ impl ProcedureQuery {
                 params.insert("separator".into(), query.separator.clone());
                 params.insert("scale".into(), query.scale.clone());
                 params.insert("rank".into(), query.rank.clone());
+                params.insert("novelty".into(), query.novelty.clone());
             }
             Self::TreeKey(query) => {
                 params.insert("of".into(), query.of.clone());
@@ -364,6 +371,7 @@ impl ProcedureQuery {
                                 (&query.separator, Value::Bytes(link.separator)),
                                 (&query.scale, Value::UnsignedInt(link.scale.into())),
                                 (&query.rank, Value::UnsignedInt(link.rank.into())),
+                                (&query.novelty, Value::UnsignedInt(link.novelty.into())),
                             ])?;
                             if let Some(row) = row {
                                 yield row;

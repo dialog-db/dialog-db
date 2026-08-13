@@ -1469,6 +1469,7 @@ mod procedure_tests {
             separator: Term::var("separator"),
             scale: Term::var("scale"),
             rank: Term::var("rank"),
+            novelty: Term::var("novelty"),
         })
     }
 
