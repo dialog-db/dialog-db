@@ -105,7 +105,10 @@ impl From<PositionError> for DialogArtifactsError {
 /// whose leading byte is a major (`A-Z`), ordered by plain byte
 /// comparison. Canonical: trailing minimum digits are trimmed, so
 /// logically equal positions are byte-identical.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(into = "String", try_from = "String")]
 pub struct Position(Vec<u8>);
 
 impl Position {
@@ -130,6 +133,20 @@ impl Position {
 impl Display for Position {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+impl From<Position> for String {
+    fn from(position: Position) -> Self {
+        position.as_str().to_owned()
+    }
+}
+
+impl TryFrom<String> for Position {
+    type Error = PositionError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Position::try_from(value.as_str())
     }
 }
 

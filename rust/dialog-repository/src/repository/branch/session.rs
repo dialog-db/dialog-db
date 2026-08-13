@@ -1368,11 +1368,14 @@ mod ordered_relation_tests {
 
     use crate::helpers::{test_operator_with_profile, test_repo};
     use dialog_artifacts::position::{Bias, Position, insert};
-    use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Value};
+    use dialog_artifacts::{
+        ArtifactSelector, Attribute, Directory, Entity, Sequence, Symbol, Value,
+    };
     use dialog_query::AttributeStatement;
     use dialog_query::attribute::The;
     use futures_util::TryStreamExt as _;
     use std::ops::RangeBounds;
+    use std::str::FromStr as _;
 
     /// Derive the position for `member` in the given range, biased by
     /// the member's entity reference.
@@ -1383,8 +1386,8 @@ mod ordered_relation_tests {
 
     /// A membership fact: `[list  test.list/<position>  member]`.
     fn membership(list: &Entity, position: &Position, member: &Entity) -> AttributeStatement {
-        let attribute =
-            Attribute::try_from(format!("test.list/{position}")).expect("attribute fits");
+        let domain = Symbol::from_str("test.list").expect("domain parses");
+        let attribute = Attribute::compose(&domain, position.clone()).expect("attribute fits");
         AttributeStatement {
             the: The::from(attribute),
             of: list.clone(),
@@ -1426,13 +1429,31 @@ mod ordered_relation_tests {
             .perform(&operator)
             .await?;
 
-        // One contiguous range scan of the list's ordered relation.
+        // A dictionary entry lives in the same domain: the disjoint
+        // name shapes (symbols start lowercase, positions uppercase)
+        // let one scan serve both.
+        let domain = Symbol::from_str("test.list")?;
+        let title = Attribute::compose(&domain, Symbol::from_str("title")?)?;
+        branch
+            .transaction()
+            .assert(AttributeStatement {
+                the: The::from(title),
+                of: list.clone(),
+                is: Value::String("Groceries".into()),
+                cause: None,
+                cardinality: None,
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // One contiguous range scan of the list's domain.
         let members: Vec<_> = branch
             .claims()
             .select(
                 ArtifactSelector::new()
                     .of(list.clone())
-                    .the_starting_with("test.list/"),
+                    .with_domain(&domain),
             )
             .perform(&operator)
             .await?
@@ -1447,12 +1468,39 @@ mod ordered_relation_tests {
         sorted.sort();
         assert_eq!(attributes, sorted, "the scan streams in position order");
 
+        // Classify the scan by name shape: named entries into a
+        // directory, position-named members into a sequence.
+        let mut fields: Directory<Value> = Directory::new();
+        let mut sequence: Sequence<Value> = Sequence::new();
+        for artifact in &members {
+            let named = fields.admit(&artifact.the, artifact.is.clone());
+            let ordered = sequence.admit(&artifact.the, artifact.is.clone());
+            assert!(named != ordered, "every entry lands in exactly one");
+        }
+
+        assert_eq!(
+            fields.get(&Symbol::from_str("title")?),
+            Some(&Value::String("Groceries".into())),
+            "the dictionary entry reads by name"
+        );
+
         let expected: Vec<Value> = [&apples, &bread, &bananas, &milk]
             .into_iter()
             .map(|member| Value::Entity(member.clone()))
             .collect();
-        let values: Vec<Value> = members.into_iter().map(|artifact| artifact.is).collect();
+        let values: Vec<Value> = sequence.values().cloned().collect();
         assert_eq!(values, expected, "members arrive in list order");
+
+        // The sequence's edge positions are the bounds for the next
+        // insertion: append after the last member.
+        assert_eq!(sequence.first_position(), Some(&at_apples));
+        assert_eq!(sequence.last_position(), Some(&at_milk));
+        let eggs = Entity::new()?;
+        let at_eggs = place(&eggs, sequence.last_position().expect("nonempty")..);
+        assert!(
+            at_eggs > at_milk,
+            "the appended position sorts after every member"
+        );
         Ok(())
     }
 }
