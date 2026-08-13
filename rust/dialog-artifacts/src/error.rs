@@ -58,6 +58,16 @@ pub enum DialogArtifactsError {
     #[error("Could not convert bytes into entity: {0}")]
     InvalidEntity(String),
 
+    /// A stored index entry failed read-side validation: its entity is not a
+    /// canonical URI, its attribute breaks the attribute invariants, or a
+    /// column is not UTF-8. The bytes came out of the tree, so this marks a
+    /// corrupt or foreign-written entry rather than caller error. Scan paths
+    /// treat rows carrying this error as ignorable — they are skipped (with a
+    /// warning) instead of failing the whole query — so an invalid entry in a
+    /// tree cannot poison every query that ranges over it.
+    #[error("Corrupt stored entry: {0}")]
+    CorruptEntry(String),
+
     /// An attempt to export the database failed
     #[error("Could not export data: {0}")]
     Export(String),

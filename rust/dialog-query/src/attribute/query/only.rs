@@ -12,11 +12,27 @@ use crate::source::SelectRules;
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
-use dialog_artifacts::{ArtifactView, Cause, Select};
+use dialog_artifacts::{Artifact, ArtifactView, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
+
+/// Materializes an election winner, treating a corrupt stored row
+/// ([`DialogArtifactsError::CorruptEntry`]) as an ignorable non-result
+/// (`Ok(None)`, with a warning) rather than a query failure: a corrupt or
+/// foreign-written tree entry must not poison every query that ranges over
+/// it. All other errors propagate.
+fn materialize_winner(winner: ArtifactView) -> Result<Option<Artifact>, DialogArtifactsError> {
+    match winner.to_owned() {
+        Ok(artifact) => Ok(Some(artifact)),
+        Err(DialogArtifactsError::CorruptEntry(reason)) => {
+            tracing::warn!(%reason, "ignoring corrupt stored row in election");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
 
 /// Winner verification.
 ///
@@ -236,14 +252,22 @@ impl AttributeQueryOnly {
                                 } else {
                                     // Group closed: only its winner pays
                                     // for materialization, and only if it
-                                    // clears the value checks.
-                                    let winner = current.to_owned()?;
-                                    if (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
-                                        && selector.admits(&winner.is)
-                                    {
-                                        let mut extension = base.clone();
-                                        selector.merge(&mut extension, &winner)?;
-                                        yield extension;
+                                    // clears the value checks. A winner
+                                    // whose stored bytes fail validation
+                                    // (`CorruptEntry`) is a corrupt tree
+                                    // entry: drop the group's yield rather
+                                    // than failing the query.
+                                    match materialize_winner(current)? {
+                                        Some(winner)
+                                            if (value_constraint.is_none()
+                                                || value_constraint.as_ref() == Some(&winner.is))
+                                                && selector.admits(&winner.is) =>
+                                        {
+                                            let mut extension = base.clone();
+                                            selector.merge(&mut extension, &winner)?;
+                                            yield extension;
+                                        }
+                                        _ => {}
                                     }
                                     artifact
                                 }
@@ -252,15 +276,20 @@ impl AttributeQueryOnly {
                         });
                     }
 
-                    // Yield the final group's winner.
+                    // Yield the final group's winner (unless its stored
+                    // bytes are corrupt; see the group-close arm above).
                     if let Some(winner) = candidate.take() {
-                        let winner = winner.to_owned()?;
-                        if (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
-                            && selector.admits(&winner.is)
-                        {
-                            let mut extension = base.clone();
-                            selector.merge(&mut extension, &winner)?;
-                            yield extension;
+                        match materialize_winner(winner)? {
+                            Some(winner)
+                                if (value_constraint.is_none()
+                                    || value_constraint.as_ref() == Some(&winner.is))
+                                    && selector.admits(&winner.is) =>
+                            {
+                                let mut extension = base.clone();
+                                selector.merge(&mut extension, &winner)?;
+                                yield extension;
+                            }
+                            _ => {}
                         }
                     }
                 } else {

@@ -1064,7 +1064,20 @@ impl ArtifactTreeExt for ArtifactTree {
                     }
                     ValueRef::Inline(_) => None,
                 };
-                let artifact = Artifact::from_key_ref_datum_value(&parts, datum, spilled)?;
+                // A row whose stored bytes fail read-side validation (a
+                // non-canonical entity, a broken attribute — `CorruptEntry`)
+                // is a corrupt or foreign-written entry: skip it with a
+                // warning rather than failing the whole query. Structural
+                // key corruption (the parse above) stays loud — see the
+                // comment there.
+                let artifact = match Artifact::from_key_ref_datum_value(&parts, datum, spilled) {
+                    Ok(artifact) => artifact,
+                    Err(DialogArtifactsError::CorruptEntry(reason)) => {
+                        tracing::warn!(%reason, "ignoring corrupt stored row in scan");
+                        continue;
+                    }
+                    Err(error) => Err(error)?,
+                };
                 // A NeedsValue verdict means some value predicate's answer
                 // lies beyond the spilled value's in-key prefix; the value
                 // is materialized now, so re-check semantically before
@@ -1839,5 +1852,128 @@ mod selector_range_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod corrupt_row_tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{ArtifactTree, ArtifactTreeExt, spill_cache};
+    use crate::key::varkey::{KeyParts, ValuePayload, build_key};
+    use crate::{
+        ATTRIBUTE_KEY_TAG, Artifact, ArtifactSelector, ArtifactViewStream as _, Datum,
+        ENTITY_KEY_TAG, Instruction, Key, State, VALUE_KEY_TAG, Value, ValueDataType,
+        encode_value_owned,
+    };
+    use dialog_search_tree::Delta;
+    use dialog_storage::{Blake3Hash, MemoryStorageBackend, StorageBackend};
+    use futures_util::{TryStreamExt, stream};
+
+    /// Manufactures a tree whose persisted nodes carry both valid facts and
+    /// crafted entries with invalid entities, written through the TREE layer —
+    /// below the artifacts layer's validating constructors — exactly as a
+    /// buggy or hostile writer would produce them. The entities cover both
+    /// failure classes: a string that is no URI at all, and one that parses
+    /// but is not its own canonical rendering.
+    async fn poisoned_tree()
+    -> anyhow::Result<(ArtifactTree, MemoryStorageBackend<Blake3Hash, Vec<u8>>)> {
+        let mut store = MemoryStorageBackend::default();
+        let mut delta = Delta::zero();
+        let mut tree = ArtifactTree::empty();
+
+        let valid: Vec<Instruction> = ["user:alice", "user:bob", "user:carol"]
+            .into_iter()
+            .map(|of| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("attribute"),
+                    of: of.parse().expect("entity"),
+                    is: Value::String(of.to_string()),
+                    cause: None,
+                })
+            })
+            .collect();
+        tree.apply(&mut store, &mut delta, stream::iter(valid))
+            .await?;
+
+        let corrupt = [
+            b"not a uri at all".to_vec(),
+            b"HTTPS://Example.com/".to_vec(),
+        ];
+        let mut entries = Vec::new();
+        for entity in corrupt {
+            // All three orderings, as a real writer would index a fact, so
+            // the poison is visible whichever index a selector dispatches to.
+            for tag in [ENTITY_KEY_TAG, ATTRIBUTE_KEY_TAG, VALUE_KEY_TAG] {
+                let parts = KeyParts {
+                    tag,
+                    entity: entity.clone(),
+                    attribute: b"user/name".to_vec(),
+                    value_type: ValueDataType::String,
+                    value: ValuePayload::Inline(encode_value_owned(&Value::String("evil".into()))),
+                    version: None,
+                };
+                entries.push((
+                    Key::from(build_key(&parts)),
+                    State::Added(Datum {
+                        cause: None,
+                        blob: None,
+                        version: None,
+                        collapsed: vec![],
+                        supersedes: vec![],
+                        retraction: false,
+                    }),
+                ));
+            }
+        }
+        tree.record(&mut store, &mut delta, entries).await?;
+
+        for (_, buffer) in delta.flush() {
+            store
+                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                .await?;
+        }
+        Ok((tree, store))
+    }
+
+    /// The owned scan silently skips manufactured corrupt rows: every valid
+    /// fact comes back, no row errors, and the corrupt entries are absent.
+    #[dialog_common::test]
+    async fn it_skips_corrupt_rows_in_owned_scans() -> anyhow::Result<()> {
+        let (tree, store) = poisoned_tree().await?;
+        let selector = ArtifactSelector::new().the("user/name".parse()?);
+        let rows: Vec<Artifact> = tree
+            .scan_owned(store, spill_cache(), selector)
+            .try_collect()
+            .await?;
+        let mut entities: Vec<String> = rows.iter().map(|row| row.of.to_string()).collect();
+        entities.sort();
+        assert_eq!(entities, ["user:alice", "user:bob", "user:carol"]);
+        Ok(())
+    }
+
+    /// The view scan yields every row without paying validation (corrupt
+    /// included), and `.owned()` — the query engine's materialization — is
+    /// where the corrupt ones drop out.
+    #[dialog_common::test]
+    async fn it_skips_corrupt_rows_when_materializing_views() -> anyhow::Result<()> {
+        let (tree, store) = poisoned_tree().await?;
+        let selector = ArtifactSelector::new().the("user/name".parse()?);
+
+        let views: Vec<_> = tree
+            .clone()
+            .scan(store.clone(), spill_cache(), selector.clone())
+            .try_collect()
+            .await?;
+        assert_eq!(views.len(), 5, "corrupt rows still scan as views");
+
+        let rows: Vec<Artifact> = tree
+            .scan(store, spill_cache(), selector)
+            .owned()
+            .try_collect()
+            .await?;
+        assert_eq!(rows.len(), 3, "materialization drops the corrupt rows");
+        Ok(())
     }
 }

@@ -391,11 +391,25 @@ impl ArtifactView {
             (None, Some(_)) => challenger,
             _ => {
                 // Causes are equal: the fact hash is the deterministic
-                // tiebreaker.
-                if Cause::from(&self.to_owned()?) >= Cause::from(&challenger.to_owned()?) {
-                    self
-                } else {
-                    challenger
+                // tiebreaker. The hash needs materialization, which is where
+                // a corrupt stored row (`CorruptEntry`) surfaces — such a row
+                // must be invisible to readers, so it LOSES to any
+                // materializable rival. Two corrupt rows elect either (the
+                // winner fails materialization downstream and is skipped
+                // there); any other error propagates.
+                use DialogArtifactsError::CorruptEntry;
+                match (self.to_owned(), challenger.to_owned()) {
+                    (Ok(a), Ok(b)) => {
+                        if Cause::from(&a) >= Cause::from(&b) {
+                            self
+                        } else {
+                            challenger
+                        }
+                    }
+                    (Ok(_), Err(CorruptEntry(_))) => self,
+                    (Err(CorruptEntry(_)), Ok(_)) => challenger,
+                    (Err(CorruptEntry(_)), Err(CorruptEntry(_))) => self,
+                    (Err(error), _) | (_, Err(error)) => return Err(error),
                 }
             }
         })
@@ -415,11 +429,26 @@ pub trait ArtifactViewStream:
     Stream<Item = Result<ArtifactView, DialogArtifactsError>> + Sized
 {
     /// Materializes every row into an owned [`Artifact`].
+    ///
+    /// A row whose stored bytes fail read-side validation
+    /// ([`CorruptEntry`](DialogArtifactsError::CorruptEntry) — e.g. an entity
+    /// that is not a canonical URI) is SKIPPED with a warning rather than
+    /// yielded as an error: a corrupt or foreign-written entry in a tree must
+    /// not fail every query that ranges over it. All other errors pass
+    /// through.
     fn owned(self) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + ConditionalSend
     where
         Self: ConditionalSend,
     {
-        self.map(|row| row.and_then(|view| view.to_owned()))
+        self.filter_map(|row| async move {
+            match row.and_then(|view| view.to_owned()) {
+                Err(DialogArtifactsError::CorruptEntry(reason)) => {
+                    tracing::warn!(%reason, "ignoring corrupt stored row");
+                    None
+                }
+                other => Some(other),
+            }
+        })
     }
 }
 
@@ -431,15 +460,29 @@ impl<S> ArtifactViewStream for S where
 /// Extracts the entity and attribute from a key view, decoding the raw UTF-8
 /// key columns.
 fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Attribute), DialogArtifactsError> {
-    // The key bytes are this crate's own normalized output, so the entity
-    // skips the URL parse (see `Uri::from_stored`).
+    // These bytes came out of the tree: every validation failure here —
+    // non-UTF-8 columns, a non-canonical entity, an attribute breaking the
+    // attribute invariants — marks a corrupt or foreign-written entry, so it
+    // is classified `CorruptEntry` and scan paths may ignore the row.
     let of = Entity::from_stored(from_utf8(key.entity().raw()).map_err(|error| {
-        DialogArtifactsError::InvalidEntity(format!("entity key is not UTF-8: {error}"))
+        DialogArtifactsError::CorruptEntry(format!("entity key is not UTF-8: {error}"))
     })?)?;
     let the = Attribute::from_str(from_utf8(key.attribute().raw()).map_err(|error| {
-        DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
-    })?)?;
+        DialogArtifactsError::CorruptEntry(format!("attribute key is not UTF-8: {error}"))
+    })?)
+    .map_err(as_corrupt_entry)?;
     Ok((of, the))
+}
+
+/// Reclassifies a stored column's validation failure as
+/// [`CorruptEntry`](DialogArtifactsError::CorruptEntry). Used only where the
+/// failing bytes are known to have come out of the tree; the underlying
+/// validators keep their caller-error variants for ingest paths.
+fn as_corrupt_entry(error: DialogArtifactsError) -> DialogArtifactsError {
+    match error {
+        already @ DialogArtifactsError::CorruptEntry(_) => already,
+        other => DialogArtifactsError::CorruptEntry(format!("{other}")),
+    }
 }
 
 /// Reconstructs an [`Artifact`] from a single borrowed parse of the key's
@@ -455,14 +498,15 @@ fn reconstruct(
     datum: &Datum,
     spilled: Option<Vec<u8>>,
 ) -> Result<Artifact, DialogArtifactsError> {
-    // The key bytes are this crate's own normalized output, so the entity
-    // skips the URL parse (see `Uri::from_stored`).
+    // These bytes came out of the tree — validation failures are classified
+    // `CorruptEntry` (an ignorable row); see `entity_attribute`.
     let of = Entity::from_stored(from_utf8(&parts.entity).map_err(|error| {
-        DialogArtifactsError::InvalidEntity(format!("entity key is not UTF-8: {error}"))
+        DialogArtifactsError::CorruptEntry(format!("entity key is not UTF-8: {error}"))
     })?)?;
     let the = Attribute::from_str(from_utf8(&parts.attribute).map_err(|error| {
-        DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
-    })?)?;
+        DialogArtifactsError::CorruptEntry(format!("attribute key is not UTF-8: {error}"))
+    })?)
+    .map_err(as_corrupt_entry)?;
 
     let is = decode_value_parts(parts, spilled)?;
 
@@ -512,4 +556,58 @@ pub(crate) fn decode_value_parts(
             value
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+    use crate::key::varkey::{ValuePayload, build_key};
+    use crate::{ValueDataType, encode_value_owned};
+
+    fn view(entity: &[u8]) -> ArtifactView {
+        let parts = varkey::KeyParts {
+            tag: ENTITY_KEY_TAG,
+            entity: entity.to_vec(),
+            attribute: b"user/name".to_vec(),
+            value_type: ValueDataType::String,
+            value: ValuePayload::Inline(encode_value_owned(&Value::String("v".into()))),
+            version: None,
+        };
+        ArtifactView::new(
+            Key::from(build_key(&parts)),
+            Datum {
+                cause: None,
+                blob: None,
+                version: None,
+                collapsed: vec![],
+                supersedes: vec![],
+                retraction: false,
+            },
+            None,
+        )
+    }
+
+    /// In a cause-tied election a corrupt stored row (an entity that fails
+    /// read-side validation) loses to a materializable rival from either
+    /// side, and two corrupt rows still elect without erroring (the winner
+    /// is dropped at materialization instead).
+    #[dialog_common::test]
+    fn it_elects_the_valid_row_over_a_corrupt_one() {
+        let valid = view(b"user:alice");
+        let corrupt = view(b"not a uri at all");
+
+        let winner = corrupt.clone().elect(valid.clone()).expect("elects");
+        assert!(winner.to_owned().is_ok(), "valid beats corrupt challenger");
+        let winner = valid.elect(corrupt.clone()).expect("elects");
+        assert!(winner.to_owned().is_ok(), "valid beats corrupt incumbent");
+
+        let winner = corrupt.clone().elect(corrupt).expect("still elects");
+        assert!(matches!(
+            winner.to_owned(),
+            Err(DialogArtifactsError::CorruptEntry(_))
+        ));
+    }
 }

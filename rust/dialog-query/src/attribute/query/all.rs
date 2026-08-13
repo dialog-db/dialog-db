@@ -14,7 +14,7 @@ use crate::{
     Binding, Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value,
     try_stream,
 };
-use dialog_artifacts::{Artifact, Cause, Select};
+use dialog_artifacts::{Artifact, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use serde::{Deserialize, Serialize};
@@ -305,8 +305,18 @@ impl AttributeQueryAll {
                 for await artifact in stream {
                     // Every admitted row becomes a binding, so each one
                     // materializes exactly once here — the merge and
-                    // tombstone layers upstream never did.
-                    let artifact = artifact?.to_owned()?;
+                    // tombstone layers upstream never did. A row whose
+                    // stored bytes fail validation (`CorruptEntry`) is a
+                    // corrupt or foreign-written tree entry: ignore it
+                    // rather than failing the query.
+                    let artifact = match artifact?.to_owned() {
+                        Ok(artifact) => artifact,
+                        Err(DialogArtifactsError::CorruptEntry(reason)) => {
+                            tracing::warn!(%reason, "ignoring corrupt stored row");
+                            continue;
+                        }
+                        Err(error) => Err(error)?,
+                    };
                     // A typed `is` slot filters facts whose value
                     // falls outside the kind.
                     if !selector.admits(&artifact.is) {

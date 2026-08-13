@@ -24,9 +24,12 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, make_reference, mutable_slice};
 /// [`url::Url`] once at every ingest boundary ([`FromStr`], deserialization),
 /// and what is stored is the parser's normalized rendering. Strings read back
 /// out of the index are exactly these normalized renderings, so the read path
-/// re-wraps them via [`from_stored`](Uri::from_stored) without paying a URL
-/// parse per row — validation happens where untrusted data enters, not where
-/// the store's own data comes back.
+/// admits them via [`from_stored`](Uri::from_stored), which verifies they are
+/// canonical (parse + equality with the parse's own rendering) and adopts the
+/// stored string without re-rendering it. A stored string that fails that
+/// check is a corrupt or foreign-written entry; it is rejected as
+/// [`CorruptEntry`](DialogArtifactsError::CorruptEntry) so readers can ignore
+/// the row. Either way a [`Uri`] holds a valid canonical URI by construction.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Uri(Box<str>);
@@ -71,19 +74,33 @@ impl Uri {
             .map_err(|error| DialogArtifactsError::InvalidEntity(format!("{error}")))
     }
 
-    /// Wraps a string ALREADY KNOWN to be a normalized URI — one this crate
-    /// itself wrote into the index — without re-running the URL parse.
+    /// Builds a [`Uri`] from a string read back out of the index, validating
+    /// that it is a URI in CANONICAL form: it parses as a [`url::Url`] and it
+    /// is exactly the parser's own rendering of itself.
     ///
-    /// Every stored entity/attribute string was produced from a parsed,
-    /// normalized [`url::Url`] on the write path ([`FromStr`] or
-    /// deserialization), and `url`'s normalization is idempotent, so
-    /// re-wrapping the stored rendering is exactly equivalent to re-parsing
-    /// it — minus the parse. This is the materialization fast path: a scan
-    /// reconstructing N rows calls this N times where `from_str` would pay
-    /// N URL parses. It must NEVER be fed data from outside the store; any
-    /// external string goes through [`FromStr`].
-    pub(crate) fn from_stored(s: &str) -> Self {
-        Self(s.into())
+    /// Every entity string this crate writes into the index is the normalized
+    /// rendering of a parsed [`url::Url`] ([`FromStr`] or deserialization
+    /// stores nothing else), so for our own data the canonicality check always
+    /// passes and the stored string is adopted as-is — no re-render, no second
+    /// allocation. A string that fails either check did not come from this
+    /// writer: the entry is corrupt or foreign, and the error is
+    /// [`CorruptEntry`](DialogArtifactsError::CorruptEntry) so scan paths can
+    /// ignore the row rather than fail the query. An [`Entity`](crate::Entity)
+    /// therefore holds a valid canonical URI by construction on every path,
+    /// stored reads included.
+    pub(crate) fn from_stored(s: &str) -> Result<Self, DialogArtifactsError> {
+        let url: Url = s.parse().map_err(|error| {
+            DialogArtifactsError::CorruptEntry(format!("stored entity is not a URI: {error}"))
+        })?;
+        // Canonicality subsumes the whitespace/control guard in `from_str`:
+        // `url::Url::parse` strips those characters, so a string containing
+        // them can never equal its own parse's rendering.
+        if url.as_str() != s {
+            return Err(DialogArtifactsError::CorruptEntry(format!(
+                "stored entity is not a canonical URI rendering: {s:?}"
+            )));
+        }
+        Ok(Self(s.into()))
     }
 
     /// The URI as its normalized string.
@@ -171,13 +188,13 @@ impl FromStr for Uri {
         // scan-and-materialize by ~31% while buying joins only ~8% at
         // 1000 rows (their gains come from the engine, not this parse) —
         // and sieve eviction or second-sight admission only shrank, never
-        // removed, the loss. (Strings coming back OUT of the index skip
-        // this entirely via `from_stored`: they are this parser's own
-        // normalized output, so there is nothing left to validate.)
+        // removed, the loss. (Strings coming back OUT of the index go
+        // through `from_stored` instead, which validates canonicality
+        // without re-rendering.)
         //
         // What is stored is the parser's normalized rendering, not the
-        // input string — that is what makes `from_stored`'s no-parse
-        // round-trip sound.
+        // input string — that is what makes `from_stored`'s canonicality
+        // check exact: our own writes always pass it.
         let url: Url = s
             .parse()
             .map_err(|error| DialogArtifactsError::InvalidUri(format!("{error}")))?;
@@ -197,6 +214,34 @@ impl TryFrom<String> for Uri {
 mod tests {
     use crate::Entity;
     use anyhow::Result;
+
+    use super::Uri;
+    use crate::DialogArtifactsError;
+
+    /// `from_stored` admits exactly the canonical renderings `from_str`
+    /// stores, and rejects both non-URIs and valid-but-non-canonical
+    /// strings as `CorruptEntry`.
+    #[test]
+    fn it_validates_stored_strings_as_canonical_uris() {
+        assert!(Uri::from_stored("https://google.com/").is_ok());
+        assert!(Uri::from_stored("did:key:z6MkExample").is_ok());
+        assert!(matches!(
+            Uri::from_stored("not a uri"),
+            Err(DialogArtifactsError::CorruptEntry(_))
+        ));
+        // Parses as a URL, but is not the parser's own rendering of itself.
+        assert!(matches!(
+            Uri::from_stored("HTTPS://Google.com"),
+            Err(DialogArtifactsError::CorruptEntry(_))
+        ));
+
+        // Whatever `from_str` normalizes and stores, `from_stored` admits:
+        // the canonicality check is exact for this writer's own output.
+        for raw in ["HTTPS://Google.com", "https://example.com", "user:alice"] {
+            let parsed: Uri = raw.parse().expect("parses");
+            assert!(Uri::from_stored(parsed.as_str()).is_ok(), "{raw}");
+        }
+    }
 
     #[test]
     fn it_can_convert_to_key_bytes() -> Result<()> {
