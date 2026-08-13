@@ -403,7 +403,7 @@ mod tests {
     /// Per-link novelty surfaces on link rows: ops route to the link
     /// whose range holds their key, the counts land per link, and the
     /// node summary carries the total.
-    #[test]
+    #[dialog_common::test]
     fn it_reports_per_link_novelty() -> anyhow::Result<()> {
         // Two keys in sort order; the second link's separator is the
         // larger key itself (a key is a prefix of itself), so `low`
@@ -456,7 +456,7 @@ mod tests {
 
     /// Key decomposition helpers: a full entity key parses into its
     /// components; separators stay lenient.
-    #[test]
+    #[dialog_common::test]
     fn it_decomposes_key_components() {
         let key = artifact_key("value");
         let components = key_components(&key);
