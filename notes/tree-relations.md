@@ -235,7 +235,6 @@ the artifacts-side module carrying the `Load` effect is named
 
 Original sketch:
 
-Original sketch:
 
 ```no_run
 # use dialog_query::{Cells, EvaluationError};
@@ -330,8 +329,9 @@ the mutable world (facts + the head flag).
 ## The tree resolver library
 
 Resolvers (all inputs `Required`; every row self-contained, in tonk's
-proven shape; large segments streamed, not collected — nodes can be
-~150 KB):
+proven shape; rows stream to the join, with the working set bounded to
+one node's decoded summaries at a time — nodes are capped near
+~150 KB, so this is a bounded transient, not an unbounded collect):
 
 - **`tree/node`** — input `of` (node reference); one row:
   `kind` (`"index"`/`"segment"`), `size` (encoded byte length),
@@ -625,8 +625,12 @@ revision-projection and subscription tests):
   cache (as `Subscription::touched` does, `subscription.rs:509-526`)
   so remote fallback and caching match branch reads; a bespoke fetch
   path would fork behavior.
-- Large nodes: stream projected rows; do not collect a 150 KB
-  segment's keys into a `Vec` eagerly.
+- Large nodes: projected rows stream to the join; the `inspect_*`
+  helpers do materialize one node's summaries per call (a
+  self-referential streaming iterator over the rkyv view isn't worth
+  the surgery), which is fine because the working set is bounded by
+  the segment cap — but never buffer more than a single node's worth,
+  and never accumulate across input rows.
 - `Formula::compute` stays sync and storage-free; do not "extend"
   formulas with async instead of adding the resolver kind — the
   maintainer's `Inert` classification and the demand story both lean

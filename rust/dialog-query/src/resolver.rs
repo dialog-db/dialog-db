@@ -75,6 +75,14 @@ fn blank() -> Term<Any> {
     Term::blank()
 }
 
+/// The kind of a block-reference input cell: base58 `String` or raw
+/// 32-byte `Bytes` — the union the evaluator's `node_reference`
+/// actually accepts, so rule type inference admits chaining a
+/// decomposition formula's bytes output straight into a resolver.
+fn reference_kind() -> Kind {
+    Kind::from(ValueType::String).union(&Kind::from(ValueType::Bytes))
+}
+
 /// The `tree/node` resolver: describe the node behind a reference.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeNodeQuery {
@@ -309,7 +317,7 @@ pub enum ResolverQuery {
 static TREE_NODE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
-            .cell("of", Some(Kind::from(ValueType::String)))
+            .cell("of", Some(reference_kind()))
             .the("Node reference: base58 of the node's content hash.")
             .required();
         builder
@@ -333,7 +341,7 @@ static TREE_NODE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 static TREE_SPAN_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
-            .cell("of", Some(Kind::from(ValueType::String)))
+            .cell("of", Some(reference_kind()))
             .the("Node reference of the index node.")
             .required();
         builder
@@ -363,7 +371,7 @@ static TREE_SPAN_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 static TREE_KEY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
-            .cell("of", Some(Kind::from(ValueType::String)))
+            .cell("of", Some(reference_kind()))
             .the("Node reference of the segment node.")
             .required();
         builder
@@ -381,7 +389,7 @@ static TREE_KEY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 static TREE_ENTRY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
-            .cell("of", Some(Kind::from(ValueType::String)))
+            .cell("of", Some(reference_kind()))
             .the("Node reference of the segment node.")
             .required();
         builder
@@ -420,7 +428,7 @@ static TREE_ENTRY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 static TREE_VALUE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
-            .cell("of", Some(Kind::from(ValueType::String)))
+            .cell("of", Some(reference_kind()))
             .the("The spilled value's 32-byte block reference.")
             .required();
         builder
@@ -435,7 +443,7 @@ static TREE_VALUE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 static TREE_BLOB_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
-            .cell("of", Some(Kind::from(ValueType::String)))
+            .cell("of", Some(reference_kind()))
             .the("Node reference of the segment node.")
             .required();
         builder
@@ -456,7 +464,7 @@ static TREE_BLOB_CELLS: LazyLock<Cells> = LazyLock::new(|| {
 static TREE_MANIFEST_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
-            .cell("of", Some(Kind::from(ValueType::String)))
+            .cell("of", Some(reference_kind()))
             .the("Node reference.")
             .required();
         builder
@@ -644,8 +652,10 @@ impl ResolverQuery {
     /// Per input row: resolve the node reference, perform the
     /// idempotent [`Load`] effect through the environment, decode the
     /// block, and project one output row per result — a segment asked
-    /// for spans, an index asked for keys, or an absent block all
-    /// yield zero rows.
+    /// for spans, an index asked for keys, an absent block, or a
+    /// resolvable reference whose block is not a tree node at all
+    /// (e.g. a spilled value block joined into `tree/node`) all yield
+    /// zero rows, mirroring the malformed-reference convention above.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         env: &'a Env,
@@ -666,7 +676,9 @@ impl ResolverQuery {
                 };
                 match &resolver {
                     ResolverQuery::TreeNode(query) => {
-                        let node = inspect::inspect_node(bytes)?;
+                        let Ok(node) = inspect::inspect_node(bytes) else {
+                            continue;
+                        };
                         let row = project(&base, &[
                             (&query.kind, Value::String(node.kind.into())),
                             (&query.size, Value::UnsignedInt(node.size.into())),
@@ -679,7 +691,10 @@ impl ResolverQuery {
                         }
                     }
                     ResolverQuery::TreeSpan(query) => {
-                        for span in inspect::inspect_spans(bytes)? {
+                        let Ok(spans) = inspect::inspect_spans(bytes) else {
+                            continue;
+                        };
+                        for span in spans {
                             let row = project(&base, &[
                                 (&query.at, Value::UnsignedInt(span.at.into())),
                                 (&query.node, Value::String(span.node.to_base58())),
@@ -695,7 +710,10 @@ impl ResolverQuery {
                         }
                     }
                     ResolverQuery::TreeKey(query) => {
-                        for (at, entry) in inspect::inspect_keys(bytes)?.into_iter().enumerate() {
+                        let Ok(keys) = inspect::inspect_keys(bytes) else {
+                            continue;
+                        };
+                        for (at, entry) in keys.into_iter().enumerate() {
                             let row = project(&base, &[
                                 (&query.at, Value::UnsignedInt(at as u128)),
                                 (&query.key, Value::Bytes(entry.key)),
@@ -707,7 +725,10 @@ impl ResolverQuery {
                         }
                     }
                     ResolverQuery::TreeEntry(query) => {
-                        for entry in inspect::inspect_entries(bytes)? {
+                        let Ok(entries) = inspect::inspect_entries(bytes) else {
+                            continue;
+                        };
+                        for entry in entries {
                             let spill = entry
                                 .spill
                                 .map(|reference| reference.to_base58())
@@ -745,7 +766,10 @@ impl ResolverQuery {
                         }
                     }
                     ResolverQuery::TreeBlob(query) => {
-                        for record in inspect::inspect_blob_records(bytes)? {
+                        let Ok(records) = inspect::inspect_blob_records(bytes) else {
+                            continue;
+                        };
+                        for record in records {
                             let row = project(&base, &[
                                 (&query.at, Value::UnsignedInt(record.at.into())),
                                 (&query.blob, Value::Bytes(record.blob)),
@@ -758,7 +782,9 @@ impl ResolverQuery {
                         }
                     }
                     ResolverQuery::TreeManifest(query) => {
-                        let manifest = inspect::inspect_manifest(bytes)?;
+                        let Ok(manifest) = inspect::inspect_manifest(bytes) else {
+                            continue;
+                        };
                         let row = project(&base, &[
                             (&query.version, Value::UnsignedInt(manifest.version.into())),
                             (&query.fanout_n, Value::UnsignedInt(manifest.fanout_n.into())),
