@@ -229,6 +229,64 @@ Two properties come along for free:
   `of(list) + the_starting_with("test.list/")` range scan — members
   arrive already in list order.
 
+## The dictionary-scan spike (PR #338) and the typed-attribute ADR
+
+Two prior explorations bear directly on the interface, and together
+they answer the open ergonomics questions better than the plan below
+originally did:
+
+- **PR [#338](https://github.com/dialog-db/dialog-db/pull/338)
+  "feat: open dictionary like concepts"** (`feat/open-record`, draft,
+  stacked on `feat/type-inference-v2`):
+  - `Attribute` reshaped as a **(domain, name) `Symbol` pair** with
+    `.split()`, and the selector grows two slots —
+    `ArtifactSelector::with_domain(d).with_name(n)` — so *domain-only*
+    selection is the first-class "all facts under this domain" scan,
+    no string-prefix construction involved.
+  - `Directory<T: Scalar>` — a `Symbol`-keyed collection as a concept
+    **field**: content type `{"directory": "Text"}`
+    (`Composite::Directory(Type)` in the type system), each matched
+    row binding one `(name, value)` entry, aggregation into a
+    `BTreeMap<Symbol, T>` at concept realize.
+- **ADR 005** (`adr-attribute-types` branch): attributes as a variant
+  — `name(utf8) | reference(0xFF ‖ digest) | position(0xFE ‖
+  fractional-index)` — giving set membership and ordered relations
+  their own attribute *types*, distinguishable by tag byte, opening
+  storage/merge optimizations no userland prefix convention can reach.
+  (It cites this very fractional-indexing design for `position`.)
+
+### How this reshapes the ordered-relations interface
+
+An ordered relation **is a `Directory` whose name half is a
+position**. `BTreeMap<Symbol, T>` already iterates in `Symbol` byte
+order, and positions are byte-ordered by construction — so a
+`Directory` field over a position-named domain realizes an ordered
+collection *with no additional machinery*: the domain-only scan is the
+single contiguous range, the name slot binds the position directly
+(retiring `dialog/position-parts` string splitting for this path),
+and the aggregation step yields members already sorted.
+
+Concretely, the adapted plan:
+
+- Adopt #338's `(domain, name)` decomposition and two-slot selector as
+  the scan interface; the ordered-members query is then "domain-bound,
+  name-free" — a first-class premise shape instead of a
+  `starts_with` constraint over a joined string.
+- The ordered concept field is `Directory<T>` with position-typed
+  names — either directly, or as a thin `Sequence<T>` refinement that
+  validates names as positions and exposes values-in-order iteration.
+  Insertion sugar hangs off the same field: derive the position with
+  `insert(&bias, &a..&b)` and assert under `(domain, position)`.
+- ADR 005's `position` attribute *type* is the storage-level endgame:
+  it removes the position/word ambiguity found while testing
+  `dialog/position-parts` (any alphanumeric word starting with a
+  letter is a syntactically valid position — with a `0xFE` tag the
+  ambiguity vanishes), keeps user-visible names out of the position
+  namespace entirely, and licenses merge/layout optimizations. The
+  interim text encoding (`domain/<position>` predicates) stays
+  wire-compatible with everything above and migrates mechanically
+  when the tagged types land.
+
 ## Surfacing plan
 
 Phased so each step is useful alone:
@@ -269,7 +327,11 @@ Phased so each step is useful alone:
    partial view, whatever neighbors are visible — the algorithm's
    graceful-degradation property is precisely that this stays
    correct.)
-5. **Concept integration** — the real ergonomics target: an *ordered*
+5. **Concept integration** — superseded in shape by PR #338's
+   `Directory` fields (see the dictionary-scan section above): the
+   ordered field is a position-named directory, realized sorted for
+   free. Original sketch kept for reference below.
+   **Concept integration (original)** — the real ergonomics target: an *ordered*
    field kind in concept descriptors (`items: { the: "todo/item", as:
    entity, ordered: true }`) that compiles to the prefix scan +
    decomposition + `(position, member)` sort and realizes conclusions
