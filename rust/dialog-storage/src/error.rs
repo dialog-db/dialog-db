@@ -1,7 +1,7 @@
 use dialog_capability::access::AuthorizeError;
+use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::memory::MemoryError;
-use dialog_effects::service::Rejection;
 use thiserror::Error;
 
 /// The common error type used by this crate

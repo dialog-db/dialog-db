@@ -48,9 +48,8 @@ pub enum Rejection {
 impl Rejection {
     /// Whether retrying the identical request could succeed.
     ///
-    /// True only for [`Rejection::Unavailable`]. A conflict needs the
-    /// request re-formed against current state, and an unrecognized
-    /// failure is not a known-transient one.
+    /// True only for [`Rejection::Unavailable`]. An unrecognized
+    /// failure is not a known-transient one, so it does not count.
     pub fn is_transient(&self) -> bool {
         matches!(self, Rejection::Unavailable { .. })
     }

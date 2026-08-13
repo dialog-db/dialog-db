@@ -1,7 +1,7 @@
 use dialog_capability::access::AuthorizeError;
+use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::memory::MemoryError;
-use dialog_effects::service::Rejection;
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::DialogStorageError;
 use thiserror::Error;

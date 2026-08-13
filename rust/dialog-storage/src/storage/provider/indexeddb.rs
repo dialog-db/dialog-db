@@ -374,7 +374,9 @@ impl From<IndexedDbError> for CredentialError {
 /// the material needed to decide could not be fetched.
 impl From<IndexedDbError> for AuthorizeError {
     fn from(e: IndexedDbError) -> Self {
-        Self::Malformed {
+        // The database failing is our machinery, not the caller's
+        // material.
+        Self::Unavailable {
             detail: e.to_string(),
         }
     }

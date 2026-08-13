@@ -189,7 +189,7 @@ impl From<StorageError> for CredentialError {
 /// was weighed and refused, the material needed to decide was unavailable.
 impl From<CredentialError> for AuthorizeError {
     fn from(e: CredentialError) -> Self {
-        Self::Malformed {
+        Self::Unavailable {
             detail: e.to_string(),
         }
     }

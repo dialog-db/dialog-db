@@ -11,92 +11,37 @@ use dialog_capability::{
     SiteFork, SiteId, Subject,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::Rejection;
 use dialog_effects::authority::{self, OperatorExt};
-use dialog_effects::service::Rejection;
 use dialog_remote_s3::{Permit, S3Error};
-use dialog_varsig::Did;
-use serde::Deserialize;
 
-const MAX_SERVICE_ERROR_BODY_BYTES: usize = 8 * 1024;
-const MALFORMED_SERVICE_ERROR_MESSAGE: &str = "Service returned a malformed error response";
+const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 
-#[derive(Deserialize)]
-struct ServiceErrorEnvelope {
-    error: ServiceErrorBody,
-}
-
-#[derive(Deserialize)]
-struct ServiceErrorBody {
-    code: Option<String>,
-    message: Option<String>,
-}
-
-/// Classify a non-success response into the reason it denotes.
+/// Read the reason a request was refused.
 ///
-/// This is the only place in the stack that reads a status code. Above
-/// it a caller sees *why* its request was not carried out and never how
-/// that answer travelled, which is the point: the same reasons arise
-/// against a local archive that speaks no HTTP.
+/// The reason travels as itself. There is no code table here and no
+/// status codes: an [`AuthorizeError`] built on the other side arrives
+/// as the same value, so nothing in this crate has to know a vocabulary
+/// of wire names, and adding a reason does not mean teaching two
+/// codebases a new string.
 ///
-/// The access-denial codes become real [`AuthorizeError`] values rather
-/// than a parallel vocabulary. The DIDs they carry come from the
-/// invocation we sent, not from the response: the service says only
-/// *that* a proof was refused, and we already know whose proof it was
-/// and what it reached for.
-///
-/// An unrecognized code becomes [`Rejection::Unclassified`]: what lands
-/// there is exactly what has no agreed meaning, and guessing would
-/// silently change what callers believe the day the service starts
-/// saying something new. `SYNC_CONFLICT` is among them here -- redeeming
-/// a permit is not a compare-and-swap, and the CAS path raises
-/// `VersionMismatch` from its own 412 rather than routing through this.
-fn classify_response(status: u16, body: &[u8], subject: &Did, issuer: &Did) -> S3Error {
-    let bounded = &body[..body.len().min(MAX_SERVICE_ERROR_BODY_BYTES)];
-    let (code, message) = match serde_json::from_slice::<ServiceErrorEnvelope>(bounded) {
-        Ok(envelope) => (
-            envelope.error.code,
-            envelope
-                .error
-                .message
-                .filter(|message| !message.is_empty())
-                .unwrap_or_else(|| MALFORMED_SERVICE_ERROR_MESSAGE.to_string()),
-        ),
-        Err(_) => (None, MALFORMED_SERVICE_ERROR_MESSAGE.to_string()),
-    };
+/// A body that does not parse becomes [`Rejection::Unclassified`] rather
+/// than being guessed at. That is also what an older responder gets: it
+/// degrades to "something went wrong and we cannot say what", which is
+/// true, instead of to a specific reason that might not be.
+fn read_rejection(status: u16, body: &[u8]) -> S3Error {
+    let bounded = &body[..body.len().min(MAX_ERROR_BODY_BYTES)];
 
-    match (code.as_deref(), status) {
-        // Authority was withdrawn: re-presenting the same proof cannot
-        // help, so this is terminal rather than retryable.
-        (Some("CREDENTIAL_REVOKED" | "DEVICE_REVOKED"), _) => AuthorizeError::Revoked {
-            subject: subject.clone(),
-        }
-        .into(),
-        // The proof does not reach this subject. Nothing was withdrawn,
-        // so a caller holding a broader proof can retry with it.
-        (Some("AUDIENCE_MISMATCH" | "SUBJECT_NOT_ALLOWED"), _) => AuthorizeError::InvalidAudience {
-            claimed: issuer.clone(),
-            authorized: subject.clone(),
-        }
-        .into(),
-        // Refused without naming a reason. `UnprovenSubject` is the
-        // honest reading: the service would not say which proof it
-        // wanted, only that ours did not satisfy it.
-        (None, 401 | 403) => AuthorizeError::UnprovenSubject {
-            claimed: issuer.clone(),
-            authorized: subject.clone(),
-        }
-        .into(),
-        (Some("REVOCATION_UNAVAILABLE" | "SYNC_UNAVAILABLE"), _) | (_, 503) => {
-            Rejection::Unavailable { reason: message }.into()
-        }
-        _ => Rejection::Unclassified {
-            detail: match code {
-                Some(code) => format!("{code} ({status}): {message}"),
-                None => format!("{status}: {message}"),
-            },
-        }
-        .into(),
+    if let Ok(reason) = serde_json::from_slice::<AuthorizeError>(bounded) {
+        return S3Error::Authorization(reason);
     }
+    if let Ok(reason) = serde_json::from_slice::<Rejection>(bounded) {
+        return S3Error::Rejected(reason);
+    }
+
+    S3Error::Rejected(Rejection::Unclassified {
+        detail: format!("responder answered {status} with no reason we could read"),
+    })
 }
 
 use crate::permit_cache::PermitCache;
@@ -129,12 +74,7 @@ impl UcanAuthorization {
         let status = response.status();
         if !status.is_success() {
             let body = response.bytes().await.unwrap_or_default();
-            return Err(classify_response(
-                status.as_u16(),
-                &body,
-                self.0.subject(),
-                self.0.chain().issuer(),
-            ));
+            return Err(read_rejection(status.as_u16(), &body));
         }
 
         let body = response.bytes().await?;
@@ -283,98 +223,87 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use tokio::net::TcpListener;
 
-    fn classify(status: u16, code: &str) -> S3Error {
-        let body = serde_json::json!({
-            "error": { "code": code, "message": "bounded detail" }
-        });
-        classify_response(
-            status,
-            body.to_string().as_bytes(),
-            &did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
-            &did!("key:z6MkfQhLHBSFMuR7bQXTQeqe5kYUW51HpfZeaymgy1zkP2jM"),
-        )
-    }
-
-    // The code table lives here and nowhere else, so this is what pins
-    // it. A service-side rename that slips past this test degrades every
-    // caller to `Unclassified` silently.
+    // The reason travels as itself, so what this pins is the round
+    // trip: whatever the responder built arrives as the same value.
     #[dialog_common::test]
-    async fn it_maps_service_codes_to_reasons() {
-        assert!(matches!(
-            classify(403, "CREDENTIAL_REVOKED"),
-            S3Error::Authorization(AuthorizeError::Revoked { .. })
-        ));
-        assert!(matches!(
-            classify(403, "DEVICE_REVOKED"),
-            S3Error::Authorization(AuthorizeError::Revoked { .. })
-        ));
-        assert!(matches!(
-            classify(403, "AUDIENCE_MISMATCH"),
-            S3Error::Authorization(AuthorizeError::InvalidAudience { .. })
-        ));
-        assert!(matches!(
-            classify(403, "SUBJECT_NOT_ALLOWED"),
-            S3Error::Authorization(AuthorizeError::InvalidAudience { .. })
-        ));
-        assert!(matches!(
-            classify(503, "REVOCATION_UNAVAILABLE"),
-            S3Error::Rejected(Rejection::Unavailable { .. })
-        ));
-    }
+    async fn it_reads_back_the_reason_the_responder_sent() {
+        let sent = AuthorizeError::Revoked {
+            subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+        };
+        let body = serde_json::to_vec(&sent).expect("serializes");
 
-    // Refused with nothing said about why: the honest reading is that
-    // our proof did not satisfy it, not that any particular thing failed.
-    #[dialog_common::test]
-    async fn it_reads_a_bare_refusal_as_an_unproven_subject() {
-        let refused = classify_response(
-            403,
-            b"not json",
-            &did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
-            &did!("key:z6MkfQhLHBSFMuR7bQXTQeqe5kYUW51HpfZeaymgy1zkP2jM"),
-        );
-        assert!(matches!(
-            refused,
-            S3Error::Authorization(AuthorizeError::UnprovenSubject { .. })
-        ));
-    }
-
-    // An unrecognized code must not be guessed at. Folding it into a
-    // named reason would claim knowledge we do not have, and would
-    // change meaning the day the service says something new.
-    #[dialog_common::test]
-    async fn it_does_not_guess_at_codes_it_does_not_know() {
-        assert!(matches!(
-            classify(500, "INTERNAL_ERROR"),
-            S3Error::Rejected(Rejection::Unclassified { .. })
-        ));
-        assert!(matches!(
-            classify(418, "SOMETHING_NEW"),
-            S3Error::Rejected(Rejection::Unclassified { .. })
-        ));
+        let S3Error::Authorization(read) = read_rejection(403, &body) else {
+            panic!("expected an authorization reason");
+        };
+        assert_eq!(read, sent, "the reason arrives as the value that was sent");
     }
 
     #[dialog_common::test]
-    async fn it_bounds_and_rejects_malformed_service_responses() {
-        let mut malformed = vec![b'x'; MAX_SERVICE_ERROR_BODY_BYTES * 2];
-        malformed
-            .extend_from_slice(br#"{"error":{"code":"LATE_CODE","message":"must not parse"}}"#);
+    async fn it_reads_back_a_rejection() {
+        let sent = Rejection::Unavailable {
+            reason: "registry is down".into(),
+        };
+        let body = serde_json::to_vec(&sent).expect("serializes");
 
-        let error = classify_response(
-            502,
-            &malformed,
-            &did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
-            &did!("key:z6MkfQhLHBSFMuR7bQXTQeqe5kYUW51HpfZeaymgy1zkP2jM"),
-        );
-        let rendered = error.to_string();
+        let S3Error::Rejected(read) = read_rejection(503, &body) else {
+            panic!("expected a rejection");
+        };
+        assert_eq!(read, sent);
+    }
+
+    // A responder that speaks the old shape, or none at all, degrades to
+    // "we cannot say" rather than to a specific reason that might be
+    // wrong. Guessing is what the code table used to do.
+    #[dialog_common::test]
+    async fn it_does_not_guess_at_a_body_it_cannot_read() {
+        for body in [
+            &b"not json at all"[..],
+            br#"{"error":{"code":"CREDENTIAL_REVOKED","message":"old shape"}}"#,
+        ] {
+            assert!(
+                matches!(
+                    read_rejection(403, body),
+                    S3Error::Rejected(Rejection::Unclassified { .. })
+                ),
+                "an unreadable body must not become a specific reason"
+            );
+        }
+    }
+
+    #[dialog_common::test]
+    async fn it_bounds_the_body_it_reads() {
+        let mut oversized = vec![b'x'; MAX_ERROR_BODY_BYTES * 2];
+        oversized.extend_from_slice(br#"{"kind":"Revoked","subject":"did:key:zLate"}"#);
+
         assert!(
-            !rendered.contains("LATE_CODE"),
-            "a code past the bound must not be read, got {rendered}"
+            matches!(
+                read_rejection(403, &oversized),
+                S3Error::Rejected(Rejection::Unclassified { .. })
+            ),
+            "a reason past the bound must not be read"
+        );
+    }
+
+    // A responder that has not been updated yet still sends the old
+    // `{code, message}` shape. That degrades to "we cannot say why",
+    // which is true, rather than to a specific reason guessed from a
+    // status code. Worth pinning: it is the behaviour during a rollout
+    // where the two sides are not yet in step.
+    #[dialog_common::test]
+    async fn it_degrades_when_the_responder_speaks_the_old_shape() {
+        let old = br#"{"error":{"code":"CREDENTIAL_REVOKED","message":"Credential revoked"}}"#;
+        let S3Error::Rejected(Rejection::Unclassified { detail }) = read_rejection(403, old) else {
+            panic!("an unreadable body must not become a specific reason");
+        };
+        assert!(
+            !detail.contains("CREDENTIAL_REVOKED"),
+            "and must not smuggle the old code back in, got {detail}"
         );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
-    async fn it_preserves_a_service_response_through_redeem() {
+    async fn it_carries_the_reason_through_redeem() {
         let subject = Ed25519Signer::import(&[41; 32]).await.expect("subject key");
         let operator = Ed25519Signer::import(&[42; 32])
             .await
@@ -413,7 +342,11 @@ mod tests {
             let (mut stream, _) = listener.accept().await.expect("request");
             let mut request = vec![0; 16 * 1024];
             let _ = stream.read(&mut request).await.expect("read request");
-            let body = r#"{"error":{"code":"CREDENTIAL_REVOKED","message":"Credential revoked"}}"#;
+            // What a responder sends now: the reason itself.
+            let reason = AuthorizeError::Revoked {
+                subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+            };
+            let body = serde_json::to_string(&reason).expect("serializes");
             let response = format!(
                 "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -430,16 +363,15 @@ mod tests {
             .await
             .expect_err("redeem is denied");
         server.await.expect("server task");
-        // End to end: the service said CREDENTIAL_REVOKED over HTTP and
-        // the caller receives the reason, with the subject filled in
-        // from the invocation rather than from the response.
+        // End to end over a real socket: the reason the responder built
+        // is the reason the caller receives.
         let S3Error::Authorization(AuthorizeError::Revoked { subject }) = error else {
             panic!("expected a revoked authorization, got {error:?}");
         };
         assert_eq!(
-            &subject,
-            authorization.0.subject(),
-            "the subject comes from the invocation we sent"
+            subject,
+            did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+            "the subject is the one the responder named"
         );
     }
 }

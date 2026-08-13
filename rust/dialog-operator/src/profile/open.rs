@@ -69,7 +69,10 @@ impl OpenProfile {
                 .load()
                 .perform(env)
                 .await
-                .map_err(|e| ProfileError::Storage(e.to_string()))?,
+                .map_err(|e| match e {
+                    storage_fx::StorageError::NotFound(_) => ProfileError::NotFound,
+                    e => ProfileError::Storage(e.to_string()),
+                })?,
             OpenMode::Create => {
                 let signer = Ed25519Signer::generate()
                     .await
@@ -80,7 +83,10 @@ impl OpenProfile {
                     .create(credential)
                     .perform(env)
                     .await
-                    .map_err(|e| ProfileError::Storage(e.to_string()))?
+                    .map_err(|e| match e {
+                        storage_fx::StorageError::AlreadyExists(_) => ProfileError::AlreadyExists,
+                        e => ProfileError::Storage(e.to_string()),
+                    })?
             }
             OpenMode::OpenOrCreate => {
                 let load_result = self.location().load().perform(env).await;

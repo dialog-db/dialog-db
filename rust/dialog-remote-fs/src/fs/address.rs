@@ -67,7 +67,7 @@ impl From<FsAddress> for SiteId {
 async fn open(address: &FsAddress) -> Result<FileSystem, AuthorizeError> {
     FileSystem::open(address.location())
         .await
-        .map_err(|e| AuthorizeError::Malformed {
+        .map_err(|e| AuthorizeError::Unavailable {
             detail: format!("opening directory: {e}"),
         })
 }
@@ -98,7 +98,7 @@ where
         .load()
         .perform(filesystem)
         .await
-        .map_err(|e| AuthorizeError::Malformed {
+        .map_err(|e| AuthorizeError::Unavailable {
             detail: format!(
                 "directory is not an initialized space (no readable credential/key/self): {e}"
             ),
@@ -137,7 +137,7 @@ where
         authority::Identify
             .perform(env)
             .await
-            .map_err(|e| AuthorizeError::Malformed {
+            .map_err(|e| AuthorizeError::Unavailable {
                 detail: e.to_string(),
             })?;
     let profile = identity.profile().clone();

@@ -15,7 +15,7 @@
 
 use std::error::Error;
 
-use crate::service::Rejection;
+use crate::Rejection;
 pub use dialog_capability::{
     Attenuate, Attenuation, Capability, DialogCapabilityPerformError, Effect, Policy, StorageError,
     Subject, access::AuthorizeError,

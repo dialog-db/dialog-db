@@ -76,7 +76,7 @@ impl Certificate for UcanCertificate {
     }
 
     fn encode(&self) -> Result<Vec<u8>, AuthorizeError> {
-        serde_ipld_dagcbor::to_vec(&self.0).map_err(|e| AuthorizeError::Malformed {
+        serde_ipld_dagcbor::to_vec(&self.0).map_err(|e| AuthorizeError::Unavailable {
             detail: format!("failed to encode proof: {e}"),
         })
     }
@@ -240,10 +240,12 @@ impl Authorization<Ucan> for UcanAuthorization {
             builder = builder.not_before(ts);
         }
 
+        // Building and signing our own delegation: ours to get right, so
+        // failing it says nothing about the caller's material.
         let delegation = builder
             .try_build()
             .await
-            .map_err(|e| AuthorizeError::Malformed {
+            .map_err(|e| AuthorizeError::Unavailable {
                 detail: format!("{e:?}"),
             })?;
 

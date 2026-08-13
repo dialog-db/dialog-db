@@ -4,7 +4,7 @@ use std::error::Error;
 
 use thiserror::Error as ThisError;
 
-use crate::service::Rejection;
+use crate::Rejection;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{DialogCapabilityPerformError, StorageError};
 

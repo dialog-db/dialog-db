@@ -17,7 +17,7 @@
 use std::fmt;
 use std::str;
 
-use crate::service::Rejection;
+use crate::Rejection;
 use base58::ToBase58;
 use dialog_capability::access::AuthorizeError;
 pub use dialog_capability::{

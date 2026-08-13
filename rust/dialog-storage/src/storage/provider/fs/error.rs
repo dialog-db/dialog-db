@@ -28,7 +28,10 @@ impl From<FileSystemError> for CredentialError {
 
 impl From<FileSystemError> for AuthorizeError {
     fn from(e: FileSystemError) -> Self {
-        Self::Malformed {
+        // The filesystem failing is our machinery, not the caller's
+        // material: nothing was decided, so this must not read as a
+        // denial.
+        Self::Unavailable {
             detail: e.to_string(),
         }
     }

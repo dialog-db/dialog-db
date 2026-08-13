@@ -164,7 +164,7 @@ where
         let profile = authority::Identify
             .perform(env)
             .await
-            .map_err(|e| AuthorizeError::Malformed {
+            .map_err(|e| AuthorizeError::Unavailable {
                 detail: e.to_string(),
             })?
             .profile()

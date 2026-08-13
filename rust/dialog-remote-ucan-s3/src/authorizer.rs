@@ -53,6 +53,7 @@
 //! ```
 
 use dialog_capability::access::AuthorizeError;
+use dialog_ucan_core::ContainerError;
 use std::collections::BTreeMap;
 
 use dialog_capability::{Capability, Constraint, Did, Policy};
@@ -295,11 +296,17 @@ impl UcanAuthorizer {
             })
         })?;
         chain.verify(&Ed25519KeyResolver).await.map_err(|e| {
-            // The resolver reports why it would not verify; the reason
-            // is not always a bad signature (an unresolvable key is not),
-            // so carry what it said rather than asserting forgery.
-            S3Error::Authorization(AuthorizeError::Malformed {
-                detail: format!("invocation chain did not verify: {e}"),
+            // Two different failures arrive here: their material not
+            // verifying, and our own setup being unable to check it.
+            // Only the first is a statement about their request, so only
+            // the first may read as one.
+            S3Error::Authorization(match e {
+                ContainerError::Invocation(detail) => AuthorizeError::Malformed {
+                    detail: format!("invocation chain did not verify: {detail}"),
+                },
+                ContainerError::Configuration(detail) => AuthorizeError::Unavailable {
+                    detail: format!("could not verify the invocation chain: {detail}"),
+                },
             })
         })?;
 

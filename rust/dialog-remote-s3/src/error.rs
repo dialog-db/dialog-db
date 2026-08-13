@@ -1,10 +1,10 @@
 //! Error types for S3 operations.
 
 use dialog_capability::access::AuthorizeError;
+use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::blob::BlobError;
 use dialog_effects::memory::MemoryError;
-use dialog_effects::service::Rejection;
 use thiserror::Error;
 
 /// Error type for S3 operations.
@@ -132,8 +132,11 @@ impl From<AuthorizationFormatError> for dialog_effects::credential::CredentialEr
 
 impl From<AuthorizationFormatError> for dialog_capability::AuthorizeError {
     fn from(error: AuthorizationFormatError) -> Self {
-        Self::Malformed {
-            detail: error.to_string(),
+        match error {
+            // Bytes that would not decode: the material itself is bad.
+            AuthorizationFormatError::Deserialize(detail) => Self::Malformed { detail },
+            // Failing to write our own bytes is our machinery.
+            AuthorizationFormatError::Serialize(detail) => Self::Unavailable { detail },
         }
     }
 }

@@ -661,22 +661,43 @@ pub enum AuthorizeError {
         link: String,
     },
 
-    /// The authorization could not be evaluated at all.
+    /// The caller's authorization material did not decode.
     ///
-    /// Not an access decision: the chain was absent or undecodable, or the
-    /// material needed to decide could not be read. Distinct from the
-    /// decision variants above, which all mean "we understood the request
-    /// and the answer is no".
+    /// Strictly that: bytes arrived and could not be read as what they
+    /// claimed to be. Anything else that prevents a decision -- a key we
+    /// could not load, a store we could not reach, our own signing
+    /// failing -- is [`Unavailable`](Self::Unavailable), because it says
+    /// nothing about the caller's input and a caller cannot act on it the
+    /// same way.
+    ///
+    /// Also distinct from the decision variants above, which all mean
+    /// "we understood the request and the answer is no".
     #[error("Authorization could not be evaluated: {detail}")]
     Malformed {
         /// What could not be evaluated.
+        detail: String,
+    },
+
+    /// The decision could not be reached because our own machinery
+    /// failed.
+    ///
+    /// Signing a payload, reading a key, reaching a store. Nothing is
+    /// wrong with the caller's input, and nothing was decided, so this
+    /// must not be reported as a denial -- a caller told "no" stops,
+    /// where a caller told "we could not answer" may retry.
+    ///
+    /// The enum's other variants are all statements about the request.
+    /// This one is a statement about us.
+    #[error("Authorization could not be evaluated: {detail}")]
+    Unavailable {
+        /// What failed on our side.
         detail: String,
     },
 }
 
 impl From<crate::StorageError> for AuthorizeError {
     fn from(e: crate::StorageError) -> Self {
-        AuthorizeError::Malformed {
+        AuthorizeError::Unavailable {
             detail: e.to_string(),
         }
     }
