@@ -73,8 +73,8 @@ impl From<&Capability<PublishAttenuation>> for S3Request {
             path: format!(
                 "{}/{}/{}",
                 capability.subject(),
-                &Space::of(capability).space,
-                &Cell::of(capability).cell
+                Space::of(capability).space,
+                Cell::of(capability).cell
             ),
             checksum: Some(publish.checksum.clone()),
             precondition: publish.when.as_ref().into(),
