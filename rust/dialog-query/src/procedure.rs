@@ -134,6 +134,11 @@ pub struct TreeKeyQuery {
 /// Serializes as `{"assert": "<name>", "where": <params>}`, the same
 /// tagged form formulas use — a bare-string `assert` whose name lives
 /// in the procedure registry rather than the formula registry.
+// Variant sizes track each procedure's term count, exactly as
+// `FormulaQuery`'s do; instances are transient planning values, never
+// bulk-stored, so boxing would cost more indirection than the size
+// skew costs memory.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "assert", content = "where")]
 pub enum ProcedureQuery {
