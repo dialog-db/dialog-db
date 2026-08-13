@@ -91,6 +91,7 @@ mod buffered;
 pub use buffered::*;
 
 pub mod merge;
+pub mod position;
 pub mod tree;
 
 mod uri;

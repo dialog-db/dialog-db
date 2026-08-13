@@ -1,6 +1,10 @@
 # Ordered Relations via Deterministically Biased Fractional Indexing
 
-Status: **proposed**. Evaluation of
+Status: **core implemented** — the position primitive
+(`dialog_artifacts::position`), the `dialog/position` and
+`dialog/position-parts` formulas, and an end-to-end ordered-list test
+(one prefix scan, sorted) have landed; see "What landed" below.
+Originally: **proposed**. Evaluation of
 [deterministically biased fractional indexing](https://observablehq.com/@gozala/deterministically-biased-fractional-indexing)
 and the synopsys POC
 ([`commontoolsinc/synopsys/src/position`](https://github.com/commontoolsinc/synopsys/blob/main/src/position/lib.js))
@@ -187,6 +191,44 @@ Two properties come along for free:
   `the_starting_with` pushdown is an optimization the premise layer
   can grow later. Nothing blocks experimentation.
 
+## What landed
+
+- **`dialog_artifacts::position`** — the Rust port:
+  `Position` (validated, canonical, byte-ordered), `Bias::derive`,
+  `insert(bias, after, before)` with explicit open bounds. Three
+  deliberate departures from the JS POC, each documented in the
+  module:
+  1. **Bias truncation** to `BIAS_DIGITS = 6` digits (~35 bits) —
+     the POC appends the full ~43-digit re-encoded reference, which
+     would blow the attribute budget; six uniform digits make
+     same-slot collisions negligible and truncation is deterministic,
+     so convergence is unaffected.
+  2. **No out-of-alphabet sentinels** — open bounds are explicit
+     (`Option`), so `/` and `{` can never reach a stored position.
+  3. **Exhaustion is an error** (`PositionError::Exhausted`) instead
+     of silently returning the neighbor's position.
+  And one genuine **bug fix over the POC**: digit arithmetic returns
+  min-trimmed minors, and the POC's `create` concatenates them with a
+  non-empty patch, letting patch digits occupy minor byte positions —
+  `between("Zz…", "a1…")` derives `aY…`, which sorts *above* `a1…`.
+  The port re-pads the minor to the major's capacity whenever a patch
+  follows (trimming stays sound only for empty patches). Worth
+  upstreaming to the JS POC.
+- **Formulas** (`define_formulas!`): `dialog/position { member,
+  after, before → is }` — derivation with empty-string open bounds,
+  usable in queries, rules, and app code, deterministic per
+  `(member, bounds)`; `dialog/position-parts { of → namespace,
+  position }` — attribute decomposition. Both pure →
+  subscription-sound with no machinery. (Learned in testing: any
+  alphanumeric word starting with a letter is a *syntactically* valid
+  position, so the namespace prefix — not position syntax — is what
+  scopes an ordered relation.)
+- **End-to-end test** (`ordered_relation_tests`): a list built by
+  appends plus a wedge between neighbors, committed as
+  `[list test.list/<position> member]` facts, read back with ONE
+  `of(list) + the_starting_with("test.list/")` range scan — members
+  arrive already in list order.
+
 ## Surfacing plan
 
 Phased so each step is useful alone:
@@ -209,14 +251,25 @@ Phased so each step is useful alone:
      position-bearing attribute name, so query results expose the
      position as a bindable term (for sorting, range filtering,
      neighbor lookup).
-3. **Write-side sugar** — `tx.insert(list, "todo/item", member)
+3. **Insertion through rules** — the intended end state: an insert is
+   an event fact plus an *inductive rule* whose premises bind the
+   neighbors and derive the position via `dialog/position`, and whose
+   head asserts the membership fact. The identified gap: rule heads
+   currently name attributes statically, and the membership fact's
+   attribute is *computed* (`namespace ‖ position`). Ordered
+   relations therefore need **dynamic-attribute heads** — a head/
+   statement form whose attribute comes from a bound term (an
+   attribute-composition formula like `dialog/attribute { namespace,
+   predicate → is }` plus head support for attribute terms). This is
+   the main engine work left.
+4. **Write-side sugar** — `tx.insert(list, "todo/item", member)
    .after(x)/.before(y)/.append()`-style helpers that read the
    neighbor positions and call the primitive with `bias` = the member
    entity's bytes. (Insertion needs the neighbors' positions; on a
    partial view, whatever neighbors are visible — the algorithm's
    graceful-degradation property is precisely that this stays
    correct.)
-4. **Concept integration** — the real ergonomics target: an *ordered*
+5. **Concept integration** — the real ergonomics target: an *ordered*
    field kind in concept descriptors (`items: { the: "todo/item", as:
    entity, ordered: true }`) that compiles to the prefix scan +
    decomposition + `(position, member)` sort and realizes conclusions
@@ -224,7 +277,7 @@ Phased so each step is useful alone:
    single-scan shape happens to stream in order, but the guarantee
    should live in the concept's realize step (an explicit sort over
    the position binding), not in an accident of the plan.
-5. **Premise pushdown** (optimization): let the scan premise carry an
+6. **Premise pushdown** (optimization): let the scan premise carry an
    attribute prefix so the selector narrows server-side instead of
    filtering post-scan. The selector, demand recording, and key-range
    machinery already support prefixes; this is surface plumbing.
