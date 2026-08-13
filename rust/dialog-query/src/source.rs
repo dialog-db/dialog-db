@@ -19,12 +19,14 @@ impl Command for SelectRules {
 pub(crate) mod test {
     use super::*;
     use crate::session::RuleRegistry;
+    use dialog_artifacts::inspect::Load;
     use dialog_artifacts::selector::Constrained;
     use dialog_artifacts::{ArtifactSelector, ArtifactStream, DialogArtifactsError, Select};
     use dialog_capability::Provider;
     use dialog_operator::Operator as DialogOperator;
-    use dialog_repository::Branch;
+    use dialog_repository::{Branch, NetworkedIndex, RepositoryArchiveExt as _};
     use dialog_storage::provider::storage::VolatileSpace;
+    use dialog_storage::{Blake3Hash, StorageBackend};
 
     type Operator = DialogOperator<VolatileSpace>;
 
@@ -74,15 +76,13 @@ pub(crate) mod test {
     // Raw node loads for procedure premises, local archive only.
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<dialog_artifacts::inspect::Load> for TestEnv<'_> {
+    impl Provider<Load> for TestEnv<'_> {
         async fn execute(
             &self,
-            input: dialog_storage::Blake3Hash,
+            input: Blake3Hash,
         ) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
-            use dialog_repository::{NetworkedIndex, RepositoryArchiveExt as _};
-            use dialog_storage::StorageBackend as _;
             let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
-            Ok(store.get(&input).await?)
+            Ok(StorageBackend::get(&store, &input).await?)
         }
     }
 }
