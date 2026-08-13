@@ -1358,6 +1358,7 @@ mod tests {
     use crate::{
         Buffer, ContentAddressedStorage, Delta, Entry, Manifest, PersistentTree, tree_spec,
     };
+    use crate::{Traversable as _, Visit};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -2271,6 +2272,54 @@ mod tests {
 
         spec_b.assert();
         spec_a.assert();
+
+        Ok(())
+    }
+
+    // A gap-tolerant walk reports what it cannot read instead of failing,
+    // so a partially replicated tree can still be walked for what it has.
+    // Absence and corruption are deliberately different: the first is an
+    // incomplete store, the second a damaged one.
+    #[dialog_common::test]
+    async fn it_reports_absent_nodes_instead_of_failing() -> Result<()> {
+        let backend = MemoryStorageBackend::default();
+        let storage = journaled_storage(&backend);
+        let spec = tree_spec![
+            [     ..e]
+            [..a, ..e]
+        ]
+        .build(storage)
+        .await
+        .unwrap();
+
+        // Everything present: no gaps, and the walk sees every node.
+        let visits: Vec<_> = spec
+            .tree()
+            .traverse_available(spec.storage())
+            .collect()
+            .await;
+        let total = visits.len();
+        assert!(
+            visits
+                .iter()
+                .all(|visit| matches!(visit, Ok(Visit::Present(_)))),
+            "an intact tree must report no gaps"
+        );
+
+        assert!(total > 1, "the fixture must have more than a root");
+
+        // Walk the same tree against a store that holds none of it. The
+        // root is unreachable, so the walk reports exactly that and stops:
+        // everything below an absent node is unreachable by definition, and
+        // a gap-tolerant walk does not pretend otherwise.
+        let empty = MemoryStorageBackend::default();
+        let elsewhere = journaled_storage(&empty);
+        let visits: Vec<_> = spec.tree().traverse_available(&elsewhere).collect().await;
+        assert_eq!(visits.len(), 1, "an unreachable root ends the walk");
+        assert!(
+            matches!(visits.first(), Some(Ok(Visit::Absent(hash))) if hash == spec.tree().root()),
+            "the missing root must be reported, not raised as an error"
+        );
 
         Ok(())
     }

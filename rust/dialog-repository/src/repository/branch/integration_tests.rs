@@ -1374,3 +1374,141 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
 
     Ok(())
 }
+
+// `Snapshot::export` reads what the local store holds. `download` is the
+// difference between "whatever is here" and "all of it": it routes reads
+// through the branch's upstream, so a replica that has only ever seen the
+// head can still export the revision whole.
+//
+// Site A commits and pushes; site B learns the revision but never pulls
+// its content, so B's store is empty of everything the revision reaches.
+// Exporting from B without `download` reaches nothing; with it, the same
+// export produces the same content A holds.
+#[dialog_common::test]
+async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) -> Result<()> {
+    use crate::{Item, SnapshotError};
+    use futures_util::Stream;
+
+    /// Drain an export, counting what it produced.
+    async fn drain(
+        items: impl Stream<Item = Result<Item, SnapshotError>>,
+    ) -> Result<(usize, usize)> {
+        let (mut blocks, mut blobs) = (0usize, 0usize);
+        futures_util::pin_mut!(items);
+        while let Some(item) = items.next().await {
+            match item? {
+                Item::Block(_) => blocks += 1,
+                Item::Blob { mut chunks, .. } => {
+                    // Drain the reader so the bytes are really fetched,
+                    // not merely announced.
+                    while chunks.next().await?.is_some() {}
+                    blobs += 1;
+                }
+            }
+        }
+        Ok((blocks, blobs))
+    }
+
+    // --- Site A: commit content and push it to the remote. ---
+    let (operator_a, profile_a) = test_operator_with_profile().await;
+    let (repo_a, branch_a) =
+        setup_repo_with_s3_remote(&operator_a, &profile_a, &s3, "reach-a").await?;
+
+    let facts = vec![Instruction::Assert(Artifact {
+        the: "document/body".parse()?,
+        of: "document:one".parse()?,
+        is: Value::String("downloaded on demand".repeat(64)),
+        cause: None,
+    })];
+    branch_a
+        .commit(stream::iter(facts))
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+    let revision = branch_a.revision().expect("site A has a revision");
+
+    let (expected_blocks, _) = drain(
+        repo_a
+            .snapshot(revision.clone())
+            .export()
+            .perform(&operator_a),
+    )
+    .await?;
+    assert!(expected_blocks > 0, "site A holds the content locally");
+
+    // --- Site B: same remote, empty local store, head only. ---
+    let storage_b = Storage::<VolatileSpace>::volatile();
+    let profile_b = Profile::open(unique_name("reach-b"))
+        .perform(&storage_b)
+        .await?;
+    let operator_b = profile_b
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_b)
+        .await?;
+    let repo_b = profile_b
+        .repository(unique_name("reach-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+    profile_b
+        .credential()
+        .site(s3_site_address(&s3))
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_b)
+        .await?;
+    let origin_b = repo_b
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(repo_a.did())
+        .perform(&operator_b)
+        .await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+
+    // Without reaching for the remote, B has nothing to export: the root
+    // itself is absent, and everything under it is unreachable.
+    let (local_blocks, local_blobs) = drain(
+        repo_b
+            .snapshot(revision.clone())
+            .export()
+            .sparse()
+            .perform(&operator_b),
+    )
+    .await?;
+    assert_eq!(
+        (local_blocks, local_blobs),
+        (0, 0),
+        "a replica that never fetched holds none of the revision"
+    );
+
+    // With `download`, the same export walks the whole revision, pulling
+    // what is missing through the upstream as it goes.
+    let upstream = repo_b.remote("origin").load().perform(&operator_b).await?;
+    let (downloaded_blocks, _) = drain(
+        repo_b
+            .snapshot(revision.clone())
+            .export()
+            .download(upstream)
+            .perform(&operator_b),
+    )
+    .await?;
+    assert_eq!(
+        downloaded_blocks, expected_blocks,
+        "downloading yields the same content the origin holds"
+    );
+
+    // And the fetched blocks were cached locally on the way through, so a
+    // plain export now succeeds where it found nothing before.
+    let (cached_blocks, _) = drain(repo_b.snapshot(revision).export().perform(&operator_b)).await?;
+    assert_eq!(
+        cached_blocks, expected_blocks,
+        "a downloaded revision stays available locally"
+    );
+    Ok(())
+}
