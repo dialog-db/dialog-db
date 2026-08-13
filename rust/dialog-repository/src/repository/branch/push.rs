@@ -237,7 +237,7 @@ impl Push<'_> {
                                 .get_blob(&blob_store, &hash)
                                 .await?
                                 .ok_or_else(|| {
-                                    BlobError::ExecutionError(format!(
+                                    BlobError::NotFound(format!(
                                         "blob {digest:?} referenced by the tree but absent from its index"
                                     ))
                                 })?;
@@ -273,7 +273,7 @@ impl Push<'_> {
                         // the novel node upload.
                         ShipmentRef::SpilledValue(reference) => {
                             let bytes = blob_store.get(&reference).await?.ok_or_else(|| {
-                                BlobError::ExecutionError(format!(
+                                BlobError::NotFound(format!(
                                     "spilled value block {reference:?} referenced by the tree but absent from the local archive"
                                 ))
                             })?;

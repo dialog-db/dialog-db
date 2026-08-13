@@ -52,6 +52,7 @@
 //! # }
 //! ```
 
+use dialog_capability::access::AuthorizeError;
 use std::collections::BTreeMap;
 
 use dialog_capability::{Capability, Constraint, Did, Policy};
@@ -79,13 +80,13 @@ fn deserialize_from_args<T: DeserializeOwned>(args: &Args) -> Result<T, S3Error>
             Ipld::try_from(v)
                 .map(|ipld| (k.clone(), ipld))
                 .map_err(|e| {
-                    S3Error::Authorization(format!("Unresolved promise for '{}': {}", k, e))
+                    S3Error::Serialization(format!("Unresolved promise for '{}': {}", k, e))
                 })
         })
         .collect::<Result<_, _>>()?;
 
     ipld_core::serde::from_ipld(Ipld::Map(ipld_map))
-        .map_err(|e| S3Error::Authorization(format!("Failed to deserialize: {}", e)))
+        .map_err(|e| S3Error::Serialization(format!("Failed to deserialize: {}", e)))
 }
 
 /// Build a memory capability from UCAN args: `Subject -> Memory -> Space -> Cell -> Attenuation`.
@@ -239,7 +240,7 @@ macro_rules! dispatch {
                     authorization.redeem(&$self.address).await
                 }
             )+
-            _ => Err(S3Error::Authorization(format!("Unknown command: {:?}", $segments)))
+            _ => Err(S3Error::Configuration(format!("Unknown command: {:?}", $segments)))
         }
     };
 }
@@ -288,12 +289,19 @@ impl UcanAuthorizer {
     /// 3. Validates policy predicates on each delegation
     pub async fn authorize(&self, container: &[u8]) -> Result<Permit, S3Error> {
         // Parse and verify the invocation chain
-        let chain = InvocationChain::try_from(container)
-            .map_err(|e| S3Error::Authorization(e.to_string()))?;
-        chain
-            .verify(&Ed25519KeyResolver)
-            .await
-            .map_err(|e| S3Error::Authorization(e.to_string()))?;
+        let chain = InvocationChain::try_from(container).map_err(|e| {
+            S3Error::Authorization(AuthorizeError::Malformed {
+                detail: e.to_string(),
+            })
+        })?;
+        chain.verify(&Ed25519KeyResolver).await.map_err(|e| {
+            // The resolver reports why it would not verify; the reason
+            // is not always a bad signature (an unresolvable key is not),
+            // so carry what it said rather than asserting forgery.
+            S3Error::Authorization(AuthorizeError::Malformed {
+                detail: format!("invocation chain did not verify: {e}"),
+            })
+        })?;
 
         // Extract command path and arguments
         let command = chain.command();

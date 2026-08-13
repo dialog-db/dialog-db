@@ -1,50 +1,57 @@
-//! Structured errors returned by remote HTTP services.
+//! Why a request was not carried out.
 
-use std::error::Error as StdError;
-
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// A non-success response returned by a remote HTTP service.
+/// A request that could not be carried out for a reason that is not an
+/// access decision.
 ///
-/// Transport implementations should bound response bodies before constructing
-/// this value. `code` is the service's stable machine-readable classification
-/// when its error envelope supplied one; `message` is safe, bounded detail for
-/// the immediate caller.
-#[derive(Clone, Debug, Deserialize, Error, PartialEq, Eq, Serialize)]
-#[error("Service returned HTTP {status}: {message}")]
-pub struct ServiceResponseError {
-    /// HTTP response status.
-    pub status: u16,
-    /// Stable service error code, when supplied.
-    pub code: Option<String>,
-    /// Bounded service error detail.
-    pub message: String,
+/// Authorization failures are *not* here: they are
+/// [`AuthorizeError`](dialog_capability::access::AuthorizeError), which
+/// already names them (revoked, expired, audience mismatch, unproven
+/// subject, and the rest), and effect errors carry that type directly
+/// rather than restating it.
+///
+/// Version conflicts are not here either: they are
+/// [`MemoryError::VersionMismatch`](crate::memory::MemoryError), which
+/// carries the versions themselves and is what every caller already
+/// matches on.
+///
+/// What is left over is the handful of ways a request fails when
+/// authority was never in question and no state moved. Deliberately not
+/// a status code or a response: a caller holding one of these has no way
+/// to learn what carried the request, because that is never what it
+/// needs to decide.
+#[derive(Clone, Debug, Error, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind")]
+pub enum Rejection {
+    /// Temporarily unable to serve. Retryable as-is.
+    #[error("Temporarily unable to serve the request: {reason}")]
+    Unavailable {
+        /// Why, as far as the responder would say.
+        reason: String,
+    },
+
+    /// Not carried out, for a reason this version does not recognize.
+    ///
+    /// The honest variant. Folding an unrecognized failure into a named
+    /// one would claim knowledge we do not have, and would silently
+    /// change meaning the day the responder starts saying something new.
+    /// `detail` is kept for logs; matching on it is a mistake, because
+    /// what lands here is exactly what has no agreed meaning.
+    #[error("The request was not carried out: {detail}")]
+    Unclassified {
+        /// Whatever came back, verbatim and bounded.
+        detail: String,
+    },
 }
 
-impl ServiceResponseError {
-    /// Construct a structured service response error.
-    pub fn new(status: u16, code: Option<String>, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            code,
-            message: message.into(),
-        }
-    }
-}
-
-/// Find a structured service response in an error's source chain.
-///
-/// Higher-level operations such as repository pull and push wrap several
-/// command-specific errors. This helper lets callers classify the original
-/// HTTP response without matching every intermediate wrapper.
-pub fn find_service_response<'a>(
-    mut error: &'a (dyn StdError + 'static),
-) -> Option<&'a ServiceResponseError> {
-    loop {
-        if let Some(service) = error.downcast_ref::<ServiceResponseError>() {
-            return Some(service);
-        }
-        error = error.source()?;
+impl Rejection {
+    /// Whether retrying the identical request could succeed.
+    ///
+    /// True only for [`Rejection::Unavailable`]. A conflict needs the
+    /// request re-formed against current state, and an unrecognized
+    /// failure is not a known-transient one.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Rejection::Unavailable { .. })
     }
 }

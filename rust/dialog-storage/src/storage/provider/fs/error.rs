@@ -15,10 +15,6 @@ pub enum FileSystemError {
     #[error("Lock error: {0}")]
     Lock(String),
 
-    /// CAS condition failed.
-    #[error("CAS condition failed: {0}")]
-    Cas(String),
-
     /// Path containment violation (attempted to escape base directory).
     #[error("Containment violation: {0}")]
     Containment(String),
@@ -32,6 +28,8 @@ impl From<FileSystemError> for CredentialError {
 
 impl From<FileSystemError> for AuthorizeError {
     fn from(e: FileSystemError) -> Self {
-        Self::Malformed(e.to_string())
+        Self::Malformed {
+            detail: e.to_string(),
+        }
     }
 }

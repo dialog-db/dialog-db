@@ -147,7 +147,7 @@ where
         match (edition, entries.get(address)) {
             // Creating new: require key doesn't exist
             (None, Some(_)) => {
-                return Err(DialogStorageError::StorageBackend(
+                return Err(DialogStorageError::Storage(
                     "CAS conflict: key already exists".to_string(),
                 ));
             }
@@ -155,14 +155,14 @@ where
             (Some(expected_hash), Some(existing_value)) => {
                 let current_hash = Blake3Hash::hash(existing_value.as_ref());
                 if &current_hash != expected_hash {
-                    return Err(DialogStorageError::StorageBackend(
+                    return Err(DialogStorageError::Storage(
                         "CAS conflict: content hash mismatch".to_string(),
                     ));
                 }
             }
             // Updating non-existent: fail
             (Some(_), None) => {
-                return Err(DialogStorageError::StorageBackend(
+                return Err(DialogStorageError::Storage(
                     "CAS conflict: key does not exist".to_string(),
                 ));
             }

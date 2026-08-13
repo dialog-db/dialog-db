@@ -8,12 +8,4 @@ pub enum ProfileError {
     /// Key generation or import failed.
     #[error("Key error: {0}")]
     Key(String),
-
-    /// Profile already exists (for create).
-    #[error("Profile already exists")]
-    AlreadyExists,
-
-    /// Profile not found (for load).
-    #[error("Profile not found")]
-    NotFound,
 }
