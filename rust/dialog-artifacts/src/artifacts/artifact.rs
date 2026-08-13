@@ -431,7 +431,9 @@ impl<S> ArtifactViewStream for S where
 /// Extracts the entity and attribute from a key view, decoding the raw UTF-8
 /// key columns.
 fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Attribute), DialogArtifactsError> {
-    let of = Entity::from_str(from_utf8(key.entity().raw()).map_err(|error| {
+    // The key bytes are this crate's own normalized output, so the entity
+    // skips the URL parse (see `Uri::from_stored`).
+    let of = Entity::from_stored(from_utf8(key.entity().raw()).map_err(|error| {
         DialogArtifactsError::InvalidEntity(format!("entity key is not UTF-8: {error}"))
     })?)?;
     let the = Attribute::from_str(from_utf8(key.attribute().raw()).map_err(|error| {
@@ -453,7 +455,9 @@ fn reconstruct(
     datum: &Datum,
     spilled: Option<Vec<u8>>,
 ) -> Result<Artifact, DialogArtifactsError> {
-    let of = Entity::from_str(from_utf8(&parts.entity).map_err(|error| {
+    // The key bytes are this crate's own normalized output, so the entity
+    // skips the URL parse (see `Uri::from_stored`).
+    let of = Entity::from_stored(from_utf8(&parts.entity).map_err(|error| {
         DialogArtifactsError::InvalidEntity(format!("entity key is not UTF-8: {error}"))
     })?)?;
     let the = Attribute::from_str(from_utf8(&parts.attribute).map_err(|error| {

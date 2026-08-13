@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Error as _};
 use url::Url;
 
 use base58::ToBase58;
@@ -19,13 +19,33 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, make_reference, mutable_slice};
 /// plain string URIs (which typically represent an [`Entity`]) and their other
 /// representations such as their byte representation when used as a component
 /// of an index key.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// Internally this holds the NORMALIZED string form: parsing goes through
+/// [`url::Url`] once at every ingest boundary ([`FromStr`], deserialization),
+/// and what is stored is the parser's normalized rendering. Strings read back
+/// out of the index are exactly these normalized renderings, so the read path
+/// re-wraps them via [`from_stored`](Uri::from_stored) without paying a URL
+/// parse per row — validation happens where untrusted data enters, not where
+/// the store's own data comes back.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
-pub struct Uri(Url);
+pub struct Uri(Box<str>);
 
 impl Hash for Uri {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.as_str().hash(state);
+        self.0.hash(state);
+    }
+}
+
+impl<'de> Deserialize<'de> for Uri {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialization is an ingest boundary: the bytes may come from
+        // anywhere, so they get the full parse-and-normalize treatment.
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(D::Error::custom)
     }
 }
 
@@ -48,8 +68,27 @@ impl Uri {
 
         format!("did:key:{key}")
             .parse()
-            .map(Self)
             .map_err(|error| DialogArtifactsError::InvalidEntity(format!("{error}")))
+    }
+
+    /// Wraps a string ALREADY KNOWN to be a normalized URI — one this crate
+    /// itself wrote into the index — without re-running the URL parse.
+    ///
+    /// Every stored entity/attribute string was produced from a parsed,
+    /// normalized [`url::Url`] on the write path ([`FromStr`] or
+    /// deserialization), and `url`'s normalization is idempotent, so
+    /// re-wrapping the stored rendering is exactly equivalent to re-parsing
+    /// it — minus the parse. This is the materialization fast path: a scan
+    /// reconstructing N rows calls this N times where `from_str` would pay
+    /// N URL parses. It must NEVER be fed data from outside the store; any
+    /// external string goes through [`FromStr`].
+    pub(crate) fn from_stored(s: &str) -> Self {
+        Self(s.into())
+    }
+
+    /// The URI as its normalized string.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     /// Convert this [`Uri`] to the byte representation expected for use as part
@@ -74,7 +113,7 @@ impl Uri {
             Ok(key_bytes) as Result<[u8; 64], io::Error>
         };
 
-        format(self.0.as_str().as_bytes()).map_err(|error| {
+        format(self.0.as_bytes()).map_err(|error| {
             DialogArtifactsError::InvalidEntity(format!("Could not format as key bytes: {error}"))
         })
     }
@@ -82,18 +121,18 @@ impl Uri {
 
 impl Display for Uri {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", **self)
+        f.write_str(&self.0)
     }
 }
 
 impl From<Uri> for String {
     fn from(value: Uri) -> Self {
-        (*value).to_string()
+        value.0.into()
     }
 }
 
 impl Deref for Uri {
-    type Target = Url;
+    type Target = str;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -132,13 +171,17 @@ impl FromStr for Uri {
         // scan-and-materialize by ~31% while buying joins only ~8% at
         // 1000 rows (their gains come from the engine, not this parse) —
         // and sieve eviction or second-sight admission only shrank, never
-        // removed, the loss. If that 8% is ever worth recovering, the
-        // right home for the cache is a query-scoped context sized by the
-        // query's own binding population, not a process-wide global with a
-        // workload-dependent cliff.
-        Ok(Uri(s.parse().map_err(|error| {
-            DialogArtifactsError::InvalidUri(format!("{error}"))
-        })?))
+        // removed, the loss. (Strings coming back OUT of the index skip
+        // this entirely via `from_stored`: they are this parser's own
+        // normalized output, so there is nothing left to validate.)
+        //
+        // What is stored is the parser's normalized rendering, not the
+        // input string — that is what makes `from_stored`'s no-parse
+        // round-trip sound.
+        let url: Url = s
+            .parse()
+            .map_err(|error| DialogArtifactsError::InvalidUri(format!("{error}")))?;
+        Ok(Uri(String::from(url).into()))
     }
 }
 

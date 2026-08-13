@@ -116,6 +116,15 @@ impl Entity {
         (**self).as_str()
     }
 
+    /// Reconstructs an [`Entity`] from a string ALREADY KNOWN to be a
+    /// normalized URI — one read back out of the index — skipping the URL
+    /// parse (see [`Uri::from_stored`]). The key bytes are still derived
+    /// (they are not stored alongside the string). Never feed this data
+    /// from outside the store; external strings go through [`FromStr`].
+    pub(crate) fn from_stored(s: &str) -> Result<Self, DialogArtifactsError> {
+        Self::try_from(Uri::from_stored(s))
+    }
+
     /// Get the raw byte representation of the [`Entity`] as it should be
     /// formatted for use in an index key.
     pub fn key_bytes(&self) -> &[u8; ENTITY_LENGTH] {
