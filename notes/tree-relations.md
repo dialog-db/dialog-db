@@ -362,20 +362,102 @@ registered in `define_formulas!` beside `dialog/revision`):
 ### What must NOT become an operation output
 
 Tonk's `tree/child` rows carry `cached: bool` — whether the child's
-block is in the local archive. **This field cannot port.** Locality is
-mutable without a commit (a block arrives when someone expands it, or a
-replication task lands it): an operation surfacing it would not be
-idempotent, and a standing subscription would go stale with nothing in
-the machinery to notice. Locality is presentation state — the client
-can infer it (row resolved fast vs. slow, or a separate
-non-subscribable diagnostic channel) but it must not be queryable. The
-same reasoning excludes fetch latency, cache residency, connection
-state — and, on the other side of the boundary, the current head
-itself (`memory::Resolve`), which stays a tracked fact.
+block is in the local archive. **This field cannot be an operation
+output.** Locality is mutable without a commit (a block arrives when
+someone expands it, or a replication task lands it): an operation
+surfacing it would not be idempotent, and a standing subscription
+would go stale with nothing in the machinery to notice. The same
+reasoning excludes fetch latency and connection state — and, on the
+other side of the boundary, the current head itself
+(`memory::Resolve`), which stays a tracked fact. The inspector *does*
+want to visualize locality, though — see "Locality as a versioned
+source" below for the sound path.
 
-Also excluded: node depth/level — the same node can sit at different
-depths under different roots; depth is a property of the inspector's
-descent, not of the node.
+Also excluded outright: node depth/level — the same node can sit at
+different depths under different roots; depth is a property of the
+inspector's descent, not of the node.
+
+### Locality as a versioned source (v2)
+
+Idempotence is the degenerate case of the invariant that actually
+keeps subscriptions sound: **every premise's result is a pure function
+of its bound inputs and the pinned versions of the mutable sources it
+read.** The gate in `Subscription::poll` is already a pin-comparison
+vector — the tree pins the root hash, the session overlay pins its
+epoch, and the head fix adds the revision pin. Operations are sound
+with *zero* pins. Locality is inadmissible today only because the
+local block set has no version to pin: nothing can tell a poll that a
+`resident?` answer moved.
+
+So give it one:
+
+- The branch's local archive maintains a monotone **generation**
+  counter, bumped whenever a block lands locally (a storage-layer
+  hook; batch writes bump once). Between polls, bumps coalesce — the
+  pull-driven model absorbs replication burstiness for free.
+- A second premise tier beside operations — call it an **observation**
+  — with the same cells/mode machinery but a different certificate:
+  its effect kind (`archive::Contains`-shaped, local-only, *no* remote
+  fallback) is not `IdempotentEffect` but `VersionedEffect`: the
+  provider returns the answer *and* the source generation it observed.
+- `Demand` records the pin: `sources: Vec<(SourceId, Generation)>`
+  (the head flag generalizes into this vector — `(branch cell,
+  revision)` is the same shape). `poll` re-evaluates when any pinned
+  source moved; observation-bearing subscriptions are never
+  incrementally maintained, only recomputed — correct, since a
+  generation move can flip any `resident` bit.
+- The inspector's residency dots then update through ordinary
+  subscription deltas as replication lands blocks — which is exactly
+  the visualization wanted, live.
+
+Sequencing: land operations (zero-pin) and the head flag first; the
+pin-vector generalization and the archive generation counter are a
+separate, later change. Until then locality stays out of the engine
+(client-side inference or a non-subscribable diagnostic call).
+
+### Prior art: separating pure/idempotent effects from mutable ones
+
+The pure / read-only / mutable stratification is well-trodden;
+the closest neighbors, most relevant first:
+
+- **CALM / Bloom / Dedalus** (Hellerstein, Alvaro): monotone logic
+  needs no coordination; non-monotone operators must be stratified
+  against an explicit notion of time. Block arrival is monotone
+  (content-addressed, append-only — an operation's world), while
+  `resident?` is a **non-monotone observation of a monotone process**
+  ("do I have it *yet*"), and Dedalus's answer is exactly the one
+  above: stamp the observation with the time (generation) it was made
+  at and stratify on it.
+- **Materialize / differential dataflow**: every source must carry
+  versions (timestamps) for incremental view maintenance to be sound;
+  sources that can't are declared `VOLATILE` and excluded from the
+  incremental guarantees — the observation tier is precisely a
+  volatile source with a coarse (generation-level) timestamp.
+- **Nix fixed-output derivations**: a derivation may perform network
+  I/O *iff* its output's hash is pinned in advance — idempotence by
+  content verification. That is `archive::Get`'s admission certificate
+  stated as a build-system rule, and a good intuition for why the
+  sealed marker is per effect kind, not per call site.
+- **FX / Gifford–Lucassen effect classes** and region systems
+  (Tofte–Talpin): the original read/write/alloc-per-region effect
+  lattices, with *effect masking* (unobservable effects are pure) —
+  the ancestor of "benign effects", the term of art for effects
+  invisible to the semantics (memoization, laziness,
+  content-addressed reads).
+- **Algebraic effect theories** (Plotkin–Power): effects come with
+  equations; the state theory literally contains lookup-idempotence
+  (`get; get ≡ get`) and read-only state has a comodel/Reader
+  presentation. "Which equations does this effect satisfy" is the
+  formal version of the `IdempotentEffect` marker.
+- **F\*'s effect lattice** (`PURE ≤ DIV ≤ STATE ≤ ALL`) and Koka's
+  effect rows: graded effect types where "reads immutable state" is a
+  point strictly between pure and stateful — the type-system shape of
+  formula < operation < observation.
+- **Datomic**: "the database is a value" — queries run against
+  immutable snapshots; the only mutable thing is the connection's
+  current-basis pointer, kept outside the query language. That is the
+  `BranchRevision`-as-sole-anchor architecture, independently arrived
+  at.
 
 ## Subscriptions: what to build, and what to verify
 
