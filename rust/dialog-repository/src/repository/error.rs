@@ -1,6 +1,5 @@
 use crate::TreeReference;
 use dialog_artifacts::DialogArtifactsError;
-use dialog_artifacts::history::HistoryError;
 use dialog_common::Blake3Hash;
 use dialog_credentials::Ed25519SignerError;
 use dialog_effects::archive::ArchiveError;
@@ -138,55 +137,6 @@ pub enum PublishRemoteBranchError {
     /// not happen in normal operation.
     #[error("Upstream cell missing edition after publish")]
     MissingEdition,
-}
-
-/// Errors returned while installing an exact revision into another storage.
-#[derive(Error, Debug)]
-pub enum InstallRevisionError {
-    /// The revision signature or structure failed validation.
-    #[error(transparent)]
-    History(#[from] HistoryError),
-
-    /// A referenced artifact failed validation.
-    #[error(transparent)]
-    Artifact(#[from] DialogArtifactsError),
-
-    /// Walking the revision's tree failed.
-    #[error(transparent)]
-    Tree(#[from] DialogSearchTreeError),
-
-    /// Reading or writing an archive block failed.
-    #[error(transparent)]
-    Archive(#[from] ArchiveError),
-
-    /// Reading or writing a blob failed.
-    #[error(transparent)]
-    Blob(#[from] BlobError),
-
-    /// Loading the staged branch's remote failed.
-    #[error(transparent)]
-    LoadRemote(#[from] LoadRemoteError),
-
-    /// The staged archive does not contain a referenced block.
-    #[error("Referenced archive block is missing: {0}")]
-    MissingArchiveBlock(Blake3Hash),
-
-    /// A spilled-value key carried a malformed content reference.
-    #[error("Spilled-value reference is not 32 bytes: {0:?}")]
-    InvalidSpillReference(Vec<u8>),
-
-    /// A destination blob import returned a digest other than its declared address.
-    #[error("Installed blob digest mismatch: expected {expected}, got {actual}")]
-    BlobDigestMismatch {
-        /// Digest declared by the staged revision.
-        expected: Blake3Hash,
-        /// Digest returned by the destination import.
-        actual: Blake3Hash,
-    },
-
-    /// Accessing the staged archive backend failed.
-    #[error(transparent)]
-    Storage(#[from] DialogStorageError),
 }
 
 /// Errors returned by the load remote branch command.
@@ -691,4 +641,81 @@ mod tests {
         let push = PushError::Artifact(DialogArtifactsError::from(tree));
         assert_response(&push);
     }
+}
+
+/// Errors from snapshot export and import.
+///
+/// The digest-mismatch variants are the point of this type. A snapshot may
+/// cross a trust boundary -- a source that fetched from a remote, or bytes
+/// read from a file -- so content that does not hash to the address it
+/// claims must be refused rather than stored. Both carry what was expected
+/// and what arrived, so a caller can say which content was corrupt.
+#[derive(Error, Debug)]
+pub enum SnapshotError {
+    /// A block's content did not hash to the digest it declared.
+    ///
+    /// Storing it anyway would not fail loudly: content-addressed bytes
+    /// simply land at a different address, unreferenced, and surface much
+    /// later as a missing node far from the cause.
+    #[error("Block content does not match its address: expected {expected}, got {actual}")]
+    BlockDigestMismatch {
+        /// The address the block declared.
+        expected: Blake3Hash,
+        /// The address its content actually hashes to.
+        actual: Blake3Hash,
+    },
+
+    /// A blob's content did not hash to the digest it declared.
+    ///
+    /// Detected at `finish`, once the last chunk has been written: a blob
+    /// arrives in pieces, so it cannot be checked on arrival the way a
+    /// block can.
+    #[error("Blob content does not match its address: expected {expected}, got {actual}")]
+    BlobDigestMismatch {
+        /// The address the blob declared.
+        expected: Blake3Hash,
+        /// The address its content actually hashes to.
+        actual: Blake3Hash,
+    },
+
+    /// The revision references a block this store does not hold.
+    ///
+    /// Only raised when the export was asked for a complete snapshot; a
+    /// sparse one records the gap and carries on.
+    #[error("Revision references block {digest}, which is not present")]
+    MissingBlock {
+        /// The address that could not be read.
+        digest: Blake3Hash,
+    },
+
+    /// A spilled-value key carried a malformed content reference.
+    #[error("Spilled-value reference is not 32 bytes: {0:?}")]
+    InvalidSpillReference(Vec<u8>),
+
+    /// The revision references a blob this store does not hold.
+    #[error("Revision references blob {digest}, which is not present")]
+    MissingBlob {
+        /// The address that could not be read.
+        digest: Blake3Hash,
+    },
+
+    /// Reading or writing an archive block failed.
+    #[error(transparent)]
+    Archive(#[from] ArchiveError),
+
+    /// Reading or writing a blob failed.
+    #[error(transparent)]
+    Blob(#[from] BlobError),
+
+    /// Walking the revision's tree failed.
+    #[error(transparent)]
+    Tree(#[from] DialogSearchTreeError),
+
+    /// Reading a referenced artifact failed.
+    #[error(transparent)]
+    Artifact(#[from] DialogArtifactsError),
+
+    /// Accessing the archive backend failed.
+    #[error(transparent)]
+    Storage(#[from] DialogStorageError),
 }

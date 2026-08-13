@@ -40,9 +40,6 @@ pub use fetch::*;
 mod import;
 pub use import::*;
 
-mod install;
-pub use install::*;
-
 mod load;
 pub use load::*;
 
@@ -84,10 +81,21 @@ pub use transaction::*;
 mod upstream;
 pub use upstream::*;
 
-#[cfg(all(test, feature = "integration-tests"))]
+// Either feature: `integration-tests` runs these natively, and
+// `web-integration-tests` runs the same tests as wasm subprocesses. The
+// `dialog_common::test` macro emits a variant per mode, so gating the
+// module on the native feature alone compiled it out of the cross-target
+// run before the macro was ever reached.
+#[cfg(all(
+    test,
+    any(feature = "integration-tests", feature = "web-integration-tests")
+))]
 mod integration_tests;
 
-#[cfg(all(test, feature = "integration-tests"))]
+#[cfg(all(
+    test,
+    any(feature = "integration-tests", feature = "web-integration-tests")
+))]
 mod read_amplification;
 
 /// Type alias for the search tree index.
