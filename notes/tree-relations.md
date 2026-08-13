@@ -1,15 +1,17 @@
 # Tree-Inspection Relations — Implementation Strategy
 
-Status: **planned, not implemented**. Revision 2 — re-validated against
-the current tree format (separator links, variable-length keys, novelty
-buffers, scale) and against what tonk actually ships as of
-[tonk#635](https://github.com/tonk-labs/tonk/pull/635). A self-contained
-specification for exposing the search tree's structure to the query
-engine as first-class relations, so that tonk's tree inspector
+Status: **planned, not implemented**. Revision 3 — the serving mechanism
+is now a general engine facility, **operations** (formula-shaped
+premises over *idempotent effects*), replacing revision 2's reserved
+`dialog.tree/*` attributes intercepted inside `Provider<Select>`. The
+goal is unchanged: let tonk's tree inspector
 (<https://github.com/tonk-labs/tonk/blob/staging/plan/tree-inspector.md>)
-can run its `tree/*` predicates through ordinary dialog queries —
-retiring the custom worker endpoint that currently intercepts those
-predicates and bypasses the evaluator.
+run its `tree/*` predicates through ordinary dialog queries — retiring
+the custom worker endpoint that currently intercepts those predicates
+and bypasses the evaluator — without breaking differential
+subscriptions. Validated against the current tree format (separator
+links, variable-length keys, novelty buffers, scale) and against what
+tonk ships as of [tonk#635](https://github.com/tonk-labs/tonk/pull/635).
 
 ## What tonk ships today (and what it teaches)
 
@@ -45,8 +47,11 @@ per expansion; no joins), no composition with real facts or rules, no
 transaction-query view, and no standing subscriptions (the inspector
 re-fetches; "re-fetch on commit" is listed as later work in tonk's
 plan). Everything else — the operator vocabulary, the moded "input"
-discipline, self-contained rows, lazy child loading, separator-aware key
-decoding — ports over and is kept by this design.
+discipline, self-contained multi-field rows, lazy child loading,
+separator-aware key decoding — ports over and is kept by this design.
+The flat row shape in particular is kept: operations return relational
+rows natively, which is what revision 2's EAV attribute encoding had to
+contort around (synthetic link entities) and now doesn't.
 
 ## Goal and non-negotiable constraint
 
@@ -55,14 +60,19 @@ composable with other premises, usable from branch *and* transaction
 queries, and visible to standing subscriptions — **without breaking
 differential subscriptions**.
 
-The subscription system is sound because every read a query performs
-flows through `Provider<Select>`, where the demanded ranges are
-recorded (`QueryEnv::record_demand`,
+The subscription system is sound because every read a query performs is
+visible to the maintenance machinery: selects flow through
+`Provider<Select>`, where demanded ranges are recorded
+(`QueryEnv::record_demand`,
 `rust/dialog-repository/src/repository/branch/session.rs:322`, invoked
-first thing in `execute` at `:411`). Any design that reads the tree
-behind that funnel (an effectful formula, a side-channel) makes standing
-queries silently stale. So the one rule this design never violates:
-**every tree read is a selector executed through `Provider<Select>`.**
+first thing in `execute` at `:411`), and the poll gate diffs the tree
+within that cover. Any read the machinery cannot account for makes
+standing queries silently stale. Operations extend the accounting with
+a second admissible read kind: **an effect whose result can never
+change** — for which there is, by construction, nothing to account.
+So the generalized rule this design never violates: **every read a
+query performs is either a demand-recorded selector or a
+certified-idempotent effect performed through the query environment.**
 
 ## Why this is sound (keep this argument in the module docs)
 
@@ -74,39 +84,44 @@ subscriptions:
    different tree is a different hash. This now includes novelty: a
    node's hash covers its buffered ops
    (`rust/dialog-artifacts/src/buffered.rs` module doc), so "this
-   node's pending novelty" is as immutable as its entries. Rows keyed
-   by node hash are permanent; stale demand entries about old hashes
-   can never be wrong, only unnecessary. (This is the same argument
-   that makes `CausalityCache` in `dialog-artifacts` require no
-   invalidation.)
+   node's pending novelty" is as immutable as its entries. Rows derived
+   from a node hash are permanent; they can become unnecessary, never
+   wrong. (This is the same argument that makes `CausalityCache` in
+   `dialog-artifacts` require no invalidation.) In effect terms:
+   `archive` reads (`dialog_effects::archive::Get` — content-addressed
+   catalog fetch) are **idempotent**.
 2. **The only mutable fact in the domain is "what is the current
    root?"** — carried by
    [`BranchRevision.tree`](../rust/dialog-repository/src/schema.rs)
-   (`dialog.branch/tree`, a base58 string), injected into every query's
-   metadata overlay
+   (`dialog.branch/tree`), injected into every query's metadata overlay
    (`repository/branch/metadata.rs`, `QueryLayer::metadata` in
-   `session.rs`).
+   `session.rs`). In effect terms this is `memory`-domain territory
+   (`Resolve` on a CAS cell) — **not** idempotent, which is exactly why
+   it must stay a tracked fact and must never be modeled as an
+   operation.
 
-Therefore: expose tree relations **only in node-bound form** (the node
-reference must be bound), and let queries reach the tree exclusively by
-joining through `BranchRevision`:
+The capability domains draw the line for free: **archive effects are
+idempotent; memory effects are not.** Tree operations use only archive
+effects, and queries reach the mutable world exclusively by joining
+through `BranchRevision`:
 
 ```text
 BranchRevision(branch, tree: ?root58)
   ⋈ dialog/tree-reference(of: ?root58, this: ?root)   ← pure formula (glue)
-  ⋈ TreeNode(?root, kind: ?k, size: ?s)               ← synthetic relation
-  ⋈ TreeLink(?root, at: ?i, node: ?c) ⋈ TreeNode(?c)  ← descend
+  ⋈ tree/node(of: ?root, kind: ?k, size: ?s)          ← operation
+  ⋈ tree/link(of: ?root, at: ?i, node: ?c)            ← operation, descend
+  ⋈ tree/node(of: ?c, …)
 ```
 
 When a commit lands, re-evaluation re-binds `?root` and the join walks
 the new tree. Per-hash rows never invalidate.
 
-## The head-tracking gap (new machinery IS required)
+## The head-tracking gap (independent of the serving mechanism)
 
-Revision 1 of this note claimed "standing queries that depend on
-`BranchRevision` already re-evaluate when the head moves — no new
-machinery". **Reading the current poll path says otherwise; treat the
-claim as false until test 7 passes.**
+Revision 1 claimed "standing queries that depend on `BranchRevision`
+already re-evaluate when the head moves — no new machinery". **Reading
+the current poll path says otherwise; treat the claim as false until
+test 7 passes.**
 
 The gate in `Subscription::poll`
 (`repository/branch/subscription.rs:381`) is: overlay epoch moved ⇒
@@ -114,14 +129,14 @@ recompute; else revision moved ⇒ `touched()` diffs the two roots
 *scoped to the demand cover*; `Touched::Nothing` ⇒ **the pin advances
 silently and no delta is delivered** (`:407-410`). Now trace a
 subscription whose only premises are `BranchRevision ⋈ tree-reference ⋈
-TreeNode`:
+tree/node`:
 
 - `BranchRevision` is **overlay-injected metadata**, rebuilt fresh per
-  evaluation (`metadata.rs`) — it is never a fact in the tree. Its
-  selector records demand over `dialog.branch/*` EAV ranges that **no
-  committed fact ever occupies**.
-- The `dialog.tree/*` synthetic selectors likewise record ranges no
-  commit touches (the namespace is write-reserved).
+  evaluation (`metadata.rs`) — never a fact in the tree. Its selector
+  records demand over `dialog.branch/*` EAV ranges that **no committed
+  fact ever occupies**.
+- The tree operations record no fact demand at all (idempotent — see
+  below), correctly.
 - A commit does **not** bump the session overlay epoch
   (`overlay.rs` — the epoch moves only on overlay mutation).
 
@@ -140,8 +155,7 @@ The fix is small and principled — a third demand class:
 - `QueryEnv::record_demand` sets it when a selector's `the` is one of
   the revision-bearing metadata attributes — `dialog.branch/tree`,
   `dialog.branch/edition`, `dialog.branch/revision` (not
-  `dialog.branch/name`/`replica`, which are stable per branch, and not
-  `dialog.tree/*`, which are per-hash immutable).
+  `dialog.branch/name`/`replica`, which are stable per branch).
 - `poll` checks it before the diff gate: epoch unchanged, revision
   moved, `demand.head` ⇒ go straight to full re-evaluation.
 
@@ -152,206 +166,179 @@ regression of the diff gate's frugality. Data-fact subscriptions that
 never read revision metadata are untouched. Encode the gap as a failing
 test first (test 7 below), then land the flag.
 
-## Terminology: two kinds of "formula"
+## Operations: the general facility
 
-Tonk's plan calls all four predicates "formulas". Implementation-wise
-they split, and the split is load-bearing:
+An **operation** is to an idempotent effect what a formula is to a pure
+function: a named, moded, multi-row premise — except evaluation
+performs a capability-authorized effect through the query environment
+instead of computing in-process. "Idempotent" here means *replayable
+forever*: same bound inputs ⇒ same rows, at any later time, on any
+replica that can perform the effect. Content-addressed reads are the
+canonical case; anything observer- or time-dependent is not admissible.
 
-- **Pure formulas** (the `Formula` derive,
-  `rust/dialog-query/src/formula/`): synchronous functions of their
-  bound inputs, no store access. `Formula::compute(Input) -> Vec<Self>`
-  cannot read the tree, and must not be made to: the incremental
-  maintainer classifies formulas as `Inert`
-  (`fixpoint.rs::classify_base`) and demand tracking would not see the
-  reads. Only key decomposition and the base58↔entity glue are pure —
-  those become real `Formula`s.
-- **Synthetic relations**: node structure requires reading node
-  buffers. They are served as reserved *attributes* answered by the
-  `Provider<Select>` implementation itself (below), so from the query's
-  point of view they are ordinary EAV premises — plannable, joinable,
-  demand-tracked — even though no fact is ever stored under them.
+Why this beats reserved attributes (revision 2's design), point by
+point:
 
-## Reserved schema
+- **No special names.** Nothing is smuggled through the EAV fact
+  namespace; no write-path reservation is load-bearing; no interception
+  hidden inside `Provider<Select>` behind the planner's back. The
+  operation registry is the same kind of namespace `math/sum` already
+  lives in.
+- **Capability-gated, not name-gated.** The effect is performed as a
+  `Capability` invocation (`Subject → attenuate(Archive) →
+  attenuate(Catalog) → invoke(Get)`, per `dialog-effects`), so
+  authorization composes: a session whose capability set does not
+  include archive reads for the branch's subject cannot run tree
+  inspection, locally or remotely, with no extra enforcement code.
+- **Relational rows.** An operation returns multi-field rows
+  (`tree/link` → at, node, separator, scale, novelty per row), which
+  the EAV encoding could not express without synthetic per-link
+  entities.
+- **Honest accounting.** Idempotent reads record no fact demand because
+  none is needed — rather than recording fake ranges and arguing they
+  are harmless.
 
-All synthetic attributes live under `dialog.tree/*`. The `dialog.`
-prefix is already write-reserved (user instructions cannot assert it —
-see `it_rejects_writes_to_the_reserved_dialog_namespace`,
-`repository/branch/commit.rs`), so no collision with user data is
-possible.
+### Shape
 
-Two entity shapes, both under a dedicated scheme (verify both survive
-`Entity`/`Uri` round-trips on native and wasm — `uri.rs` accepts any
-whitespace-free URL the `url` crate parses; add unit tests):
+Sketch (final naming open — "operation" avoids overloading `Formula`
+and the `dialog-operator` crate is about authority, not queries):
 
-- **Node**: `tree:z<base58(blake3)>` — same base58 encoding
-  `dialog.branch/tree` already uses.
-- **Link**: `tree:z<base58(parent)>/<at>` — the `at`-th link of an
-  index node. Links need their own entities because their fields
-  (separator, scale, novelty) belong to the *(parent, position)* pair,
-  not to the child node: the same child hash reappears under other
-  roots across history with a different position or siblings.
+```no_run
+# use dialog_query::{Cells, EvaluationError};
+# struct Bindings; struct Match;
+/// A formula-shaped premise resolved by performing an idempotent
+/// effect through the query environment.
+trait Operation: Sized {
+    /// The effect this operation performs. Must be certified
+    /// idempotent (sealed marker trait) — e.g. archive::Get.
+    type Effect;
 
-Node-scoped attributes (`of` = a `tree:` node entity):
+    /// Moded parameter slots, exactly as Formula::cells — inputs are
+    /// Required, outputs Optional.
+    fn cells() -> &'static Cells;
 
-| attribute            | is                                            | cardinality |
-|----------------------|-----------------------------------------------|-------------|
-| `dialog.tree/kind`   | `"index"` \| `"segment"` (Text)               | one         |
-| `dialog.tree/size`   | serialized byte length (UnsignedInt)          | one         |
-| `dialog.tree/count`  | links (index) or entries (segment) (UnsignedInt) | one      |
-| `dialog.tree/bound`  | the node's upper-bound key (Bytes) — absent for an empty node | one |
-| `dialog.tree/rank`   | rank of the upper-bound key under the node's own embedded manifest (UnsignedInt) | one |
-| `dialog.tree/scale`  | the node's own `Scale` byte (UnsignedInt)     | one         |
-| `dialog.tree/link`   | link entity (`tree:z<hash>/<at>`)             | many        |
-| `dialog.tree/child`  | child node entity (`tree:`) — convenience projection of links | many |
-| `dialog.tree/key`    | an entry key in a segment (Bytes, variable length) | many   |
+    /// Build the effect invocation from the bound inputs.
+    fn invoke(input: &Bindings) -> Result<Self::Effect, EvaluationError>;
 
-Link-scoped attributes (`of` = a `tree:` link entity):
+    /// Project rows from the effect's output. Pure.
+    fn project(output: <Self::Effect as Returns>::Value, input: &Bindings)
+        -> Result<Vec<Match>, EvaluationError>;
+}
+# trait Returns { type Value; }
+```
 
-| attribute                  | is                                       | cardinality |
-|----------------------------|------------------------------------------|-------------|
-| `dialog.tree.link/at`      | position among siblings (UnsignedInt)    | one         |
-| `dialog.tree.link/node`    | child node entity (`tree:`)              | one         |
-| `dialog.tree.link/separator` | the link's separator bytes (Bytes; empty = leftmost/−∞) | one |
-| `dialog.tree.link/scale`   | advisory subtree scale (UnsignedInt)     | one         |
-| `dialog.tree.link/novelty` | buffered ops pending against this subtree (UnsignedInt) | one |
+The split matters: **all mutability lives in the effect, all logic in a
+pure projection.** The operation is idempotent iff its effect kind is,
+and effect kinds are certified once, by a sealed marker trait
+(`IdempotentEffect`), implemented for `archive::Get` first and nothing
+else. `memory::Resolve`/`Publish` must never receive the marker — that
+is the crisp boundary between the immutable universe (operations) and
+the mutable world (facts + the head flag).
 
-Format notes (all verified against current code):
+### Engine integration
 
-- Links are `Link { separator, node, scale }`
-  (`rust/dialog-search-tree/src/link.rs`) — **lower-bound separators**,
-  not upper bounds as revision 1 assumed. A separator is a front-coded
-  *prefix* of the subtree's minimum leaf key; the empty separator is
-  the level's global leftmost link. The node's own `upper_bound()`
-  still exists (`node/persistent.rs:134`) and is what `dialog.tree/bound`
-  surfaces.
-- Index nodes carry per-link novelty buffers
-  (`PersistentIndex.novelty`, `node/persistent.rs:635`) — hitchhiker
-  ops not yet flushed to their destination subtrees. Surface the count
-  per link; it is the inspector's window into buffered-vs-canonical
-  cost, and it is covered by the node's hash so immutability holds.
-- `rank` needs the manifest, which every node embeds
-  (`Distribution::rank(key, manifest)`,
-  `dialog-search-tree/src/distribution.rs:144`), so it is node-derived
-  and belongs here rather than in a pure formula (which would need the
-  manifest threaded as input).
-- Do **not** add `dialog.tree/level`/depth: the same node can sit at
-  different depths under different roots; depth is a property of the
-  inspector's descent, not of the node.
+- **Premise kind**: a new `Proposition::Operation(OperationQuery)`
+  variant (`dialog-query/src/proposition.rs:32`) and matching
+  `Plan::Operation` node. Evaluation is async with env access — the
+  precedent is `Plan::Scan`, whose stream awaits `Provider<Select>`
+  inside `Plan::evaluate<Env: Provider<Select<'_>> + …>`
+  (`planner/plan.rs:168`); operations extend the env bound with the
+  provider for their effect (in practice `Provider<archive::Get>`-
+  shaped, which `QueryEnv` can supply the same way it supplies
+  `Select` — through the branch's `NetworkedIndex` + node cache, so
+  remote fallback and caching behave exactly as branch reads do).
+- **Modes/planner**: `Requirement::Required` on the input slots means
+  `estimate() → None` while the input is unbound — the planner refuses
+  to schedule the premise until a join binds it. The "node-bound only"
+  contract of revision 2 falls out of modes instead of a runtime
+  selector error, and the planner can order operations after the
+  premises that bind their inputs, costed like formulas
+  (`PARAM_COST`-style base + a fetch constant).
+- **Incremental maintenance**: classify operations exactly as formulas
+  are classified in `fixpoint.rs::classify_base` — `Inert`. Their
+  outputs change only when their inputs change; a changed input
+  re-derives through the operation in the delta-join. This is *sound
+  only because of the idempotence certificate* — say so in the
+  `classify_base` match arm.
+- **Demand**: operations record nothing in the demand cover. The
+  mutable anchor (`BranchRevision`) is what re-fires the subscription
+  (head flag), and the re-evaluation replays the operations against the
+  new root binding.
+- **Serialization**: mirror `FormulaQuery`'s
+  `{"assert": "<name>", "where": {…}}` tagged form
+  (`formula/query.rs:37-56`) in an `define_operations!` registry. On
+  the wire this is exactly the shape tonk already speaks (a string
+  predicate naming the operator, terms in `where`), so the migration
+  path for tonk is: same names, same rows, delete the interception.
+- **Capability derivation**: the wire query never names a subject; the
+  session env already scopes evaluation to the branches in the
+  `QueryLayer`, and the operation's effect is invoked against those
+  branches' archive capabilities (first branch whose catalog has the
+  block wins — content addressing makes them interchangeable). A
+  remote evaluator performs the same invocation under the caller's
+  delegated capabilities; attenuation is the authorization story.
 
-Derived concepts on top (like `schema::Revision` /
-`schema::RevisionParent`, via `builtin` in
-`rust/dialog-repository/src/rules.rs`): `TreeNode { this, kind, size,
-count, rank, scale }`, `TreeLink { this, at, node, separator, scale,
-novelty }`, `TreeChild { this, child }`, `TreeKey { this, key }` —
-`bound` as a `maybe` field if optional-field support fits, else a field
-on `TreeNode`. Follow the attribute-newtype pattern in
-`rust/dialog-repository/src/schema.rs`.
+### Failure semantics
 
-### What must NOT become a relation
+- Input that decodes but whose block is absent everywhere → zero rows,
+  consistent with "unreplicated contributes nothing". (Caveat: a
+  subscription that read zero rows for an unreachable block will not
+  refire when connectivity returns — nothing moved the head. Same
+  behavior partial replicas exhibit elsewhere; document, don't
+  engineer around.)
+- Malformed input (bad hash string, wrong length) → zero rows,
+  mirroring the forged-record-projects-nothing convention.
+- Asking `tree/link` of a segment, or `tree/key` of an index → zero
+  rows (not an error — lets a query union over mixed levels).
+- Effect *transport* failure (storage error mid-stream) → propagate as
+  an evaluation error, like a failed select.
 
-Tonk's `tree/child` rows carry `cached: bool` — whether the child's
-block is in the local archive. **This field cannot port.** Locality is
-mutable without a commit (a block arrives when someone expands it, or a
-replication task lands it), so a `dialog.tree/cached` fact would change
-underneath a standing subscription with nothing in the demand/diff
-machinery to notice — exactly the staleness this design exists to
-prevent. Locality is presentation state: the client can infer it (row
-resolved fast vs. slow, or a separate non-subscribable diagnostic
-endpoint) but it must not be a queryable fact. The same reasoning
-excludes anything else observer-relative: fetch latency, cache
-residency, connection state.
+## The tree operation library
 
-## Serving the synthetic relations
+Operations (all inputs `Required`; every row self-contained, in tonk's
+proven shape; large segments streamed, not collected — nodes can be
+~150 KB):
 
-### Routing point
+- **`tree/node`** — input `of` (node reference); one row:
+  `kind` (`"index"`/`"segment"`), `size` (encoded byte length),
+  `count` (links or entries), `bound` (the node's upper-bound key
+  bytes, `PersistentNode::upper_bound`, absent for empty), `rank`
+  (rank of the bound under the node's own embedded manifest —
+  `Distribution::rank(key, manifest)`,
+  `dialog-search-tree/src/distribution.rs:144`), `scale` (the node's
+  `Scale` byte).
+- **`tree/link`** — input `of`; one row per link of an index node
+  (`Link { separator, node, scale }`,
+  `dialog-search-tree/src/link.rs`): `at` (position), `node` (child
+  reference), `separator` (bytes; empty = the level's leftmost/−∞),
+  `scale` (advisory subtree size), `novelty` (count of hitchhiker ops
+  buffered against this subtree, from `PersistentIndex.novelty`,
+  `node/persistent.rs:635` — the window into buffered-vs-canonical
+  cost, covered by the node's hash so immutability holds).
+- **`tree/key`** — input `of`; one row per entry key of a segment
+  node (bytes, in entry order). Entry *values*/states are v2 (see out
+  of scope).
 
-`impl Provider<Select> for QueryEnv` in
-`rust/dialog-repository/src/repository/branch/session.rs` (`execute`,
-`:407`). After `self.record_demand(&input)` (`:411` — recording MUST
-stay first; that is the whole point), check whether the selector's
-`the` is a `dialog.tree/*` attribute. If so, do **not** union
-branch/overlay streams; return the synthesized stream instead.
-Everything else is unchanged. Because transaction queries construct the
-same `QueryEnv` (see `repository/branch/transaction/query.rs`), the tx
-view gets tree relations for free.
+Node references travel as the same base58 string `dialog.branch/tree`
+uses (`ToBase58` in `repository/branch/metadata.rs:76-79`) — no new
+entity scheme is needed now that rows are not EAV facts; whether to
+also mint a `tree:` URI form is a presentation choice, not a
+requirement.
 
-### Selector contract
+Pure formulas (ordinary `Formula`s in `dialog-query/src/formula/`,
+registered in `define_formulas!` beside `dialog/revision`):
 
-- `of` must be a constant `tree:` entity (node or link form per the
-  attribute). If `of` is unconstrained, return a stream whose first
-  item is an error (`DialogArtifactsError::InvalidSelector` or nearest
-  fit) with a message like *"tree relations are node-bound: constrain
-  `of` to a tree: entity"*. This is deliberate, twice over: hashes are
-  not enumerable, and an unbound scan is the one shape whose demand
-  would be "the whole tree" — the shape that would actually degrade
-  subscriptions.
-- `is` constrained → filter the synthesized artifacts before yielding
-  (ordinary post-filter; the engine also re-checks).
-- A hash that decodes but whose block is absent everywhere → yield
-  nothing (zero rows), consistent with "unreplicated contributes
-  nothing". A malformed `tree:` entity → zero rows.
-- Link attributes for an `at` out of range, or link/entry attributes
-  asked of the wrong node kind → zero rows (not an error — lets a
-  query union over mixed levels).
-
-### Reading a node
-
-Given the `Blake3Hash` decoded from the `of` entity:
-
-1. Fetch the buffer through the same path branch reads use so the
-   shared node cache and remote fallback apply: per branch in
-   `self.branches`, construct the store the way the branch select does
-   (`NetworkedIndex` + the branch's `node_cache()`, as
-   `Subscription::touched` also does at `subscription.rs:509-526`) and
-   attempt the content-addressed read. First branch that has the block
-   wins — content addressing makes them interchangeable. The remote
-   fallback means expanding a not-yet-replicated node transparently
-   pulls it, same as tonk's resolver.
-2. Decode as the artifact tree's node type: `ArtifactTree =
-   PersistentTree<Key, State<Datum>>`
-   (`rust/dialog-artifacts/src/tree.rs`), so nodes are
-   `PersistentNode<Key, State<Datum>>` with `body()` = `Index` (links +
-   per-link novelty) or `Segment` (entries with variable-length keys).
-3. Synthesize `Artifact`s for the requested attribute, in the shapes
-   from the schema table. Yield `child`/`link`/`key` rows in link/entry
-   order. Large segments must be yielded lazily through the stream, not
-   collected (nodes can be ~150 KB). `cause` on synthetic artifacts:
-   `None`.
-
-### Where the mutable world enters
-
-Nothing else. Do not add a "current root" tree attribute — the root
-enters queries via `BranchRevision.tree` + `dialog/tree-reference`
-only. That keeps invalidation confined to the head flag above.
-
-Caveat worth documenting: "absent everywhere → zero rows" interacts
-with offline operation. A subscription that read zero rows for a node
-whose block was unreachable will not refire when connectivity returns —
-nothing moved the head. That is consistent with how partial replicas
-behave elsewhere, and the inspector's usage (descend from a root you
-just read) makes it rare; note it in the module docs rather than
-engineering around it.
-
-## Pure formulas
-
-In `rust/dialog-query/src/formula/`, registered in the
-`define_formulas!` table in `formula/query.rs` (`:93`) beside
-`dialog/revision` / `dialog/revision-parent`:
-
-1. **`dialog/tree-reference`** — glue between the base58 string the
-   `BranchRevision.tree` fact carries and the `tree:` entity the
-   relations key on. Input `of: String` (base58 hash), output
-   `this: Entity` (`tree:z…`). Malformed base58 → zero rows (mirror the
-   forged-record-projects-nothing convention).
+1. **`dialog/tree-reference`** — glue from the `BranchRevision.tree`
+   base58 string to the node-reference value the operations take (and
+   back). Malformed base58 → zero rows.
 2. **`dialog/key-part`** — decompose a full, variable-length index key.
    Input `of: Bytes`; output **one row per component**:
-   `at: UnsignedInt` (position), `kind: Text` (`index` / `entity` /
-   `attribute` / `vtype` / `value` / `spill` / `origin` / `edition` /
-   `blob`), `text: Text` (human rendering), `bytes: Bytes` (raw).
-   Multi-row output is native to `Formula::compute -> Vec<Self>`.
-   Build it on the key views (`EntityKey`/`AttributeKey`/`ValueKey`
-   over `key/varkey.rs`), dispatching on the tag byte — entity(0),
-   attribute(1), value(2), history(3), blob(4), coverage(5), from
+   `at` (position), `kind` (`index` / `entity` / `attribute` / `vtype`
+   / `value` / `spill` / `origin` / `edition` / `blob`), `text` (human
+   rendering), `bytes` (raw). Build on the key views
+   (`EntityKey`/`AttributeKey`/`ValueKey` over `key/varkey.rs`),
+   dispatching on the tag byte — entity(0), attribute(1), value(2),
+   history(3), blob(4), coverage(5), from
    `dialog-artifacts/src/constants.rs` — exactly as tonk's `key_parts`
    does, including the spilled-value arm and the history/coverage
    `origin ‖ edition ‖ fact-tail` shape. Unparseable under its tag's
@@ -360,29 +347,42 @@ In `rust/dialog-query/src/formula/`, registered in the
 3. **`dialog/separator-part`** — same output shape over a link
    separator. Separators are front-coded *prefixes*: the column framing
    a full-key parse relies on lies past the truncation, so this formula
-   is lenient — emit the tag chip and as many leading components as the
-   prefix carries, ending with an opaque remainder chip; empty input →
-   one `kind: "min"` row (the −∞ separator). Keeping it separate from
-   `dialog/key-part` mirrors tonk's `key_parts`/`separator_parts` split
-   and keeps the strict/lenient contracts honest.
+   is lenient — the tag chip, as many leading components as the prefix
+   carries, an opaque remainder chip; empty input → one `kind: "min"`
+   row (the −∞ separator). Keeping it separate from `dialog/key-part`
+   mirrors tonk's `key_parts`/`separator_parts` split and keeps the
+   strict/lenient contracts honest.
 
-Both decomposition formulas are pure per-row computation — the
-legitimate `Formula` kind, exactly like `dialog/revision-parent`.
+### What must NOT become an operation output
+
+Tonk's `tree/child` rows carry `cached: bool` — whether the child's
+block is in the local archive. **This field cannot port.** Locality is
+mutable without a commit (a block arrives when someone expands it, or a
+replication task lands it): an operation surfacing it would not be
+idempotent, and a standing subscription would go stale with nothing in
+the machinery to notice. Locality is presentation state — the client
+can infer it (row resolved fast vs. slow, or a separate
+non-subscribable diagnostic channel) but it must not be queryable. The
+same reasoning excludes fetch latency, cache residency, connection
+state — and, on the other side of the boundary, the current head
+itself (`memory::Resolve`), which stays a tracked fact.
+
+Also excluded: node depth/level — the same node can sit at different
+depths under different roots; depth is a property of the inspector's
+descent, not of the node.
 
 ## Subscriptions: what to build, and what to verify
 
-Machinery to build: the `Demand::head` flag from "The head-tracking
-gap" above. Everything else is verification:
+Machinery to build: the `Demand::head` flag (above) and the `Inert`
+classification for operation premises. Everything else is verification:
 
 - A standing query shaped `BranchRevision(branch, tree) ⋈
-  tree-reference ⋈ TreeNode(root, …)` re-fires after a commit and
+  tree-reference ⋈ tree/node(root, …)` re-fires after a commit and
   reflects the new root (via the head flag; write the test to fail
   before the flag lands).
-- Committed facts never carry `dialog.tree/*` attributes, so the
-  incremental maintainer (`extend` / `retract` in `fixpoint.rs`) never
-  sees them in additions/deletions — nothing to do, but assert the
-  assumption: attempting to `assert` a `dialog.tree/*` fact through a
-  transaction must be rejected by the existing reserved-domain check.
+- Operation rows never appear in the tree, so the incremental
+  maintainer never sees them in additions/deletions; their premises
+  re-derive from changed inputs like formulas do.
 - Head-flagged subscriptions take the full-recompute path per commit by
   design; incremental maintenance of mixed fact+tree queries is not a
   goal (the revision binding changes every commit, so every commit is a
@@ -392,62 +392,70 @@ gap" above. Everything else is verification:
 
 - Tonk's chained point queries (`node → links → node → keys →
   decomposition`) become ONE dialog query — joins, not client
-  round-trips per level — usable from branch and transaction queries,
-  live under subscriptions. The worker's predicate interception and
-  the custom endpoint can be deleted; `dialog-arboretum` (the UI)
-  stays, now driven by a subscription instead of re-fetch-on-demand.
-- Chips (`{kind, text, hex}`) move client-side or become
-  `dialog/key-part` / `dialog/separator-part` rows — either way the
-  worker stops hand-rolling key parsing.
+  round-trips per level — usable from branch and transaction queries
+  (`tx.query()` builds the same `QueryEnv`), live under subscriptions.
+  The worker's predicate interception and the custom endpoint can be
+  deleted; the wire shape (string operator name + `where` terms) is
+  what tonk already speaks. `dialog-arboretum` (the UI) stays, driven
+  by a subscription instead of re-fetch-on-demand.
+- Operations are a general facility: future idempotent-effect premises
+  (blob metadata by digest, record fetch by content address, packfile
+  introspection) reuse the same admission rule — certified-idempotent
+  effect + pure projection — instead of each inventing a side channel.
 - Declarative subtree traversal ("all nodes under this root", "bytes
-  per subtree") is a recursive rule over `TreeChild`. It is **blocked
+  per subtree") is a recursive rule over `tree/link`. It is **blocked
   on** the goal-directed fixpoint
   (`notes/goal-directed-fixpoint.md`): the full-closure evaluator's
-  seed round scans unbound, which the selector contract above rejects
-  loudly — the right failure mode. Do not weaken the contract to make
-  full-closure traversal pass; implement demand seeding instead.
+  seed round evaluates with unbound inputs, which the operation's
+  Required mode refuses — the right failure mode. Do not weaken modes
+  to make full-closure traversal pass; implement demand seeding
+  instead.
 
 ## Tests
 
-In `dialog-repository` (model fixtures on the existing
+In `dialog-query` (engine-level, with a stub idempotent effect +
+in-memory provider):
+
+1. Operation premise with unbound input is non-viable
+   (`estimate() → None`); binding it through a join schedules it.
+2. Multi-row projection joins onward (operation output feeding a
+   second operation's input — the descent chain).
+3. `classify_base` treats an operation premise as `Inert`.
+4. Unit tests for all three pure formulas (round-trip base58; per-tag
+   decomposition incl. history and blob keys; spilled values;
+   separator prefixes incl. empty; wrong-length and malformed inputs).
+   Model on `formula/revision.rs::tests`.
+
+In `dialog-repository` (integration, model fixtures on the existing
 revision-projection and subscription tests):
 
-1. `it_reads_the_root_node_through_the_query_engine` — commit a few
-   facts; query `BranchRevision` for `tree`, glue through
-   `dialog/tree-reference`, select `TreeNode` — kind ∈
-   {index, segment}, size > 0, count > 0. Do the whole thing as ONE
-   query (joins, not application-side chaining) to prove composition.
-2. `it_descends_through_links_and_decomposes_keys` — commit enough
-   facts to force an index root (or accept a segment root and skip
-   descent); follow `TreeLink`/`TreeChild` one level, select `TreeKey`,
-   run `dialog/key-part` over the bytes; assert tags are within the
-   known tag set and per-tag component kinds match.
-3. `it_rejects_unbound_tree_scans` — `TreeNode` with `this` unbound
-   errors with the node-bound message.
-4. `it_keeps_old_roots_queryable` — capture root₁, commit again, query
-   `TreeNode(root₁)` — still answers (content-addressed history), and
-   `TreeNode(root₂)` differs.
-5. `it_yields_nothing_for_an_absent_node` — a syntactically valid
-   `tree:` entity whose hash is not in the store → zero rows, no error.
-6. `it_refuses_committing_tree_facts` — `tx.assert(dialog.tree/kind …)`
-   is rejected by the reserved-domain check.
+5. `it_reads_the_root_node_through_the_query_engine` — commit a few
+   facts; `BranchRevision ⋈ dialog/tree-reference ⋈ tree/node` as ONE
+   query — kind ∈ {index, segment}, size > 0, count > 0.
+6. `it_descends_through_links_and_decomposes_keys` — follow
+   `tree/link` a level, `tree/key` at a segment, `dialog/key-part`
+   over the bytes; assert tags within the known set and component
+   kinds per tag.
 7. `it_refires_a_tree_subscription_on_commit` — standing query over
-   `BranchRevision ⋈ tree-reference ⋈ TreeNode`; commit; assert the
+   `BranchRevision ⋈ tree-reference ⋈ tree/node`; commit; assert the
    subscription delivers rows for the *new* root. **Write this first;
    it is expected to fail against today's poll gate** and is the
-   evidence for the `Demand::head` flag. (Anchor on the harness in
-   `repository/branch/subscription.rs` tests.)
-8. `it_serves_tree_relations_in_transaction_queries` — the same
-   root-node query through `tx.query()`.
-9. `it_surfaces_link_novelty` — commit through the buffered path so an
-   index node holds novelty; assert `TreeLink.novelty` > 0 for the
-   affected link and 0 elsewhere; `canonicalize()` and assert all
-   zeros.
-
-In `dialog-query`: unit tests for all three pure formulas (round-trip
-base58 ↔ entity; per-tag decomposition incl. history and blob keys;
-spilled values; separator prefixes incl. empty; wrong-length and
-malformed inputs). Model on `formula/revision.rs::tests`.
+   evidence for the `Demand::head` flag.
+8. `it_keeps_old_roots_queryable` — capture root₁, commit again;
+   `tree/node(root₁)` still answers (content-addressed history) and
+   differs from `tree/node(root₂)`.
+9. `it_yields_nothing_for_an_absent_node` — a well-formed reference
+   whose block is nowhere → zero rows, no error.
+10. `it_serves_tree_operations_in_transaction_queries` — the
+    root-node query through `tx.query()`.
+11. `it_surfaces_link_novelty` — commit through the buffered path so
+    an index node holds novelty; assert `tree/link.novelty` > 0 for
+    the affected link and 0 elsewhere; `canonicalize()` and assert all
+    zeros.
+12. `it_denies_tree_operations_without_archive_capability` — a session
+    whose capability set lacks archive read for the subject gets an
+    authorization error, not rows (the capability story is real, so
+    test it).
 
 ## Acceptance checklist
 
@@ -456,61 +464,57 @@ malformed inputs). Model on `formula/revision.rs::tests`.
 - [ ] `cargo clippy --workspace --all-targets --all-features` clean.
 - [ ] `cargo check --target wasm32-unknown-unknown -p dialog-query -p dialog-repository -p dialog-artifacts`
       compiles (the inspector's whole point is running against
-      IndexedDB-backed wasm builds).
+      IndexedDB-backed wasm builds; operations must not introduce
+      native-only bounds — use `ConditionalSend`/`ConditionalSync`).
 - [ ] Test 7 demonstrated failing before the `Demand::head` fix, green
       after.
-- [ ] Tests 1–9 + formula unit tests present and green.
-- [ ] Demand recording precedes routing in `QueryEnv::execute`
-      (assert by code review; the subscription test backs it
-      behaviorally).
-- [ ] Doc comments on the routing carry the soundness argument from
-      "Why this is sound" above, including the novelty-under-hash
-      point and the `cached`-exclusion rationale.
+- [ ] The `IdempotentEffect` marker is sealed, implemented exactly for
+      `archive::Get`, with the memory-domain counterexample in its
+      docs.
+- [ ] Doc comments on the operation facility carry the soundness
+      argument from "Why this is sound", including the
+      novelty-under-hash point and the `cached`-exclusion rationale.
 
 ## Out of scope
 
-- Entry *values* / states (`dialog.tree/entry` as a record of
-  key + `State<Datum>`): v2 — needs a decision on surfacing tombstones
-  and decoded values; keys alone serve the inspector's size/boundary
-  analysis, and `dialog/key-part` already exposes the value component
-  of the key.
-- Manifest fields as relations (`version`, branch factor, …) — the
-  inspector can read them from any node row later if needed.
-- Node depth/level (path-dependent, see schema notes).
-- Locality (`cached`) as a fact — excluded by design, see "What must
-  NOT become a relation".
+- Entry *values* / states (`tree/entry` as key + `State<Datum>` rows):
+  v2 — needs a decision on surfacing tombstones and decoded values;
+  keys alone serve the inspector's size/boundary analysis, and
+  `dialog/key-part` already exposes the value component of the key.
+- Manifest fields as rows (`version`, branch factor, …) — add to
+  `tree/node` later if needed.
+- The root *default* (tonk's bare `tree/node` = current root): in
+  dialog the root is one join away through `BranchRevision`; a
+  defaulting convenience premise would re-smuggle the mutable head
+  into an operation. Don't.
 - Recursive subtree aggregation (blocked on
   `notes/goal-directed-fixpoint.md`).
-- Any write path for tree facts (they are read-only by construction).
+- Any write path for tree data through operations (archive `Put` is
+  idempotent too, but operations are a *read* facility; effects with
+  observable external consequences are out until a separate design
+  says otherwise).
 
 ## Gotchas
 
-- **Never bypass `record_demand`.** If a refactor moves routing above
-  it, subscriptions rot silently — the exact failure this design
-  exists to avoid.
-- **Separators are not bounds.** Revision 1 specified `upper_bound`
-  per link; the current format stores lower-bound separator prefixes
-  (`link.rs`). Bounds exist per *node* (`upper_bound()`), separators
-  per *link*; the schema reflects both, and the decomposition formulas
-  differ (strict vs. lenient) for exactly this reason.
-- `Value` payloads: keys/bounds/separators go out as `Value::Bytes`;
-  sizes, counts, ranks, scales, novelty as unsigned integers; kind as
-  text. Check the `Value` variant set in `dialog-artifacts` before
-  inventing encodings.
-- Base58: match the exact encoding `dialog.branch/tree` uses
-  (`ToBase58` in `repository/branch/metadata.rs:76-79`).
-- `Demand` builds its ranges under the **default** `Manifest`
-  (`subscription.rs` doc around `Demand`) — fine for `dialog.tree/*`
-  ranges since no committed fact ever occupies them, but keep the
-  caveat in mind if the head flag is instead implemented as a fake
-  range (don't: the flag is more honest).
-- Large nodes: stream synthesized artifacts; do not collect a 150 KB
+- **Idempotence is the whole contract.** The marker trait must stay
+  sealed; the moment a non-idempotent effect (a memory resolve, a
+  clock, a random source) becomes an operation, subscriptions rot
+  silently and undetectably. This is the operations-era restatement of
+  "never bypass `record_demand`".
+- **Separators are not bounds.** Links store lower-bound separator
+  prefixes (`link.rs`); nodes have upper bounds (`upper_bound()`). The
+  row schema reflects both, and the decomposition formulas differ
+  (strict vs. lenient) for exactly this reason.
+- Operations must read through the branch's `NetworkedIndex` + node
+  cache (as `Subscription::touched` does, `subscription.rs:509-526`)
+  so remote fallback and caching match branch reads; a bespoke fetch
+  path would fork behavior.
+- Large nodes: stream projected rows; do not collect a 150 KB
   segment's keys into a `Vec` eagerly.
-- Entity scheme: confirm `tree:z…` and `tree:z…/3` survive
-  `Entity::from_str` round-trips on both native and wasm (`uri.rs`
-  strips nothing but rejects whitespace; the `url` crate may normalize
-  opaque paths — add a unit test).
-- wasm: no threads, no native-only sync primitives; reuse the existing
-  `Cache`/`ConditionalSync` patterns if any per-env memoization is
-  added (none is required for v1 — the branch node cache already
-  serves repeat reads).
+- `Formula::compute` stays sync and storage-free; do not "extend"
+  formulas with async instead of adding the operation kind — the
+  maintainer's `Inert` classification and the demand story both lean
+  on formulas staying pure.
+- wasm: no threads, no native-only sync primitives; the operation
+  evaluation path must be `Send`-general on native and single-threaded
+  on wasm exactly as `Plan::evaluate` already is.
