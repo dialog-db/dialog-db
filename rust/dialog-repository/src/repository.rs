@@ -2000,7 +2000,7 @@ mod tests {
                     name_attr.clone(),
                     Value::String("Charlie".into()),
                 ),
-                // VAE probe: same value, different attributes,
+                // VAE resolver: same value, different attributes,
                 // entity-order opposite to attribute-order.
                 (
                     charlie.clone(),

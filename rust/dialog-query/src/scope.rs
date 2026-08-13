@@ -4,7 +4,7 @@
 //! Evaluation reaches the world exclusively through effects the
 //! environment provides: range scans ([`Select`]) with demand
 //! recording, rule discovery ([`SelectRules`]), and idempotent
-//! content-addressed block loads ([`Load`]) for procedure premises.
+//! content-addressed block loads ([`Load`]) for resolver premises.
 //! `Scope` names that bundle once so premise evaluation signatures
 //! stay stable as effects are added.
 
