@@ -251,6 +251,7 @@ impl<C: Principal> SnapshotExport<'_, C> {
         Env: Provider<Get>
             + Provider<Put>
             + Provider<BlobRead>
+            + Provider<BlobImport>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
@@ -262,6 +263,9 @@ impl<C: Principal> SnapshotExport<'_, C> {
             Reach::Download(remote) => Some(remote.clone()),
             Reach::Complete | Reach::Sparse => None,
         };
+        // The index consumes one handle for block read-misses; blob bytes
+        // travel their own channel, so the blob loop needs its own.
+        let hydrate = upstream.clone();
         let sparse = matches!(self.reach, Reach::Sparse);
         let root = NodeHash::from(*self.snapshot.revision.tree.hash());
 
@@ -346,6 +350,47 @@ impl<C: Principal> SnapshotExport<'_, C> {
                     .read(digest.clone())
                     .perform(env)
                     .await;
+                let reader = match (reader, &hydrate) {
+                    // A local miss the reach says to resolve. The index
+                    // cannot serve this one -- blocks fall through to the
+                    // remote via `Get`, blob bytes travel their own
+                    // channel -- so fetch the whole blob through a local
+                    // digest-verified import first (a lying remote
+                    // surfaces as `DigestMismatch` at `finish`, and the
+                    // bytes are cached like every other download), then
+                    // serve the read from the now-local copy.
+                    (Err(BlobError::NotFound(_)), Some(remote)) => {
+                        let address = remote.address();
+                        let mut source = address
+                            .subject
+                            .clone()
+                            .archive()
+                            .blob()
+                            .read(digest.clone())
+                            .fork(address.site())
+                            .perform(env)
+                            .await?;
+                        let mut sink = subject
+                            .clone()
+                            .archive()
+                            .blob()
+                            .import(digest.clone(), record.size)
+                            .perform(env)
+                            .await?;
+                        while let Some(chunk) = source.next().await? {
+                            sink.write_all(&chunk).await?;
+                        }
+                        sink.finish().await?;
+                        subject
+                            .clone()
+                            .archive()
+                            .blob()
+                            .read(digest.clone())
+                            .perform(env)
+                            .await
+                    }
+                    (reader, _) => reader,
+                };
                 match reader {
                     Ok(chunks) => {
                         yield Item::Blob { digest, size: record.size, chunks };
