@@ -43,6 +43,8 @@
 //!   the neighbor's position.
 
 use std::fmt::{self, Display};
+use std::iter::repeat_n;
+use std::str::from_utf8;
 
 use crate::DialogArtifactsError;
 
@@ -113,7 +115,7 @@ impl Position {
     /// The position as a string slice (always ASCII).
     pub fn as_str(&self) -> &str {
         // Validated ASCII on construction.
-        std::str::from_utf8(&self.0).expect("positions are ASCII")
+        from_utf8(&self.0).expect("positions are ASCII")
     }
 }
 
@@ -220,7 +222,7 @@ fn create(major: u8, minor: &[u8], patch: &[u8]) -> Position {
     } else {
         let width = minor.len().min(capacity);
         bytes.extend_from_slice(&minor[..width]);
-        bytes.extend(std::iter::repeat_n(B62_MIN, capacity - width));
+        bytes.extend(repeat_n(B62_MIN, capacity - width));
         bytes.extend_from_slice(patch);
     }
     Position(bytes)
@@ -712,7 +714,7 @@ fn to_base62(bytes: &[u8]) -> Vec<u8> {
         }
     }
     let mut digits = Vec::with_capacity(leading_zeros + encoding.len());
-    digits.extend(std::iter::repeat_n(CODES[0], leading_zeros));
+    digits.extend(repeat_n(CODES[0], leading_zeros));
     digits.extend(encoding.iter().rev().map(|&digit| CODES[digit as usize]));
     digits
 }
