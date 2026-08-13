@@ -1,6 +1,7 @@
 //! Error types for S3 operations.
 
 use dialog_effects::archive::ArchiveError;
+use dialog_effects::blob::BlobError;
 use dialog_effects::memory::MemoryError;
 use thiserror::Error;
 
@@ -46,9 +47,42 @@ impl From<S3Error> for MemoryError {
     }
 }
 
-impl From<S3Error> for dialog_effects::blob::BlobError {
+impl From<S3Error> for BlobError {
     fn from(error: S3Error) -> Self {
-        dialog_effects::blob::BlobError::Storage(error.to_string())
+        BlobError::Storage(error.to_string())
+    }
+}
+
+/// Whether an error means the presented permit itself was rejected.
+///
+/// The S3 providers map an HTTP 401/403 to their error type's
+/// authorization variant; everything else is either a semantic outcome
+/// (a missing object, a CAS conflict) or a transport failure that
+/// proves nothing about the permit. A permit cache uses this split to
+/// decide when a cached permit must be dropped and redeemed afresh:
+/// invalidating on any error would let a routine presence probe (a 404)
+/// evict a perfectly reusable permit.
+pub trait PermitRejection {
+    /// `true` when the service rejected the permit this operation
+    /// presented, so retrying with the same permit cannot succeed.
+    fn is_permit_rejection(&self) -> bool;
+}
+
+impl PermitRejection for ArchiveError {
+    fn is_permit_rejection(&self) -> bool {
+        matches!(self, ArchiveError::AuthorizationError(_))
+    }
+}
+
+impl PermitRejection for BlobError {
+    fn is_permit_rejection(&self) -> bool {
+        matches!(self, BlobError::AuthorizationError(_))
+    }
+}
+
+impl PermitRejection for MemoryError {
+    fn is_permit_rejection(&self) -> bool {
+        matches!(self, MemoryError::Authorization(_))
     }
 }
 
@@ -79,6 +113,6 @@ impl From<AuthorizationFormatError> for dialog_effects::credential::CredentialEr
 
 impl From<AuthorizationFormatError> for dialog_capability::AuthorizeError {
     fn from(error: AuthorizationFormatError) -> Self {
-        Self::Configuration(error.to_string())
+        Self::Malformed(error.to_string())
     }
 }

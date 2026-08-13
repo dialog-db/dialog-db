@@ -1069,7 +1069,7 @@ where
 {
     Box::pin(async move {
         let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
-        let links = match node.body()? {
+        let links = match node.body() {
             ArchivedNodeBody::Segment(_) => return Ok(false),
             ArchivedNodeBody::Index(index) => {
                 if !index.novelty.is_empty() {
@@ -2256,14 +2256,14 @@ mod tests {
             .retrieve(hash)
             .await?
             .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
-        Ok(PersistentNode::new(Buffer::from(bytes)))
+        Ok(PersistentNode::try_from(Buffer::from(bytes))?)
     }
 
     /// The buffered ops sealed into a stored node, owned.
     fn sealed_novelty(
         node: &PersistentNode<SpecKey, Vec<u8>>,
     ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
-        Ok(match node.body()? {
+        Ok(match node.body() {
             ArchivedNodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
             ArchivedNodeBody::Segment(_) => Vec::new(),
         })
@@ -2737,7 +2737,7 @@ mod tests {
         let mut delta = Delta::zero();
         tree.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            let node = PersistentNode::<[u8; 4], Vec<u8>>::new(buffer);
+            let node = PersistentNode::<[u8; 4], Vec<u8>>::try_from(buffer)?;
             assert_eq!(
                 node.manifest()?,
                 custom,

@@ -519,28 +519,160 @@ pub trait CertificateStore<P: Protocol> {
             }
         }
 
-        Err(AuthorizeError::Denied(format!(
-            "no delegation chain found for '{}' to access '{}'",
-            authority, subject
-        )))
+        Err(AuthorizeError::UnprovenSubject {
+            claimed: authority.clone(),
+            authorized: subject.clone(),
+        })
     }
 }
 
 /// Error during the authorize step.
+///
+/// Most variants here are the caller's input failing to authorize what it
+/// asked for -- the request is answerable, and the answer is no. The
+/// exceptions are [`UnavailableProof`](Self::UnavailableProof) and
+/// [`Malformed`](Self::Malformed), which mean no decision could be reached
+/// at all. A backend that broke while trying to decide is a
+/// [`StorageError`](crate::StorageError), not one of these.
+///
+/// Variant names and `claimed`/`authorized` field naming follow
+/// `dialog_ucan_core::invocation::CheckFailed`, which classifies the same
+/// failures one layer down. This enum cannot reuse it -- that would invert
+/// the dependency, since the UCAN implementation must not depend on dialog
+/// types -- so it mirrors the vocabulary instead, and abilities arrive as
+/// `String` paths rather than a `Command` for the same reason.
+///
+/// The split matters because callers act differently on the reasons.
+/// [`Expired`](Self::Expired) means obtain a fresh proof and retry;
+/// [`Revoked`](Self::Revoked) means stop, since retrying presents the same
+/// withdrawn authority.
 #[derive(Debug, Error)]
 pub enum AuthorizeError {
-    /// Authorization was denied.
-    #[error("Authorization denied: {0}")]
-    Denied(String),
+    /// No delegation chain connects the authority to the subject.
+    ///
+    /// A real access decision: the delegations were searched and none of
+    /// them authorizes this. Distinct from
+    /// [`UnavailableProof`](Self::UnavailableProof), where a chain may well
+    /// exist but could not be evaluated.
+    ///
+    /// Mirrors `CheckFailed::UnprovenSubject`.
+    #[error("No delegation chain proves '{claimed}' may access '{authorized}'")]
+    UnprovenSubject {
+        /// The principal attempting access.
+        claimed: Did,
+        /// The subject it attempted to access.
+        authorized: Did,
+    },
 
-    /// Configuration error (e.g., missing delegation chain).
-    #[error("Authorization configuration error: {0}")]
-    Configuration(String),
+    /// A delegation exists but does not cover the requested ability.
+    ///
+    /// Abilities are paths (`/storage/get`), matching
+    /// [`Ability::ability`](crate::Ability::ability), which is how this crate
+    /// represents them everywhere else.
+    ///
+    /// Mirrors `CheckFailed::CommandEscalation`.
+    #[error("Claimed ability '{claimed}' is not authorized by ability '{authorized}'")]
+    CommandEscalation {
+        /// The ability the invocation asked for.
+        claimed: String,
+        /// The ability the delegation actually grants.
+        authorized: String,
+    },
+
+    /// A delegation covers the ability, but its policy rejected the arguments.
+    ///
+    /// Mirrors `CheckFailed::PolicyViolation`. That variant carries the
+    /// `Predicate` that failed; this one cannot name it without depending on
+    /// the UCAN types, so it carries the rendered predicate instead.
+    #[error("Invocation arguments violate delegation policy: {predicate}")]
+    PolicyViolation {
+        /// The predicate that evaluated to `false`, as rendered by the
+        /// protocol that evaluated it.
+        predicate: String,
+    },
+
+    /// The proof was issued for a different audience than the one presenting it.
+    ///
+    /// Mirrors `CheckFailed::DelegationAudienceMismatch`.
+    #[error("Claimed audience '{claimed}' does not match authorized audience '{authorized}'")]
+    InvalidAudience {
+        /// The audience the proof names.
+        claimed: Did,
+        /// The audience the invocation requires.
+        authorized: Did,
+    },
+
+    /// The proof's validity window has not opened yet.
+    ///
+    /// Mirrors the `TooEarly` side of `CheckFailed::TimeBound`.
+    #[error("Proof is not valid before {not_before}")]
+    NotValidBefore {
+        /// Unix timestamp the proof becomes valid at.
+        not_before: u64,
+        /// Unix timestamp the check was made at.
+        at: u64,
+    },
+
+    /// The proof's validity window has closed.
+    ///
+    /// Distinct from [`Revoked`](Self::Revoked): the authority was never
+    /// withdrawn, it simply lapsed, so obtaining a fresh proof is expected
+    /// to succeed.
+    ///
+    /// Mirrors the `Expired` side of `CheckFailed::TimeBound`.
+    #[error("Proof expired at {expiration}")]
+    Expired {
+        /// Unix timestamp the proof expired at.
+        expiration: u64,
+        /// Unix timestamp the check was made at.
+        at: u64,
+    },
+
+    /// Authority in the chain has been withdrawn.
+    ///
+    /// Terminal in a way [`Expired`](Self::Expired) is not: re-obtaining a
+    /// proof presents the same revoked authority, so callers should stop
+    /// rather than retry.
+    #[error("Authority for '{subject}' has been revoked")]
+    Revoked {
+        /// The subject whose authority was withdrawn.
+        subject: Did,
+    },
+
+    /// A proof's signature does not verify against its issuer's key.
+    #[error("Proof does not carry a valid signature from '{issuer}'")]
+    InvalidSignature {
+        /// The principal the proof claims to be signed by.
+        issuer: Did,
+    },
+
+    /// The chain referred to a proof that was not supplied.
+    ///
+    /// Not an access decision: the chain might well authorize this, but it
+    /// cannot be evaluated because a link it names is missing. Proofs travel
+    /// with the invocation here, so this is incomplete input rather than a
+    /// resolution failure.
+    ///
+    /// Mirrors the conformance suite's `UnavailableProof`.
+    #[error("Chain refers to proof '{link}', which was not supplied")]
+    UnavailableProof {
+        /// Identifier of the proof the chain referred to.
+        link: String,
+    },
+
+    /// The authorization could not be evaluated at all.
+    ///
+    /// Not an access decision: the chain was absent or undecodable, or the
+    /// material needed to decide could not be read. Distinct from the
+    /// decision variants above, which all mean "we understood the request
+    /// and the answer is no".
+    #[error("Authorization could not be evaluated: {0}")]
+    Malformed(String),
 }
 
 impl From<crate::StorageError> for AuthorizeError {
     fn from(e: crate::StorageError) -> Self {
-        AuthorizeError::Configuration(e.to_string())
+        AuthorizeError::Malformed(e.to_string())
     }
 }
 
@@ -550,6 +682,109 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::TimeRange;
+
+    mod reasons {
+        use crate::access::AuthorizeError;
+        use crate::did;
+
+        // The distinction the split exists for. Both mean "this proof does not
+        // authorize you right now", and a single `Denied(String)` could not
+        // tell them apart -- but a caller should re-authenticate on one and
+        // stop on the other, so they cannot share a variant.
+        #[dialog_common::test]
+        async fn it_separates_a_lapsed_proof_from_a_withdrawn_one() {
+            let lapsed = AuthorizeError::Expired {
+                expiration: 100,
+                at: 200,
+            };
+            let withdrawn = AuthorizeError::Revoked {
+                subject: did!("key:zSubject"),
+            };
+
+            assert!(matches!(lapsed, AuthorizeError::Expired { .. }));
+            assert!(matches!(withdrawn, AuthorizeError::Revoked { .. }));
+            assert_ne!(lapsed.to_string(), withdrawn.to_string());
+        }
+
+        // Operands are carried, not interpolated into prose, so a caller can
+        // read them back rather than parse a message.
+        #[dialog_common::test]
+        async fn it_carries_the_operands_of_a_denial() {
+            let claimed_did = did!("key:zAuthority");
+            let authorized_did = did!("key:zSubject");
+
+            match (AuthorizeError::UnprovenSubject {
+                claimed: claimed_did.clone(),
+                authorized: authorized_did.clone(),
+            }) {
+                AuthorizeError::UnprovenSubject {
+                    claimed,
+                    authorized,
+                } => {
+                    assert_eq!(claimed, claimed_did);
+                    assert_eq!(authorized, authorized_did);
+                }
+                other => panic!("expected UnprovenSubject, got {other:?}"),
+            }
+
+            match (AuthorizeError::CommandEscalation {
+                claimed: "/archive/put".into(),
+                authorized: "/archive/get".into(),
+            }) {
+                AuthorizeError::CommandEscalation {
+                    claimed,
+                    authorized,
+                } => {
+                    assert_eq!(claimed, "/archive/put");
+                    assert_eq!(authorized, "/archive/get");
+                }
+                other => panic!("expected CommandEscalation, got {other:?}"),
+            }
+        }
+
+        // Two failures that are not access decisions at all. Keeping them
+        // distinct from the decision variants is what stops either becoming
+        // the next catch-all -- and `UnavailableProof` specifically must not
+        // read as "denied", because the chain may well authorize once the
+        // caller supplies the link it refers to.
+        #[dialog_common::test]
+        async fn it_keeps_unevaluable_authorizations_out_of_the_denial_reasons() {
+            let undecodable = AuthorizeError::Malformed("chain did not decode".into());
+            assert!(
+                undecodable.to_string().contains("could not be evaluated"),
+                "an unevaluable authorization must not read as a refusal: {undecodable}"
+            );
+
+            let incomplete = AuthorizeError::UnavailableProof {
+                link: "bafyproof".into(),
+            };
+            match incomplete {
+                AuthorizeError::UnavailableProof { ref link } => assert_eq!(link, "bafyproof"),
+                other => panic!("expected UnavailableProof, got {other:?}"),
+            }
+            assert!(
+                incomplete.to_string().contains("not supplied"),
+                "a missing proof must name what is absent, not read as a denial: {incomplete}"
+            );
+        }
+
+        // A chain that was searched and found wanting is a decision; a chain
+        // that could not be evaluated is not. Both used to be `Denied`.
+        #[dialog_common::test]
+        async fn it_separates_an_absent_chain_from_an_unevaluable_one() {
+            let decided = AuthorizeError::UnprovenSubject {
+                claimed: did!("key:zAuthority"),
+                authorized: did!("key:zSubject"),
+            };
+            let undecided = AuthorizeError::UnavailableProof {
+                link: "bafyproof".into(),
+            };
+
+            assert!(matches!(decided, AuthorizeError::UnprovenSubject { .. }));
+            assert!(matches!(undecided, AuthorizeError::UnavailableProof { .. }));
+            assert_ne!(decided.to_string(), undecided.to_string());
+        }
+    }
 
     mod covers {
         use super::*;

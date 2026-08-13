@@ -1,0 +1,40 @@
+[package]
+name = "wbg-pool"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Pooled-browser test runner for wasm-bindgen: one shared headless Chrome, a unique origin per test, nextest-compatible"
+repository = "https://github.com/dialog-db/dialog-db"
+keywords = ["wasm", "wasm-bindgen", "testing", "nextest", "headless"]
+categories = ["development-tools::testing", "wasm"]
+
+# The isolation fixture is a standalone wasm project used to exercise the runner
+# by hand; it declares its own workspace and is not built as part of dialog-db.
+exclude = ["fixtures"]
+
+# wasm-bindgen-cli-support must match the wasm-bindgen version used by the crates
+# under test, exactly like wasm-bindgen-test-runner does. The pin lives in the
+# workspace manifest and is bumped in lockstep with wasm-bindgen.
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+futures-util = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = [
+  "macros",
+  "rt-multi-thread",
+  "net",
+  "process",
+  "io-util",
+  "time",
+  "sync",
+  "signal",
+  "fs",
+] }
+tokio-tungstenite = { workspace = true }
+ureq = { workspace = true }
+wasm-bindgen-cli-support = { workspace = true }
+wasmparser = { workspace = true }

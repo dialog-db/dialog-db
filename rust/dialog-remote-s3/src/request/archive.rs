@@ -4,7 +4,7 @@
 //! archive (content-addressed) capabilities, enabling them to be
 //! translated into concrete S3 request descriptions.
 
-use super::S3Request;
+use super::{RequestMethod, S3Request};
 use base58::ToBase58;
 use dialog_capability::{Capability, Policy};
 use dialog_common::Hasher;
@@ -26,6 +26,10 @@ impl From<&Capability<Get>> for S3Request {
     }
 }
 
+impl RequestMethod for Capability<Get> {
+    const METHOD: &'static str = "GET";
+}
+
 impl From<&Capability<Put>> for S3Request {
     fn from(capability: &Capability<Put>) -> Self {
         S3Request {
@@ -40,6 +44,10 @@ impl From<&Capability<Put>> for S3Request {
             ..S3Request::default()
         }
     }
+}
+
+impl RequestMethod for Capability<Put> {
+    const METHOD: &'static str = "PUT";
 }
 
 impl From<&Capability<PutAttenuation>> for S3Request {
@@ -57,4 +65,8 @@ impl From<&Capability<PutAttenuation>> for S3Request {
             ..S3Request::default()
         }
     }
+}
+
+impl RequestMethod for Capability<PutAttenuation> {
+    const METHOD: &'static str = "PUT";
 }

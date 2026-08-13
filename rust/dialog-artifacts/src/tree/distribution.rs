@@ -91,7 +91,7 @@ where
                 DialogArtifactsError::Tree(format!("tree node missing from store at depth {depth}"))
             })?;
             let size = bytes.len();
-            let node = PersistentNode::<Key, State<Datum>>::new(Buffer::from(bytes));
+            let node = PersistentNode::<Key, State<Datum>>::try_from(Buffer::from(bytes))?;
             let stat = if let Ok(index) = node.as_index() {
                 let bound = node.manifest()?.max_separator as usize;
                 let mut forced_links = 0usize;

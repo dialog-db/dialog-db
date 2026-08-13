@@ -116,7 +116,7 @@ where
             Node::Persistent(link) => Ok(link),
             Node::Transient(transient) => {
                 let separator = transient.separator()?.to_vec();
-                transient.persist(delta, manifest)?.to_link(separator)
+                Ok(transient.persist(delta, manifest)?.to_link(separator))
             }
         }
     }

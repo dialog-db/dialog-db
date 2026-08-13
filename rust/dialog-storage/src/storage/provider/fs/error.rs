@@ -39,6 +39,6 @@ impl From<FileSystemError> for CredentialError {
 
 impl From<FileSystemError> for AuthorizeError {
     fn from(e: FileSystemError) -> Self {
-        Self::Configuration(e.to_string())
+        Self::Malformed(e.to_string())
     }
 }

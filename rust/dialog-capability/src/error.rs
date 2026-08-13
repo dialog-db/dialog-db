@@ -2,7 +2,6 @@ use crate::access::AuthorizeError;
 use crate::subject::Did;
 use std::error::Error as StdError;
 use std::fmt::{self, Debug, Display, Formatter};
-use std::io;
 use thiserror::Error;
 
 /// Error that can occur during signing operations.
@@ -60,15 +59,30 @@ pub enum DialogCapabilityAuthorizationError {
 }
 
 /// Errors from capability-routed storage operations.
+///
+/// These are the "we failed" side of an effect's error: the backend broke,
+/// or the request named a subject this environment cannot serve. A caller
+/// supplying bad input is reported by the effect's own error type, not here.
 #[derive(Debug, Error)]
 pub enum StorageError {
     /// Storage backend error.
     #[error("Storage error: {0}")]
     Storage(String),
 
-    /// IO error.
-    #[error("IO error: {0}")]
-    Io(#[from] io::Error),
+    /// This environment has no provider for the requested subject.
+    ///
+    /// Distinct from a backend failure: nothing is broken. Not-found is
+    /// relative to this environment rather than absolute -- the subject may
+    /// exist elsewhere, and loading the space it belongs to makes the same
+    /// request succeed -- so callers may retry after mounting rather than
+    /// treat it as terminal.
+    #[error(
+        "No provider found for subject {subject}; it must be mounted before it can be accessed"
+    )]
+    SubjectNotFound {
+        /// The subject this environment cannot serve.
+        subject: Did,
+    },
 }
 
 /// Error during fork execution.

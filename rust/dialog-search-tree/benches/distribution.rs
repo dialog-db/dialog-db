@@ -36,7 +36,7 @@ use dialog_common::Blake3Hash;
 use dialog_common::helpers::BenchData;
 use dialog_search_tree::helpers::{Traversable as _, TraversalOrder};
 use dialog_search_tree::{
-    ContentAddressedStorage, Delta, Distribution, PersistentNode, PersistentTree, Rank,
+    Buffer, ContentAddressedStorage, Delta, Distribution, PersistentNode, PersistentTree, Rank,
 };
 use dialog_storage::MemoryStorageBackend;
 use futures_util::StreamExt;
@@ -348,7 +348,8 @@ where
 
             for hash in &frontier {
                 let bytes = storage.retrieve(hash).await.unwrap().unwrap();
-                let node = PersistentNode::<[u8; 16], Vec<u8>>::new(bytes.into());
+                let node =
+                    PersistentNode::<[u8; 16], Vec<u8>>::try_from(Buffer::from(bytes)).unwrap();
                 node_count += 1;
                 match node.as_index() {
                     Ok(index) => {

@@ -67,7 +67,7 @@ impl From<FsAddress> for SiteId {
 async fn open(address: &FsAddress) -> Result<FileSystem, AuthorizeError> {
     FileSystem::open(address.location())
         .await
-        .map_err(|e| AuthorizeError::Configuration(format!("opening directory: {e}")))
+        .map_err(|e| AuthorizeError::Malformed(format!("opening directory: {e}")))
 }
 
 /// Verify the resolved directory is the space for the invocation's subject:
@@ -97,7 +97,7 @@ where
         .perform(filesystem)
         .await
         .map_err(|e| {
-            AuthorizeError::Configuration(format!(
+            AuthorizeError::Malformed(format!(
                 "directory is not an initialized space (no readable credential/key/self): {e}"
             ))
         })?;
@@ -106,9 +106,10 @@ where
     let expected = capability.subject();
     let actual = credential.did();
     if &actual != expected {
-        return Err(AuthorizeError::Denied(format!(
-            "directory is the space for {actual}, not the invocation subject {expected}",
-        )));
+        return Err(AuthorizeError::InvalidAudience {
+            claimed: actual,
+            authorized: expected.clone(),
+        });
     }
     Ok(())
 }
@@ -133,7 +134,7 @@ where
     let identity = authority::Identify
         .perform(env)
         .await
-        .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+        .map_err(|e| AuthorizeError::Malformed(e.to_string()))?;
     let profile = identity.profile().clone();
     let operator = identity.did();
 

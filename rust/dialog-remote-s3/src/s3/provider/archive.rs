@@ -36,6 +36,14 @@ impl Provider<S3Invocation<Get>> for S3 {
             Ok(Some(bytes.to_vec()))
         } else if response.status() == StatusCode::NOT_FOUND {
             Ok(None)
+        } else if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            Err(ArchiveError::AuthorizationError(format!(
+                "Failed to get value: {}",
+                response.status()
+            )))
         } else {
             Err(ArchiveError::Storage(format!(
                 "Failed to get value: {}",
@@ -68,6 +76,14 @@ impl Provider<S3Invocation<Put>> for S3 {
 
         if response.status().is_success() {
             Ok(())
+        } else if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            Err(ArchiveError::AuthorizationError(format!(
+                "Failed to put value: {}",
+                response.status()
+            )))
         } else {
             Err(ArchiveError::Storage(format!(
                 "Failed to put value: {}",

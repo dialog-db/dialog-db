@@ -1,4 +1,6 @@
-//! UCAN site configuration -- marker trait + address type.
+//! UCAN site configuration -- site type + address type.
+
+use std::sync::Arc;
 
 use dialog_capability::access::{
     Access, Authorization as _, Authorize as AuthorizeEffect, AuthorizeError, FromCapability,
@@ -11,6 +13,8 @@ use dialog_capability::{
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::authority::{self, OperatorExt};
 use dialog_remote_s3::{Permit, S3Error};
+
+use crate::permit_cache::PermitCache;
 
 // Re-export UCAN types for convenience.
 pub use dialog_ucan::{Ucan, UcanInvocation};
@@ -121,7 +125,7 @@ where
         let identity = authority::Identify
             .perform(env)
             .await
-            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+            .map_err(|e| AuthorizeError::Malformed(e.to_string()))?;
         let profile = identity.profile().clone();
         let operator = identity.did();
 
@@ -140,9 +144,22 @@ where
 
 /// UCAN site configuration for delegated authorization.
 ///
-/// A marker type -- no fields. Address info lives in `UcanAddress`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UcanSite;
+/// Address info lives in `UcanAddress`. The site owns the cache of
+/// redeemed GET permits, so cached permits are scoped to whoever holds
+/// this site (one `Network`, hence one `Operator`) and are dropped with
+/// it; another operator in the same process has its own site and can
+/// never be served a permit this one redeemed. Clones share the cache.
+#[derive(Debug, Clone, Default)]
+pub struct UcanSite {
+    permits: Arc<PermitCache>,
+}
+
+impl UcanSite {
+    /// The cache of redeemed GET permits shared by clones of this site.
+    pub(crate) fn permits(&self) -> &PermitCache {
+        &self.permits
+    }
+}
 
 impl Site for UcanSite {
     type Authorization = UcanAuthorization;

@@ -374,9 +374,11 @@ impl From<IndexedDbError> for CredentialError {
     }
 }
 
+/// A backend failure while reading certificates is not an access decision:
+/// the material needed to decide could not be fetched.
 impl From<IndexedDbError> for AuthorizeError {
     fn from(e: IndexedDbError) -> Self {
-        Self::Configuration(e.to_string())
+        Self::Malformed(e.to_string())
     }
 }
 
