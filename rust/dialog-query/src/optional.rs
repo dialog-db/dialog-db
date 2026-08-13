@@ -160,7 +160,7 @@ impl OptionalAttributeQuery {
                     // The row claims the value is absent. A fact for
                     // this entity would contradict that claim; no fact
                     // confirms it and the row passes through unchanged.
-                    let resolver = DynamicAttributeQuery::new(
+                    let probe = DynamicAttributeQuery::new(
                         selector.query.the().clone(),
                         selector.query.of().clone(),
                         Term::blank(),
@@ -168,7 +168,7 @@ impl OptionalAttributeQuery {
                         Some(Cardinality::Many),
                     );
                     let inner: Pin<Box<dyn Selection + 'a>> =
-                        Box::pin(Application::evaluate(resolver, base.clone().seed(), env));
+                        Box::pin(Application::evaluate(probe, base.clone().seed(), env));
                     let mut found = false;
                     for await extension in inner {
                         extension?;

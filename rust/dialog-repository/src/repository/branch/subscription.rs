@@ -114,6 +114,17 @@ pub struct Demand {
     /// to re-evaluation when the head moves. See
     /// [`Subscription::poll`].
     head: Arc<AtomicBool>,
+    /// The overlay-injected branch entities whose EAV slices carry
+    /// the head-bearing attributes — anchored by the subscription
+    /// before evaluation ([`Demand::anchor_metadata`]). An
+    /// attribute-unconstrained scan reads every attribute of the
+    /// entities it covers, so it must flip `head` — but only when its
+    /// entity slice can actually hold one of these entities. Without
+    /// the anchor set, every dynamic-attribute probe (e.g. an
+    /// optional premise expanding an entity's attributes) would flip
+    /// `head` permanently and silently disable incremental
+    /// maintenance for the subscription.
+    metadata: Arc<Mutex<BTreeSet<Entity>>>,
 }
 
 /// The overlay-injected attributes whose values change whenever the
@@ -128,9 +139,9 @@ const HEAD_ATTRIBUTES: [&str; 3] = [
 
 /// Whether a selector could read a head-bearing metadata attribute:
 /// an exact `the` match, a covering `the` prefix, or no attribute
-/// constraint at all (an unconstrained-attribute scan reads
-/// everything, the metadata included).
-fn selects_head(selector: &ArtifactSelector<Constrained>) -> bool {
+/// constraint over an entity slice that can hold the metadata
+/// entities (`metadata` — the anchored branch entities).
+fn selects_head(selector: &ArtifactSelector<Constrained>, metadata: &BTreeSet<Entity>) -> bool {
     if let Some(attribute) = selector.attribute() {
         return HEAD_ATTRIBUTES.contains(&attribute.as_str());
     }
@@ -139,9 +150,15 @@ fn selects_head(selector: &ArtifactSelector<Constrained>) -> bool {
             .iter()
             .any(|attribute| attribute.starts_with(prefix));
     }
-    // No attribute constraint: entity- or value-keyed scans can still
-    // surface the metadata facts.
-    true
+    // No attribute constraint: the scan reads every attribute in its
+    // entity slice, the metadata included — unless the slice is
+    // pinned to an entity that carries none of it (the common
+    // dynamic-attribute probe over an ordinary entity). Entity-
+    // unconstrained (including value-keyed) scans stay conservative.
+    match selector.entity() {
+        Some(entity) => metadata.contains(entity),
+        None => true,
+    }
 }
 
 /// Insert a range into a cover, merging overlaps: the cover stays a
@@ -195,9 +212,22 @@ impl Demand {
     /// scanned range would fail to invalidate the reader.
     pub(crate) fn record(&self, selector: &ArtifactSelector<Constrained>) {
         record_range(&self.facts, selector_range(selector, &default_manifest()));
-        if selects_head(selector) {
+        let metadata = self.metadata.lock().expect("demand metadata lock");
+        if selects_head(selector, &metadata) {
             self.head.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// Anchor the branch entity that carries the head-bearing
+    /// metadata attributes, so entity-pinned attribute-unconstrained
+    /// scans over *other* entities do not flip the head flag. Called
+    /// by the subscription before each evaluation; idempotent, and
+    /// sticky across the Arc-backed clones recording flows through.
+    pub(crate) fn anchor_metadata(&self, entity: Entity) {
+        self.metadata
+            .lock()
+            .expect("demand metadata lock")
+            .insert(entity);
     }
 
     /// Record a rule-discovery scan's demanded range.
@@ -693,6 +723,8 @@ where
                 let layer = QueryLayer::from(&self.branch);
                 let overlay = layer.overlay(&operator);
                 let tombstones = tombstones_from(&overlay);
+                self.demand
+                    .anchor_metadata(self.branch.metadata(&operator).branch.this);
                 // Typed with the *named* env lifetime (owned branch
                 // clone, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
@@ -804,6 +836,7 @@ where
             let layer = QueryLayer::from(&self.branch);
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
+            demand.anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let mut query_env: QueryEnv<'a, Env> =
@@ -852,6 +885,8 @@ where
             let layer = QueryLayer::from(&self.branch);
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
+            self.demand
+                .anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let query_env: QueryEnv<'a, Env> =
@@ -883,6 +918,43 @@ mod tests {
     use dialog_query::attribute::The;
     use dialog_query::types::Any;
     use dialog_query::{AttributeQuery, Claim, Term, the};
+
+    /// The head flag flips only for scans that can actually read the
+    /// overlay-injected metadata: a head attribute pinned by `the`,
+    /// or an attribute-unconstrained scan whose entity slice can hold
+    /// the anchored branch entity. An entity-pinned dynamic-attribute
+    /// scan over an ordinary entity (the shape every optional-premise
+    /// probe records) must NOT flip it — that would silently disable
+    /// incremental maintenance for the whole subscription.
+    #[dialog_common::test]
+    fn it_keeps_entity_pinned_attribute_scans_head_independent() -> anyhow::Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+
+        let branch_entity = Entity::new()?;
+        let ordinary = Entity::new()?;
+
+        let demand = super::Demand::new();
+        demand.anchor_metadata(branch_entity.clone());
+
+        demand.record(&ArtifactSelector::new().of(ordinary));
+        assert!(
+            !demand.depends_on_head(),
+            "a dynamic-attribute scan of an ordinary entity must stay incremental"
+        );
+
+        demand.record(&ArtifactSelector::new().the("dialog.branch/name".parse()?));
+        assert!(
+            !demand.depends_on_head(),
+            "stable branch attributes are deliberately not head-bearing"
+        );
+
+        demand.record(&ArtifactSelector::new().of(branch_entity));
+        assert!(
+            demand.depends_on_head(),
+            "the branch entity's own slice carries the head attributes"
+        );
+        Ok(())
+    }
 
     /// Compile-time proof that the poll future is `Send` on native
     /// (`ConditionalSend` = `Send` there, nothing on wasm): the

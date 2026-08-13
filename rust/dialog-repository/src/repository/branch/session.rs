@@ -7,6 +7,7 @@ use dialog_artifacts::{
     SortKey, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
+use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
@@ -19,6 +20,7 @@ use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
+use dialog_search_tree::Buffer;
 use dialog_storage::{Blake3Hash, StorageBackend};
 use futures_util::TryStreamExt as _;
 use std::sync::Arc;
@@ -439,7 +441,11 @@ where
 // catalog capability with the same remote fallback a fact scan uses;
 // the first branch that has the block wins (content addressing makes
 // them interchangeable), and a block absent everywhere contributes
-// nothing.
+// nothing. Reads go through the branch's shared node cache (the same
+// one the eager root probe in `select.rs` and `Subscription::touched`
+// use): a resolver join re-resolves the same reference once per outer
+// row, and a raw backend get would re-fetch that identical immutable
+// block every time.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl<'a, Env> Provider<Load> for QueryEnv<'a, Env>
@@ -465,8 +471,16 @@ where
                 _ => None,
             };
             let store = NetworkedIndex::new(self.env, branch.archive().index(), remote);
-            if let Some(bytes) = StorageBackend::get(&store, &input).await? {
-                return Ok(Some(bytes));
+            let cached = branch
+                .node_cache()
+                .get_or_fetch(&NodeHash::from(input), async |hash| {
+                    StorageBackend::get(&store, hash.as_bytes())
+                        .await
+                        .map(|bytes| bytes.map(Buffer::from))
+                })
+                .await?;
+            if let Some(buffer) = cached {
+                return Ok(Some(buffer.into_vec()));
             }
         }
         Ok(None)

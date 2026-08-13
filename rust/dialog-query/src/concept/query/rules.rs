@@ -309,7 +309,7 @@ mod tests {
         );
     }
 
-    /// Soundness resolver for a GLOBAL per-(rule, adornment) plan cache:
+    /// Soundness probe for a GLOBAL per-(rule, adornment) plan cache:
     /// does `DeductiveRule::plan` depend only on the binding *pattern*
     /// (the adornment), or also on the caller's variable *names*?
     ///

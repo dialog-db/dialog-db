@@ -420,7 +420,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                 // value-in-key format sorts values order-preservingly — and
                 // spilled strings sort into the same band by their in-key
                 // prefix, so the pushed range covers them too (the scan
-                // loads and post-filters the rare resolver that outruns the
+                // loads and post-filters the rare probe that outruns the
                 // stored prefix). Pushed ONLY when the kind admits nothing
                 // but strings: the pushed range brackets the String band,
                 // and the scan is the row generator, so a kind that still

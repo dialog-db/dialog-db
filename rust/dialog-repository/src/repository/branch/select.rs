@@ -104,14 +104,14 @@ impl Select<'_> {
     {
         // Tree hydration is lazy (nodes load on demand during the scan),
         // but unreachable branches should fail here rather than midway
-        // through the stream, so resolver the root block eagerly. Through a
+        // through the stream, so probe the root block eagerly. Through a
         // `NetworkedIndex` this also replicates and caches the root
         // locally, so the scan's own root read stays local.
         //
-        // Route the resolver through the shared node cache, not a raw
+        // Route the probe through the shared node cache, not a raw
         // `store.get`: the root is the single most-reused block, and a
         // multi-premise query re-selects the same branch once per outer
-        // binding. A raw resolver would re-fetch the root from the backend on
+        // binding. A raw probe would re-fetch the root from the backend on
         // every one of those selects (defeating the cache); `get_or_fetch`
         // makes the first select warm the cache and the rest hit it, while
         // still fetching (and, through `NetworkedIndex`, replicating) on a

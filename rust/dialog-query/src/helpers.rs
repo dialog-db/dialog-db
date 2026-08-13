@@ -606,7 +606,7 @@ where
     ///
     /// The query scans the branch's index for every fact carrying the
     /// given attribute. The journal is cleared immediately before the
-    /// scan so warm-up reads (e.g. the eager root resolver inside
+    /// scan so warm-up reads (e.g. the eager root probe inside
     /// `execute`) are excluded from the recorded counts.
     pub async fn run_query(&self, attribute: &str) -> Result<QueryRun> {
         let the: Attribute = attribute.parse()?;
@@ -1600,7 +1600,7 @@ mod test {
     {
         // `DIALOG_TRACE=1` attributes replay time to the commit path's
         // existing tracing spans (totals printed when the guard drops), so
-        // depth growth can be assigned to a phase without adding resolvers.
+        // depth growth can be assigned to a phase without adding probes.
         let _trace = trace_phases();
         let start = Instant::now();
         // `DIALOG_TXN_CURVE` interleaves a fixed query at each power-of-two
