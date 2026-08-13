@@ -717,6 +717,32 @@ pub trait ArtifactTreeExt {
             + Clone
             + ConditionalSync
             + 's;
+
+    /// Like [`scan`](Self::scan), but yields every row as an owned
+    /// [`Artifact`] materialized from the scan's OWN key parse.
+    ///
+    /// This is the fast path for consumers that materialize every row (a
+    /// `select(..).to_owned()`, an export): the scan already parsed each
+    /// key once for selector matching and spill resolution, and
+    /// reconstruction reuses that parse. Routing the same rows through
+    /// [`ArtifactView`]s and per-row
+    /// [`to_owned`](crate::ArtifactView::to_owned) parses every key a
+    /// second time — measured at double-digit percent on large
+    /// scan-and-materialize workloads. Consumers that read only some
+    /// fields, or only some rows, should keep using
+    /// [`scan`](Self::scan)'s views and pay materialization selectively.
+    fn scan_owned<'s, S>(
+        self,
+        store: S,
+        cache: SpillCache,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
+    where
+        Self: Sized,
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync
+            + 's;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -984,6 +1010,71 @@ impl ArtifactTreeExt for ArtifactTree {
                     unreachable!("Added state checked above")
                 };
                 yield ArtifactView::new(raw.key, datum, spilled);
+            }
+        }
+    }
+
+    fn scan_owned<'s, S>(
+        self,
+        store: S,
+        cache: SpillCache,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync
+            + 's,
+    {
+        let tree = self;
+        // Keep the raw backend to fetch spilled value blocks by reference; the
+        // bridge below is only for reading tree nodes.
+        let raw_store = store.clone();
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        try_stream! {
+            // Both the scan range and the per-entry match must be built under
+            // the manifest the stored facts were WRITTEN with — see `scan`.
+            let manifest = tree.manifest(&storage).await?;
+            let range = selector_range(&selector, &manifest);
+
+            let stream = tree.stream_range(range, &storage);
+            tokio::pin!(stream);
+            for await item in stream {
+                let raw = item?;
+                // Parse each entry's key ONCE into borrowed components, and
+                // reuse that single parse for matching, spill resolution,
+                // AND reconstruction — this path materializes every
+                // surviving row, so deferring the reconstruction to a view
+                // would only buy a second key walk.
+                let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                    DialogArtifactsError::InvalidKey(
+                        "scanned entry's key does not parse".to_string(),
+                    )
+                })?;
+                let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
+                if verdict == SelectorMatch::Excluded {
+                    continue;
+                }
+                let State::Added(datum) = &raw.value else {
+                    continue;
+                };
+                let spilled = match &parts.value {
+                    ValueRef::Spilled { hash, .. } => {
+                        Some(fetch_spilled_reference(&raw_store, &cache, hash).await?)
+                    }
+                    ValueRef::Inline(_) => None,
+                };
+                let artifact = Artifact::from_key_ref_datum_value(&parts, datum, spilled)?;
+                // A NeedsValue verdict means some value predicate's answer
+                // lies beyond the spilled value's in-key prefix; the value
+                // is materialized now, so re-check semantically before
+                // yielding.
+                if verdict == SelectorMatch::NeedsValue
+                    && !value_predicates_admit(&selector, &artifact.is)
+                {
+                    continue;
+                }
+                yield artifact;
             }
         }
     }

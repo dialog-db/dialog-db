@@ -1,9 +1,7 @@
 use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactView, ArtifactViewStream as _, DialogArtifactsError,
-};
+use dialog_artifacts::{Artifact, ArtifactSelector, ArtifactView, DialogArtifactsError};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -164,6 +162,47 @@ impl Select<'_> {
         // the cardinality-one sliding window relies on.
         Ok(tree.scan(store, self.branch.spill_cache(), self.selector))
     }
+
+    /// [`execute`](Self::execute) materializing every row from the scan's
+    /// own key parse — the fast path behind [`SelectOwned`], which by
+    /// definition materializes everything and would otherwise pay a second
+    /// key walk per row through the view's `to_owned`.
+    async fn execute_owned<'s, S>(
+        self,
+        store: S,
+    ) -> Result<
+        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
+        DialogSearchTreeError,
+    >
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync
+            + 's,
+    {
+        // The same eager root probe as `execute`; see the comment there.
+        let tree_hash = self.tree_hash();
+        let node_cache = self.branch.node_cache();
+        if tree_hash != EMPTY_TREE_HASH {
+            node_cache
+                .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
+                    store
+                        .get(hash.as_bytes())
+                        .await
+                        .map(|maybe| maybe.map(Buffer::from))
+                })
+                .await?
+                .ok_or_else(|| {
+                    DialogSearchTreeError::Node(format!(
+                        "Blob not found in storage: {}",
+                        tree_hash.to_base58(),
+                    ))
+                })?;
+        }
+
+        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache);
+        Ok(tree.scan_owned(store, self.branch.spill_cache(), self.selector))
+    }
 }
 
 /// A [`Select`] whose streams materialize every row into an owned
@@ -181,7 +220,8 @@ impl SelectOwned<'_> {
         self.0.catalog()
     }
 
-    /// [`Select::perform`], with every row materialized.
+    /// [`Select::perform`], with every row materialized from the scan's
+    /// own key parse (see [`Select::execute_owned`]).
     pub async fn perform<Env>(
         self,
         env: &Env,
@@ -195,10 +235,28 @@ impl SelectOwned<'_> {
             + ConditionalSync
             + 'static,
     {
-        Ok(self.0.perform(env).await?.owned())
+        // The same remote fallback as `Select::perform`; see the comment
+        // there.
+        let upstreams = self.0.branch.upstreams();
+        let remote = match upstreams.remote_name() {
+            Some(name) => self
+                .0
+                .branch
+                .subject()
+                .remote(name.to_string())
+                .load()
+                .perform(env)
+                .await
+                .ok(),
+            None => None,
+        };
+
+        let store = NetworkedIndex::new(env, self.catalog(), remote);
+        self.execute(store).await
     }
 
-    /// [`Select::execute`], with every row materialized.
+    /// [`Select::execute`], with every row materialized from the scan's
+    /// own key parse (see [`Select::execute_owned`]).
     pub async fn execute<'s, S>(
         self,
         store: S,
@@ -212,6 +270,6 @@ impl SelectOwned<'_> {
             + ConditionalSync
             + 's,
     {
-        Ok(self.0.execute(store).await?.owned())
+        self.0.execute_owned(store).await
     }
 }

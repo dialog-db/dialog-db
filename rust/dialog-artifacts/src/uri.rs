@@ -100,41 +100,6 @@ impl Deref for Uri {
     }
 }
 
-/// Memo of successful URI parses, keyed by the exact input string.
-///
-/// Entity URIs repeat heavily on hot paths — a scan materializes the same
-/// entities query after query, a join probes one per outer binding — and
-/// each `url::Url` parse costs thousands of instructions where a hit costs
-/// a hash lookup and a `Url` clone. Only SUCCESSFUL parses are cached
-/// (failures are texts masquerading as URIs; caching them would grow the
-/// map with arbitrary values), and the map clears wholesale at capacity —
-/// the workloads that benefit cycle a bounded entity population, so
-/// eviction sophistication buys nothing.
-fn parse_memoized(s: &str) -> Result<Uri, DialogArtifactsError> {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-
-    const CAPACITY: usize = 4096;
-    thread_local! {
-        static MEMO: RefCell<HashMap<Box<str>, Uri>> = RefCell::new(HashMap::new());
-    }
-
-    MEMO.with(|memo| {
-        if let Some(hit) = memo.borrow().get(s) {
-            return Ok(hit.clone());
-        }
-        let parsed = Uri(s
-            .parse()
-            .map_err(|error| DialogArtifactsError::InvalidUri(format!("{error}")))?);
-        let mut memo = memo.borrow_mut();
-        if memo.len() >= CAPACITY {
-            memo.clear();
-        }
-        memo.insert(s.into(), parsed.clone());
-        Ok(parsed)
-    })
-}
-
 impl FromStr for Uri {
     type Err = DialogArtifactsError;
 
@@ -158,7 +123,22 @@ impl FromStr for Uri {
                 "URI must not contain whitespace or control characters: {s:?}"
             )));
         }
-        parse_memoized(s)
+        // Parse plainly, with no memo. A memo here looks attractive (joins
+        // re-parse the same entity per outer binding) but any bounded,
+        // admit-on-miss cache inverts into pure overhead the moment a scan
+        // materializes more DISTINCT entities than it can hold: every row
+        // then pays the parse PLUS the memo's bookkeeping. Measured on the
+        // query benches, a 4096-entry memo regressed 10k-row
+        // scan-and-materialize by ~31% while buying joins only ~8% at
+        // 1000 rows (their gains come from the engine, not this parse) —
+        // and sieve eviction or second-sight admission only shrank, never
+        // removed, the loss. If that 8% is ever worth recovering, the
+        // right home for the cache is a query-scoped context sized by the
+        // query's own binding population, not a process-wide global with a
+        // workload-dependent cliff.
+        Ok(Uri(s.parse().map_err(|error| {
+            DialogArtifactsError::InvalidUri(format!("{error}"))
+        })?))
     }
 }
 
