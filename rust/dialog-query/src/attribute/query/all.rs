@@ -390,6 +390,21 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                         Some(s) => s.the_starting_with(prefix),
                     });
                 }
+                // A name-shape refinement narrows the scan to the
+                // shape's contiguous half of the domain range (when
+                // the prefix above is a whole domain) or filters
+                // per entry otherwise. A shape alone is not a range,
+                // so it never constitutes the selector's sole
+                // constraint.
+                if let Some(shape) = from
+                    .the
+                    .kind()
+                    .as_ref()
+                    .and_then(Kind::refinement)
+                    .and_then(|refinement| refinement.name_shape)
+                {
+                    selector = selector.map(|s| s.with_name_shape(shape));
+                }
             }
         }
 
@@ -614,6 +629,25 @@ mod tests {
         );
         let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
         assert_eq!(selector.attribute_prefix(), Some("person/"));
+
+        // A name-shape refinement rides the same lowering: the
+        // selector carries the shape, and under a whole-domain
+        // prefix the storage layer narrows the scan to the shape's
+        // half of the domain range.
+        let members_kind = Kind::from(Type::Symbol)
+            .with_prefix("todo.list/")
+            .expect("symbol is textual")
+            .with_name_shape(NameShape::Position)
+            .expect("shapes compose with prefixes");
+        let query = AttributeQueryAll::new(
+            Term::<The>::var("a").with_kind(members_kind),
+            Term::<Entity>::var("e"),
+            Term::var("v"),
+            Term::var("cause"),
+        );
+        let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
+        assert_eq!(selector.attribute_prefix(), Some("todo.list/"));
+        assert_eq!(selector.name_shape(), Some(NameShape::Position));
 
         // A prefix refinement on the value variable (e.g. from a
         // `text/starts-with` constraint) becomes a VAE value-range bound.

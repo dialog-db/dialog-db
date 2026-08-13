@@ -390,13 +390,29 @@ churn #338 itself walked back):
   pre-filter), covering the `only` winner path too. Pinning a shape
   is for premises that want one half; a consumer of both halves
   leaves the shape unpinned — one scan, classified per row
-  downstream (the `Directory`/`Sequence` `admit` split). When a rule
-  genuinely needs the halves as two distinct typed premises, those
-  are semantically two subsets of the same contiguous range, and the
-  disjointness the refinement proves is exactly what would let a
-  planner fuse them into one physical scan with per-row dispatch —
-  a future optimization, not yet done; today they scan twice, though
-  demand recording coalesces on the shared range either way.
+  downstream (the `Directory`/`Sequence` `admit` split).
+- **Name-shape scan narrowing** (`ArtifactSelector::with_name_shape`
+  + `apply_prefix_bounds`): the shape constraint reaches the key
+  range itself. Uppercase-only majors made the shapes not merely
+  disjoint but *range-separable*: within a domain, every position
+  name (`A`–`Z` first byte) sorts contiguously below every symbol
+  name (`a`–`z`), so a whole-domain prefix plus a shape narrows the
+  scan to `[domain/A, domain/Z‖filler]` or `[domain/a, domain/z‖filler]`
+  — the matching half of the domain, not a post-filtered sweep of
+  all of it. The selector carries `name_shape`; the per-entry match
+  applies the same coarse first-byte classification the range uses
+  (strict `Name` vocabulary enforcement stays with consumers:
+  `Attribute::split` in the query layer's `admits`, `admit` in the
+  containers), and a prefix that does not end at the `/` boundary
+  leaves the shape as a per-entry filter. The query layer lowers a
+  kind's `name_shape` refinement onto the selector alongside its
+  prefix. Two consequences fall out: two pinned premises over the
+  same domain now scan two *disjoint* sub-ranges — together exactly
+  one domain sweep, nothing scanned twice, no planner fusion needed
+  — and `selector_range` being the demand cover means a
+  shape-pinned subscription is invalidated only by writes to its
+  half of the domain (append to a list without waking dictionary
+  watchers, retitle without waking list watchers).
 
 ## Surfacing plan
 

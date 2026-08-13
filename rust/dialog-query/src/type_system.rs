@@ -322,26 +322,7 @@ impl Display for ConceptRef {
     }
 }
 
-/// The shape of an attribute's name half — the discriminant of the
-/// artifact layer's `Name` sum, lifted into the type lattice.
-///
-/// An attribute is `domain/name`, and the name half is either a
-/// symbol (a named predicate — a dictionary's entry) or a
-/// fractional position (an ordered relation's member). The two are
-/// syntactically disjoint by their first byte, so the distinction
-/// is row-checkable from the attribute alone; carrying it as a
-/// refinement lets a kind say "attributes naming ordered members
-/// only" and have that participate in unification, inclusion
-/// ordering, and scan-time row admission.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NameShape {
-    /// The name half is a symbol: a named predicate.
-    Symbol,
-    /// The name half is a fractional position: an ordered-relation
-    /// member's sort key.
-    Position,
-}
+pub use crate::artifact::NameShape;
 
 /// A value-level constraint layered onto a primitive membership
 /// set. The meet of two refinements is their conjunction (both

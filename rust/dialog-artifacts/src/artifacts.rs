@@ -541,7 +541,7 @@ mod tests {
     use crate::tree::distribution;
     use crate::{
         Artifact, ArtifactSelector, ArtifactStoreMutExt, Artifacts, Attribute,
-        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Symbol, Value,
+        DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, NameShape, Symbol, Value,
         make_reference,
     };
 
@@ -1319,6 +1319,75 @@ mod tests {
             .await?;
         assert_eq!(exact.len(), 1, "exactly person/name");
         assert_eq!(String::from(&exact[0].the), "person/name");
+        Ok(())
+    }
+
+    /// A domain selection with a name shape yields exactly the
+    /// matching half of a mixed domain — the scan ranges over the
+    /// shape's contiguous sub-range (see `it_narrows_domain_ranges_by_name_shape`
+    /// in `tree`), with attributes of adjacent domains and of the
+    /// other shape outside it.
+    #[dialog_common::test]
+    async fn it_selects_domain_halves_by_name_shape() -> Result<()> {
+        let (storage_backend, _temp_directory) = make_target_storage().await?;
+        let mut facts = Artifacts::anonymous(storage_backend).await?;
+        let list = Entity::new()?;
+
+        // A mixed domain (two entries, two ordered members) between
+        // two adjacent domains that a sloppy range would sweep up.
+        let data = [
+            "todo.lisa/name",
+            "todo.list/title",
+            "todo.list/owner",
+            "todo.list/N",
+            "todo.list/N5",
+            "todo.lists/name",
+        ]
+        .map(|attribute| Artifact {
+            the: Attribute::from_str(attribute).expect("attribute parses"),
+            of: list.clone(),
+            is: Value::String(attribute.to_string()),
+            cause: None,
+        });
+        facts
+            .commit(data.into_iter().map(Instruction::Assert))
+            .await?;
+
+        let domain: Symbol = "todo.list".parse()?;
+        let members: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new()
+                    .with_domain(&domain)
+                    .with_name_shape(NameShape::Position),
+            )
+            .try_collect()
+            .await?;
+        assert_eq!(
+            members
+                .iter()
+                .map(|fact| String::from(&fact.the))
+                .collect::<Vec<_>>(),
+            vec!["todo.list/N", "todo.list/N5"],
+            "the ordered half, in list order"
+        );
+
+        let entries: Vec<Artifact> = facts
+            .select(
+                ArtifactSelector::new()
+                    .with_domain(&domain)
+                    .with_name_shape(NameShape::Symbol),
+            )
+            .try_collect()
+            .await?;
+        assert_eq!(
+            entries
+                .iter()
+                .map(|fact| String::from(&fact.the))
+                .collect::<Vec<_>>(),
+            vec!["todo.list/owner", "todo.list/title"],
+            "the dictionary half, in name order"
+        );
+
         Ok(())
     }
 
