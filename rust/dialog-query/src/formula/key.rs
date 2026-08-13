@@ -1,10 +1,10 @@
 //! Formulas decomposing index keys into their components.
 //!
-//! The tree procedures (`tree/node`, `tree/link`, `tree/key`) surface
-//! raw key and separator bytes; these formulas make them legible:
-//! apply [`KeyPart`] to a full entry key (from `tree/key` or a node's
-//! `bound`) or [`SeparatorPart`] to a link separator (from
-//! `tree/link`), and get one row per component — its position, kind,
+//! The tree procedures (`tree/span`, `tree/key`) surface raw key and
+//! separator bytes; these formulas make them legible: apply
+//! [`KeyPart`] to a full entry key (from `tree/key`) or
+//! [`SeparatorPart`] to a span boundary (a `tree/span` row's
+//! `separator`/`until`), and get one row per component — its position, kind,
 //! human rendering, and raw bytes. Pure per-row computation over the
 //! self-describing variable-length key encoding
 //! (`dialog_artifacts::key::varkey`) — the legitimate `Formula` kind,
@@ -31,8 +31,7 @@ type Bytes = Vec<u8>;
 /// row per component, in the key's own sort order.
 #[derive(Debug, Clone, Formula)]
 pub struct KeyPart {
-    /// The raw key bytes — a `tree/key` row's `key`, or a `tree/node`
-    /// row's `bound`.
+    /// The raw key bytes — a `tree/key` row's `key`.
     pub of: Bytes,
     /// Position of the component within the key, from 0.
     #[output]
@@ -72,8 +71,8 @@ impl KeyPart {
 /// components: the tag plus the prefix bytes, leniently.
 #[derive(Debug, Clone, Formula)]
 pub struct SeparatorPart {
-    /// The raw separator bytes — a `tree/link` row's `separator`.
-    /// Empty is the level's leftmost boundary (−∞).
+    /// The raw separator bytes — a `tree/span` row's `separator` or
+    /// `until`. Empty is an open bound (−∞ / +∞).
     pub of: Bytes,
     /// Position of the component within the separator, from 0.
     #[output]

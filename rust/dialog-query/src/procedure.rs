@@ -18,17 +18,19 @@
 //! invalidate its rows (see `dialog_artifacts::inspect` for the full
 //! soundness argument).
 //!
-//! The first procedures are the tree-inspection family (see
-//! `notes/tree-relations.md`): `tree/node`, `tree/link` and `tree/key`
-//! expose the search tree's structure — node kind/size/counts, child
-//! links with separators and scales, and segment entry keys — keyed by
-//! the same base58 node reference that `dialog.branch/tree` carries,
-//! so a query reaches the tree by joining through `BranchRevision`:
+//! The first procedures expose the search tree's *logical model* (see
+//! `notes/tree-relations.md`): a node is an index (a table of spans)
+//! or a segment (a run of entries); an index's spans each delegate a
+//! key range `[separator, until)` to a child and carry the ops
+//! buffered against it; a segment's entries are ranked keys; and every
+//! node embeds the format manifest it was written under. Nodes are
+//! keyed by the same base58 reference `dialog.branch/tree` carries, so
+//! a query reaches the tree by joining through `BranchRevision`:
 //!
 //! ```text
 //! BranchRevision(branch, tree: ?root)
 //!   ⋈ tree/node(of: ?root, kind: ?kind, size: ?size)
-//!   ⋈ tree/link(of: ?root, node: ?child)
+//!   ⋈ tree/span(of: ?root, node: ?child, separator: ?from, until: ?to)
 //!   ⋈ tree/node(of: ?child, …)
 //! ```
 
@@ -67,22 +69,16 @@ pub struct TreeNodeQuery {
     /// Node reference (base58 of the node's content hash) — required.
     #[serde(default = "blank")]
     pub of: Term<Any>,
-    /// `"index"` or `"segment"`.
+    /// `"index"` (a table of spans) or `"segment"` (a run of entries).
     #[serde(default = "blank")]
     pub kind: Term<Any>,
     /// Serialized block size in bytes.
     #[serde(default = "blank")]
     pub size: Term<Any>,
-    /// Child-link count (index) or entry count (segment).
+    /// Span count (index) or entry count (segment).
     #[serde(default = "blank")]
     pub count: Term<Any>,
-    /// Upper-bound key of a segment; empty bytes for an index node.
-    #[serde(default = "blank")]
-    pub bound: Term<Any>,
-    /// Rank of the upper bound under the node's embedded manifest.
-    #[serde(default = "blank")]
-    pub rank: Term<Any>,
-    /// The node's scale code (log-scale subtree size estimate).
+    /// The node's scale code (advisory log-scale subtree size).
     #[serde(default = "blank")]
     pub scale: Term<Any>,
     /// Buffered hitchhiker ops riding this node (0 for a segment).
@@ -90,35 +86,42 @@ pub struct TreeNodeQuery {
     pub novelty: Term<Any>,
 }
 
-/// The `tree/link` procedure: one row per child link of an index node.
+/// The `tree/span` procedure: one row per span of an index node — the
+/// key range `[separator, until)` the node delegates to one child,
+/// with everything pending against it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TreeLinkQuery {
+pub struct TreeSpanQuery {
     /// Node reference of the index node — required.
     #[serde(default = "blank")]
     pub of: Term<Any>,
-    /// Position among siblings.
+    /// Position among the node's spans.
     #[serde(default = "blank")]
     pub at: Term<Any>,
-    /// The child's node reference (base58), feeding the next
-    /// `tree/node`/`tree/link` input.
+    /// The child node reference (base58) rooting the span's subtree,
+    /// feeding the next `tree/node`/`tree/span` input.
     #[serde(default = "blank")]
     pub node: Term<Any>,
-    /// The link separator: front-coded left-edge boundary of the child
-    /// subtree; empty for the level's leftmost link (−∞).
+    /// The span's lower bound: a front-coded prefix of the subtree's
+    /// minimum leaf key. Empty for the leftmost span (−∞).
     #[serde(default = "blank")]
     pub separator: Term<Any>,
-    /// The child subtree's advisory scale code.
+    /// The span's upper bound: the next span's separator. Empty for
+    /// the last span (+∞).
+    #[serde(default = "blank")]
+    pub until: Term<Any>,
+    /// The subtree's advisory scale code.
     #[serde(default = "blank")]
     pub scale: Term<Any>,
-    /// Seam rank of the separator under the node's embedded manifest.
+    /// Seam rank of the separator: the level coin that made this
+    /// boundary exist (0 for the leftmost span and forced seams).
     #[serde(default = "blank")]
     pub rank: Term<Any>,
-    /// Buffered hitchhiker ops pending against this subtree.
+    /// Buffered hitchhiker ops pending against this span.
     #[serde(default = "blank")]
     pub novelty: Term<Any>,
 }
 
-/// The `tree/key` procedure: one row per entry key of a segment node.
+/// The `tree/key` procedure: one row per entry of a segment node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeKeyQuery {
     /// Node reference of the segment node — required.
@@ -130,6 +133,44 @@ pub struct TreeKeyQuery {
     /// The entry's variable-length index key bytes.
     #[serde(default = "blank")]
     pub key: Term<Any>,
+    /// The key's leaf-coin rank: what decides whether a leaf boundary
+    /// forms after this entry.
+    #[serde(default = "blank")]
+    pub rank: Term<Any>,
+}
+
+/// The `tree/manifest` procedure: the format manifest the node embeds,
+/// field for field. Every node carries one, so a bare reference is
+/// self-describing and mixed-format trees are visible per node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeManifestQuery {
+    /// Node reference — required.
+    #[serde(default = "blank")]
+    pub of: Term<Any>,
+    /// Format version; pins how the rest of the node is interpreted.
+    #[serde(default = "blank")]
+    pub version: Term<Any>,
+    /// Branching parameter `n`; expected fanout is `2^n`.
+    #[serde(default = "blank")]
+    pub fanout_n: Term<Any>,
+    /// Keys longer than this never become boundaries.
+    #[serde(default = "blank")]
+    pub max_separator: Term<Any>,
+    /// Values longer than this spill to the block store.
+    #[serde(default = "blank")]
+    pub inline_n: Term<Any>,
+    /// Leading raw value bytes a spilled value's key keeps as prefix.
+    #[serde(default = "blank")]
+    pub spill_prefix: Term<Any>,
+    /// Leaf-run weight cap; 0 disables it.
+    #[serde(default = "blank")]
+    pub max_segment: Term<Any>,
+    /// Hard frame-weight ceiling as a multiple of `max_segment`.
+    #[serde(default = "blank")]
+    pub frame_ceiling_factor: Term<Any>,
+    /// Which candidate seam a forced cut anchors at.
+    #[serde(default = "blank")]
+    pub anchor_selector: Term<Any>,
 }
 
 /// A procedure premise bound to specific term arguments.
@@ -148,12 +189,15 @@ pub enum ProcedureQuery {
     /// Procedure `tree/node`.
     #[serde(rename = "tree/node")]
     TreeNode(TreeNodeQuery),
-    /// Procedure `tree/link`.
-    #[serde(rename = "tree/link")]
-    TreeLink(TreeLinkQuery),
+    /// Procedure `tree/span`.
+    #[serde(rename = "tree/span")]
+    TreeSpan(TreeSpanQuery),
     /// Procedure `tree/key`.
     #[serde(rename = "tree/key")]
     TreeKey(TreeKeyQuery),
+    /// Procedure `tree/manifest`.
+    #[serde(rename = "tree/manifest")]
+    TreeManifest(TreeManifestQuery),
 }
 
 static TREE_NODE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
@@ -164,29 +208,23 @@ static TREE_NODE_CELLS: LazyLock<Cells> = LazyLock::new(|| {
             .required();
         builder
             .cell("kind", Some(Kind::from(ValueType::String)))
-            .the("\"index\" or \"segment\".");
+            .the("\"index\" (a table of spans) or \"segment\" (a run of entries).");
         builder
             .cell("size", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Serialized block size in bytes.");
         builder
             .cell("count", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Child-link count (index) or entry count (segment).");
-        builder
-            .cell("bound", Some(Kind::from(ValueType::Bytes)))
-            .the("Upper-bound key of a segment; empty for an index node.");
-        builder
-            .cell("rank", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Rank of the upper bound under the node's manifest.");
+            .the("Span count (index) or entry count (segment).");
         builder
             .cell("scale", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("The node's scale code.");
+            .the("The node's advisory scale code.");
         builder
             .cell("novelty", Some(Kind::from(ValueType::UnsignedInt)))
             .the("Buffered ops riding this node (0 for a segment).");
     })
 });
 
-static TREE_LINK_CELLS: LazyLock<Cells> = LazyLock::new(|| {
+static TREE_SPAN_CELLS: LazyLock<Cells> = LazyLock::new(|| {
     Cells::define(|builder| {
         builder
             .cell("of", Some(Kind::from(ValueType::String)))
@@ -194,22 +232,25 @@ static TREE_LINK_CELLS: LazyLock<Cells> = LazyLock::new(|| {
             .required();
         builder
             .cell("at", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Position among siblings.");
+            .the("Position among the node's spans.");
         builder
             .cell("node", Some(Kind::from(ValueType::String)))
-            .the("The child's node reference.");
+            .the("The child node reference rooting the span's subtree.");
         builder
             .cell("separator", Some(Kind::from(ValueType::Bytes)))
-            .the("Left-edge boundary of the child subtree (empty = −∞).");
+            .the("The span's lower bound (empty = −∞).");
+        builder
+            .cell("until", Some(Kind::from(ValueType::Bytes)))
+            .the("The span's upper bound: the next separator (empty = +∞).");
         builder
             .cell("scale", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("The child subtree's advisory scale code.");
+            .the("The subtree's advisory scale code.");
         builder
             .cell("rank", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Seam rank of the separator under the node's manifest.");
+            .the("Seam rank of the separator (the boundary's level coin).");
         builder
             .cell("novelty", Some(Kind::from(ValueType::UnsignedInt)))
-            .the("Buffered ops pending against this subtree.");
+            .the("Buffered ops pending against this span.");
     })
 });
 
@@ -225,6 +266,45 @@ static TREE_KEY_CELLS: LazyLock<Cells> = LazyLock::new(|| {
         builder
             .cell("key", Some(Kind::from(ValueType::Bytes)))
             .the("The entry's variable-length index key bytes.");
+        builder
+            .cell("rank", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("The key's leaf-coin rank.");
+    })
+});
+
+static TREE_MANIFEST_CELLS: LazyLock<Cells> = LazyLock::new(|| {
+    Cells::define(|builder| {
+        builder
+            .cell("of", Some(Kind::from(ValueType::String)))
+            .the("Node reference.")
+            .required();
+        builder
+            .cell("version", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Format version.");
+        builder
+            .cell("fanout_n", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Branching parameter n; expected fanout is 2^n.");
+        builder
+            .cell("max_separator", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Keys longer than this never become boundaries.");
+        builder
+            .cell("inline_n", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Values longer than this spill to the block store.");
+        builder
+            .cell("spill_prefix", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Order-preserving prefix bytes a spilled value's key keeps.");
+        builder
+            .cell("max_segment", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Leaf-run weight cap; 0 disables it.");
+        builder
+            .cell(
+                "frame_ceiling_factor",
+                Some(Kind::from(ValueType::UnsignedInt)),
+            )
+            .the("Hard frame-weight ceiling as a multiple of max_segment.");
+        builder
+            .cell("anchor_selector", Some(Kind::from(ValueType::UnsignedInt)))
+            .the("Which candidate seam a forced cut anchors at.");
     })
 });
 
@@ -233,8 +313,9 @@ impl ProcedureQuery {
     pub fn name(&self) -> &'static str {
         match self {
             Self::TreeNode(_) => "tree/node",
-            Self::TreeLink(_) => "tree/link",
+            Self::TreeSpan(_) => "tree/span",
             Self::TreeKey(_) => "tree/key",
+            Self::TreeManifest(_) => "tree/manifest",
         }
     }
 
@@ -242,8 +323,9 @@ impl ProcedureQuery {
     pub(crate) fn cells(&self) -> &'static Cells {
         match self {
             Self::TreeNode(_) => &TREE_NODE_CELLS,
-            Self::TreeLink(_) => &TREE_LINK_CELLS,
+            Self::TreeSpan(_) => &TREE_SPAN_CELLS,
             Self::TreeKey(_) => &TREE_KEY_CELLS,
+            Self::TreeManifest(_) => &TREE_MANIFEST_CELLS,
         }
     }
 
@@ -256,8 +338,9 @@ impl ProcedureQuery {
     fn of(&self) -> &Term<Any> {
         match self {
             Self::TreeNode(query) => &query.of,
-            Self::TreeLink(query) => &query.of,
+            Self::TreeSpan(query) => &query.of,
             Self::TreeKey(query) => &query.of,
+            Self::TreeManifest(query) => &query.of,
         }
     }
 
@@ -280,16 +363,15 @@ impl ProcedureQuery {
                 params.insert("kind".into(), query.kind.clone());
                 params.insert("size".into(), query.size.clone());
                 params.insert("count".into(), query.count.clone());
-                params.insert("bound".into(), query.bound.clone());
-                params.insert("rank".into(), query.rank.clone());
                 params.insert("scale".into(), query.scale.clone());
                 params.insert("novelty".into(), query.novelty.clone());
             }
-            Self::TreeLink(query) => {
+            Self::TreeSpan(query) => {
                 params.insert("of".into(), query.of.clone());
                 params.insert("at".into(), query.at.clone());
                 params.insert("node".into(), query.node.clone());
                 params.insert("separator".into(), query.separator.clone());
+                params.insert("until".into(), query.until.clone());
                 params.insert("scale".into(), query.scale.clone());
                 params.insert("rank".into(), query.rank.clone());
                 params.insert("novelty".into(), query.novelty.clone());
@@ -298,6 +380,21 @@ impl ProcedureQuery {
                 params.insert("of".into(), query.of.clone());
                 params.insert("at".into(), query.at.clone());
                 params.insert("key".into(), query.key.clone());
+                params.insert("rank".into(), query.rank.clone());
+            }
+            Self::TreeManifest(query) => {
+                params.insert("of".into(), query.of.clone());
+                params.insert("version".into(), query.version.clone());
+                params.insert("fanout_n".into(), query.fanout_n.clone());
+                params.insert("max_separator".into(), query.max_separator.clone());
+                params.insert("inline_n".into(), query.inline_n.clone());
+                params.insert("spill_prefix".into(), query.spill_prefix.clone());
+                params.insert("max_segment".into(), query.max_segment.clone());
+                params.insert(
+                    "frame_ceiling_factor".into(),
+                    query.frame_ceiling_factor.clone(),
+                );
+                params.insert("anchor_selector".into(), query.anchor_selector.clone());
             }
         }
         params
@@ -327,7 +424,7 @@ impl ProcedureQuery {
     /// Per input row: resolve the node reference, perform the
     /// idempotent [`Load`] effect through the environment, decode the
     /// block, and project one output row per result — a segment asked
-    /// for links, an index asked for keys, or an absent block all
+    /// for spans, an index asked for keys, or an absent block all
     /// yield zero rows.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
@@ -354,8 +451,6 @@ impl ProcedureQuery {
                             (&query.kind, Value::String(node.kind.into())),
                             (&query.size, Value::UnsignedInt(node.size.into())),
                             (&query.count, Value::UnsignedInt(node.count.into())),
-                            (&query.bound, Value::Bytes(node.bound)),
-                            (&query.rank, Value::UnsignedInt(node.rank.into())),
                             (&query.scale, Value::UnsignedInt(node.scale.into())),
                             (&query.novelty, Value::UnsignedInt(node.novelty.into())),
                         ])?;
@@ -363,15 +458,16 @@ impl ProcedureQuery {
                             yield row;
                         }
                     }
-                    ProcedureQuery::TreeLink(query) => {
-                        for link in inspect::inspect_links(bytes)? {
+                    ProcedureQuery::TreeSpan(query) => {
+                        for span in inspect::inspect_spans(bytes)? {
                             let row = project(&base, &[
-                                (&query.at, Value::UnsignedInt(link.at.into())),
-                                (&query.node, Value::String(link.node.to_base58())),
-                                (&query.separator, Value::Bytes(link.separator)),
-                                (&query.scale, Value::UnsignedInt(link.scale.into())),
-                                (&query.rank, Value::UnsignedInt(link.rank.into())),
-                                (&query.novelty, Value::UnsignedInt(link.novelty.into())),
+                                (&query.at, Value::UnsignedInt(span.at.into())),
+                                (&query.node, Value::String(span.node.to_base58())),
+                                (&query.separator, Value::Bytes(span.separator)),
+                                (&query.until, Value::Bytes(span.until)),
+                                (&query.scale, Value::UnsignedInt(span.scale.into())),
+                                (&query.rank, Value::UnsignedInt(span.rank.into())),
+                                (&query.novelty, Value::UnsignedInt(span.novelty.into())),
                             ])?;
                             if let Some(row) = row {
                                 yield row;
@@ -379,14 +475,46 @@ impl ProcedureQuery {
                         }
                     }
                     ProcedureQuery::TreeKey(query) => {
-                        for (at, key) in inspect::inspect_keys(bytes)?.into_iter().enumerate() {
+                        for (at, entry) in inspect::inspect_keys(bytes)?.into_iter().enumerate() {
                             let row = project(&base, &[
                                 (&query.at, Value::UnsignedInt(at as u128)),
-                                (&query.key, Value::Bytes(key)),
+                                (&query.key, Value::Bytes(entry.key)),
+                                (&query.rank, Value::UnsignedInt(entry.rank.into())),
                             ])?;
                             if let Some(row) = row {
                                 yield row;
                             }
+                        }
+                    }
+                    ProcedureQuery::TreeManifest(query) => {
+                        let manifest = inspect::inspect_manifest(bytes)?;
+                        let row = project(&base, &[
+                            (&query.version, Value::UnsignedInt(manifest.version.into())),
+                            (&query.fanout_n, Value::UnsignedInt(manifest.fanout_n.into())),
+                            (
+                                &query.max_separator,
+                                Value::UnsignedInt(manifest.max_separator.into()),
+                            ),
+                            (&query.inline_n, Value::UnsignedInt(manifest.inline_n.into())),
+                            (
+                                &query.spill_prefix,
+                                Value::UnsignedInt(manifest.spill_prefix.into()),
+                            ),
+                            (
+                                &query.max_segment,
+                                Value::UnsignedInt(manifest.max_segment.into()),
+                            ),
+                            (
+                                &query.frame_ceiling_factor,
+                                Value::UnsignedInt(manifest.frame_ceiling_factor.into()),
+                            ),
+                            (
+                                &query.anchor_selector,
+                                Value::UnsignedInt(manifest.anchor_selector.into()),
+                            ),
+                        ])?;
+                        if let Some(row) = row {
+                            yield row;
                         }
                     }
                 }

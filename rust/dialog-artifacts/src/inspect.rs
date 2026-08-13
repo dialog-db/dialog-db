@@ -1,9 +1,19 @@
 //! Tree-node inspection: the [`Load`] effect and pure node decoders.
 //!
 //! Together these back the query engine's tree procedures (`tree/node`,
-//! `tree/link`, `tree/key`): [`Load`] fetches a raw node block by content
-//! hash through the evaluation environment, and the `inspect_*` functions
-//! project structure out of the fetched bytes without touching storage.
+//! `tree/span`, `tree/key`, `tree/manifest`): [`Load`] fetches a raw
+//! node block by content hash through the evaluation environment, and
+//! the `inspect_*` functions project the node's *logical model* out of
+//! the fetched bytes without touching storage:
+//!
+//! - a node is an index (a table of spans) or a segment (a run of
+//!   entries), with a byte size, a scale estimate, and pending novelty;
+//! - an index's spans each delegate a key range `[separator, until)` to
+//!   a child, carry the ops buffered against that range, and exist as
+//!   boundaries because the seam coin ranked their separator;
+//! - a segment's entries are keys, each ranked by the leaf coin;
+//! - every node embeds the format [`Manifest`] it was written under,
+//!   making a bare hash a self-describing root.
 //!
 //! # Why this is sound under differential subscriptions
 //!
@@ -20,7 +30,7 @@
 //! idempotent, and must not be served through this module.
 
 use dialog_capability::Command;
-use dialog_search_tree::{Buffer, Distribution, Geometric, PersistentNode, Rank};
+use dialog_search_tree::{Buffer, Distribution, Geometric, Manifest, PersistentNode, Rank};
 use dialog_storage::Blake3Hash;
 
 use crate::{
@@ -30,7 +40,7 @@ use crate::{
 };
 
 /// The raw content hash a [`Load`] resolves: the same 32 bytes a
-/// revision's tree reference and an index link's child hash carry.
+/// revision's tree reference and an index span's child hash carry.
 pub type NodeReference = Blake3Hash;
 
 /// Command for loading a raw tree node block by its content hash.
@@ -53,72 +63,98 @@ type ArtifactNode = PersistentNode<Key, State<Datum>>;
 /// Structural description of one persisted node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeSummary {
-    /// `"index"` for a node of child links, `"segment"` for a leaf of
+    /// `"index"` for a table of spans, `"segment"` for a run of
     /// entries.
     pub kind: &'static str,
     /// Serialized block size in bytes (what a fetch pays for).
     pub size: u64,
-    /// Child-link count for an index, entry count for a segment.
+    /// Span count for an index, entry count for a segment.
     pub count: u64,
-    /// The node's upper-bound key: the last entry key of a segment.
-    /// Empty for an index node (its table holds separators, not whole
-    /// keys) — the per-link separators are exposed by [`inspect_links`].
-    pub bound: Vec<u8>,
-    /// Rank of the upper bound under the node's own embedded manifest
-    /// (0 when there is no bound). Higher rank ⇒ higher boundary in the
-    /// tree.
-    pub rank: Rank,
     /// The node's [`Scale`](dialog_search_tree::Scale) code: a one-byte
-    /// log-scale estimate of the subtree's entry count.
+    /// log-scale estimate of the subtree's entry count. Advisory — an
+    /// upper bound that excludes ops still pending in novelty buffers.
     pub scale: u64,
-    /// Buffered hitchhiker ops riding this node (always 0 for a
-    /// segment): the window into buffered-vs-canonical cost.
+    /// Buffered hitchhiker ops riding this node, summed over its spans
+    /// (always 0 for a segment): the window into buffered-vs-canonical
+    /// cost.
     pub novelty: u64,
 }
 
-/// Structural description of one child link of an index node.
+/// One span of an index node: the key range the node delegates to one
+/// child, with everything pending against it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinkSummary {
-    /// Position among siblings.
+pub struct SpanSummary {
+    /// Position among the node's spans.
     pub at: u64,
-    /// Content hash of the referenced child node.
+    /// Content hash of the child node rooting the span's subtree.
     pub node: Blake3Hash,
-    /// The link's separator: the left-edge boundary of the referenced
-    /// subtree, a front-coded prefix of its minimum leaf key. Empty for
-    /// the level's global leftmost link (reads as negative infinity).
+    /// The span's lower bound: a front-coded prefix of its subtree's
+    /// minimum leaf key. Empty for the leftmost span (reads as −∞).
     pub separator: Vec<u8>,
-    /// The child subtree's advisory [`Scale`](dialog_search_tree::Scale)
+    /// The span's upper bound: the next span's separator. Empty for the
+    /// last span (reads as +∞). Together with `separator` this makes
+    /// each row a self-contained range `[separator, until)`.
+    pub until: Vec<u8>,
+    /// The subtree's advisory [`Scale`](dialog_search_tree::Scale)
     /// code.
     pub scale: u64,
-    /// Rank of the separator under the node's embedded manifest: the
-    /// seam level this boundary falls on.
+    /// Seam rank of the separator under the node's embedded manifest:
+    /// the level coin that made this boundary exist. 0 for the leftmost
+    /// span (no boundary) and for separators past the manifest's
+    /// `max_separator` (forced backstop seams).
     pub rank: Rank,
-    /// Buffered hitchhiker ops pending against this subtree (0 when the
-    /// link carries no buffer). Covered by the node's hash, so as
-    /// immutable as every other field.
+    /// Buffered hitchhiker ops pending against this span (0 when it
+    /// carries no buffer). Covered by the node's hash, so as immutable
+    /// as every other field.
     pub novelty: u64,
+}
+
+/// One entry of a segment node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeySummary {
+    /// The entry's variable-length index key bytes.
+    pub key: Vec<u8>,
+    /// The key's leaf-coin rank under the node's embedded manifest:
+    /// what decides whether a leaf boundary forms after this entry.
+    pub rank: Rank,
+}
+
+/// The format manifest a node embeds, field for field (see
+/// [`Manifest`]). Every node carries one, so a bare node hash is a
+/// self-describing root and mixed-format trees are visible per node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestSummary {
+    /// Format version; pins how the rest of the node is interpreted.
+    pub version: u64,
+    /// Branching parameter `n`; expected fanout is `2^n`.
+    pub fanout_n: u64,
+    /// Keys longer than this never become boundaries.
+    pub max_separator: u64,
+    /// Values longer than this spill to the block store.
+    pub inline_n: u64,
+    /// Leading raw value bytes a spilled value's key keeps as prefix.
+    pub spill_prefix: u64,
+    /// Leaf-run weight cap; 0 disables it.
+    pub max_segment: u64,
+    /// Hard frame-weight ceiling as a multiple of `max_segment`; 0
+    /// disables it.
+    pub frame_ceiling_factor: u64,
+    /// Which candidate seam a forced cut anchors at (0 = rendezvous,
+    /// 1 = hybrid).
+    pub anchor_selector: u64,
 }
 
 /// Decode the node behind `bytes` into its [`NodeSummary`].
 pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogArtifactsError> {
     let size = bytes.len() as u64;
     let node = ArtifactNode::new(Buffer::from(bytes));
-    let manifest = node.manifest()?;
     let scale = node.scale()?.as_u8() as u64;
-    let bound = node.upper_bound()?.unwrap_or_default();
-    let rank = if bound.is_empty() {
-        0
-    } else {
-        Geometric::rank(&bound, &manifest)
-    };
 
     Ok(match node.as_index() {
         Ok(index) => NodeSummary {
             kind: "index",
             size,
             count: index.len() as u64,
-            bound,
-            rank,
             scale,
             novelty: index.novelty_len() as u64,
         },
@@ -128,8 +164,6 @@ pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogArtifactsError>
                 kind: "segment",
                 size,
                 count: segment.len() as u64,
-                bound,
-                rank,
                 scale,
                 novelty: 0,
             }
@@ -137,28 +171,36 @@ pub fn inspect_node(bytes: Vec<u8>) -> Result<NodeSummary, DialogArtifactsError>
     })
 }
 
-/// Decode the index node behind `bytes` into one [`LinkSummary`] per
-/// child link, in position order. A segment has no links and yields an
-/// empty vector (not an error — queries union over mixed levels).
-pub fn inspect_links(bytes: Vec<u8>) -> Result<Vec<LinkSummary>, DialogArtifactsError> {
+/// Decode the index node behind `bytes` into one [`SpanSummary`] per
+/// span, in key order. A segment has no spans and yields an empty
+/// vector (not an error — queries union over mixed levels).
+pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogArtifactsError> {
     let node = ArtifactNode::new(Buffer::from(bytes));
     let Ok(index) = node.as_index() else {
         return Ok(Vec::new());
     };
     let manifest = node.manifest()?;
 
-    let mut links = Vec::with_capacity(index.len());
+    let mut spans = Vec::with_capacity(index.len());
     for at in 0..index.len() {
         let separator = index.separator(at)?;
+        // The span's upper bound is the NEXT span's separator; the last
+        // span is unbounded above (empty = +∞).
+        let until = if at + 1 < index.len() {
+            index.separator(at + 1)?
+        } else {
+            Vec::new()
+        };
         let rank = if separator.is_empty() {
             0
         } else {
-            Geometric::rank(&separator, &manifest)
+            Geometric::seam_rank(&separator, &manifest)
         };
-        links.push(LinkSummary {
+        spans.push(SpanSummary {
             at: at as u64,
             node: *index.hash_at(at)?.as_bytes(),
             separator,
+            until,
             scale: index.scale_at(at)?.as_u8() as u64,
             rank,
             novelty: index
@@ -167,23 +209,43 @@ pub fn inspect_links(bytes: Vec<u8>) -> Result<Vec<LinkSummary>, DialogArtifacts
                 .unwrap_or(0),
         });
     }
-    Ok(links)
+    Ok(spans)
 }
 
-/// Decode the segment node behind `bytes` into its entry keys, in entry
-/// order. An index node has no entries and yields an empty vector.
-pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<Vec<u8>>, DialogArtifactsError> {
+/// Decode the segment node behind `bytes` into one [`KeySummary`] per
+/// entry, in entry order. An index node has no entries and yields an
+/// empty vector.
+pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogArtifactsError> {
     let node = ArtifactNode::new(Buffer::from(bytes));
     if node.as_index().is_ok() {
         return Ok(Vec::new());
     }
+    let manifest = node.manifest()?;
     let segment = node.as_segment()?;
     let mut keys = Vec::with_capacity(segment.len());
     let mut cursor = segment.keys::<Key>()?;
     while let Some((_, key)) = cursor.next_key()? {
-        keys.push(key.to_vec());
+        let key = key.to_vec();
+        let rank = Geometric::rank(&key, &manifest);
+        keys.push(KeySummary { key, rank });
     }
     Ok(keys)
+}
+
+/// Decode the manifest embedded in the node behind `bytes`.
+pub fn inspect_manifest(bytes: Vec<u8>) -> Result<ManifestSummary, DialogArtifactsError> {
+    let node = ArtifactNode::new(Buffer::from(bytes));
+    let manifest: Manifest = node.manifest()?;
+    Ok(ManifestSummary {
+        version: manifest.version as u64,
+        fanout_n: manifest.fanout_n as u64,
+        max_separator: manifest.max_separator as u64,
+        inline_n: manifest.inline_n as u64,
+        spill_prefix: manifest.spill_prefix as u64,
+        max_segment: manifest.max_segment as u64,
+        frame_ceiling_factor: manifest.frame_ceiling_factor as u64,
+        anchor_selector: manifest.anchor_selector as u64,
+    })
 }
 
 /// One decoded component of an index key, in sort order. `kind` names
@@ -351,13 +413,13 @@ pub fn key_components(bytes: &[u8]) -> Vec<KeyComponent> {
     out
 }
 
-/// Decompose a link separator. A separator is a front-coded *prefix*
+/// Decompose a span separator. A separator is a front-coded *prefix*
 /// of a full key: the column framing a full-key parse relies on lies
 /// past the truncation, so this is deliberately lenient — the tag
 /// component plus the post-tag prefix bytes as one `prefix` component
 /// (utf8-lossy text, since the leading columns are textual for every
-/// fact ordering). The empty separator is the level's global leftmost
-/// boundary and yields the `min` marker.
+/// fact ordering). The empty separator is the leftmost span's boundary
+/// and yields the `min` marker.
 pub fn separator_components(bytes: &[u8]) -> Vec<KeyComponent> {
     if bytes.is_empty() {
         return vec![KeyComponent::new("min", "⊥ start".into(), Vec::new())];
@@ -400,12 +462,12 @@ mod tests {
             .to_vec()
     }
 
-    /// Per-link novelty surfaces on link rows: ops route to the link
-    /// whose range holds their key, the counts land per link, and the
-    /// node summary carries the total.
+    /// Spans surface the logical range model: each row carries its
+    /// `[separator, until)` bounds, its per-span novelty, and the node
+    /// summary carries the total.
     #[dialog_common::test]
-    fn it_reports_per_link_novelty() -> anyhow::Result<()> {
-        // Two keys in sort order; the second link's separator is the
+    fn it_reports_spans_with_ranges_and_novelty() -> anyhow::Result<()> {
+        // Two keys in sort order; the second span's separator is the
         // larger key itself (a key is a prefix of itself), so `low`
         // routes left and `high` routes right.
         let mut keys = [artifact_key("a"), artifact_key("b")];
@@ -432,7 +494,7 @@ mod tests {
                 op: NoveltyOp::Retract,
             },
             NoveltyEntry {
-                key: high,
+                key: high.clone(),
                 op: NoveltyOp::Retract,
             },
         ];
@@ -447,10 +509,20 @@ mod tests {
         assert_eq!(node.kind, "index");
         assert_eq!(node.novelty, 2, "total buffered ops: {node:?}");
 
-        let links = inspect_links(bytes)?;
-        assert_eq!(links.len(), 2);
-        assert_eq!(links[0].novelty, 1, "one op rides the left link");
-        assert_eq!(links[1].novelty, 1, "one op rides the right link");
+        let spans = inspect_spans(bytes.clone())?;
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].novelty, 1, "one op pends on the left span");
+        assert_eq!(spans[1].novelty, 1, "one op pends on the right span");
+        // Each span is a self-contained range: the left span ends where
+        // the right begins; the outer bounds are open (−∞, +∞).
+        assert!(spans[0].separator.is_empty(), "leftmost is −∞");
+        assert_eq!(spans[0].until, high, "left span ends at the boundary");
+        assert_eq!(spans[1].separator, high);
+        assert!(spans[1].until.is_empty(), "last span is +∞");
+
+        let manifest = inspect_manifest(bytes)?;
+        assert_eq!(manifest.version, Manifest::default().version as u64);
+        assert_eq!(manifest.fanout_n, Manifest::default().fanout_n as u64);
         Ok(())
     }
 
