@@ -32,11 +32,14 @@
 use dialog_capability::Command;
 use dialog_search_tree::{Buffer, Distribution, Geometric, Manifest, PersistentNode, Rank};
 use dialog_storage::Blake3Hash;
+use rkyv::deserialize;
+use rkyv::rancor::Error as RkyvError;
 
+use crate::key::varkey::{self, ValuePayload};
 use crate::{
-    ATTRIBUTE_KEY_TAG, AttributeKey, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, DialogArtifactsError,
-    ENTITY_KEY_TAG, EntityKey, HISTORY_KEY_TAG, Key, KeyView, State, VALUE_KEY_TAG, Value,
-    ValueKey, decode_value,
+    ATTRIBUTE_KEY_TAG, AttributeKey, BLOB_KEY_TAG, BlobRecord, COVERAGE_KEY_TAG, Datum,
+    DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, HISTORY_KEY_TAG, Key, KeyView, State,
+    VALUE_KEY_TAG, Value, ValueKey, decode_value,
 };
 
 /// The raw content hash a [`Load`] resolves: the same 32 bytes a
@@ -117,6 +120,54 @@ pub struct KeySummary {
     /// The key's leaf-coin rank under the node's embedded manifest:
     /// what decides whether a leaf boundary forms after this entry.
     pub rank: Rank,
+}
+
+/// One entry of a segment node with its stored claim metadata — the
+/// value side of the entry, where the fact content itself lives in the
+/// key (see [`inspect_keys`] / `dialog/key-part`). This is what makes
+/// the history and coverage regions legible: their entries' versions,
+/// causes, and coverage all ride here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntrySummary {
+    /// Position within the segment.
+    pub at: u64,
+    /// The entry's variable-length index key bytes.
+    pub key: Vec<u8>,
+    /// `"asserted"` for a stored datum, `"removed"` for a tombstone.
+    pub state: &'static str,
+    /// Whether the datum marks a retraction (a covering record in the
+    /// history/coverage regions).
+    pub retraction: bool,
+    /// Origin half of the claim's version (32 bytes; empty when the
+    /// write was unversioned).
+    pub origin: Vec<u8>,
+    /// Edition half of the claim's version (0 when unversioned).
+    pub edition: u64,
+    /// Number of prior claim versions in the entry's cause.
+    pub cause: u64,
+    /// Extra claim versions collapsed into this entry (identical-value
+    /// claims from other writers standing at the same key).
+    pub collapsed: u64,
+    /// Versions a covering record supersedes.
+    pub supersedes: u64,
+    /// The spilled value's 32-byte block reference, when the key's
+    /// value spilled past the manifest's inline threshold.
+    pub spill: Option<Blake3Hash>,
+}
+
+/// One blob-index entry of a segment node: the content-derived
+/// metadata the tree stores about a referenced blob. The blob's bytes
+/// themselves live in the blob store, not the tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobEntrySummary {
+    /// Position within the segment.
+    pub at: u64,
+    /// The referenced blob's 32-byte content hash, from the key.
+    pub blob: Vec<u8>,
+    /// The record's encoding version.
+    pub version: u64,
+    /// Total size of the blob in bytes.
+    pub size: u64,
 }
 
 /// The format manifest a node embeds, field for field (see
@@ -230,6 +281,101 @@ pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogArtifactsEr
         keys.push(KeySummary { key, rank });
     }
     Ok(keys)
+}
+
+/// Decode the segment node behind `bytes` into one [`EntrySummary`]
+/// per entry, in entry order — the claim-metadata (value) side of each
+/// entry. Blob-index entries carry no claim metadata and surface
+/// through [`inspect_blob_records`] instead; they still appear here
+/// (with empty metadata) so counts line up. An index node yields an
+/// empty vector.
+pub fn inspect_entries(bytes: Vec<u8>) -> Result<Vec<EntrySummary>, DialogArtifactsError> {
+    let node = ArtifactNode::new(Buffer::from(bytes));
+    if node.as_index().is_ok() {
+        return Ok(Vec::new());
+    }
+    let segment = node.as_segment()?;
+    let mut entries = Vec::with_capacity(segment.len());
+    let mut cursor = segment.keys::<Key>()?;
+    while let Some((at, key)) = cursor.next_key()? {
+        let key = key.to_vec();
+        // Lenient spill detection: only fact-shaped keys carry a value
+        // payload; anything that does not parse is simply not spilled.
+        let spill = varkey::parse_key(&key).and_then(|parts| match parts.value {
+            ValuePayload::Spilled { hash, .. } => Blake3Hash::try_from(hash.as_slice()).ok(),
+            ValuePayload::Inline(_) => None,
+        });
+        let state: State<Datum> = deserialize::<State<Datum>, RkyvError>(segment.value_at(at)?)
+            .map_err(|error| DialogArtifactsError::Tree(format!("entry decode: {error}")))?;
+        entries.push(match state {
+            State::Added(datum) => EntrySummary {
+                at: at as u64,
+                key,
+                state: "asserted",
+                retraction: datum.retraction,
+                origin: datum
+                    .version
+                    .as_ref()
+                    .map(|version| version.origin.0.to_vec())
+                    .unwrap_or_default(),
+                edition: datum
+                    .version
+                    .as_ref()
+                    .map(|version| version.edition.value())
+                    .unwrap_or_default(),
+                cause: datum
+                    .cause
+                    .as_ref()
+                    .map(|cause| cause.len() as u64)
+                    .unwrap_or_default(),
+                collapsed: datum.collapsed.len() as u64,
+                supersedes: datum.supersedes.len() as u64,
+                spill,
+            },
+            State::Removed => EntrySummary {
+                at: at as u64,
+                key,
+                state: "removed",
+                retraction: false,
+                origin: Vec::new(),
+                edition: 0,
+                cause: 0,
+                collapsed: 0,
+                supersedes: 0,
+                spill,
+            },
+        });
+    }
+    Ok(entries)
+}
+
+/// Decode the segment node behind `bytes` into one [`BlobEntrySummary`]
+/// per blob-index entry. Non-blob entries (and index nodes) yield no
+/// rows.
+pub fn inspect_blob_records(bytes: Vec<u8>) -> Result<Vec<BlobEntrySummary>, DialogArtifactsError> {
+    let node = ArtifactNode::new(Buffer::from(bytes));
+    if node.as_index().is_ok() {
+        return Ok(Vec::new());
+    }
+    let segment = node.as_segment()?;
+    let mut records = Vec::new();
+    let mut cursor = segment.keys::<Key>()?;
+    while let Some((at, key)) = cursor.next_key()? {
+        if key.first() != Some(&BLOB_KEY_TAG) {
+            continue;
+        }
+        let state: State<Datum> = deserialize::<State<Datum>, RkyvError>(segment.value_at(at)?)
+            .map_err(|error| DialogArtifactsError::Tree(format!("entry decode: {error}")))?;
+        if let Some(record) = BlobRecord::from_state(&state)? {
+            records.push(BlobEntrySummary {
+                at: at as u64,
+                blob: key[1..].to_vec(),
+                version: record.version as u64,
+                size: record.size,
+            });
+        }
+    }
+    Ok(records)
 }
 
 /// Decode the manifest embedded in the node behind `bytes`.
@@ -544,5 +690,47 @@ mod tests {
         assert_eq!(separator[1].kind, "prefix");
 
         assert_eq!(separator_components(&[])[0].kind, "min");
+    }
+
+    /// Blob-index entries decode into their content-derived records:
+    /// hash from the key, `{version, size}` from the stored record.
+    #[dialog_common::test]
+    fn it_reports_blob_records() -> anyhow::Result<()> {
+        use dialog_search_tree::Entry;
+
+        let hash = NodeHash::hash(b"blob-bytes");
+        let key = crate::BlobKey::new(hash.as_bytes()).0;
+        let mut record = vec![1u8];
+        record.extend_from_slice(&5u64.to_be_bytes());
+        let datum = Datum {
+            cause: None,
+            blob: Some(record),
+            version: None,
+            collapsed: Vec::new(),
+            supersedes: Vec::new(),
+            retraction: false,
+        };
+        let entries = vec![Entry {
+            key,
+            value: State::Added(datum),
+        }];
+        let body = PersistentNodeBody::<State<Datum>>::segment_from_entries::<Key>(
+            entries,
+            Manifest::default(),
+        )?;
+        let bytes: Vec<u8> = body.as_bytes()?.as_ref().to_vec();
+
+        let records = inspect_blob_records(bytes.clone())?;
+        assert_eq!(records.len(), 1, "one blob record: {records:?}");
+        assert_eq!(records[0].size, 5);
+        assert_eq!(records[0].version, 1);
+        assert_eq!(records[0].blob, hash.as_bytes().to_vec());
+
+        // The generic entry view counts it too (with empty claim
+        // metadata), so per-node counts line up.
+        let generic = inspect_entries(bytes)?;
+        assert_eq!(generic.len(), 1);
+        assert_eq!(generic[0].origin, Vec::<u8>::new());
+        Ok(())
     }
 }
