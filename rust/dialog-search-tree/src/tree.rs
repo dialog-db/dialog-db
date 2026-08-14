@@ -245,6 +245,27 @@ where
         TreeWalker::new(self.root.clone()).stream(range, accessor)
     }
 
+    /// [`stream_range`](Self::stream_range), yielding each entry's key as a
+    /// [`KeyHandle`](crate::KeyHandle) instead of the typed `Key`: warm
+    /// leaves' entries borrow the memoized decoded-keys arena with no
+    /// per-entry key copy. For consumers that work directly on the raw key
+    /// bytes (the artifact scan paths).
+    pub fn stream_range_handles<R, Backend>(
+        &self,
+        range: R,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> impl Stream<Item = Result<Entry<crate::KeyHandle, Value>, DialogSearchTreeError>>
+    + ConditionalSend
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        R: RangeBounds<Key> + ConditionalSend,
+    {
+        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+
+        TreeWalker::<Key, Value>::new(self.root.clone()).stream_handles(range, accessor)
+    }
+
     /// Returns a differential that produces changes to transform `self` into
     /// `other`.
     ///

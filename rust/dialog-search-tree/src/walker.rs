@@ -16,10 +16,95 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
+use std::sync::Arc;
+
 use crate::{
-    Accessor, ArchivedNodeBody, DialogSearchTreeError, Entry, Key, Link, NoveltyOp, PersistentNode,
-    Value, into_owned,
+    Accessor, ArchivedNodeBody, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, NoveltyOp,
+    PersistentNode, Value, into_owned,
 };
+
+/// How [`TreeWalker::stream`] materializes the keys of the entries it yields.
+///
+/// The typed instantiation (any [`Key`]) rebuilds the tree's key from the
+/// entry bytes — one allocation and copy per yielded entry. The
+/// [`KeyHandle`] instantiation instead hands out handles into the leaf's
+/// memoized decoded-keys arena, so a warm leaf's entries yield with NO
+/// per-entry copy; consumers that only need the key BYTES (the artifact
+/// scan, which re-splits them itself) read through `as_ref`.
+pub trait ScanKey: Sized + ConditionalSend {
+    /// Build a yielded key from plain bytes: a buffered novelty op, or a
+    /// cold leaf's streaming decode (whose per-key buffer is transient).
+    fn from_entry_bytes(bytes: &[u8]) -> Result<Self, DialogSearchTreeError>;
+
+    /// Build a yielded key from a warm leaf's memoized arena. Defaults to
+    /// copying out via [`from_entry_bytes`](Self::from_entry_bytes).
+    fn from_arena(keys: &Arc<DecodedKeys>, at: usize) -> Result<Self, DialogSearchTreeError> {
+        Self::from_entry_bytes(keys.get(at).ok_or_else(|| {
+            DialogSearchTreeError::Operation(format!("decoded key index {at} out of range"))
+        })?)
+    }
+}
+
+/// The typed instantiation of [`ScanKey`]: rebuilds the tree's own [`Key`]
+/// from the entry bytes. A wrapper rather than a blanket impl so it cannot
+/// conflict with [`KeyHandle`]'s impl under coherence.
+struct TypedKey<K>(K);
+
+impl<K: Key + ConditionalSend> ScanKey for TypedKey<K> {
+    fn from_entry_bytes(bytes: &[u8]) -> Result<Self, DialogSearchTreeError> {
+        Ok(TypedKey(K::try_from_bytes(bytes)?))
+    }
+}
+
+/// A yielded entry's key bytes, without the typed-key copy: either a handle
+/// into a warm leaf's memoized [`DecodedKeys`] arena (cloning clones the
+/// `Arc`; the arena stays alive as long as any handle does), or an owned
+/// copy for the sources that have no arena — buffered novelty ops and cold
+/// leaves' streaming decodes.
+///
+/// Order note: handles compare/read only through [`as_ref`](AsRef), so the
+/// tree's byte order is preserved exactly.
+#[derive(Clone, Debug)]
+pub enum KeyHandle {
+    /// An owned copy (novelty op or cold streaming decode).
+    Owned(Vec<u8>),
+    /// A borrowed slice of a warm leaf's decoded arena. `at` is validated
+    /// against the arena on construction ([`ScanKey::from_arena`]).
+    Arena {
+        /// The leaf's decoded keys, shared with the node's memo.
+        keys: Arc<DecodedKeys>,
+        /// This entry's index in the arena.
+        at: usize,
+    },
+}
+
+impl AsRef<[u8]> for KeyHandle {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            KeyHandle::Owned(bytes) => bytes,
+            // In range by construction: `from_arena` validated `at`.
+            KeyHandle::Arena { keys, at } => keys.get(*at).expect("arena handle in range"),
+        }
+    }
+}
+
+impl ScanKey for KeyHandle {
+    fn from_entry_bytes(bytes: &[u8]) -> Result<Self, DialogSearchTreeError> {
+        Ok(Self::Owned(bytes.to_vec()))
+    }
+
+    fn from_arena(keys: &Arc<DecodedKeys>, at: usize) -> Result<Self, DialogSearchTreeError> {
+        if keys.get(at).is_none() {
+            return Err(DialogSearchTreeError::Operation(format!(
+                "decoded key index {at} out of range"
+            )));
+        }
+        Ok(Self::Arena {
+            keys: Arc::clone(keys),
+            at,
+        })
+    }
+}
 
 /// A buffered op that won its key during [`pending_for_leaf`]'s collection
 /// pass, located by position instead of decoded: `level` names the path layer
@@ -302,6 +387,50 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSync,
     {
+        // A thin adapter, not another generator: wrapping the walk in a
+        // second `try_stream!` layer measurably bloats every future that
+        // embeds a walk (clippy's `large_futures` catches it downstream).
+        futures_util::TryStreamExt::map_ok(
+            self.stream_scan::<R, Backend, TypedKey<Key>>(range, accessor),
+            |entry| Entry {
+                key: entry.key.0,
+                value: entry.value,
+            },
+        )
+    }
+
+    /// [`stream`](Self::stream), yielding each entry's key as a
+    /// [`KeyHandle`] instead of the typed [`Key`]: a warm leaf's entries
+    /// borrow the memoized decoded-keys arena with NO per-entry copy, and
+    /// only novelty ops and cold streaming decodes copy. For consumers that
+    /// work on the raw key bytes.
+    pub fn stream_handles<R, Backend>(
+        self,
+        range: R,
+        accessor: Accessor<Backend>,
+    ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
+    where
+        R: RangeBounds<Key> + ConditionalSend,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        self.stream_scan::<R, Backend, KeyHandle>(range, accessor)
+    }
+
+    /// The walk shared by [`stream`](Self::stream) and
+    /// [`stream_handles`](Self::stream_handles); `Out` decides how yielded
+    /// keys materialize (see [`ScanKey`]).
+    fn stream_scan<R, Backend, Out>(
+        self,
+        range: R,
+        accessor: Accessor<Backend>,
+    ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
+    where
+        R: RangeBounds<Key> + ConditionalSend,
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        Out: ScanKey + 'static,
+    {
         try_stream! {
             // Get the start key. Included/Excluded ranges are identical here,
             // the check if key is in range is below, and this will at most read
@@ -407,7 +536,7 @@ where
                             let (buffered_key, op) = buffered.next().expect("peeked");
                             if let NoveltyOp::Assert(value) = op {
                                 entered_range = true;
-                                let entry_key = Key::try_from_bytes(&buffered_key)?;
+                                let entry_key = Out::from_entry_bytes(&buffered_key)?;
                                 yield Entry { key: entry_key, value };
                             }
                         }
@@ -417,7 +546,7 @@ where
                             let (buffered_key, op) = buffered.next().expect("peeked");
                             if let NoveltyOp::Assert(value) = op {
                                 entered_range = true;
-                                let entry_key = Key::try_from_bytes(&buffered_key)?;
+                                let entry_key = Out::from_entry_bytes(&buffered_key)?;
                                 yield Entry { key: entry_key, value };
                             }
                             continue;
@@ -438,7 +567,10 @@ where
                                 }
                             };
                             let value = into_owned(segment.value_at(at)?)?;
-                            let entry_key = Key::try_from_bytes(key)?;
+                            // The memoized arena outlives the yield, so a
+                            // `KeyHandle` consumer borrows it copy-free; the
+                            // typed consumer copies out, as before.
+                            let entry_key = Out::from_arena(&keys, at)?;
                             yield Entry { key: entry_key, value };
                         // Entries only ascend, so a key past the range's end
                         // ends the walk. The `past_end_bytes` half must NOT be
@@ -464,7 +596,7 @@ where
                             let (buffered_key, op) = buffered.next().expect("peeked");
                             if let NoveltyOp::Assert(value) = op {
                                 entered_range = true;
-                                let entry_key = Key::try_from_bytes(&buffered_key)?;
+                                let entry_key = Out::from_entry_bytes(&buffered_key)?;
                                 yield Entry { key: entry_key, value };
                             }
                         }
@@ -474,7 +606,7 @@ where
                             let (buffered_key, op) = buffered.next().expect("peeked");
                             if let NoveltyOp::Assert(value) = op {
                                 entered_range = true;
-                                let entry_key = Key::try_from_bytes(&buffered_key)?;
+                                let entry_key = Out::from_entry_bytes(&buffered_key)?;
                                 yield Entry { key: entry_key, value };
                             }
                             continue;
@@ -484,7 +616,7 @@ where
                         if !below_start(&start_bytes, key) && !past_end_bytes(&end_bytes, key) {
                             entered_range = true;
                             let value = into_owned(segment.value_at(at)?)?;
-                            let entry_key = Key::try_from_bytes(key)?;
+                            let entry_key = Out::from_entry_bytes(key)?;
                             yield Entry { key: entry_key, value };
                         // See the memoized arm above: the `past_end_bytes`
                         // half must not be gated on `entered_range`, or a
@@ -502,7 +634,7 @@ where
                 for (buffered_key, op) in buffered {
                     if let NoveltyOp::Assert(value) = op {
                         entered_range = true;
-                        let entry_key = Key::try_from_bytes(&buffered_key)?;
+                        let entry_key = Out::from_entry_bytes(&buffered_key)?;
                         yield Entry { key: entry_key, value };
                     }
                 }

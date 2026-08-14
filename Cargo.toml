@@ -126,6 +126,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
 ] }
 rexie = "0.6"
+memchr = "2"
 rkyv = "0.8"
 rsa = "0.9"
 s3s = "0.13"
