@@ -479,6 +479,184 @@ async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
     Ok(())
 }
 
+/// A retained delegation replicates like any data: site A retains a chain
+/// (facts + envelope blob in one commit) and pushes; site B pulls, finds the
+/// delegation by an ordinary value-bound query on `dialog.ucan/audience` (the
+/// shape a prover uses), and reads the envelope back byte-identical through
+/// blob hydration. A retraction then replicates the same way: after B pulls
+/// it, the facts and the blob reference are gone.
+// Native only, feature-gated: same reasoning as
+// `it_ships_blobs_on_push_and_hydrates_on_read` above.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
+    use crate::DELEGATION_AUDIENCE;
+    use dialog_capability::access::{Certificate as _, Delegation as _};
+    use dialog_credentials::Ed25519Signer;
+
+    // --- Site A: retain a delegation, push. ---
+    let storage_a = Storage::temp();
+    let profile_a = Profile::open(unique_name("delegation-ship-a"))
+        .perform(&storage_a)
+        .await?;
+    let operator_a = profile_a
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_a)
+        .await?;
+    let repo_a = profile_a
+        .repository(unique_name("delegation-ship"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .credential()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_a)
+        .await?;
+    let origin_a = repo_a
+        .remote("origin")
+        .create(site_a)
+        .perform(&operator_a)
+        .await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+
+    let space = Ed25519Signer::generate().await?;
+    let holder = Ed25519Signer::generate().await?;
+    let delegation = dialog_ucan_core::DelegationBuilder::new()
+        .issuer(space.clone())
+        .audience(&holder)
+        .subject(dialog_ucan_core::subject::Subject::Specific(
+            dialog_varsig::Principal::did(&space),
+        ))
+        .command(vec!["storage".to_string()])
+        .try_build()
+        .await?;
+    let chain =
+        dialog_ucan::UcanDelegation::new(dialog_ucan_core::DelegationChain::new(delegation));
+    let certificate = chain.certificates().pop().unwrap();
+    let envelope = certificate.encode().unwrap();
+
+    let entities = branch_a
+        .delegations()
+        .retain(chain.clone())
+        .perform(&operator_a)
+        .await?;
+    assert_eq!(entities.len(), 1);
+    let entity = entities[0].clone();
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // --- Site B: pull, query by audience, read the envelope. ---
+    let storage_b = Storage::temp();
+    let profile_b = Profile::open(unique_name("delegation-ship-b"))
+        .perform(&storage_b)
+        .await?;
+    let operator_b = profile_b
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_b)
+        .await?;
+    let repo_b = profile_b
+        .repository(unique_name("delegation-ship-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .credential()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_b)
+        .await?;
+    let origin_b = repo_b
+        .remote("origin")
+        .create(site_b)
+        .subject(repo_a.did())
+        .perform(&operator_b)
+        .await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+
+    branch_b.pull().perform(&operator_b).await?;
+
+    // Value-bound query on the audience: the shape a prover's candidate
+    // lookup takes, over facts site B never wrote.
+    let holder_did = dialog_varsig::Principal::did(&holder).to_string();
+    let found: Vec<_> = branch_b
+        .claims()
+        .select(
+            ArtifactSelector::new()
+                .the(DELEGATION_AUDIENCE.parse()?)
+                .is(Value::String(holder_did.clone())),
+        )
+        .perform(&operator_b)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(found.len(), 1, "site B finds the delegation by audience");
+    assert_eq!(found[0].of, entity);
+
+    // The envelope hydrates from the remote and reads back byte-identical.
+    let mut reader = Blob::from(entity.clone())
+        .read((&branch_b).into())
+        .perform(&operator_b)
+        .await?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        bytes.extend(chunk);
+    }
+    assert_eq!(bytes, envelope, "the envelope replicates byte-identical");
+
+    // --- Site A retracts and pushes; B pulls the retraction. ---
+    branch_a
+        .delegations()
+        .retract(chain)
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+    branch_b.pull().perform(&operator_b).await?;
+
+    let after: Vec<_> = branch_b
+        .claims()
+        .select(
+            ArtifactSelector::new()
+                .the(DELEGATION_AUDIENCE.parse()?)
+                .is(Value::String(holder_did)),
+        )
+        .perform(&operator_b)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(after.is_empty(), "a pulled retraction removes the facts");
+    assert_eq!(
+        Blob::from(entity)
+            .size((&branch_b).into())
+            .perform(&operator_b)
+            .await?,
+        None,
+        "a pulled retraction removes the blob reference"
+    );
+
+    Ok(())
+}
+
 /// Push ships a spilling scalar value's block to the remote before publishing.
 ///
 /// A value larger than the tree's inline threshold does not travel in the key

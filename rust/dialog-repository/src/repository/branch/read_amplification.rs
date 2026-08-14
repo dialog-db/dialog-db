@@ -355,7 +355,7 @@ async fn measure_shape(depth: usize) -> Result<()> {
 async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     use crate::RepositoryArchiveExt as _;
     use dialog_artifacts::tree::ArtifactTreeExt as _;
-    use dialog_artifacts::tree::write_instructions;
+    use dialog_artifacts::tree::{WriteScope, write_instructions};
     use dialog_artifacts::{Instruction as I, apply_buffered};
     use dialog_effects::prelude::CatalogExt as _;
     use dialog_search_tree::Delta;
@@ -439,6 +439,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
             // The bench tree carries the default manifest.
             &dialog_search_tree::Manifest::default(),
             stream::iter(batch(i)),
+            WriteScope::Application,
         )
         .await?;
         deferred = next;

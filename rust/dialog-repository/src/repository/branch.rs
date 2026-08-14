@@ -31,6 +31,9 @@ pub use claims::*;
 mod commit;
 pub use commit::*;
 
+mod delegation;
+pub use delegation::*;
+
 mod export;
 pub use export::*;
 

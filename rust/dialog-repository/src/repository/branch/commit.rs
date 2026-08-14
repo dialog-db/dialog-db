@@ -3,7 +3,8 @@ use crate::{
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
 use dialog_artifacts::history::{Context, Edition, TreeHistory, Version, context_of, extend_skips};
-use dialog_artifacts::{DialogArtifactsError, Instruction};
+use dialog_artifacts::tree::WriteScope;
+use dialog_artifacts::{Datum, DialogArtifactsError, Instruction, Key, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -22,6 +23,8 @@ pub struct Commit<'a, Changes> {
     changes: Changes,
     allow_empty: bool,
     canonicalize: bool,
+    scope: WriteScope,
+    entries: Vec<(Key, State<Datum>)>,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -31,7 +34,27 @@ impl<'a, Changes> Commit<'a, Changes> {
             changes,
             allow_empty: false,
             canonicalize: false,
+            scope: WriteScope::Application,
+            entries: Vec::new(),
         }
+    }
+
+    /// Permit reserved `dialog.*` attributes in the change stream.
+    ///
+    /// For machinery-written facts (delegation records); application
+    /// commits keep the default [`WriteScope::Application`] rejection.
+    pub(crate) fn machinery(mut self) -> Self {
+        self.scope = WriteScope::Machinery;
+        self
+    }
+
+    /// Append pre-built machinery entries (blob-index edits) to the same
+    /// batch, so they seal, persist, and publish with the commit's data in
+    /// one revision. Entries make the commit non-empty even when the change
+    /// stream is all no-ops.
+    pub(crate) fn with_entries(mut self, entries: Vec<(Key, State<Datum>)>) -> Self {
+        self.entries = entries;
+        self
     }
 
     /// Flush the write buffers to the leaves before publishing, so the
@@ -196,10 +219,17 @@ where
         // for callers that want the history-independent form (see
         // `Commit::canonicalize`).
         let mut delta = Delta::zero();
-        let batch =
-            dialog_artifacts::BufferedBatch::apply(&tree, &mut store, Some(version), changes)
-                .await?;
-        let changed = batch.changed();
+        let batch = dialog_artifacts::BufferedBatch::apply(
+            &tree,
+            &mut store,
+            Some(version),
+            changes,
+            self.scope,
+        )
+        .await?;
+        // Machinery entries count as changes: a commit carrying only a
+        // blob-index edit still advances the head.
+        let changed = batch.changed() || !self.entries.is_empty();
 
         // A batch that left the indexes untouched (e.g. a transaction
         // re-asserting metadata that is already in place) is a no-op:
@@ -304,6 +334,10 @@ where
         // they ride the same buffered write as the data, so the record costs
         // a buffer append instead of a second canonical spine-to-leaf edit.
         let entries = record.entries(batch.manifest())?;
+        // The caller's machinery entries (blob-index edits) ride the same
+        // batch as the revision record, so one seal covers data, record,
+        // and entries together.
+        let batch = batch.record(&store, self.entries).await?;
         let batch = batch.record(&store, entries).await?;
         // Seed the verified-record memo with what we just minted. The next
         // commit's skip-table walk starts at this very record, so without this

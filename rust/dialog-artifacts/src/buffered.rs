@@ -42,7 +42,7 @@ use futures_util::Stream;
 use std::ops::RangeInclusive;
 
 use crate::history::Version;
-use crate::tree::{ArtifactTree, TreeStorageBridge, write_instructions};
+use crate::tree::{ArtifactTree, TreeStorageBridge, WriteScope, write_instructions};
 use crate::{Datum, DialogArtifactsError, Instruction, Key, State};
 
 /// The buffered counterpart of [`ArtifactTree`].
@@ -267,6 +267,7 @@ impl BufferedBatch {
         store: &mut S,
         version: Option<Version>,
         instructions: I,
+        scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -287,6 +288,7 @@ impl BufferedBatch {
             version,
             &manifest,
             instructions,
+            scope,
         )
         .await?;
         Ok(Self {
@@ -408,7 +410,8 @@ where
         + ConditionalSync,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
-    let batch = BufferedBatch::apply(tree, store, version, instructions).await?;
+    let batch =
+        BufferedBatch::apply(tree, store, version, instructions, WriteScope::Application).await?;
     let changed = batch.changed();
     *tree = batch.seal(store, delta, canonicalize).await?;
     Ok(changed)
@@ -424,7 +427,7 @@ mod tests {
     use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    use super::{BufferedBatch, apply_buffered};
+    use super::{BufferedBatch, WriteScope, apply_buffered};
     use crate::history::{Edition, Origin, Version};
     use crate::key::{FromKey as _, default_manifest};
     use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
@@ -790,6 +793,7 @@ mod tests {
             &mut batch_store,
             Some(version()),
             stream::iter(data()),
+            WriteScope::Application,
         )
         .await?;
         assert!(batch.changed(), "the data writes change the indexes");
@@ -815,6 +819,7 @@ mod tests {
             &mut buffered_store,
             Some(version()),
             stream::iter(data()),
+            WriteScope::Application,
         )
         .await?;
         let batch = batch.record(&buffered_store, entries()).await?;
