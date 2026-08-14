@@ -963,7 +963,7 @@ impl ArtifactTreeExt for ArtifactTree {
             let manifest = tree.manifest(&storage).await?;
             let range = selector_range(&selector, &manifest);
 
-            let stream = tree.stream_range(range, &storage);
+            let stream = tree.stream_range_handles(range, &storage);
             tokio::pin!(stream);
             for await item in stream {
                 let raw = item?;
@@ -1037,7 +1037,7 @@ impl ArtifactTreeExt for ArtifactTree {
             let manifest = tree.manifest(&storage).await?;
             let range = selector_range(&selector, &manifest);
 
-            let stream = tree.stream_range(range, &storage);
+            let stream = tree.stream_range_handles(range, &storage);
             tokio::pin!(stream);
             for await item in stream {
                 let raw = item?;

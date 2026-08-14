@@ -11,6 +11,7 @@ use std::{
 };
 
 use dialog_common::ConditionalSend;
+use dialog_search_tree::KeyHandle;
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
@@ -211,8 +212,12 @@ pub struct ArtifactView {
 #[derive(Clone, Debug)]
 enum Backing {
     /// A row as the tree scan holds it: key + payload + fetched spill block.
+    /// The key is a [`KeyHandle`]: on a warm leaf it borrows the node's
+    /// memoized decoded-keys arena (cloning clones an `Arc`, and the arena
+    /// stays alive while any view over it does), so carrying a view costs
+    /// no per-row key copy.
     Scanned {
-        key: Key,
+        key: KeyHandle,
         datum: Datum,
         spilled: Option<Vec<u8>>,
     },
@@ -231,9 +236,9 @@ impl From<Artifact> for ArtifactView {
 }
 
 impl ArtifactView {
-    /// Assembles a view from a scanned entry's key, its payload, and (for a
-    /// spilled value) the fetched block bytes.
-    pub(crate) fn new(key: Key, datum: Datum, spilled: Option<Vec<u8>>) -> Self {
+    /// Assembles a view from a scanned entry's key handle, its payload, and
+    /// (for a spilled value) the fetched block bytes.
+    pub(crate) fn new(key: KeyHandle, datum: Datum, spilled: Option<Vec<u8>>) -> Self {
         Self {
             backing: Backing::Scanned {
                 key,
@@ -243,11 +248,11 @@ impl ArtifactView {
         }
     }
 
-    /// The index key this row was scanned at, or `None` for a row backed by
-    /// an owned [`Artifact`] (no stored key exists).
-    pub fn key(&self) -> Option<&Key> {
+    /// The raw bytes of the index key this row was scanned at, or `None`
+    /// for a row backed by an owned [`Artifact`] (no stored key exists).
+    pub fn key(&self) -> Option<&[u8]> {
         match &self.backing {
-            Backing::Scanned { key, .. } => Some(key),
+            Backing::Scanned { key, .. } => Some(key.as_ref()),
             Backing::Owned(_) => None,
         }
     }
@@ -577,7 +582,7 @@ mod tests {
             version: None,
         };
         ArtifactView::new(
-            Key::from(build_key(&parts)),
+            KeyHandle::Owned(build_key(&parts)),
             Datum {
                 cause: None,
                 blob: None,
