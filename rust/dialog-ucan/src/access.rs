@@ -76,13 +76,15 @@ impl Certificate for UcanCertificate {
     }
 
     fn encode(&self) -> Result<Vec<u8>, AuthorizeError> {
-        serde_ipld_dagcbor::to_vec(&self.0)
-            .map_err(|e| AuthorizeError::Malformed(format!("failed to encode proof: {e}")))
+        serde_ipld_dagcbor::to_vec(&self.0).map_err(|e| AuthorizeError::Unavailable {
+            detail: format!("failed to encode proof: {e}"),
+        })
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, AuthorizeError> {
-        serde_ipld_dagcbor::from_slice(bytes)
-            .map_err(|e| AuthorizeError::Malformed(format!("failed to decode proof: {e}")))
+        serde_ipld_dagcbor::from_slice(bytes).map_err(|e| AuthorizeError::Malformed {
+            detail: format!("failed to decode proof: {e}"),
+        })
     }
 }
 
@@ -154,9 +156,9 @@ impl Proof<Ucan> for UcanProof {
             Some(first) => {
                 let mut chain = DelegationChain::new(first.0);
                 for proof in iter {
-                    chain = chain
-                        .push(proof.0)
-                        .map_err(|e| AuthorizeError::Malformed(e.to_string()))?;
+                    chain = chain.push(proof.0).map_err(|e| AuthorizeError::Malformed {
+                        detail: e.to_string(),
+                    })?;
                 }
                 Some(chain)
             }
@@ -238,15 +240,21 @@ impl Authorization<Ucan> for UcanAuthorization {
             builder = builder.not_before(ts);
         }
 
+        // Building and signing our own delegation: ours to get right, so
+        // failing it says nothing about the caller's material.
         let delegation = builder
             .try_build()
             .await
-            .map_err(|e| AuthorizeError::Malformed(format!("{e:?}")))?;
+            .map_err(|e| AuthorizeError::Unavailable {
+                detail: format!("{e:?}"),
+            })?;
 
         let chain = match &self.chain {
             Some(chain) => chain
                 .push(delegation)
-                .map_err(|e| AuthorizeError::Malformed(format!("{e}")))?,
+                .map_err(|e| AuthorizeError::Malformed {
+                    detail: format!("{e}"),
+                })?,
             None => DelegationChain::new(delegation),
         };
 
@@ -287,7 +295,9 @@ impl Authorization<Ucan> for UcanAuthorization {
             .proofs(proofs)
             .try_build()
             .await
-            .map_err(|e| AuthorizeError::Malformed(format!("{e:?}")))?;
+            .map_err(|e| AuthorizeError::Malformed {
+                detail: format!("{e:?}"),
+            })?;
 
         let chain = InvocationChain::new(invocation, delegations_map);
 

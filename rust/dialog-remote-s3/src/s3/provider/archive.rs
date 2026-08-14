@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use dialog_capability::ForkInvocation;
 use dialog_capability::Provider;
+use dialog_capability::access::AuthorizeError;
 use dialog_effects::archive::*;
 use reqwest::StatusCode;
 
@@ -40,10 +41,11 @@ impl Provider<S3Invocation<Get>> for S3 {
             response.status(),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
         ) {
-            Err(ArchiveError::AuthorizationError(format!(
-                "Failed to get value: {}",
-                response.status()
-            )))
+            Err(ArchiveError::Authorization(
+                AuthorizeError::UnavailableProof {
+                    link: format!("Failed to get value: {}", response.status()),
+                },
+            ))
         } else {
             Err(ArchiveError::Storage(format!(
                 "Failed to get value: {}",
@@ -80,10 +82,11 @@ impl Provider<S3Invocation<Put>> for S3 {
             response.status(),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
         ) {
-            Err(ArchiveError::AuthorizationError(format!(
-                "Failed to put value: {}",
-                response.status()
-            )))
+            Err(ArchiveError::Authorization(
+                AuthorizeError::UnavailableProof {
+                    link: format!("Failed to put value: {}", response.status()),
+                },
+            ))
         } else {
             Err(ArchiveError::Storage(format!(
                 "Failed to put value: {}",

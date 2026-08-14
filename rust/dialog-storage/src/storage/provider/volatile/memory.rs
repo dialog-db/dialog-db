@@ -3,18 +3,12 @@
 //! Implements transactional cell storage with CAS (Compare-And-Swap) semantics.
 //! Uses BLAKE3 content hashing for edition tracking.
 
-use super::{MemoryKey, Volatile, VolatileError};
+use super::{MemoryKey, Volatile};
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
 use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
-
-impl From<VolatileError> for MemoryError {
-    fn from(e: VolatileError) -> Self {
-        MemoryError::Storage(e.to_string())
-    }
-}
 
 /// Format edition bytes for error messages.
 fn format_edition(edition: Option<&[u8]>) -> Option<Version> {

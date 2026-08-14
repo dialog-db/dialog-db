@@ -4,6 +4,7 @@ use crate::{S3, S3Error, S3Invocation};
 use async_trait::async_trait;
 use dialog_capability::ForkInvocation;
 use dialog_capability::Provider;
+use dialog_capability::access::AuthorizeError;
 use dialog_effects::memory::*;
 use reqwest::StatusCode;
 
@@ -53,10 +54,11 @@ impl Provider<S3Invocation<Resolve>> for S3 {
             response.status(),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
         ) {
-            Err(MemoryError::Authorization(format!(
-                "Failed to resolve value: {}",
-                response.status()
-            )))
+            Err(MemoryError::Authorization(
+                AuthorizeError::UnavailableProof {
+                    link: format!("Failed to resolve value: {}", response.status()),
+                },
+            ))
         } else {
             Err(MemoryError::Storage(format!(
                 "Failed to resolve value: {}",
@@ -109,7 +111,9 @@ impl Provider<S3Invocation<Publish>> for S3 {
                 actual: None,
             }),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(MemoryError::Authorization(
-                format!("Failed to publish value: {}", response.status()),
+                AuthorizeError::UnavailableProof {
+                    link: format!("Failed to publish value: {}", response.status()),
+                },
             )),
             status => Err(MemoryError::Storage(format!(
                 "Failed to publish value: {}",
@@ -149,7 +153,9 @@ impl Provider<S3Invocation<Retract>> for S3 {
                 actual: None,
             }),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Err(MemoryError::Authorization(
-                format!("Failed to retract value: {}", response.status()),
+                AuthorizeError::UnavailableProof {
+                    link: format!("Failed to retract value: {}", response.status()),
+                },
             )),
             status => Err(MemoryError::Storage(format!(
                 "Failed to retract value: {}",

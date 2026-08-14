@@ -312,7 +312,7 @@ impl ReadBlob<'_> {
             .load()
             .perform(env)
             .await
-            .map_err(|e| CommitError::Blob(BlobError::ExecutionError(e.to_string())))?;
+            .map_err(|e| CommitError::Blob(BlobError::Storage(e.to_string())))?;
         let address = remote.address();
 
         // Full-blob read from the remote, forked to its site.

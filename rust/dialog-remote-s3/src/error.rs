@@ -1,5 +1,7 @@
 //! Error types for S3 operations.
 
+use dialog_capability::access::AuthorizeError;
+use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::blob::BlobError;
 use dialog_effects::memory::MemoryError;
@@ -8,17 +10,22 @@ use thiserror::Error;
 /// Error type for S3 operations.
 #[derive(Debug, Error)]
 pub enum S3Error {
-    /// Failed to authorize the request.
-    #[error("Authorization error: {0}")]
-    Authorization(String),
+    /// The request was not authorized.
+    ///
+    /// Carries the access decision itself rather than its rendering, so
+    /// a caller can tell a withdrawn authority from a lapsed one without
+    /// parsing a message.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
 
     /// Transport-level error (connection failed, timeout, network issues).
     #[error("Transport error: {0}")]
     Transport(String),
 
-    /// Service-level error (S3 returned an error response).
-    #[error("Service error: {0}")]
-    Service(String),
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
 
     /// Invalid configuration.
     #[error("Configuration error: {0}")]
@@ -37,19 +44,31 @@ impl From<reqwest::Error> for S3Error {
 
 impl From<S3Error> for ArchiveError {
     fn from(error: S3Error) -> Self {
-        ArchiveError::Io(error.to_string())
+        match error {
+            S3Error::Authorization(error) => ArchiveError::Authorization(error),
+            S3Error::Rejected(error) => ArchiveError::Rejected(error),
+            error => ArchiveError::Storage(error.to_string()),
+        }
     }
 }
 
 impl From<S3Error> for MemoryError {
     fn from(error: S3Error) -> Self {
-        MemoryError::Storage(error.to_string())
+        match error {
+            S3Error::Authorization(error) => MemoryError::Authorization(error),
+            S3Error::Rejected(error) => MemoryError::Rejected(error),
+            error => MemoryError::Storage(error.to_string()),
+        }
     }
 }
 
 impl From<S3Error> for BlobError {
     fn from(error: S3Error) -> Self {
-        BlobError::Storage(error.to_string())
+        match error {
+            S3Error::Authorization(error) => BlobError::Authorization(error),
+            S3Error::Rejected(error) => BlobError::Rejected(error),
+            error => BlobError::Storage(error.to_string()),
+        }
     }
 }
 
@@ -70,13 +89,13 @@ pub trait PermitRejection {
 
 impl PermitRejection for ArchiveError {
     fn is_permit_rejection(&self) -> bool {
-        matches!(self, ArchiveError::AuthorizationError(_))
+        matches!(self, ArchiveError::Authorization(_))
     }
 }
 
 impl PermitRejection for BlobError {
     fn is_permit_rejection(&self) -> bool {
-        matches!(self, BlobError::AuthorizationError(_))
+        matches!(self, BlobError::Authorization(_))
     }
 }
 
@@ -113,6 +132,61 @@ impl From<AuthorizationFormatError> for dialog_effects::credential::CredentialEr
 
 impl From<AuthorizationFormatError> for dialog_capability::AuthorizeError {
     fn from(error: AuthorizationFormatError) -> Self {
-        Self::Malformed(error.to_string())
+        match error {
+            // Bytes that would not decode: the material itself is bad.
+            AuthorizationFormatError::Deserialize(detail) => Self::Malformed { detail },
+            // Failing to write our own bytes is our machinery.
+            AuthorizationFormatError::Serialize(detail) => Self::Unavailable { detail },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use dialog_capability::access::AuthorizeError;
+    use dialog_effects::blob::BlobError;
+
+    use super::*;
+
+    fn revoked() -> AuthorizeError {
+        AuthorizeError::Revoked {
+            subject: dialog_capability::did!(
+                "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
+            ),
+        }
+    }
+
+    // Every hop from the transport to an effect error must carry the
+    // reason itself. Stringifying it here is what made callers parse
+    // messages -- and what made `is_permit_rejection` a substring test
+    // in all but name.
+    #[dialog_common::test]
+    async fn it_preserves_the_reason_across_effect_errors() {
+        let archive = ArchiveError::from(S3Error::Authorization(revoked()));
+        let memory = MemoryError::from(S3Error::Authorization(revoked()));
+        let blob = BlobError::from(S3Error::Authorization(revoked()));
+
+        assert!(matches!(
+            archive,
+            ArchiveError::Authorization(AuthorizeError::Revoked { .. })
+        ));
+        assert!(matches!(
+            memory,
+            MemoryError::Authorization(AuthorizeError::Revoked { .. })
+        ));
+        assert!(matches!(
+            blob,
+            BlobError::Authorization(AuthorizeError::Revoked { .. })
+        ));
+    }
+
+    // The one consumer that acts on the distinction.
+    #[dialog_common::test]
+    async fn it_recognizes_a_rejected_permit() {
+        assert!(ArchiveError::Authorization(revoked()).is_permit_rejection());
+        assert!(!ArchiveError::Storage("disk".into()).is_permit_rejection());
     }
 }

@@ -73,6 +73,7 @@ wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

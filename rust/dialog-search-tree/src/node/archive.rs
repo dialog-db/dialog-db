@@ -460,6 +460,29 @@ where
         StreamingLeaf::new(&schema, &columns, count)
     }
 
+    /// Visit this segment's entries in order, handing each key and value to
+    /// `visit`.
+    ///
+    /// Streams the keys and pairs each with its index-aligned value rather
+    /// than materializing the leaf, so a caller that already holds the node
+    /// can read its entries without a second walk of the tree to reach the
+    /// same rows.
+    pub fn for_each_entry<Key, Visit>(&self, mut visit: Visit) -> Result<(), DialogSearchTreeError>
+    where
+        Key: self::Key,
+        Visit: FnMut(&[u8], &Value::Archived) -> Result<(), DialogSearchTreeError>,
+    {
+        let mut keys = self.keys::<Key>()?;
+        while let Some((at, key)) = keys.next_key()? {
+            let value = self
+                .values
+                .get(at)
+                .ok_or_else(|| malformed("Segment value is out of range for its key"))?;
+            visit(key, value)?;
+        }
+        Ok(())
+    }
+
     /// The first (minimum) key of this segment, decoded to its bytes: one
     /// streaming step, no whole-leaf materialization.
     pub fn first_key<Key: self::Key>(&self) -> Result<Vec<u8>, DialogSearchTreeError> {
