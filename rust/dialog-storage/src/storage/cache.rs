@@ -37,11 +37,7 @@ where
         Ok(Self {
             backend,
             cache: Arc::new(Mutex::new(SieveCache::new(cache_size).map_err(
-                |error| {
-                    DialogStorageError::StorageBackend(format!(
-                        "Could not initialize cache: {error}"
-                    ))
-                },
+                |error| DialogStorageError::Storage(format!("Could not initialize cache: {error}")),
             )?)),
         })
     }

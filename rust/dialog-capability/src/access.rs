@@ -546,7 +546,8 @@ pub trait CertificateStore<P: Protocol> {
 /// [`Expired`](Self::Expired) means obtain a fresh proof and retry;
 /// [`Revoked`](Self::Revoked) means stop, since retrying presents the same
 /// withdrawn authority.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind")]
 pub enum AuthorizeError {
     /// No delegation chain connects the authority to the subject.
     ///
@@ -660,19 +661,45 @@ pub enum AuthorizeError {
         link: String,
     },
 
-    /// The authorization could not be evaluated at all.
+    /// The caller's authorization material did not decode.
     ///
-    /// Not an access decision: the chain was absent or undecodable, or the
-    /// material needed to decide could not be read. Distinct from the
-    /// decision variants above, which all mean "we understood the request
-    /// and the answer is no".
-    #[error("Authorization could not be evaluated: {0}")]
-    Malformed(String),
+    /// Strictly that: bytes arrived and could not be read as what they
+    /// claimed to be. Anything else that prevents a decision -- a key we
+    /// could not load, a store we could not reach, our own signing
+    /// failing -- is [`Unavailable`](Self::Unavailable), because it says
+    /// nothing about the caller's input and a caller cannot act on it the
+    /// same way.
+    ///
+    /// Also distinct from the decision variants above, which all mean
+    /// "we understood the request and the answer is no".
+    #[error("Authorization could not be evaluated: {detail}")]
+    Malformed {
+        /// What could not be evaluated.
+        detail: String,
+    },
+
+    /// The decision could not be reached because our own machinery
+    /// failed.
+    ///
+    /// Signing a payload, reading a key, reaching a store. Nothing is
+    /// wrong with the caller's input, and nothing was decided, so this
+    /// must not be reported as a denial -- a caller told "no" stops,
+    /// where a caller told "we could not answer" may retry.
+    ///
+    /// The enum's other variants are all statements about the request.
+    /// This one is a statement about us.
+    #[error("Authorization could not be evaluated: {detail}")]
+    Unavailable {
+        /// What failed on our side.
+        detail: String,
+    },
 }
 
 impl From<crate::StorageError> for AuthorizeError {
     fn from(e: crate::StorageError) -> Self {
-        AuthorizeError::Malformed(e.to_string())
+        AuthorizeError::Unavailable {
+            detail: e.to_string(),
+        }
     }
 }
 
@@ -682,6 +709,70 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::TimeRange;
+
+    // The reasons cross the wire: the access service answers with these
+    // rather than with a code table both sides have to keep in step.
+    // Round-tripping every variant is what makes that safe -- a variant
+    // that serializes but will not come back is a silent protocol break.
+    mod wire {
+        use crate::access::AuthorizeError;
+        use crate::did;
+
+        fn round_trip(error: AuthorizeError) {
+            let encoded = serde_json::to_string(&error).expect("serializes");
+            let decoded: AuthorizeError = serde_json::from_str(&encoded).expect("deserializes");
+            assert_eq!(error, decoded, "round-tripped through {encoded}");
+        }
+
+        #[dialog_common::test]
+        async fn it_round_trips_every_reason() {
+            let subject = did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX");
+            let audience = did!("key:z6MkfQhLHBSFMuR7bQXTQeqe5kYUW51HpfZeaymgy1zkP2jM");
+
+            for error in [
+                AuthorizeError::UnprovenSubject {
+                    claimed: audience.clone(),
+                    authorized: subject.clone(),
+                },
+                AuthorizeError::CommandEscalation {
+                    claimed: "/storage/put".into(),
+                    authorized: "/storage/get".into(),
+                },
+                AuthorizeError::PolicyViolation {
+                    predicate: "size < 1024".into(),
+                },
+                AuthorizeError::InvalidAudience {
+                    claimed: audience.clone(),
+                    authorized: subject.clone(),
+                },
+                AuthorizeError::Revoked {
+                    subject: subject.clone(),
+                },
+                AuthorizeError::InvalidSignature {
+                    issuer: subject.clone(),
+                },
+                AuthorizeError::Malformed {
+                    detail: "bad envelope".into(),
+                },
+            ] {
+                round_trip(error);
+            }
+        }
+
+        // The tag is part of the protocol: renaming a variant renames
+        // the wire form, so this pins what the service must emit.
+        #[dialog_common::test]
+        async fn it_names_the_reason_in_the_payload() {
+            let encoded = serde_json::to_string(&AuthorizeError::Revoked {
+                subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+            })
+            .expect("serializes");
+            assert!(
+                encoded.contains(r#""kind":"Revoked""#),
+                "the reason is named in the payload, got {encoded}"
+            );
+        }
+    }
 
     mod reasons {
         use crate::access::AuthorizeError;
@@ -749,7 +840,9 @@ mod tests {
         // caller supplies the link it refers to.
         #[dialog_common::test]
         async fn it_keeps_unevaluable_authorizations_out_of_the_denial_reasons() {
-            let undecodable = AuthorizeError::Malformed("chain did not decode".into());
+            let undecodable = AuthorizeError::Malformed {
+                detail: "chain did not decode".into(),
+            };
             assert!(
                 undecodable.to_string().contains("could not be evaluated"),
                 "an unevaluable authorization must not read as a refusal: {undecodable}"

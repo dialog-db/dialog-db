@@ -42,7 +42,7 @@ pub mod authority;
 pub mod blob;
 pub mod credential;
 pub mod memory;
-pub mod service;
+pub mod rejection;
 pub mod space;
 pub mod storage;
 
@@ -60,3 +60,4 @@ pub mod prelude {
 
 // Re-export capability primitives for convenience
 pub use dialog_capability::{Attenuation, Capability, Effect, Policy, Subject};
+pub use rejection::Rejection;

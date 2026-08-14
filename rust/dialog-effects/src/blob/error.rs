@@ -4,11 +4,9 @@ use std::error::Error;
 
 use thiserror::Error as ThisError;
 
-use crate::service::ServiceResponseError;
+use crate::Rejection;
 use dialog_capability::access::AuthorizeError;
-use dialog_capability::{
-    DialogCapabilityAuthorizationError, DialogCapabilityPerformError, StorageError,
-};
+use dialog_capability::{DialogCapabilityPerformError, StorageError};
 
 /// Errors that can occur during blob operations.
 #[derive(Debug, ThisError)]
@@ -26,31 +24,21 @@ pub enum BlobError {
         actual: String,
     },
 
-    /// Authorization failed.
-    #[error("Unauthorized error: {0}")]
-    AuthorizationError(String),
+    /// The request was not authorized.
+    ///
+    /// Carries the decision itself rather than its rendering, so a
+    /// caller can tell a withdrawn authority from a lapsed one.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
 
-    /// The operation failed during execution.
-    #[error("Execution error: {0}")]
-    ExecutionError(String),
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
 
     /// The storage backend failed.
     #[error("Storage error: {0}")]
     Storage(String),
-
-    /// A remote service returned a non-success HTTP response.
-    #[error("{0}")]
-    ServiceResponse(#[source] ServiceResponseError),
-
-    /// An I/O error occurred.
-    #[error("IO error: {0}")]
-    Io(String),
-}
-
-impl From<ServiceResponseError> for BlobError {
-    fn from(error: ServiceResponseError) -> Self {
-        Self::ServiceResponse(error)
-    }
 }
 
 impl From<StorageError> for BlobError {
@@ -59,27 +47,11 @@ impl From<StorageError> for BlobError {
     }
 }
 
-impl From<DialogCapabilityAuthorizationError> for BlobError {
-    fn from(value: DialogCapabilityAuthorizationError) -> Self {
-        BlobError::AuthorizationError(value.to_string())
-    }
-}
-
-impl From<AuthorizeError> for BlobError {
-    fn from(value: AuthorizeError) -> Self {
-        BlobError::AuthorizationError(value.to_string())
-    }
-}
-
 impl<E: Error> From<DialogCapabilityPerformError<E>> for BlobError {
     fn from(value: DialogCapabilityPerformError<E>) -> Self {
         match value {
-            DialogCapabilityPerformError::Authorization(error) => {
-                BlobError::AuthorizationError(error.to_string())
-            }
-            DialogCapabilityPerformError::Execution(error) => {
-                BlobError::ExecutionError(error.to_string())
-            }
+            DialogCapabilityPerformError::Authorization(error) => error.into(),
+            DialogCapabilityPerformError::Execution(error) => BlobError::Storage(error.to_string()),
         }
     }
 }

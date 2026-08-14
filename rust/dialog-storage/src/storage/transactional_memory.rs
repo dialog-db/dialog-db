@@ -315,7 +315,7 @@ where
     ) -> Result<Self, DialogStorageError> {
         let (value, edition) = if let Some((bytes, edition)) =
             backend.resolve(&address).await.map_err(|e| {
-                DialogStorageError::StorageBackend(format!(
+                DialogStorageError::Storage(format!(
                     "Resolving memory at {:?} failed with error {}",
                     address,
                     e.into()

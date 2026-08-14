@@ -11,39 +11,37 @@ use dialog_capability::{
     SiteFork, SiteId, Subject,
 };
 use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_effects::Rejection;
 use dialog_effects::authority::{self, OperatorExt};
-use dialog_effects::service::ServiceResponseError;
 use dialog_remote_s3::{Permit, S3Error};
-use serde::Deserialize;
 
-const MAX_SERVICE_ERROR_BODY_BYTES: usize = 8 * 1024;
-const MALFORMED_SERVICE_ERROR_MESSAGE: &str = "Service returned a malformed error response";
+const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 
-#[derive(Deserialize)]
-struct ServiceErrorEnvelope {
-    error: ServiceErrorBody,
-}
+/// Read the reason a request was refused.
+///
+/// The reason travels as itself. There is no code table here and no
+/// status codes: an [`AuthorizeError`] built on the other side arrives
+/// as the same value, so nothing in this crate has to know a vocabulary
+/// of wire names, and adding a reason does not mean teaching two
+/// codebases a new string.
+///
+/// A body that does not parse becomes [`Rejection::Unclassified`] rather
+/// than being guessed at. That is also what an older responder gets: it
+/// degrades to "something went wrong and we cannot say what", which is
+/// true, instead of to a specific reason that might not be.
+fn read_rejection(status: u16, body: &[u8]) -> S3Error {
+    let bounded = &body[..body.len().min(MAX_ERROR_BODY_BYTES)];
 
-#[derive(Deserialize)]
-struct ServiceErrorBody {
-    code: Option<String>,
-    message: Option<String>,
-}
-
-fn service_response_error(status: u16, body: &[u8]) -> ServiceResponseError {
-    let bounded = &body[..body.len().min(MAX_SERVICE_ERROR_BODY_BYTES)];
-    match serde_json::from_slice::<ServiceErrorEnvelope>(bounded) {
-        Ok(envelope) => ServiceResponseError::new(
-            status,
-            envelope.error.code,
-            envelope
-                .error
-                .message
-                .filter(|message| !message.is_empty())
-                .unwrap_or_else(|| MALFORMED_SERVICE_ERROR_MESSAGE.to_string()),
-        ),
-        Err(_) => ServiceResponseError::new(status, None, MALFORMED_SERVICE_ERROR_MESSAGE),
+    if let Ok(reason) = serde_json::from_slice::<AuthorizeError>(bounded) {
+        return S3Error::Authorization(reason);
     }
+    if let Ok(reason) = serde_json::from_slice::<Rejection>(bounded) {
+        return S3Error::Rejected(reason);
+    }
+
+    S3Error::Rejected(Rejection::Unclassified {
+        detail: format!("responder answered {status} with no reason we could read"),
+    })
 }
 
 use crate::permit_cache::PermitCache;
@@ -64,7 +62,7 @@ impl UcanAuthorization {
         let body = self
             .0
             .to_bytes()
-            .map_err(|e| S3Error::Authorization(e.to_string()))?;
+            .map_err(|e| S3Error::Serialization(e.to_string()))?;
 
         let response = reqwest::Client::new()
             .post(&address.endpoint)
@@ -76,7 +74,7 @@ impl UcanAuthorization {
         let status = response.status();
         if !status.is_success() {
             let body = response.bytes().await.unwrap_or_default();
-            return Err(service_response_error(status.as_u16(), &body).into());
+            return Err(read_rejection(status.as_u16(), &body));
         }
 
         let body = response.bytes().await?;
@@ -151,10 +149,13 @@ where
     type Effect = Fx;
 
     async fn authorize(self, env: &Env) -> Result<ForkInvocation<UcanSite, Fx>, AuthorizeError> {
-        let identity = authority::Identify
-            .perform(env)
-            .await
-            .map_err(|e| AuthorizeError::Malformed(e.to_string()))?;
+        let identity =
+            authority::Identify
+                .perform(env)
+                .await
+                .map_err(|e| AuthorizeError::Malformed {
+                    detail: e.to_string(),
+                })?;
         let profile = identity.profile().clone();
         let operator = identity.did();
 
@@ -202,6 +203,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use dialog_capability::did;
 
     #[cfg(not(target_arch = "wasm32"))]
     use std::collections::{BTreeMap, HashMap};
@@ -221,44 +223,87 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use tokio::net::TcpListener;
 
+    // The reason travels as itself, so what this pins is the round
+    // trip: whatever the responder built arrives as the same value.
     #[dialog_common::test]
-    async fn it_preserves_structured_service_responses() {
-        for (status, code) in [
-            (403, "CREDENTIAL_REVOKED"),
-            (403, "DEVICE_REVOKED"),
-            (409, "SYNC_CONFLICT"),
-            (503, "REVOCATION_UNAVAILABLE"),
-            (500, "INTERNAL_ERROR"),
+    async fn it_reads_back_the_reason_the_responder_sent() {
+        let sent = AuthorizeError::Revoked {
+            subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+        };
+        let body = serde_json::to_vec(&sent).expect("serializes");
+
+        let S3Error::Authorization(read) = read_rejection(403, &body) else {
+            panic!("expected an authorization reason");
+        };
+        assert_eq!(read, sent, "the reason arrives as the value that was sent");
+    }
+
+    #[dialog_common::test]
+    async fn it_reads_back_a_rejection() {
+        let sent = Rejection::Unavailable {
+            reason: "registry is down".into(),
+        };
+        let body = serde_json::to_vec(&sent).expect("serializes");
+
+        let S3Error::Rejected(read) = read_rejection(503, &body) else {
+            panic!("expected a rejection");
+        };
+        assert_eq!(read, sent);
+    }
+
+    // A responder that speaks the old shape, or none at all, degrades to
+    // "we cannot say" rather than to a specific reason that might be
+    // wrong. Guessing is what the code table used to do.
+    #[dialog_common::test]
+    async fn it_does_not_guess_at_a_body_it_cannot_read() {
+        for body in [
+            &b"not json at all"[..],
+            br#"{"error":{"code":"CREDENTIAL_REVOKED","message":"old shape"}}"#,
         ] {
-            let body = serde_json::json!({
-                "error": {
-                    "code": code,
-                    "message": "bounded detail"
-                }
-            });
-            let error = service_response_error(status, body.to_string().as_bytes());
-            assert_eq!(error.status, status);
-            assert_eq!(error.code.as_deref(), Some(code));
-            assert_eq!(error.message, "bounded detail");
+            assert!(
+                matches!(
+                    read_rejection(403, body),
+                    S3Error::Rejected(Rejection::Unclassified { .. })
+                ),
+                "an unreadable body must not become a specific reason"
+            );
         }
     }
 
     #[dialog_common::test]
-    async fn it_bounds_and_rejects_malformed_service_responses() {
-        let mut malformed = vec![b'x'; MAX_SERVICE_ERROR_BODY_BYTES * 2];
-        malformed
-            .extend_from_slice(br#"{"error":{"code":"LATE_CODE","message":"must not parse"}}"#);
+    async fn it_bounds_the_body_it_reads() {
+        let mut oversized = vec![b'x'; MAX_ERROR_BODY_BYTES * 2];
+        oversized.extend_from_slice(br#"{"kind":"Revoked","subject":"did:key:zLate"}"#);
 
-        let error = service_response_error(502, &malformed);
-        assert_eq!(error.status, 502);
-        assert_eq!(error.code, None);
-        assert_eq!(error.message, MALFORMED_SERVICE_ERROR_MESSAGE);
-        assert!(!error.message.contains("LATE_CODE"));
+        assert!(
+            matches!(
+                read_rejection(403, &oversized),
+                S3Error::Rejected(Rejection::Unclassified { .. })
+            ),
+            "a reason past the bound must not be read"
+        );
+    }
+
+    // A responder that has not been updated yet still sends the old
+    // `{code, message}` shape. That degrades to "we cannot say why",
+    // which is true, rather than to a specific reason guessed from a
+    // status code. Worth pinning: it is the behaviour during a rollout
+    // where the two sides are not yet in step.
+    #[dialog_common::test]
+    async fn it_degrades_when_the_responder_speaks_the_old_shape() {
+        let old = br#"{"error":{"code":"CREDENTIAL_REVOKED","message":"Credential revoked"}}"#;
+        let S3Error::Rejected(Rejection::Unclassified { detail }) = read_rejection(403, old) else {
+            panic!("an unreadable body must not become a specific reason");
+        };
+        assert!(
+            !detail.contains("CREDENTIAL_REVOKED"),
+            "and must not smuggle the old code back in, got {detail}"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
-    async fn it_preserves_a_service_response_through_redeem() {
+    async fn it_carries_the_reason_through_redeem() {
         let subject = Ed25519Signer::import(&[41; 32]).await.expect("subject key");
         let operator = Ed25519Signer::import(&[42; 32])
             .await
@@ -297,7 +342,11 @@ mod tests {
             let (mut stream, _) = listener.accept().await.expect("request");
             let mut request = vec![0; 16 * 1024];
             let _ = stream.read(&mut request).await.expect("read request");
-            let body = r#"{"error":{"code":"CREDENTIAL_REVOKED","message":"Credential revoked"}}"#;
+            // What a responder sends now: the reason itself.
+            let reason = AuthorizeError::Revoked {
+                subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+            };
+            let body = serde_json::to_string(&reason).expect("serializes");
             let response = format!(
                 "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -314,11 +363,15 @@ mod tests {
             .await
             .expect_err("redeem is denied");
         server.await.expect("server task");
-        let S3Error::ServiceResponse(error) = error else {
-            panic!("expected structured service response");
+        // End to end over a real socket: the reason the responder built
+        // is the reason the caller receives.
+        let S3Error::Authorization(AuthorizeError::Revoked { subject }) = error else {
+            panic!("expected a revoked authorization, got {error:?}");
         };
-        assert_eq!(error.status, 403);
-        assert_eq!(error.code.as_deref(), Some("CREDENTIAL_REVOKED"));
-        assert_eq!(error.message, "Credential revoked");
+        assert_eq!(
+            subject,
+            did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+            "the subject is the one the responder named"
+        );
     }
 }

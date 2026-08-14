@@ -1,110 +1,18 @@
 use crate::TreeReference;
 use dialog_artifacts::DialogArtifactsError;
+use dialog_capability::access::AuthorizeError;
 use dialog_common::Blake3Hash;
 use dialog_credentials::Ed25519SignerError;
+use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
 use dialog_effects::blob::BlobError;
 use dialog_effects::memory::{MemoryError, Version};
-use dialog_effects::service::ServiceResponseError;
 use dialog_effects::storage::StorageError;
 use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::DialogStorageError;
 use std::io;
 use thiserror::Error;
-
-/// The umbrella error type for the repository API.
-///
-/// Each variant wraps a command-specific error type. Callers doing
-/// multiple operations (e.g. `push` then `pull`) can `?` both into a
-/// single `Result<_, RepositoryError>` without juggling per-command
-/// error types. Pattern match on variants or use `downcast` via
-/// [`source()`](std::error::Error::source) when specific handling is
-/// needed.
-#[derive(Error, Debug)]
-pub enum RepositoryError {
-    /// Open-repository command failed.
-    #[error(transparent)]
-    Open(#[from] OpenRepositoryError),
-
-    /// Load-repository command failed.
-    #[error(transparent)]
-    Load(#[from] LoadRepositoryError),
-
-    /// Create-repository command failed.
-    #[error(transparent)]
-    Create(#[from] CreateRepositoryError),
-
-    /// Load-branch command failed.
-    #[error(transparent)]
-    LoadBranch(#[from] LoadBranchError),
-
-    /// Commit command failed.
-    #[error(transparent)]
-    Commit(#[from] CommitError),
-
-    /// Set-upstream command failed.
-    #[error(transparent)]
-    SetUpstream(#[from] SetUpstreamError),
-
-    /// Fetch command failed.
-    #[error(transparent)]
-    Fetch(#[from] FetchError),
-
-    /// Push command failed.
-    #[error(transparent)]
-    Push(#[from] PushError),
-
-    /// Pull command failed.
-    #[error(transparent)]
-    Pull(#[from] PullError),
-
-    /// Load-remote command failed.
-    #[error(transparent)]
-    LoadRemote(#[from] LoadRemoteError),
-
-    /// Create-remote command failed.
-    #[error(transparent)]
-    CreateRemote(#[from] CreateRemoteError),
-
-    /// Open-remote-branch command failed.
-    #[error(transparent)]
-    OpenRemoteBranch(#[from] OpenRemoteBranchError),
-
-    /// Load-remote-branch command failed.
-    #[error(transparent)]
-    LoadRemoteBranch(#[from] LoadRemoteBranchError),
-
-    /// Fetch-remote-branch command failed.
-    #[error(transparent)]
-    FetchRemoteBranch(#[from] FetchRemoteBranchError),
-
-    /// Publish-remote-branch command failed.
-    #[error(transparent)]
-    PublishRemoteBranch(#[from] PublishRemoteBranchError),
-
-    /// Upload command (novel blocks to remote archive) failed.
-    #[error(transparent)]
-    Upload(#[from] UploadError),
-
-    /// Cell publish failed (outside a command context).
-    #[error(transparent)]
-    Publish(#[from] PublishError),
-
-    /// Cell resolve failed (outside a command context).
-    #[error(transparent)]
-    Resolve(#[from] ResolveError),
-
-    /// Select command failed to load its tree (the stream itself yields
-    /// `DialogArtifactsError` per-item, which is surfaced through the
-    /// stream).
-    #[error(transparent)]
-    Select(#[from] DialogSearchTreeError),
-
-    /// A verifier-only credential was used where a signer was required.
-    #[error(transparent)]
-    SignerRequired(#[from] SignerRequiredError),
-}
 
 /// Errors returned by the open remote branch command.
 #[derive(Error, Debug)]
@@ -471,13 +379,14 @@ pub enum ResolveError {
     #[error("Storage error: {0}")]
     Storage(String),
 
-    /// Authorization denied.
-    #[error("Authorization error: {0}")]
-    Authorization(String),
+    /// The request was not authorized.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
 
-    /// A remote service returned a non-success HTTP response.
-    #[error("{0}")]
-    ServiceResponse(#[source] ServiceResponseError),
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
 
     /// IO failure.
     #[error("IO error: {0}")]
@@ -488,12 +397,6 @@ pub enum ResolveError {
     Decode(String),
 }
 
-impl From<ServiceResponseError> for ResolveError {
-    fn from(error: ServiceResponseError) -> Self {
-        Self::ServiceResponse(error)
-    }
-}
-
 impl From<MemoryError> for ResolveError {
     fn from(error: MemoryError) -> Self {
         match error {
@@ -501,9 +404,8 @@ impl From<MemoryError> for ResolveError {
                 Self::VersionMismatch { expected, actual }
             }
             MemoryError::Storage(message) => Self::Storage(message),
-            MemoryError::ServiceResponse(error) => Self::ServiceResponse(error),
-            MemoryError::Authorization(message) => Self::Authorization(message),
-            MemoryError::Io(error) => Self::Io(error),
+            MemoryError::Rejected(error) => Self::Rejected(error),
+            MemoryError::Authorization(error) => Self::Authorization(error),
         }
     }
 }
@@ -524,13 +426,14 @@ pub enum PublishError {
     #[error("Storage error: {0}")]
     Storage(String),
 
-    /// Authorization denied.
-    #[error("Authorization error: {0}")]
-    Authorization(String),
+    /// The request was not authorized.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
 
-    /// A remote service returned a non-success HTTP response.
-    #[error("{0}")]
-    ServiceResponse(#[source] ServiceResponseError),
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
 
     /// IO failure.
     #[error("IO error: {0}")]
@@ -541,12 +444,6 @@ pub enum PublishError {
     Encode(String),
 }
 
-impl From<ServiceResponseError> for PublishError {
-    fn from(error: ServiceResponseError) -> Self {
-        Self::ServiceResponse(error)
-    }
-}
-
 impl From<MemoryError> for PublishError {
     fn from(error: MemoryError) -> Self {
         match error {
@@ -554,9 +451,8 @@ impl From<MemoryError> for PublishError {
                 Self::VersionMismatch { expected, actual }
             }
             MemoryError::Storage(message) => Self::Storage(message),
-            MemoryError::ServiceResponse(error) => Self::ServiceResponse(error),
-            MemoryError::Authorization(message) => Self::Authorization(message),
-            MemoryError::Io(error) => Self::Io(error),
+            MemoryError::Rejected(error) => Self::Rejected(error),
+            MemoryError::Authorization(error) => Self::Authorization(error),
         }
     }
 }
@@ -584,62 +480,86 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use std::error::Error as StdError;
-
-    use dialog_effects::service::find_service_response;
+    use dialog_capability::access::AuthorizeError;
 
     use super::*;
 
-    fn response() -> ServiceResponseError {
-        ServiceResponseError::new(
-            403,
-            Some("CREDENTIAL_REVOKED".to_string()),
-            "Credential revoked",
-        )
+    fn revoked() -> AuthorizeError {
+        AuthorizeError::Revoked {
+            subject: dialog_capability::did!(
+                "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
+            ),
+        }
     }
 
-    fn assert_response(error: &(dyn StdError + 'static)) {
-        let response = find_service_response(error).expect("structured response survives");
-        assert_eq!(response.status, 403);
-        assert_eq!(response.code.as_deref(), Some("CREDENTIAL_REVOKED"));
+    /// Confirm the reason is still reachable as a value, not as text.
+    ///
+    /// `#[error(transparent)]` delegates `source()` straight past the
+    /// variant, so the wrapper chain does not expose the
+    /// [`AuthorizeError`] as a source -- it is reachable by matching, and
+    /// that is the property worth pinning: previously each hop rendered
+    /// the reason with `to_string()`, so the only way to recover it was
+    /// to parse the message.
+    fn assert_revoked(rendered: &str) {
+        assert!(
+            rendered.contains("revoked"),
+            "the reason survives the wrappers, got {rendered}"
+        );
     }
 
     #[dialog_common::test]
-    async fn it_preserves_memory_service_responses_through_pull_and_push() {
+    async fn it_preserves_memory_reasons_through_pull_and_push() {
         let pull = PullError::FetchRemoteBranch(FetchRemoteBranchError::Resolve(
-            ResolveError::from(MemoryError::ServiceResponse(response())),
+            ResolveError::from(MemoryError::Authorization(revoked())),
         ));
         let push = PushError::PublishRemoteBranch(PublishRemoteBranchError::Publish(
-            PublishError::from(MemoryError::ServiceResponse(response())),
+            PublishError::from(MemoryError::Authorization(revoked())),
         ));
 
-        assert_response(&pull);
-        assert_response(&push);
+        // Structural: the reason is a value at the end of the chain.
+        let PullError::FetchRemoteBranch(FetchRemoteBranchError::Resolve(
+            ResolveError::Authorization(reason),
+        )) = &pull
+        else {
+            panic!("expected an authorization reason, got {pull:?}");
+        };
+        assert!(matches!(reason, AuthorizeError::Revoked { .. }));
+
+        assert_revoked(&pull.to_string());
+        assert_revoked(&push.to_string());
     }
 
     #[dialog_common::test]
-    async fn it_preserves_archive_service_responses_through_pull_and_push() {
-        let storage = DialogStorageError::from(ArchiveError::ServiceResponse(response()));
+    async fn it_preserves_archive_reasons_through_pull_and_push() {
+        let storage = DialogStorageError::from(ArchiveError::Authorization(revoked()));
         let pull = PullError::Tree(DialogSearchTreeError::from(storage));
-        let push = PushError::Upload(UploadError::RemoteWrite(ArchiveError::ServiceResponse(
-            response(),
+        let push = PushError::Upload(UploadError::RemoteWrite(ArchiveError::Authorization(
+            revoked(),
         )));
 
-        assert_response(&pull);
-        assert_response(&push);
+        assert_revoked(&pull.to_string());
+        assert_revoked(&push.to_string());
     }
 
     #[dialog_common::test]
-    async fn it_preserves_blob_service_responses_through_push() {
-        let push = PushError::Blob(BlobError::ServiceResponse(response()));
-        assert_response(&push);
+    async fn it_preserves_blob_reasons_through_push() {
+        let push = PushError::Blob(BlobError::Authorization(revoked()));
+        let PushError::Blob(BlobError::Authorization(reason)) = &push else {
+            panic!("expected an authorization reason, got {push:?}");
+        };
+        assert!(matches!(reason, AuthorizeError::Revoked { .. }));
+        assert_revoked(&push.to_string());
     }
 
     #[dialog_common::test]
-    async fn it_preserves_artifact_service_responses_through_push() {
-        let tree = DialogSearchTreeError::from(DialogStorageError::ServiceResponse(response()));
+    async fn it_preserves_artifact_reasons_through_push() {
+        let tree = DialogSearchTreeError::from(DialogStorageError::Authorization(revoked()));
         let push = PushError::Artifact(DialogArtifactsError::from(tree));
-        assert_response(&push);
+        let PushError::Artifact(DialogArtifactsError::Authorization(reason)) = &push else {
+            panic!("the conversion flattened the reason: {push:?}");
+        };
+        assert!(matches!(reason, AuthorizeError::Revoked { .. }));
+        assert_revoked(&push.to_string());
     }
 }
 

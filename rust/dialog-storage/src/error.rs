@@ -1,6 +1,7 @@
+use dialog_capability::access::AuthorizeError;
+use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::memory::MemoryError;
-use dialog_effects::service::ServiceResponseError;
 use thiserror::Error;
 
 /// The common error type used by this crate
@@ -16,28 +17,28 @@ pub enum DialogStorageError {
 
     /// An error that occurs when working with a storage backend
     #[error("Storage backend error: {0}")]
-    StorageBackend(String),
+    Storage(String),
 
-    /// A remote service returned a non-success HTTP response.
-    #[error("{0}")]
-    ServiceResponse(#[source] ServiceResponseError),
+    /// The request was not authorized.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
+
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
 
     /// An error that occurs when byte hash verification fails
     #[error("Byte hash verification failed: {0}")]
     Verification(String),
 }
 
-impl From<ServiceResponseError> for DialogStorageError {
-    fn from(error: ServiceResponseError) -> Self {
-        Self::ServiceResponse(error)
-    }
-}
-
 impl From<ArchiveError> for DialogStorageError {
     fn from(error: ArchiveError) -> Self {
         match error {
-            ArchiveError::ServiceResponse(error) => Self::ServiceResponse(error),
-            error => Self::StorageBackend(error.to_string()),
+            ArchiveError::Authorization(error) => Self::Authorization(error),
+            ArchiveError::Rejected(error) => Self::Rejected(error),
+            error => Self::Storage(error.to_string()),
         }
     }
 }
@@ -45,8 +46,9 @@ impl From<ArchiveError> for DialogStorageError {
 impl From<MemoryError> for DialogStorageError {
     fn from(error: MemoryError) -> Self {
         match error {
-            MemoryError::ServiceResponse(error) => Self::ServiceResponse(error),
-            error => Self::StorageBackend(error.to_string()),
+            MemoryError::Authorization(error) => Self::Authorization(error),
+            MemoryError::Rejected(error) => Self::Rejected(error),
+            error => Self::Storage(error.to_string()),
         }
     }
 }
