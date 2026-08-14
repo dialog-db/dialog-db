@@ -2,10 +2,12 @@
 
 use std::sync::{Arc, OnceLock};
 
-use super::Operator;
-use dialog_capability::{Ability, Capability, Constraint};
+use super::{Hydrator, Operator};
+use dialog_capability::{Ability, Capability, Constraint, Provider};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
+use dialog_effects::blob;
 use dialog_effects::storage::Directory;
 use dialog_identity::Authority;
 use dialog_identity::Profile;
@@ -93,7 +95,14 @@ impl OperatorBuilder {
     /// which every proof of cross-party authority resolves.
     pub async fn build<S>(self, storage: Storage<S>) -> Result<Operator<S>, OperatorError>
     where
-        S: SpaceProvider + Clone + 'static,
+        S: SpaceProvider
+            + Provider<blob::Read>
+            + Provider<blob::Write>
+            + Provider<blob::Import>
+            + Clone
+            + ConditionalSend
+            + ConditionalSync
+            + 'static,
     {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
         let credentials = Authority::new(
@@ -126,6 +135,7 @@ impl OperatorBuilder {
             session: Arc::new(session),
             delegations: Arc::new(OnceLock::new()),
             chains: Arc::default(),
+            hydrator: Arc::new(OnceLock::new()),
         };
 
         // Open the profile repository's access branch: the store every
@@ -139,8 +149,28 @@ impl OperatorBuilder {
             .map_err(|e| OperatorError::Delegation(format!("{e}")))?;
         operator
             .delegations
-            .set(branch)
+            .set(branch.clone())
             .expect("freshly built operator has no access branch yet");
+
+        // Install the hydrator: when the branch head moves, the operator
+        // fetches the delegation records and envelopes the new head
+        // references, through this full network-capable environment. The
+        // captured operator clone carries NO hydrator of its own — the
+        // proofs authorizing the hydration fetches resolve from what is
+        // already local, bounding the recursion.
+        let anchor = Operator {
+            hydrator: Arc::new(OnceLock::new()),
+            ..operator.clone()
+        };
+        let hydrator: Hydrator = Box::new(move || {
+            let operator = anchor.clone();
+            let branch = branch.clone();
+            Box::pin(async move { branch.delegations().hydrate().perform(&operator).await })
+        });
+        operator
+            .hydrator
+            .set(hydrator)
+            .unwrap_or_else(|_| unreachable!("freshly built operator has no hydrator yet"));
 
         Ok(operator)
     }

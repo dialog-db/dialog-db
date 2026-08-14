@@ -49,6 +49,9 @@ pub(crate) struct ChainCache {
     epoch: Option<Version>,
     /// Resolved chains by `(principal, subject, command)`.
     chains: HashMap<(Did, Did, String), Vec<UcanCertificate>>,
+    /// The branch head the last hydration ran against — `None` until the
+    /// first prove, reset when a run fails so the next prove retries.
+    hydrated: Option<Option<Version>>,
 }
 
 /// The local provider set the delegation walk needs from the operator.
@@ -248,6 +251,52 @@ impl<S: Clone> Operator<S> {
             .find(|grant| grant.verify(&claim.access).is_ok())
     }
 
+    /// Refresh the access branch head and, when it moved since the last
+    /// hydration, fetch the delegation records and envelopes it
+    /// references through the full environment.
+    ///
+    /// The refresh is what makes a pull through ANOTHER handle of the
+    /// branch visible here: a pull moves the head in storage, not in
+    /// this handle's cache, and both the walk and the chain-cache epoch
+    /// read the cache. The hydration then brings the moved head's
+    /// delegation state local — a pulled tree adopts subtrees by link
+    /// and envelope bytes replicate lazily, while the walk deliberately
+    /// reads only local state.
+    ///
+    /// Best-effort on both counts: on a failure the walk still runs over
+    /// whatever is local, and a failed hydration retries on the next
+    /// prove. The operator clone the hydrator runs against carries no
+    /// hydrator of its own, which is what bounds the recursion
+    /// (hydration fetches are authorized by proofs that must already be
+    /// local — the retained login grant and the in-memory session).
+    async fn rehydrate(&self)
+    where
+        Self: LocalEnv,
+        S: ConditionalSend + ConditionalSync + 'static,
+    {
+        let Ok(branch) = self.delegations() else {
+            return;
+        };
+        if let Err(error) = branch.refresh(self).await {
+            tracing::warn!(%error, "failed to refresh the access branch head");
+        }
+        let Some(hydrator) = self.hydrator.get() else {
+            return;
+        };
+        let epoch = branch.revision().map(|revision| revision.version());
+        {
+            let mut cache = self.chains.lock();
+            if cache.hydrated.as_ref() == Some(&epoch) {
+                return;
+            }
+            cache.hydrated = Some(epoch);
+        }
+        if let Err(error) = hydrator().await {
+            tracing::warn!(%error, "failed to hydrate the access branch delegations");
+            self.chains.lock().hydrated = None;
+        }
+    }
+
     /// Resolve a proof for `claim` from the access branch, with the
     /// session composition when the principal is this operator.
     async fn resolve(&self, claim: Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
@@ -255,6 +304,8 @@ impl<S: Clone> Operator<S> {
         Self: LocalEnv,
         S: ConditionalSend + ConditionalSync + 'static,
     {
+        self.rehydrate().await;
+
         let key = Self::cache_key(&claim);
         if let Some(key) = &key
             && let Some(proof) = self.cached(key, &claim)

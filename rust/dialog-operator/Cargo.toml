@@ -43,6 +43,7 @@ signature = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "macros", "io-util"] }
+tracing = { workspace = true }
 [dev-dependencies]
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
