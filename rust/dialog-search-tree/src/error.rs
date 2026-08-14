@@ -10,15 +10,11 @@ pub enum DialogSearchTreeError {
 
     /// An error from the storage backend.
     #[error("{0}")]
-    Storage(DialogStorageError),
+    Storage(#[source] DialogStorageError),
 
     /// An error that occurs during a tree operation.
     #[error("Failed to operate the tree: {0}")]
     Operation(String),
-
-    /// An error that occurs when retrieving an item from the cache.
-    #[error("Failed to retrieve item in cache: {0}")]
-    Cache(String),
 
     /// An error that occurs when accessing part of the tree.
     #[error("Failed to access part of the tree: {0}")]
