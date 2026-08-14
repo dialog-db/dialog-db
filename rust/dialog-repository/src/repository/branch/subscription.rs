@@ -1187,6 +1187,83 @@ mod tests {
         Ok(())
     }
 
+    /// Spilled (blob-backed) values must merge across overlay and
+    /// branch backings exactly like inline ones: the overlay derives
+    /// its sort keys under the default manifest while the scan reads
+    /// stored bytes, and this is where a divergence would silently
+    /// resurrect or duplicate a fact. A staged re-assert of a
+    /// committed spilled fact yields the row once (merge fingerprint
+    /// agreement), and an overlay retract suppresses the committed
+    /// row (tombstone key agreement).
+    #[dialog_common::test]
+    async fn it_merges_spilled_values_across_overlay_and_branch() -> anyhow::Result<()> {
+        use dialog_query::query::Output as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let spilled = "z".repeat(dialog_search_tree::Manifest::default().inline_n as usize + 1);
+        branch
+            .transaction()
+            .assert(the!("person/name").of(alice.clone()).is(spilled.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let committed = names(
+            &branch
+                .select(names_query())
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        );
+        assert_eq!(
+            committed,
+            vec![(alice.clone(), spilled.clone())],
+            "the committed spilled fact reads back"
+        );
+
+        // Dedup across backings: the same spilled fact staged in a
+        // transaction and committed in the tree merges to one row.
+        let transaction = branch
+            .transaction()
+            .assert(the!("person/name").of(alice.clone()).is(spilled.clone()));
+        let staged = names(
+            &transaction
+                .query()
+                .select(names_query())
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        );
+        assert_eq!(
+            staged,
+            vec![(alice.clone(), spilled.clone())],
+            "a staged duplicate of a committed spilled fact must not double the row"
+        );
+
+        // Tombstone across backings: an overlay retract must suppress
+        // the committed spilled row.
+        branch
+            .overlay()
+            .retract(the!("person/name").of(alice.clone()).is(spilled.clone()));
+        let hidden = names(
+            &branch
+                .select(names_query())
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        );
+        assert_eq!(
+            hidden,
+            Vec::<(Entity, String)>::new(),
+            "an overlay tombstone must suppress the committed spilled fact"
+        );
+        Ok(())
+    }
+
     /// The first poll evaluates and reports the initial result;
     /// polling again without a commit is a no-op.
     #[dialog_common::test]
