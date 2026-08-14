@@ -47,9 +47,28 @@ pub struct Storage<S: Clone> {
         credential::Load<Credential>,
         credential::Save<Credential>,
         credential::Load<Secret>,
-        credential::Save<Secret>
+        credential::Save<Secret>,
+        credential::Retract<Secret>
     )]
     router: Router<S>,
+}
+
+/// Cloning yields a second handle onto the *same* spaces, not a second
+/// set of them: the pool behind `loader` and `router` is already
+/// `Arc`-shared, which is what makes two handles safe to hold at once.
+///
+/// Callers need this whenever an environment that owns a `Storage` has
+/// to be rebuilt while the old one stays live — swapping an `Operator`
+/// for a freshly keyed one, say. Handing the replacement its own
+/// `Storage::new()` would open a second set of connections to the same
+/// databases and let already-open handles drift from newly opened ones.
+impl<S: Clone> Clone for Storage<S> {
+    fn clone(&self) -> Self {
+        Self {
+            loader: self.loader.clone(),
+            router: self.router.clone(),
+        }
+    }
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -122,6 +141,48 @@ mod tests {
     use dialog_effects::prelude::*;
     use dialog_effects::storage::{LocationExt, Storage as StorageFx};
     use dialog_varsig::Principal;
+
+    #[dialog_common::test]
+    async fn it_shares_mounted_spaces_with_a_clone() {
+        let env = Storage::volatile();
+        let clone = env.clone();
+        let credential = test_credential().await;
+
+        let cred = StorageFx::profile("shared")
+            .create(credential)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        assert!(
+            clone.contains(&cred.did()),
+            "a clone must see spaces mounted through the original"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_resolves_a_location_to_one_did_across_clones() {
+        let env = Storage::volatile();
+        let clone = env.clone();
+        let credential = test_credential().await;
+
+        let created = StorageFx::profile("stable")
+            .create(credential)
+            .perform(&env)
+            .await
+            .unwrap();
+        let loaded = StorageFx::profile("stable")
+            .load()
+            .perform(&clone)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            loaded.did(),
+            created.did(),
+            "the location mapping is shared, so a clone resolves the same space"
+        );
+    }
 
     #[dialog_common::test]
     async fn it_creates_profile_with_sugar() {
@@ -211,17 +272,39 @@ mod tests {
         assert_eq!(resolved.unwrap().content, content);
     }
 
+    // A subject this environment cannot serve is its own condition, not a
+    // backend failure: the store is not broken, the subject was simply never
+    // loaded here. Callers need to tell "load it and retry" apart from "the
+    // backend is down".
+    //
+    // Asserted on the message rather than the variant because
+    // `From<StorageError> for ArchiveError` is `Self::Storage(e.to_string())`
+    // -- the typed variant is flattened to prose one layer up, so it cannot
+    // be matched from here. Fixing that is the effect-error rework; until
+    // then this pins the routing behaviour and the subject it names.
     #[dialog_common::test]
     async fn it_errors_for_unmounted_did() {
         let env = Storage::volatile();
+        let subject = did!("key:zUnknown");
 
-        let result = did!("key:zUnknown")
+        let result = subject
+            .clone()
             .archive()
             .catalog("index")
             .get([0u8; 32])
             .perform(&env)
             .await;
-        assert!(result.is_err());
+
+        let error = result.expect_err("an unserviceable subject must not resolve");
+        let message = error.to_string();
+        assert!(
+            message.contains(&subject.to_string()),
+            "the error must name the subject it cannot serve, got: {message}"
+        );
+        assert!(
+            message.contains("mounted"),
+            "the error must say what to do about it, not just that it failed: {message}"
+        );
     }
 
     #[dialog_common::test]

@@ -38,15 +38,19 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
         let store = self.store(CERTIFICATE).await?;
         let lower = JsValue::from_str(&prefix);
         let upper = JsValue::from_str(&format!("{prefix}\u{ffff}"));
-        let range = KeyRange::bound(&lower, &upper, None, None)
-            .map_err(|e| AuthorizeError::Configuration(format!("key range error: {e:?}")))?;
+        let range = KeyRange::bound(&lower, &upper, None, None).map_err(|e| {
+            AuthorizeError::Unavailable {
+                detail: format!("key range error: {e:?}"),
+            }
+        })?;
 
         store
             .query(|object_store| async move {
-                let values = object_store
-                    .get_all(Some(range), None)
-                    .await
-                    .map_err(|e| AuthorizeError::Configuration(format!("query: {e:?}")))?;
+                let values = object_store.get_all(Some(range), None).await.map_err(|e| {
+                    AuthorizeError::Unavailable {
+                        detail: format!("query: {e:?}"),
+                    }
+                })?;
 
                 let mut certs = Vec::new();
                 for value in values {
@@ -89,7 +93,9 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
                     object_store
                         .put(&js_val, Some(&js_key))
                         .await
-                        .map_err(|e| AuthorizeError::Configuration(format!("write: {e:?}")))?;
+                        .map_err(|e| AuthorizeError::Unavailable {
+                            detail: format!("write: {e:?}"),
+                        })?;
                     Ok::<(), AuthorizeError>(())
                 })
                 .await?;

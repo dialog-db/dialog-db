@@ -164,7 +164,9 @@ where
         let profile = authority::Identify
             .perform(env)
             .await
-            .map_err(|e| AuthorizeError::Configuration(e.to_string()))?
+            .map_err(|e| AuthorizeError::Unavailable {
+                detail: e.to_string(),
+            })?
             .profile()
             .clone();
 

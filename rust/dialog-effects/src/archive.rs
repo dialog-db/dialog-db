@@ -15,9 +15,10 @@
 
 use std::error::Error;
 
+use crate::Rejection;
 pub use dialog_capability::{
-    Attenuate, Attenuation, Capability, DialogCapabilityAuthorizationError,
-    DialogCapabilityPerformError, Effect, Policy, StorageError, Subject, access::AuthorizeError,
+    Attenuate, Attenuation, Capability, DialogCapabilityPerformError, Effect, Policy, StorageError,
+    Subject, access::AuthorizeError,
 };
 pub use dialog_common::Blake3Hash;
 pub use dialog_common::Buffer;
@@ -232,30 +233,22 @@ pub mod prelude;
 /// Errors that can occur during archive operations.
 #[derive(Debug, Error)]
 pub enum ArchiveError {
-    /// Content digest mismatch.
-    #[error("Content digest mismatch: expected {expected}, got {actual}")]
-    DigestMismatch {
-        /// Expected digest.
-        expected: String,
-        /// Actual digest.
-        actual: String,
-    },
+    /// The request was not authorized.
+    ///
+    /// Carries the decision itself rather than its rendering: a caller
+    /// can tell a withdrawn authority from a lapsed one, and act
+    /// differently, without parsing a message.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
 
-    /// Authorization error occurred.
-    #[error("Unauthorized error: {0}")]
-    AuthorizationError(String),
-
-    /// Execution error occurred during operation.
-    #[error("Executions error: {0}")]
-    ExecutionError(String),
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
 
     /// Storage backend error.
     #[error("Storage error: {0}")]
     Storage(String),
-
-    /// IO error.
-    #[error("IO error: {0}")]
-    Io(String),
 }
 
 impl From<StorageError> for ArchiveError {
@@ -264,26 +257,12 @@ impl From<StorageError> for ArchiveError {
     }
 }
 
-impl From<DialogCapabilityAuthorizationError> for ArchiveError {
-    fn from(value: DialogCapabilityAuthorizationError) -> Self {
-        ArchiveError::AuthorizationError(value.to_string())
-    }
-}
-
-impl From<AuthorizeError> for ArchiveError {
-    fn from(value: AuthorizeError) -> Self {
-        ArchiveError::AuthorizationError(value.to_string())
-    }
-}
-
 impl<E: Error> From<DialogCapabilityPerformError<E>> for ArchiveError {
     fn from(value: DialogCapabilityPerformError<E>) -> Self {
         match value {
-            DialogCapabilityPerformError::Authorization(error) => {
-                ArchiveError::AuthorizationError(error.to_string())
-            }
+            DialogCapabilityPerformError::Authorization(error) => error.into(),
             DialogCapabilityPerformError::Execution(error) => {
-                ArchiveError::ExecutionError(error.to_string())
+                ArchiveError::Storage(error.to_string())
             }
         }
     }

@@ -11,13 +11,13 @@ pub enum FileSystemError {
     #[error("Filesystem I/O error: {0}")]
     Io(String),
 
+    /// No file exists at the requested location.
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     /// Lock acquisition failed.
     #[error("Lock error: {0}")]
     Lock(String),
-
-    /// CAS condition failed.
-    #[error("CAS condition failed: {0}")]
-    Cas(String),
 
     /// Path containment violation (attempted to escape base directory).
     #[error("Containment violation: {0}")]
@@ -26,12 +26,20 @@ pub enum FileSystemError {
 
 impl From<FileSystemError> for CredentialError {
     fn from(e: FileSystemError) -> Self {
-        Self::Storage(e.to_string())
+        match e {
+            FileSystemError::NotFound(location) => Self::NotFound(location),
+            other => Self::Storage(other.to_string()),
+        }
     }
 }
 
 impl From<FileSystemError> for AuthorizeError {
     fn from(e: FileSystemError) -> Self {
-        Self::Configuration(e.to_string())
+        // The filesystem failing is our machinery, not the caller's
+        // material: nothing was decided, so this must not read as a
+        // denial.
+        Self::Unavailable {
+            detail: e.to_string(),
+        }
     }
 }
