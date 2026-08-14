@@ -6,9 +6,9 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use dialog_operator::DeriveOperator as _;
 use std::collections::HashSet;
 
-use crate::helpers::{test_operator_with_profile, unique_name};
 use crate::{
     Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryArchiveExt as _,
     RepositoryExt as _, Revision, SiteAddress, SnapshotError,
@@ -23,6 +23,7 @@ use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_credentials::SignerCredential;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 // Only the native-only tests below construct one.
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::BlobError;
@@ -281,6 +282,384 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
     Ok(())
 }
 
+/// A blob retraction replicates on pull: the tombstoned index entry travels
+/// with the tree nodes, so a replica that pulls it stops referencing the
+/// blob (`size` answers `None`) and a replica that never hydrated the bytes
+/// can no longer fetch them from the remote. Bytes already held locally are
+/// untouched: retraction removes the reference, not the content, so a
+/// replica that hydrated before the retraction still reads its local copy.
+// Native only, feature-gated: same reasoning as
+// `it_ships_blobs_on_push_and_hydrates_on_read` above.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
+    // --- Site A: write a blob, push. ---
+    let storage_a = Storage::temp();
+    let profile_a = Profile::open(unique_name("blob-retract-a"))
+        .perform(&storage_a)
+        .await?;
+    let operator_a = profile_a
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_a)
+        .await?;
+
+    let repo_a = profile_a
+        .repository(unique_name("blob-retract"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .credential()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_a)
+        .await?;
+
+    let origin_a = repo_a
+        .remote("origin")
+        .create(site_a)
+        .perform(&operator_a)
+        .await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+
+    let payload: Vec<u8> = (0..50_000u32).map(|i| (i % 199) as u8).collect();
+    let chunks: Vec<Result<Vec<u8>, BlobError>> =
+        payload.chunks(8192).map(|c| Ok(c.to_vec())).collect();
+    let blob = Blob::import(stream::iter(chunks))
+        .write((&branch_a).into())
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // --- Site B: pull and hydrate the bytes while still referenced. ---
+    let storage_b = Storage::temp();
+    let profile_b = Profile::open(unique_name("blob-retract-b"))
+        .perform(&storage_b)
+        .await?;
+    let operator_b = profile_b
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_b)
+        .await?;
+    let repo_b = profile_b
+        .repository(unique_name("blob-retract-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .credential()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_b)
+        .await?;
+    let origin_b = repo_b
+        .remote("origin")
+        .create(site_b)
+        .subject(repo_a.did())
+        .perform(&operator_b)
+        .await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+
+    branch_b.pull().perform(&operator_b).await?;
+    let mut reader = Blob::from(blob.clone())
+        .read((&branch_b).into())
+        .perform(&operator_b)
+        .await?;
+    let mut out = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        out.extend(chunk);
+    }
+    assert_eq!(out, payload, "site B hydrates the bytes before retraction");
+
+    // --- Site A retracts the blob and pushes the retraction. ---
+    Blob::from(blob.clone())
+        .retract((&branch_a).into())
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // --- Site B pulls the retraction: the reference is gone, the hydrated
+    // bytes are not. ---
+    branch_b.pull().perform(&operator_b).await?;
+    assert_eq!(
+        Blob::from(blob.clone())
+            .size((&branch_b).into())
+            .perform(&operator_b)
+            .await?,
+        None,
+        "a pulled retraction removes the index reference"
+    );
+    let mut reader = Blob::from(blob.clone())
+        .read((&branch_b).into())
+        .perform(&operator_b)
+        .await?;
+    let mut out = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        out.extend(chunk);
+    }
+    assert_eq!(
+        out, payload,
+        "locally hydrated bytes survive the retraction"
+    );
+
+    // --- Site C: fresh replica, pulls after the retraction; it can neither
+    // see the reference nor hydrate the bytes. ---
+    let storage_c = Storage::temp();
+    let profile_c = Profile::open(unique_name("blob-retract-c"))
+        .perform(&storage_c)
+        .await?;
+    let operator_c = profile_c
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_c)
+        .await?;
+    let repo_c = profile_c
+        .repository(unique_name("blob-retract-c-repo"))
+        .open()
+        .perform(&operator_c)
+        .await?;
+    let site_c = s3_site_address(&s3);
+    profile_c
+        .credential()
+        .site(&site_c)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_c)
+        .await?;
+    let origin_c = repo_c
+        .remote("origin")
+        .create(site_c)
+        .subject(repo_a.did())
+        .perform(&operator_c)
+        .await?;
+    let branch_c = repo_c.branch("main").open().perform(&operator_c).await?;
+    let remote_branch_c = origin_c.branch("main").open().perform(&operator_c).await?;
+    branch_c
+        .set_upstream(remote_branch_c)
+        .perform(&operator_c)
+        .await?;
+
+    branch_c.pull().perform(&operator_c).await?;
+    assert_eq!(
+        Blob::from(blob.clone())
+            .size((&branch_c).into())
+            .perform(&operator_c)
+            .await?,
+        None,
+        "a fresh replica pulls no reference to the retracted blob"
+    );
+    let refused = Blob::from(blob)
+        .read((&branch_c).into())
+        .perform(&operator_c)
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(crate::CommitError::Blob(BlobError::NotFound(_)))
+        ),
+        "an unreferenced blob cannot hydrate: {:?}",
+        refused.as_ref().err()
+    );
+
+    Ok(())
+}
+
+/// A retained delegation replicates like any data: site A retains a chain
+/// (facts + envelope blob in one commit) and pushes; site B pulls, finds the
+/// delegation by an ordinary value-bound query on `dialog.ucan/audience` (the
+/// shape a prover uses), and reads the envelope back byte-identical through
+/// blob hydration. A retraction then replicates the same way: after B pulls
+/// it, the facts and the blob reference are gone.
+// Native only, feature-gated: same reasoning as
+// `it_ships_blobs_on_push_and_hydrates_on_read` above.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
+    use crate::DELEGATION_AUDIENCE;
+    use dialog_capability::access::{Certificate as _, Delegation as _};
+    use dialog_credentials::Ed25519Signer;
+
+    // --- Site A: retain a delegation, push. ---
+    let storage_a = Storage::temp();
+    let profile_a = Profile::open(unique_name("delegation-ship-a"))
+        .perform(&storage_a)
+        .await?;
+    let operator_a = profile_a
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_a)
+        .await?;
+    let repo_a = profile_a
+        .repository(unique_name("delegation-ship"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .credential()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_a)
+        .await?;
+    let origin_a = repo_a
+        .remote("origin")
+        .create(site_a)
+        .perform(&operator_a)
+        .await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+
+    let space = Ed25519Signer::generate().await?;
+    let holder = Ed25519Signer::generate().await?;
+    let delegation = dialog_ucan_core::DelegationBuilder::new()
+        .issuer(space.clone())
+        .audience(&holder)
+        .subject(dialog_ucan_core::subject::Subject::Specific(
+            dialog_varsig::Principal::did(&space),
+        ))
+        .command(vec!["storage".to_string()])
+        .try_build()
+        .await?;
+    let chain =
+        dialog_ucan::UcanDelegation::new(dialog_ucan_core::DelegationChain::new(delegation));
+    let certificate = chain.certificates().pop().unwrap();
+    let envelope = certificate.encode().unwrap();
+
+    let entities = branch_a
+        .delegations()
+        .retain(chain.clone())
+        .perform(&operator_a)
+        .await?;
+    assert_eq!(entities.len(), 1);
+    let entity = entities[0].clone();
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // --- Site B: pull, query by audience, read the envelope. ---
+    let storage_b = Storage::temp();
+    let profile_b = Profile::open(unique_name("delegation-ship-b"))
+        .perform(&storage_b)
+        .await?;
+    let operator_b = profile_b
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_b)
+        .await?;
+    let repo_b = profile_b
+        .repository(unique_name("delegation-ship-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .credential()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_b)
+        .await?;
+    let origin_b = repo_b
+        .remote("origin")
+        .create(site_b)
+        .subject(repo_a.did())
+        .perform(&operator_b)
+        .await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+
+    branch_b.pull().perform(&operator_b).await?;
+
+    // Value-bound query on the audience: the shape a prover's candidate
+    // lookup takes, over facts site B never wrote.
+    let holder_did = dialog_varsig::Principal::did(&holder).to_string();
+    let found: Vec<_> = branch_b
+        .claims()
+        .select(
+            ArtifactSelector::new()
+                .the(DELEGATION_AUDIENCE.parse()?)
+                .is(Value::String(holder_did.clone())),
+        )
+        .to_owned()
+        .perform(&operator_b)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(found.len(), 1, "site B finds the delegation by audience");
+    assert_eq!(found[0].of, entity);
+
+    // The envelope hydrates from the remote and reads back byte-identical.
+    let mut reader = Blob::from(entity.clone())
+        .read((&branch_b).into())
+        .perform(&operator_b)
+        .await?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        bytes.extend(chunk);
+    }
+    assert_eq!(bytes, envelope, "the envelope replicates byte-identical");
+
+    // --- Site A retracts and pushes; B pulls the retraction. ---
+    branch_a
+        .delegations()
+        .retract(chain)
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+    branch_b.pull().perform(&operator_b).await?;
+
+    let after: Vec<_> = branch_b
+        .claims()
+        .select(
+            ArtifactSelector::new()
+                .the(DELEGATION_AUDIENCE.parse()?)
+                .is(Value::String(holder_did)),
+        )
+        .to_owned()
+        .perform(&operator_b)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(after.is_empty(), "a pulled retraction removes the facts");
+    assert_eq!(
+        Blob::from(entity)
+            .size((&branch_b).into())
+            .perform(&operator_b)
+            .await?,
+        None,
+        "a pulled retraction removes the blob reference"
+    );
+
+    Ok(())
+}
+
 /// Push ships a spilling scalar value's block to the remote before publishing.
 ///
 /// A value larger than the tree's inline threshold does not travel in the key
@@ -368,6 +747,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     let local: Vec<_> = branch_a
         .claims()
         .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .to_owned()
         .perform(&operator_a)
         .await?
         .collect::<Vec<_>>()
@@ -437,6 +817,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     let remote_side: Vec<_> = branch_b
         .claims()
         .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .to_owned()
         .perform(&operator_b)
         .await?
         .collect::<Vec<_>>()
@@ -570,6 +951,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
     let remaining: Vec<_> = branch_a
         .claims()
         .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .to_owned()
         .perform(&operator_a)
         .await?
         .collect::<Vec<_>>()
@@ -793,6 +1175,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     let results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -875,6 +1258,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
     let alice_results: Vec<_> = alice_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -885,6 +1269,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
     let bob_results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -913,6 +1298,179 @@ use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
 /// Alice creates a repo, delegates to Bob, Bob pulls, commits, pushes,
 /// then Alice pulls Bob's changes.
+/// The upgrade path, end to end over the access service and local S3:
+/// a delegation sitting in the LEGACY certificate store (as an old
+/// install left it) no longer authorizes anything — the operator serves
+/// proofs from the access branch only — so resolving the remote branch
+/// revision fails. `profile.access().migrate()` moves the delegation
+/// into the branch and drains the legacy store; an operator built after
+/// the migration (migrate before build: the access branch is opened at
+/// build time) resolves the remote branch revision through the migrated
+/// credentials.
+#[dialog_common::test]
+async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<()> {
+    use crate::MigrateAccess as _;
+    use dialog_capability::access::{Access as AccessAttenuation, Export, Retain};
+    use dialog_operator::DeriveOperator as _;
+    use dialog_ucan::Ucan;
+
+    // --- Alice: repo, ownership, UCAN remote, initial push. ---
+    let (alice_operator, alice_profile) = test_operator_with_profile().await;
+    let alice_repo = alice_profile
+        .repository(unique_name("migrate-alice"))
+        .create()
+        .perform(&alice_operator)
+        .await?;
+    let ownership = alice_repo
+        .access()
+        .claim(&alice_repo)
+        .delegate(alice_profile.did())
+        .perform(&alice_operator)
+        .await?;
+    alice_profile
+        .access()
+        .save(ownership)
+        .perform(&alice_operator)
+        .await?;
+
+    let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+    let alice_origin = alice_repo
+        .remote("origin")
+        .create(ucan_site.clone())
+        .perform(&alice_operator)
+        .await?;
+    let alice_branch = alice_repo
+        .branch("main")
+        .open()
+        .perform(&alice_operator)
+        .await?;
+    let remote_branch = alice_origin
+        .branch("main")
+        .open()
+        .perform(&alice_operator)
+        .await?;
+    alice_branch
+        .set_upstream(remote_branch)
+        .perform(&alice_operator)
+        .await?;
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&alice_operator)
+        .await?;
+    alice_branch.push().perform(&alice_operator).await?;
+
+    // --- Bob: the delegation lands in his LEGACY certificate store, the
+    // way an old install left it (storage-routed, not through the
+    // operator). ---
+    let bob_storage = Storage::volatile();
+    let bob_profile = Profile::open(unique_name("migrate-bob"))
+        .perform(&bob_storage)
+        .await?;
+    let delegation_to_bob = alice_profile
+        .access()
+        .claim(&alice_repo)
+        .delegate(bob_profile.did())
+        .perform(&alice_operator)
+        .await?;
+    Subject::from(bob_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Retain::<Ucan>::new(delegation_to_bob))
+        .perform(&bob_storage)
+        .await?;
+
+    let bob_operator = bob_profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(bob_storage.clone())
+        .await?;
+    let bob_repo = bob_profile
+        .repository(unique_name("migrate-bob-repo"))
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    let bob_origin = bob_repo
+        .remote("origin")
+        .create(ucan_site)
+        .subject(alice_repo.did())
+        .perform(&bob_operator)
+        .await?;
+    let bob_branch = bob_repo
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    let remote_branch = bob_origin
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    bob_branch
+        .set_upstream(remote_branch)
+        .perform(&bob_operator)
+        .await?;
+
+    // A legacy-store delegation authorizes nothing: resolving the remote
+    // branch revision refuses.
+    let refused = bob_branch.fetch().perform(&bob_operator).await;
+    assert!(
+        refused.is_err(),
+        "the legacy store must not authorize: {:?}",
+        refused.is_ok()
+    );
+
+    // Migrate: the delegation moves into Bob's access branch and the
+    // legacy store drains.
+    let retained = bob_profile.access().migrate().perform(&bob_storage).await?;
+    assert!(!retained.is_empty(), "the delegation chain migrated");
+    let remaining = Subject::from(bob_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Export::<Ucan>::new())
+        .perform(&bob_storage)
+        .await?;
+    assert!(
+        remaining.is_empty(),
+        "the legacy store drained: {} left",
+        remaining.len()
+    );
+
+    // Migrate before build: the operator opens its access branch at
+    // build time, so the post-migration operator sees the migrated
+    // credentials. Resolving the remote branch revision now succeeds.
+    let bob_operator = bob_profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(bob_storage)
+        .await?;
+    let fetched = bob_branch.fetch().perform(&bob_operator).await?;
+    assert!(
+        fetched.is_some(),
+        "the migrated credentials authorize the resolve"
+    );
+
+    // And the full pull works: Bob reads Alice's data.
+    bob_branch.pull().perform(&bob_operator).await?;
+    let facts: Vec<_> = bob_branch
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&bob_operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(facts.len(), 1, "Bob reads Alice's data after migration");
+
+    Ok(())
+}
+
 #[dialog_common::test]
 async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> {
     // Alice: create profile, operator, repo
@@ -1027,6 +1585,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
     let bob_results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&bob_operator)
         .await?
         .collect::<Vec<_>>()
@@ -1058,6 +1617,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
     let alice_results: Vec<_> = alice_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&alice_operator)
         .await?
         .collect::<Vec<_>>()
@@ -1131,6 +1691,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
     let results: Vec<_> = branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -1192,6 +1753,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
     let no_remote_result = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await;
     assert!(
@@ -1210,6 +1772,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
     let results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -1229,6 +1792,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
     let cached_results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -1418,6 +1982,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
     let results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&bob_operator)
         .await?
         .collect::<Vec<_>>()

@@ -3,7 +3,8 @@ use crate::{
     RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
 use dialog_artifacts::history::{Context, Edition, TreeHistory, Version, context_of, extend_skips};
-use dialog_artifacts::{DialogArtifactsError, Instruction};
+use dialog_artifacts::tree::WriteScope;
+use dialog_artifacts::{Datum, DialogArtifactsError, Instruction, Key, State};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -22,6 +23,8 @@ pub struct Commit<'a, Changes> {
     changes: Changes,
     allow_empty: bool,
     canonicalize: bool,
+    scope: WriteScope,
+    entries: Vec<(Key, State<Datum>)>,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -31,7 +34,27 @@ impl<'a, Changes> Commit<'a, Changes> {
             changes,
             allow_empty: false,
             canonicalize: false,
+            scope: WriteScope::Application,
+            entries: Vec::new(),
         }
+    }
+
+    /// Permit reserved `dialog.*` attributes in the change stream.
+    ///
+    /// For machinery-written facts (delegation records); application
+    /// commits keep the default [`WriteScope::Application`] rejection.
+    pub(crate) fn machinery(mut self) -> Self {
+        self.scope = WriteScope::Machinery;
+        self
+    }
+
+    /// Append pre-built machinery entries (blob-index edits) to the same
+    /// batch, so they seal, persist, and publish with the commit's data in
+    /// one revision. Entries make the commit non-empty even when the change
+    /// stream is all no-ops.
+    pub(crate) fn with_entries(mut self, entries: Vec<(Key, State<Datum>)>) -> Self {
+        self.entries = entries;
+        self
     }
 
     /// Flush the write buffers to the leaves before publishing, so the
@@ -159,8 +182,7 @@ where
             .as_ref()
             .map(|base| base.edition.successor())
             .unwrap_or(Edition::GENESIS);
-        let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
-        let origin = crate::origin_of(&branch_entity, &issuer);
+        let (branch_entity, origin) = branch.commit_identity(&profile, &issuer);
         let version = Version::new(origin, edition);
 
         // Walk forward from the current revision's tree root, or from
@@ -170,7 +192,13 @@ where
             .map(|rev| *rev.tree.hash())
             .unwrap_or(EMPTY_TREE_HASH);
 
-        let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
+        // Read through the branch's shared node cache: the commit's
+        // supersession scans and history reads then hit blocks earlier
+        // commits and queries already fetched (and blocks the persist below
+        // seeds), instead of re-fetching everything into a cache that dies
+        // with this commit.
+        let mut tree =
+            Index::from_hash_with_cache(NodeHash::from(base_tree_hash), branch.node_cache());
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
         // cardinality-one supersession, retraction — and, because the
@@ -196,10 +224,18 @@ where
         // for callers that want the history-independent form (see
         // `Commit::canonicalize`).
         let mut delta = Delta::zero();
-        let batch =
-            dialog_artifacts::BufferedBatch::apply(&tree, &mut store, Some(version), changes)
-                .await?;
-        let changed = batch.changed();
+        let batch = dialog_artifacts::BufferedBatch::apply_reusing(
+            branch.spine(),
+            &tree,
+            &mut store,
+            Some(version),
+            changes,
+            self.scope,
+        )
+        .await?;
+        // Machinery entries count as changes: a commit carrying only a
+        // blob-index edit still advances the head.
+        let changed = batch.changed() || !self.entries.is_empty();
 
         // A batch that left the indexes untouched (e.g. a transaction
         // re-asserting metadata that is already in place) is a no-op:
@@ -304,6 +340,10 @@ where
         // they ride the same buffered write as the data, so the record costs
         // a buffer append instead of a second canonical spine-to-leaf edit.
         let entries = record.entries(batch.manifest())?;
+        // The caller's machinery entries (blob-index edits) ride the same
+        // batch as the revision record, so one seal covers data, record,
+        // and entries together.
+        let batch = batch.record(&store, self.entries).await?;
         let batch = batch.record(&store, entries).await?;
         // Seed the verified-record memo with what we just minted. The next
         // commit's skip-table walk starts at this very record, so without this
@@ -356,8 +396,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::TreeReference;
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
     use anyhow::Result;
+    use dialog_operator::helpers::test_operator_with_profile;
 
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
     use futures_util::{StreamExt, stream};
@@ -404,6 +445,7 @@ mod tests {
         let results: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("person/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .filter_map(|r| async { r.ok() })
@@ -434,7 +476,12 @@ mod tests {
 
         // Select should find the artifact
         let selector = ArtifactSelector::new().the("user/name".parse()?);
-        let stream = branch.claims().select(selector).perform(&operator).await?;
+        let stream = branch
+            .claims()
+            .select(selector)
+            .to_owned()
+            .perform(&operator)
+            .await?;
         tokio::pin!(stream);
 
         let results: Vec<_> = stream.filter_map(|r| async { r.ok() }).collect().await;
@@ -519,6 +566,7 @@ mod tests {
         let results: Vec<_> = fresh
             .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -540,8 +588,9 @@ mod history_tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
     use anyhow::Result;
+    use dialog_operator::helpers::test_operator_with_profile;
 
     use dialog_artifacts::history::{Causality, History as _, causality, common_ancestor};
     use dialog_artifacts::{Artifact, Instruction, Value};
@@ -863,6 +912,7 @@ mod history_tests {
                     .the("post/title".parse()?)
                     .of("post:1".parse()?),
             )
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()

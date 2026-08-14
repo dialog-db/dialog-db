@@ -41,7 +41,9 @@
 //! how higher-level runtimes (`Storage`) can construct mounted spaces
 //! without knowing the concrete provider types.
 
-use dialog_capability::access::{AuthorizeError, Protocol, Prove, Retain as AccessRetain};
+use dialog_capability::access::{
+    AuthorizeError, Export, Forget, Protocol, Prove, Retain as AccessRetain,
+};
 use dialog_capability::{Capability, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
@@ -65,6 +67,7 @@ pub trait SpaceProvider:
     + Provider<credential::Save<Credential>>
     + Provider<credential::Load<Secret>>
     + Provider<credential::Save<Secret>>
+    + Provider<credential::Retract<Secret>>
     + ConditionalSend
     + ConditionalSync
     + Clone
@@ -83,6 +86,7 @@ impl<T> SpaceProvider for T where
         + Provider<credential::Save<Credential>>
         + Provider<credential::Load<Secret>>
         + Provider<credential::Save<Secret>>
+        + Provider<credential::Retract<Secret>>
         + ConditionalSend
         + ConditionalSync
         + Clone
@@ -106,7 +110,8 @@ pub struct Space<A, M, C, D, B> {
         credential::Load<Credential>,
         credential::Save<Credential>,
         credential::Load<Secret>,
-        credential::Save<Secret>
+        credential::Save<Secret>,
+        credential::Retract<Secret>
     )]
     pub credential: C,
 
@@ -141,6 +146,46 @@ where
     Blob: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Prove<P>>) -> Result<P::Proof, AuthorizeError> {
+        input.perform(&self.certificate).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Archive, Memory, Credential, Certificate, Blob, P> Provider<Export<P>>
+    for Space<Archive, Memory, Credential, Certificate, Blob>
+where
+    P: Protocol,
+    P::Certificate: ConditionalSend + ConditionalSync,
+    Certificate: Provider<Export<P>> + ConditionalSend + ConditionalSync,
+    Archive: ConditionalSend + ConditionalSync,
+    Memory: ConditionalSend + ConditionalSync,
+    Credential: ConditionalSend + ConditionalSync,
+    Blob: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<Export<P>>,
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        input.perform(&self.certificate).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Archive, Memory, Credential, Certificate, Blob, P> Provider<Forget<P>>
+    for Space<Archive, Memory, Credential, Certificate, Blob>
+where
+    P: Protocol,
+    P::Certificate:
+        serde::Serialize + for<'de> serde::Deserialize<'de> + ConditionalSend + ConditionalSync,
+    Certificate: Provider<Forget<P>> + ConditionalSend + ConditionalSync,
+    Archive: ConditionalSend + ConditionalSync,
+    Memory: ConditionalSend + ConditionalSync,
+    Credential: ConditionalSend + ConditionalSync,
+    Blob: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Forget<P>>) -> Result<(), AuthorizeError> {
         input.perform(&self.certificate).await
     }
 }

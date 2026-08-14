@@ -14,7 +14,7 @@ use crate::{
     Binding, Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value,
     try_stream,
 };
-use dialog_artifacts::{Artifact, Cause, Select};
+use dialog_artifacts::{Artifact, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use serde::{Deserialize, Serialize};
@@ -318,7 +318,20 @@ impl AttributeQueryAll {
 
                 let stream = Provider::<Select<'_>>::execute(env, (&selection).try_into()?).await?;
                 for await artifact in stream {
-                    let artifact = artifact?;
+                    // Every admitted row becomes a binding, so each one
+                    // materializes exactly once here — the merge and
+                    // tombstone layers upstream never did. A row whose
+                    // stored bytes fail validation (`CorruptEntry`) is a
+                    // corrupt or foreign-written tree entry: ignore it
+                    // rather than failing the query.
+                    let artifact = match artifact?.to_owned() {
+                        Ok(artifact) => artifact,
+                        Err(DialogArtifactsError::CorruptEntry(reason)) => {
+                            tracing::warn!(%reason, "ignoring corrupt stored row");
+                            continue;
+                        }
+                        Err(error) => Err(error)?,
+                    };
                     // Typed `is`/`the` slots filter facts falling
                     // outside their kinds.
                     if !selector.admits(&artifact) {
@@ -598,7 +611,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::the;
     use crate::type_system::{Interval, IntervalBound, NameShape, Refinement};
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use std::collections::BTreeSet;
 
     /// A prefix refinement stamped onto a variable term becomes a

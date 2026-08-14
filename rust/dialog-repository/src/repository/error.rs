@@ -220,6 +220,17 @@ pub enum CommitError {
     /// A cell resolve during commit failed.
     #[error("Failed to resolve during commit: {0}")]
     Resolve(#[from] ResolveError),
+
+    /// Commit-time induction still emitted novelty or transients after
+    /// the round bound — a self-feeding cascade (e.g. a transient
+    /// ping-pong between two rules, or an unguarded rule deriving from
+    /// its own durable output).
+    #[error("Inductive rules did not settle within {0} rounds")]
+    InductionDivergence(u32),
+
+    /// Evaluating or loading an inductive rule during commit failed.
+    #[error("Commit-time induction failed: {0}")]
+    Induction(String),
 }
 
 /// Errors specific to a pull operation.

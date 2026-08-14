@@ -535,7 +535,9 @@ mod tests {
     use dialog_effects::storage::{LocationExt as _, Storage as StorageFx};
 
     use crate::Blob;
-    use crate::helpers::{generate_data, test_operator_with_profile, test_repo, unique_name};
+    use crate::helpers::test_repo;
+    use dialog_operator::DeriveOperator as _;
+    use dialog_operator::helpers::{generate_data, test_operator_with_profile, unique_name};
 
     /// A blob source over bytes held in memory.
     struct Bytes(Option<Vec<u8>>);

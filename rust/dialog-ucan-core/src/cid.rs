@@ -14,6 +14,15 @@ use sha2::Digest;
 pub fn to_dagcbor_cid<T: Serialize>(t: &T) -> Cid {
     #[allow(clippy::expect_used)]
     let bytes = serde_ipld_dagcbor::to_vec(t).expect("not serializable");
+    dagcbor_cid(&bytes)
+}
+
+/// Derive a DAG-CBOR/SHA2-256 CID from an encoding that is already to hand.
+///
+/// # Panics
+///
+/// Will panic if the multihash cannot be created.
+pub fn dagcbor_cid(bytes: &[u8]) -> Cid {
     let digest = sha2::Sha256::digest(bytes);
     #[allow(clippy::expect_used)]
     let multihash = Multihash::wrap(0x12, &digest).expect("unable to create multihash");

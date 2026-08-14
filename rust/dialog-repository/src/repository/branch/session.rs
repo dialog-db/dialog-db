@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Entity, Select,
-    SortKey, Statement,
+    Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
+    DialogArtifactsError, Entity, Select, SortKey, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -18,7 +18,7 @@ use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
-use futures_util::TryStreamExt as _;
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::Arc;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
@@ -230,7 +230,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
 
             let overlay = layer.overlay(&operator);
-            let tombstones = tombstones_from(&overlay);
+            let tombstones = Arc::new(tombstones_from(&overlay));
 
             let branches = layer.branches.iter().map(|&branch| branch.clone()).collect();
             let query_env = QueryEnv::new(branches, overlay, tombstones, env);
@@ -262,7 +262,7 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// `sort_key`s of every retracted fact in `changes`. Each branch
     /// stream is filtered against these before the merge so retracts
     /// in the overlay suppress matching facts in the source.
-    tombstones: HashSet<SortKey>,
+    tombstones: Arc<HashSet<SortKey>>,
     /// When present, every selector this environment executes —
     /// fact scans and rule-discovery reads alike — records its
     /// demanded range here. Subscriptions use the recorded cover to
@@ -289,7 +289,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
     pub(crate) fn new(
         branches: Vec<Branch>,
         changes: Changes,
-        tombstones: HashSet<SortKey>,
+        tombstones: Arc<HashSet<SortKey>>,
         env: &'a Env,
     ) -> Self {
         Self {
@@ -420,8 +420,21 @@ where
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
-        // Overlay stream — Changes itself is a Provider<Select>.
-        streams.push(Provider::<Select<'a>>::execute(&self.changes, input).await?);
+        // Overlay stream — Changes itself is a Provider<Select>. The
+        // overlay always carries facts (session metadata at minimum), but
+        // MATCHES the typical fact selector rarely: a join's inner premise
+        // probes one entity per outer binding, and pushing an empty overlay
+        // stream anyway forced the k-way merge (and its per-row sort keys)
+        // on every one of those probes. Peek the overlay's materialized
+        // result and push it only when it has rows, so the single-source
+        // common case flows through `merge_grouped`'s passthrough arm.
+        let mut overlay = Provider::<Select<'a>>::execute(&self.changes, input).await?;
+        match futures_util::StreamExt::next(&mut overlay).await {
+            None => {}
+            Some(first) => {
+                streams.push(Box::pin(stream::iter(vec![first]).chain(overlay)));
+            }
+        }
 
         Ok(merge_grouped(streams))
     }
@@ -437,7 +450,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    /// Read a `db.rule/*` selector against a single branch's committed
+    /// Read a `dialog.rule/*` selector against a single branch's committed
     /// tree only (NOT the overlay) and collect the matching artifacts.
     /// The durable layer's reads must be tree-only so the head-keyed
     /// discovery cache stays correct — overlay rules are handled
@@ -455,13 +468,16 @@ where
         if let Some(demand) = &self.demand {
             demand.record_rules(&selector);
         }
+        // Rule bodies are hydrated from the full artifact, so this read
+        // genuinely needs owned rows; it is head-cached, not per-query hot.
         select_from_branch(branch.clone(), self.env, selector)
+            .owned()
             .try_collect()
             .await
     }
 
     /// The durable rules concluding `concept` on `branch`: the committed
-    /// `db.rule/*` rules, read from the tree and cached by branch head
+    /// `dialog.rule/*` rules, read from the tree and cached by branch head
     /// (re-scanned only when the head moves), with hydrated bodies
     /// cached by content-addressed rule entity.
     async fn durable_rules(
@@ -492,7 +508,7 @@ where
         };
 
         // Hydration: reuse cached bodies (content-addressed, never stale),
-        // fetch + compile the rest from each rule's `db.rule/source`.
+        // fetch + compile the rest from each rule's `dialog.rule/source`.
         let mut rules = Vec::with_capacity(rule_entities.len());
         for rule_entity in rule_entities {
             if let Some(body) = cache.body(&rule_entity) {
@@ -527,8 +543,8 @@ where
         + 'static,
 {
     /// Resolve a concept's deductive rules by unioning across layers:
-    /// each branch is a durable layer (committed `db.rule/*`, head-cached),
-    /// the overlay is a transient layer (uncommitted `db.rule/*`, fresh).
+    /// each branch is a durable layer (committed `dialog.rule/*`, head-cached),
+    /// the overlay is a transient layer (uncommitted `dialog.rule/*`, fresh).
     /// The implicit per-descriptor rule is assembled once on top.
     ///
     /// The resolved rule set is checked against the program analysis
@@ -682,7 +698,8 @@ mod rule_tests {
 
     use super::*;
     use crate::Branch;
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
+    use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
     use dialog_query::rule::DeductiveRuleDescriptor;
@@ -718,22 +735,6 @@ mod rule_tests {
         });
         let d: DeductiveRuleDescriptor = serde_json::from_value(json).expect("descriptor parses");
         d.compile().expect("rule compiles")
-    }
-
-    /// The `db.rule/*` facts that store `rule`: a `conclusion` index
-    /// pointing at the concept it concludes, and the `source` body.
-    /// Asserting these makes the durable/transient layer resolve it.
-    fn rule_statements(
-        rule: &DeductiveRule,
-    ) -> (impl Statement + 'static, impl Statement + 'static) {
-        let rule_entity = rule.this();
-        let conclusion = rule.conclusion().this();
-        (
-            the!("db.rule/conclusion")
-                .of(rule_entity.clone())
-                .is(conclusion),
-            the!("db.rule/source").of(rule_entity).is(rule.encode()),
-        )
     }
 
     /// Query `employee` and return the derived entities.
@@ -773,7 +774,6 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice: Entity = "id:alice".parse()?;
-        let (conc, src) = rule_statements(&employee_from_person());
         branch
             .transaction()
             .assert(
@@ -781,8 +781,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(conc)
-            .assert(src)
+            .assert(employee_from_person())
             .commit()
             .perform(&operator)
             .await?;
@@ -791,6 +790,80 @@ mod rule_tests {
 
         let employees = query_employees(&branch, &operator).await?;
         assert!(employees.contains(&alice), "committed rule must resolve");
+        Ok(())
+    }
+
+    /// A *reducing* rule stores, discovers, and hydrates through the
+    /// same `db.rule/*` rail: the committed rule's reduce block
+    /// survives the durable layer round trip, and queries evaluate
+    /// its fold over committed facts.
+    #[dialog_common::test]
+    async fn it_resolves_a_committed_reducing_rule() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // dept-total(this, total: sum(?salary)) grouped by department.
+        let rule = {
+            let json = serde_json::json!({
+                "deduce": { "with": {
+                    "total": { "the": "org/dept-total", "as": "UnsignedInteger" }
+                }},
+                "when": [{
+                    "assert": { "with": {
+                        "dept": { "the": "org/dept", "as": "Entity" },
+                        "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "employee" } },
+                        "dept": { "?": { "name": "this" } },
+                        "salary": { "?": { "name": "salary" } }
+                    }
+                }],
+                "reduce": {
+                    "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
+                }
+            });
+            let descriptor: DeductiveRuleDescriptor =
+                serde_json::from_value(json).expect("descriptor parses");
+            descriptor.compile().expect("reducing rule compiles")
+        };
+        let dept_total = rule.conclusion().clone();
+
+        let dept: Entity = "id:dept-a".parse()?;
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        branch
+            .transaction()
+            .assert(the!("org/dept").of(alice.clone()).is(dept.clone()))
+            .assert(the!("org/salary").of(alice.clone()).is(3u32))
+            .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))
+            .assert(the!("org/salary").of(bob.clone()).is(4u32))
+            .assert(&rule)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("dept"));
+        terms.insert("total".into(), Term::var("total"));
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: dept_total,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "one folded row for the department");
+        assert_eq!(*rows[0].entity(), dept);
+        assert_eq!(
+            rows[0].get::<u64>("total")?,
+            7,
+            "the hydrated reduce block folded the committed salaries"
+        );
         Ok(())
     }
 
@@ -838,14 +911,12 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         // Rule lives only in the overlay (uncommitted) — must still resolve.
-        let (conc, src) = rule_statements(&employee_from_person());
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("name".into(), Term::var("name"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(conc)
-            .with(src)
+            .with(employee_from_person())
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -885,14 +956,12 @@ mod rule_tests {
         assert!(query_employees(&branch, &operator).await?.is_empty());
 
         // Now add the rule via the overlay (head unchanged) — must resolve.
-        let (conc, src) = rule_statements(&employee_from_person());
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("name".into(), Term::var("name"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(conc)
-            .with(src)
+            .with(employee_from_person())
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -929,14 +998,12 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         // Query WITH the overlay rule — resolves.
-        let (conc, src) = rule_statements(&employee_from_person());
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("name".into(), Term::var("name"));
         let with_overlay: Vec<ConceptConclusion> = branch
             .query()
-            .with(conc)
-            .with(src)
+            .with(employee_from_person())
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -982,11 +1049,9 @@ mod rule_tests {
         assert!(query_employees(&branch, &operator).await?.is_empty());
 
         // Commit the rule on the SAME handle → its head advances.
-        let (conc, src) = rule_statements(&employee_from_person());
         branch
             .transaction()
-            .assert(conc)
-            .assert(src)
+            .assert(employee_from_person())
             .commit()
             .perform(&operator)
             .await?;
@@ -1020,8 +1085,6 @@ mod rule_tests {
             "distinct bodies ⇒ distinct identities"
         );
 
-        let (c1, s1) = rule_statements(&r1);
-        let (c2, s2) = rule_statements(&r2);
         branch
             .transaction()
             .assert(
@@ -1034,10 +1097,8 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(c1)
-            .assert(s1)
-            .assert(c2)
-            .assert(s2)
+            .assert(&r1)
+            .assert(&r2)
             .commit()
             .perform(&operator)
             .await?;
@@ -1068,7 +1129,6 @@ mod rule_tests {
         let bob: Entity = "id:bob".parse()?;
         // Commit rule #1 (person) + a person fact + a contractor fact.
         let r1 = rule_with_person_attr("org/person-name");
-        let (c1, s1) = rule_statements(&r1);
         branch
             .transaction()
             .assert(
@@ -1081,8 +1141,7 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(c1)
-            .assert(s1)
+            .assert(&r1)
             .commit()
             .perform(&operator)
             .await?;
@@ -1090,14 +1149,12 @@ mod rule_tests {
 
         // Rule #2 (contractor) only in the overlay.
         let r2 = rule_with_person_attr("org/contractor-name");
-        let (c2, s2) = rule_statements(&r2);
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("name".into(), Term::var("name"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(c2)
-            .with(s2)
+            .with(&r2)
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -1144,14 +1201,12 @@ mod rule_tests {
         assert!(query_employees(&handle_a, &operator).await?.is_empty());
 
         // Handle B (independent handle) commits the rule → branch head -> H1.
-        let (conc, src) = rule_statements(&employee_from_person());
         repo.branch("main")
             .open()
             .perform(&operator)
             .await?
             .transaction()
-            .assert(conc)
-            .assert(src)
+            .assert(employee_from_person())
             .commit()
             .perform(&operator)
             .await?;
@@ -1184,7 +1239,6 @@ mod rule_tests {
         // `main` holds a person + the person rule.
         let alice: Entity = "id:alice".parse()?;
         let r_person = rule_with_person_attr("org/person-name");
-        let (cp, sp) = rule_statements(&r_person);
         repo.branch("main")
             .open()
             .perform(&operator)
@@ -1195,8 +1249,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(cp)
-            .assert(sp)
+            .assert(&r_person)
             .commit()
             .perform(&operator)
             .await?;
@@ -1204,7 +1257,6 @@ mod rule_tests {
         // A second branch holds a contractor + the contractor rule.
         let bob: Entity = "id:bob".parse()?;
         let r_contractor = rule_with_person_attr("org/contractor-name");
-        let (cc, sc) = rule_statements(&r_contractor);
         repo.branch("other")
             .open()
             .perform(&operator)
@@ -1215,8 +1267,7 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(cc)
-            .assert(sc)
+            .assert(&r_contractor)
             .commit()
             .perform(&operator)
             .await?;
@@ -1249,7 +1300,7 @@ mod rule_tests {
 
     // A committed rule that is later RETRACTED must stop resolving: the
     // retract moves the head, so the discovery cache re-scans and finds
-    // the rule's `db.rule/*` facts gone. The inverse of the
+    // the rule's `dialog.rule/*` facts gone. The inverse of the
     // head-move-adds case.
 
     #[dialog_common::test]
@@ -1260,7 +1311,6 @@ mod rule_tests {
 
         let alice: Entity = "id:alice".parse()?;
         let rule = employee_from_person();
-        let (conc, src) = rule_statements(&rule);
         branch
             .transaction()
             .assert(
@@ -1268,8 +1318,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(conc)
-            .assert(src)
+            .assert(&rule)
             .commit()
             .perform(&operator)
             .await?;
@@ -1278,11 +1327,9 @@ mod rule_tests {
         assert!(query_employees(&branch, &operator).await?.contains(&alice));
 
         // Retract the rule's facts on the same handle → head advances.
-        let (conc, src) = rule_statements(&rule);
         branch
             .transaction()
-            .retract(conc)
-            .retract(src)
+            .retract(&rule)
             .commit()
             .perform(&operator)
             .await?;
@@ -1310,7 +1357,6 @@ mod rule_tests {
         // v1 reads org/person-name; commit it + a matching person fact.
         let alice: Entity = "id:alice".parse()?;
         let v1 = rule_with_person_attr("org/person-name");
-        let (c1, s1) = rule_statements(&v1);
         branch
             .transaction()
             .assert(
@@ -1318,8 +1364,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(c1)
-            .assert(s1)
+            .assert(&v1)
             .commit()
             .perform(&operator)
             .await?;
@@ -1333,7 +1378,6 @@ mod rule_tests {
         let carol: Entity = "id:carol".parse()?;
         let v2 = rule_with_person_attr("org/agent-name");
         assert_ne!(v1.this(), v2.this());
-        let (c2, s2) = rule_statements(&v2);
         branch
             .transaction()
             .assert(
@@ -1341,8 +1385,7 @@ mod rule_tests {
                     .of(carol.clone())
                     .is("Carol".to_string()),
             )
-            .assert(c2)
-            .assert(s2)
+            .assert(&v2)
             .commit()
             .perform(&operator)
             .await?;
@@ -1366,11 +1409,13 @@ mod ordered_relation_tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
     use dialog_artifacts::position::{Bias, Position, insert};
     use dialog_artifacts::{
-        ArtifactSelector, Attribute, Directory, Entity, Sequence, Symbol, Value,
+        Artifact, ArtifactSelector, ArtifactViewStream as _, Attribute, Directory, Entity,
+        Sequence, Symbol, Value,
     };
+    use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::AttributeStatement;
     use dialog_query::attribute::The;
     use futures_util::TryStreamExt as _;
@@ -1448,7 +1493,7 @@ mod ordered_relation_tests {
             .await?;
 
         // One contiguous range scan of the list's domain.
-        let members: Vec<_> = branch
+        let members: Vec<Artifact> = branch
             .claims()
             .select(
                 ArtifactSelector::new()
@@ -1457,6 +1502,7 @@ mod ordered_relation_tests {
             )
             .perform(&operator)
             .await?
+            .owned()
             .try_collect()
             .await?;
 

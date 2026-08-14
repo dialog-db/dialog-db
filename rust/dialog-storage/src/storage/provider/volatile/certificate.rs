@@ -6,7 +6,8 @@
 
 use base58::ToBase58;
 use dialog_capability::access::{
-    AuthorizeError, Certificate, CertificateStore, Delegation, Protocol, Prove, Retain,
+    AuthorizeError, Certificate, CertificateStore, Delegation, Export, Forget, Protocol, Prove,
+    Retain,
 };
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -50,6 +51,43 @@ where
         Ok(certificates)
     }
 
+    /// Decode every stored certificate across all sessions, for migration.
+    async fn export(&self) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        let sessions = self.sessions.read();
+        let mut certificates = Vec::new();
+        for session in sessions.values() {
+            for bytes in session.certificates.values() {
+                if let Ok(cert) = <P::Certificate as Certificate>::decode(bytes) {
+                    certificates.push(cert);
+                }
+            }
+        }
+        Ok(certificates)
+    }
+
+    /// Remove each certificate under its recomputed key. Absent keys are
+    /// a no-op.
+    async fn forget(&self, certificates: &[P::Certificate]) -> Result<(), AuthorizeError> {
+        let mut sessions = self.sessions.write();
+        for cert in certificates {
+            let bytes = cert.encode()?;
+            let id = blake3::hash(&bytes).as_bytes().to_base58();
+            let subject_segment = match cert.subject() {
+                Some(did) => did.to_string(),
+                None => "_".to_string(),
+            };
+            let key = format!(
+                "{}/{subject_segment}/{}.{id}",
+                cert.audience(),
+                cert.issuer()
+            );
+            if let Some(session) = sessions.get_mut(cert.audience()) {
+                session.certificates.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
     /// Store a delegation's certificates for future lookups.
     ///
     /// Each certificate is stored keyed by
@@ -75,6 +113,37 @@ where
         }
 
         Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<P> Provider<Export<P>> for Volatile
+where
+    P: Protocol,
+    P::Certificate: ConditionalSend + ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        _input: Capability<Export<P>>,
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        CertificateStore::<P>::export(self).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<P> Provider<Forget<P>> for Volatile
+where
+    P: Protocol,
+    P::Certificate:
+        serde::Serialize + for<'de> serde::Deserialize<'de> + ConditionalSend + ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Forget<P>>) -> Result<(), AuthorizeError> {
+        let certificates = &Forget::<P>::of(&input).certificates;
+        CertificateStore::<P>::forget(self, certificates).await
     }
 }
 

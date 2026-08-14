@@ -19,6 +19,7 @@ use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::{AnalysisError, TypeError};
 use crate::planner::Planner;
 use crate::premise::Premise;
+use crate::reduce::ReduceSpec;
 use crate::{Environment, Type};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
@@ -30,6 +31,8 @@ pub mod deductive;
 pub mod inductive;
 /// Premises collection type.
 pub mod premises;
+/// Rules as statements: `dialog.rule/*` vocabulary and install-by-assert.
+pub mod statement;
 /// Type inference over a rule's premises.
 pub mod types;
 /// When trait and tuple implementations.
@@ -153,69 +156,119 @@ pub trait Compile: Sized + Into<Rule> {
     /// that every conclusion variable is bound by the body. A returned
     /// rule is therefore plannable by construction.
     fn compile(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
-        // A concept with no required (`with`) attributes is
-        // unconstructable (see `ConceptDescriptor`'s `TryFrom` /
-        // `Deserialize` and the `#[derive(Concept)]` compile-time
-        // assertion), so `conclusion` is guaranteed non-degenerate
-        // here; no explicit emptiness check is needed.
+        compile_rule::<Self>(conclusion, premises, Vec::new())
+    }
+}
 
-        // Analyze first: inference + narrowing + required-head /
-        // Coalesce checks + dependency graph, all from the premises,
-        // before any execution order is chosen. The original premises
-        // are kept for the error-path display rule.
-        let display_premises = premises.clone();
-        let analysis = match analyzer::analyze(conclusion.clone(), premises, Self::KIND) {
-            Ok(analysis) => analysis,
-            Err(err) => {
-                let rule = Self::in_progress(conclusion, display_premises);
-                return Err(match err {
-                    AnalysisError::Inference { reason } => TypeError::TypeInference { reason },
-                    AnalysisError::RequiredHeadFromOptional { variable } => {
-                        TypeError::RequiredHeadFromOptional {
-                            rule: Box::new(rule.into()),
-                            variable,
-                        }
-                    }
-                    AnalysisError::CoalesceTypeMismatch { reason } => {
-                        TypeError::CoalesceTypeMismatch {
-                            rule: Box::new(rule.into()),
-                            reason,
-                        }
-                    }
-                    AnalysisError::NegatedOptional => TypeError::NegatedOptional {
+/// The shared compilation pipeline behind [`Compile::compile`] and
+/// [`DeductiveRule::with_reduce`](deductive::DeductiveRule::with_reduce):
+/// analysis, plannability, and head grounding, parameterized over an
+/// optional `reduce` clause (`(field, spec)` pairs in head-field
+/// order; empty for a plain rule).
+pub(crate) fn compile_rule<T: Compile>(
+    conclusion: ConceptDescriptor,
+    premises: Vec<Premise>,
+    reduce: Vec<(String, ReduceSpec)>,
+) -> Result<T, TypeError> {
+    // A concept with no required (`with`) attributes is
+    // unconstructable (see `ConceptDescriptor`'s `TryFrom` /
+    // `Deserialize` and the `#[derive(Concept)]` compile-time
+    // assertion), so `conclusion` is guaranteed non-degenerate
+    // here; no explicit emptiness check is needed.
+
+    // Analyze first: inference + narrowing + required-head /
+    // Coalesce / reduce checks + dependency graph, all from the
+    // premises, before any execution order is chosen. The original
+    // premises are kept for the error-path display rule.
+    let display_premises = premises.clone();
+    let analysis = match analyzer::analyze_with(conclusion.clone(), premises, T::KIND, reduce) {
+        Ok(analysis) => analysis,
+        Err(err) => {
+            let rule = T::in_progress(conclusion, display_premises);
+            return Err(match err {
+                AnalysisError::Inference { reason } => TypeError::TypeInference { reason },
+                AnalysisError::RequiredHeadFromOptional { variable } => {
+                    TypeError::RequiredHeadFromOptional {
                         rule: Box::new(rule.into()),
-                    },
-                    AnalysisError::SelfNegation { concept } => TypeError::SelfNegation {
+                        variable,
+                    }
+                }
+                AnalysisError::CoalesceTypeMismatch { reason } => TypeError::CoalesceTypeMismatch {
+                    rule: Box::new(rule.into()),
+                    reason,
+                },
+                AnalysisError::NegatedOptional => TypeError::NegatedOptional {
+                    rule: Box::new(rule.into()),
+                },
+                AnalysisError::SelfNegation { concept } => TypeError::SelfNegation {
+                    rule: Box::new(rule.into()),
+                    concept,
+                },
+                AnalysisError::ReducedFieldCollision { field } => {
+                    TypeError::ReducedFieldCollision {
                         rule: Box::new(rule.into()),
-                        concept,
-                    },
-                });
-            }
-        };
-
-        // Verify the rule is plannable: ordering at an empty scope
-        // surfaces unsatisfiable premises (e.g. a formula whose
-        // required input is never bound) as a planning error.
-        let join = Planner::with_types(analysis.premises.clone(), analysis.types.clone())
-            .plan(&Environment::new())?;
-
-        // Verify that every conclusion parameter is derived by one
-        // of the premises; otherwise the rule could never fully
-        // bind its output.
-        let unbound = conclusion
-            .required_operands()
-            .find(|name| !join.binds.contains(name))
-            .map(String::from);
-        if let Some(variable) = unbound {
-            let rule = Self::in_progress(conclusion, analysis.premises);
-            return Err(TypeError::UnboundVariable {
-                rule: Box::new(rule.into()),
-                variable,
+                        field,
+                    }
+                }
+                // Entry-scoped reduce errors pass through unchanged.
+                AnalysisError::Reduce(error) => *error,
             });
         }
+    };
 
-        Ok(Self::from_analysis(analysis))
+    // Verify the rule is plannable: ordering at an empty scope
+    // surfaces unsatisfiable premises (e.g. a formula whose
+    // required input is never bound) as a planning error.
+    let join = Planner::with_types(analysis.premises.clone(), analysis.types.clone())
+        .plan(&Environment::new())?;
+
+    // Verify that every conclusion parameter is derived by one of
+    // the premises; otherwise the rule could never fully bind its
+    // output. *Reduced* fields are exempt — the fold defines them,
+    // never the body — but each fold's input variable must itself be
+    // bound by the body.
+    let reduced = |name: &str| analysis.reduce.iter().any(|entry| entry.field == name);
+    let unbound = conclusion
+        .required_operands()
+        .filter(|name| !reduced(name))
+        .find(|name| !join.binds.contains(name))
+        .map(String::from)
+        .or_else(|| {
+            // A reducing rule's optional non-reduced fields join the
+            // derived grouping set, and the fold looks every grouping
+            // term up on every row — a never-bound one would fail
+            // every evaluation at runtime, where a plain rule simply
+            // omits it from the conclusion. Reject it here instead.
+            (!analysis.reduce.is_empty())
+                .then(|| {
+                    conclusion
+                        .with()
+                        .iter()
+                        .filter(|(_, attribute)| attribute.is_optional())
+                        .map(|(name, _)| name)
+                        .filter(|name| !reduced(name))
+                        .find(|name| !join.binds.contains(name))
+                        .map(String::from)
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            analysis
+                .reduce
+                .iter()
+                .filter_map(|entry| entry.input.name())
+                .find(|name| !join.binds.contains(name))
+                .map(String::from)
+        });
+    if let Some(variable) = unbound {
+        let rule = T::in_progress(conclusion, analysis.premises);
+        return Err(TypeError::UnboundVariable {
+            rule: Box::new(rule.into()),
+            variable,
+        });
     }
+
+    Ok(T::from_analysis(analysis))
 }
 
 /// Helper for the [`Display`] impls on [`DeductiveRule`] and

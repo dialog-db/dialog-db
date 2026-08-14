@@ -323,6 +323,6 @@ impl<S: Signature, I: Issuer<S>> DelegationBuilder<S, I, Did, Subject, Command> 
             .await
             .map_err(BuildError::SigningError)?;
 
-        Ok(super::Delegation(Envelope(signature, envelope)))
+        Ok(super::Delegation::new(Envelope(signature, envelope)))
     }
 }

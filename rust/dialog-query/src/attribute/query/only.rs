@@ -12,29 +12,25 @@ use crate::source::SelectRules;
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
-use dialog_artifacts::{Artifact, Cause, Select};
+use dialog_artifacts::{Artifact, ArtifactView, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 
-/// Given two artifacts for the same `(attribute, entity)` pair, return the
-/// winner. The winner is the artifact with the higher cause; when causes are
-/// equal (including both `None`), the fact hash (`Cause::from`) breaks the tie.
-fn choose(current: Artifact, challenger: Artifact) -> Artifact {
-    match (&current.cause, &challenger.cause) {
-        (Some(a), Some(b)) if a > b => current,
-        (Some(a), Some(b)) if a < b => challenger,
-        (Some(_), None) => current,
-        (None, Some(_)) => challenger,
-        _ => {
-            // Causes are equal: use the fact hash as a deterministic tiebreaker.
-            if Cause::from(&current) >= Cause::from(&challenger) {
-                current
-            } else {
-                challenger
-            }
+/// Materializes an election winner, treating a corrupt stored row
+/// ([`DialogArtifactsError::CorruptEntry`]) as an ignorable non-result
+/// (`Ok(None)`, with a warning) rather than a query failure: a corrupt or
+/// foreign-written tree entry must not poison every query that ranges over
+/// it. All other errors propagate.
+fn materialize_winner(winner: ArtifactView) -> Result<Option<Artifact>, DialogArtifactsError> {
+    match winner.to_owned() {
+        Ok(artifact) => Ok(Some(artifact)),
+        Err(DialogArtifactsError::CorruptEntry(reason)) => {
+            tracing::warn!(%reason, "ignoring corrupt stored row in election");
+            Ok(None)
         }
+        Err(error) => Err(error),
     }
 }
 
@@ -73,19 +69,24 @@ where
             .the(attribute)
             .of(entity)).await?;
 
-        let mut winner: Option<Artifact> = None;
+        let mut winner: Option<ArtifactView> = None;
         for await each in challengers {
             let challenger = each?;
+            // The election policy lives with the value layer
+            // (`ArtifactView::elect`); this loop only folds rows
+            // through it.
             winner = Some(match winner {
                 None => challenger,
-                Some(winner) => choose(winner, challenger),
+                Some(winner) => winner.elect(challenger)?,
             });
         }
 
+        // Only the surviving winner decodes its value; the losing
+        // challengers never materialized anything.
         if let Some(winner) = winner
-            && winner.is == value
+            && winner.value()? == value
         {
-            let winner_cause = winner.cause.unwrap_or(Cause([0; 32]));
+            let winner_cause = winner.cause().cloned().unwrap_or(Cause([0; 32]));
             if cause.is_none() || cause == Some(winner_cause) {
                 yield candidate;
             }
@@ -95,9 +96,11 @@ where
 
 /// Winner-selecting attribute query for `Cardinality::One`.
 ///
-/// Wraps an [`AttributeQueryAll`] and applies winner selection logic so that
-/// only one value per `(attribute, entity)` pair is yielded: the one with
-/// the highest cause.
+/// Wraps an [`AttributeQueryAll`] and yields one value per
+/// `(attribute, entity)` pair. Which row survives is not this layer's
+/// decision: competing rows fold through [`ArtifactView::elect`], the
+/// value layer's cardinality-one election, and the engine encodes no
+/// policy of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct AttributeQueryOnly {
     query: AttributeQueryAll,
@@ -231,38 +234,63 @@ impl AttributeQueryOnly {
                         resolved.cause().clone(),
                     );
 
-                    let mut candidate: Option<Artifact> = None;
+                    let mut candidate: Option<ArtifactView> = None;
 
                     let stream = Provider::<Select<'_>>::execute(env, (&scan).try_into()?).await?;
                     for await artifact in stream {
                         let artifact = artifact?;
 
                         candidate = Some(match candidate.take() {
-                            Some(current) if current.the == artifact.the && current.of == artifact.of => {
-                                choose(current, artifact)
-                            }
-                            Some(winner) => {
-                                if (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
-                                    && selector.admits(&winner)
+                            Some(current) => {
+                                // Group membership compares the raw key
+                                // bytes; nothing materializes while the
+                                // window slides within a group.
+                                if current.the_bytes()? == artifact.the_bytes()?
+                                    && current.of_bytes()? == artifact.of_bytes()?
                                 {
-                                    let mut extension = base.clone();
-                                    selector.merge(&mut extension, &winner)?;
-                                    yield extension;
+                                    current.elect(artifact)?
+                                } else {
+                                    // Group closed: only its winner pays
+                                    // for materialization, and only if it
+                                    // clears the value checks. A winner
+                                    // whose stored bytes fail validation
+                                    // (`CorruptEntry`) is a corrupt tree
+                                    // entry: drop the group's yield rather
+                                    // than failing the query.
+                                    match materialize_winner(current)? {
+                                        Some(winner)
+                                            if (value_constraint.is_none()
+                                                || value_constraint.as_ref() == Some(&winner.is))
+                                                && selector.admits(&winner) =>
+                                        {
+                                            let mut extension = base.clone();
+                                            selector.merge(&mut extension, &winner)?;
+                                            yield extension;
+                                        }
+                                        _ => {}
+                                    }
+                                    artifact
                                 }
-                                artifact
                             }
                             None => artifact,
                         });
                     }
 
-                    // Yield the final group's winner.
-                    if let Some(winner) = candidate.take()
-                        && (value_constraint.is_none() || value_constraint.as_ref() == Some(&winner.is))
-                        && selector.admits(&winner)
-                    {
-                        let mut extension = base.clone();
-                        selector.merge(&mut extension, &winner)?;
-                        yield extension;
+                    // Yield the final group's winner (unless its stored
+                    // bytes are corrupt; see the group-close arm above).
+                    if let Some(winner) = candidate.take() {
+                        match materialize_winner(winner)? {
+                            Some(winner)
+                                if (value_constraint.is_none()
+                                    || value_constraint.as_ref() == Some(&winner.is))
+                                    && selector.admits(&winner) =>
+                            {
+                                let mut extension = base.clone();
+                                selector.merge(&mut extension, &winner)?;
+                                yield extension;
+                            }
+                            _ => {}
+                        }
                     }
                 } else {
                     // Secondary lookup path (Box::pin to avoid stack overflow).
@@ -328,9 +356,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::{Value, the};
-    use dialog_artifacts::{Artifact, Attribute, Cause};
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
-    use std::str::FromStr;
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
 
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
@@ -719,63 +745,6 @@ mod tests {
         assert_eq!(results[0].of(), &entity);
 
         Ok(())
-    }
-
-    #[dialog_common::test]
-    async fn choose_prefers_higher_cause() {
-        let attr = Attribute::from_str("person/name").unwrap();
-        let entity = Entity::new().unwrap();
-
-        let older = Artifact {
-            the: attr.clone(),
-            of: entity.clone(),
-            is: Value::String("Alice".into()),
-            cause: Some(Cause([1u8; 32])),
-        };
-
-        let newer = Artifact {
-            the: attr,
-            of: entity,
-            is: Value::String("Alicia".into()),
-            cause: Some(Cause([2u8; 32])),
-        };
-
-        let winner = choose(older.clone(), newer.clone());
-        assert_eq!(winner.cause, newer.cause, "Higher cause should win");
-
-        // Reversed argument order should produce the same winner.
-        let winner2 = choose(newer.clone(), older.clone());
-        assert_eq!(winner2.cause, newer.cause);
-    }
-
-    #[dialog_common::test]
-    async fn choose_uses_fact_hash_for_equal_causes() {
-        let attr = Attribute::from_str("person/name").unwrap();
-        let entity = Entity::new().unwrap();
-
-        let a = Artifact {
-            the: attr.clone(),
-            of: entity.clone(),
-            is: Value::String("Alice".into()),
-            cause: Some(Cause([1u8; 32])),
-        };
-
-        let b = Artifact {
-            the: attr,
-            of: entity,
-            is: Value::String("Alicia".into()),
-            cause: Some(Cause([1u8; 32])),
-        };
-
-        let winner_ab = choose(a.clone(), b.clone());
-        let winner_ba = choose(b.clone(), a.clone());
-
-        // The winner should be deterministic regardless of argument order.
-        assert_eq!(
-            Cause::from(&winner_ab),
-            Cause::from(&winner_ba),
-            "Tiebreaker should be deterministic"
-        );
     }
 
     /// An *optional* `is` whose variable an earlier premise bound to

@@ -1,3 +1,4 @@
+use crate::DeriveOperator as _;
 use std::str::FromStr;
 
 use crate::{Operator, Profile};
@@ -11,6 +12,13 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 /// Generate a unique name with a prefix for test isolation.
+///
+/// The name carries the process id as well as a timestamp: the test
+/// runner starts one process per test, so the per-process counter alone
+/// cannot disambiguate two tests whose first call lands on the same
+/// clock tick — which is exactly how two concurrently running e2e tests
+/// intermittently collided on one temp vault directory and found each
+/// other's credentials in it.
 pub fn unique_name(prefix: &str) -> String {
     use dialog_common::time;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,8 +27,18 @@ pub fn unique_name(prefix: &str) -> String {
         .duration_since(time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    // `process::id()` panics on wasm32-unknown (unsupported os call);
+    // a browser test runs one module per process anyway, so the
+    // timestamp + counter already disambiguate there.
+    #[cfg(not(target_arch = "wasm32"))]
+    let pid = {
+        use std::process;
+        process::id()
+    };
+    #[cfg(target_arch = "wasm32")]
+    let pid = 0u32;
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{ts}-{seq}")
+    format!("{prefix}-{ts}-{pid}-{seq}")
 }
 
 /// Build a test operator with a fresh profile and powerline delegation.
@@ -54,6 +72,20 @@ pub async fn test_operator_with_profile() -> (Operator<VolatileSpace>, Profile) 
         .await
         .unwrap();
     (operator, profile)
+}
+
+/// Create a test repository using the given operator and profile.
+pub async fn test_repo(
+    operator: &Operator<VolatileSpace>,
+    profile: &Profile,
+) -> dialog_repository::Repository<dialog_credentials::Credential> {
+    use dialog_repository::RepositoryExt as _;
+    profile
+        .repository(unique_name("repo"))
+        .open()
+        .perform(operator)
+        .await
+        .expect("test_repo: failed to open repository")
 }
 
 /// Generate deterministic test data consisting of facts that reference a
