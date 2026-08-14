@@ -17,6 +17,7 @@ strip = "debuginfo"
 [workspace]
 members = [
     "rust/dialog-artifacts",
+    "rust/dialog-baseline",
     "rust/dialog-capability",
     "rust/dialog-credentials",
     "rust/dialog-common",
@@ -126,8 +127,10 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
 ] }
 rexie = "0.6"
+memchr = "2"
 rkyv = "0.8"
 rsa = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"] }
 s3s = "0.13"
 serde = "1"
 serde-value = "0.7"

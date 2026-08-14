@@ -1,6 +1,7 @@
 //! Access capability providers for Operator.
 
 use super::Operator;
+use super::memo::unix_now;
 use dialog_capability::Provider;
 use dialog_capability::access::{
     Access, Authorize, AuthorizeError, Proof as _, Protocol, Prove, Retain,
@@ -38,7 +39,13 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Retain<P>>) -> Result<(), AuthorizeError> {
-        input.perform(&self.storage).await
+        let retained = input.perform(&self.storage).await;
+
+        // A new certificate can complete or shorten any chain, so what
+        // was proven before it arrived no longer stands.
+        self.memo.forget();
+
+        retained
     }
 }
 
@@ -49,7 +56,7 @@ where
     S: Clone + ConditionalSend + ConditionalSync + 'static,
     P: Protocol,
     P::Access: Clone + ConditionalSend + ConditionalSync,
-    P::Certificate: Clone + ConditionalSend + ConditionalSync,
+    P::Certificate: Clone + ConditionalSend + ConditionalSync + 'static,
     P::Proof: ConditionalSend,
     P::Signer: From<Ed25519Signer>,
     P::Authorization: ConditionalSend,
@@ -62,12 +69,23 @@ where
     ) -> Result<P::Authorization, AuthorizeError> {
         let subject = input.subject().clone();
         let prove: Prove<P> = input.into_effect().into();
+        let now = unix_now();
 
-        let proof = Subject::from(subject)
-            .attenuate(Access)
-            .invoke(prove)
-            .perform(&self.storage)
-            .await?;
+        // The invocation this authorization signs is fresh every time,
+        // but the chain underneath it only moves when a certificate is
+        // retained or the operator key rotates.
+        let proof = match self.memo.recall::<P>(&subject, &prove, now) {
+            Some(proof) => proof,
+            None => {
+                let proven = Subject::from(subject.clone())
+                    .attenuate(Access)
+                    .invoke(prove.clone())
+                    .perform(&self.storage)
+                    .await?;
+                self.memo.remember::<P>(&subject, &prove, &proven, now);
+                proven
+            }
+        };
 
         proof.claim(self.authority.operator_signer().clone().into())
     }

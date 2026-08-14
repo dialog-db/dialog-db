@@ -37,7 +37,6 @@ dialog-ucan-core = { workspace = true }
 dialog-varsig = { workspace = true }
 ipld-core = { workspace = true }
 parking_lot = { workspace = true }
-reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }

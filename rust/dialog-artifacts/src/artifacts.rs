@@ -73,7 +73,10 @@ use crate::tree::{
     ArtifactTree, ArtifactTreeExt, SpillCache, TreeStorageBridge, fetch_spilled_cached, spill_cache,
 };
 use crate::{
-    DialogArtifactsError, HASH_SIZE, Key, State, artifacts::selector::Constrained, make_reference,
+    DialogArtifactsError, HASH_SIZE, Key, State,
+    artifacts::selector::Constrained,
+    buffered::{BufferedBatch, SpineSlot, apply_buffered_reusing},
+    make_reference,
 };
 
 /// An alias type that describes the search tree that is used for each
@@ -114,6 +117,11 @@ where
     /// same large value skips the store fetch. Content-addressed, so it never
     /// serves stale bytes.
     spill_cache: SpillCache,
+    /// Carries the live buffered spine between commits (keyed by root hash,
+    /// so any out-of-band root change simply misses), sparing every commit
+    /// the root-frame decode and sealed-buffer bulk copies of a fresh open.
+    /// Shared across clones, like the index it accelerates.
+    spine: SpineSlot,
 }
 
 impl<Backend> Artifacts<Backend>
@@ -183,6 +191,7 @@ where
             storage,
             index: Arc::new(RwLock::new(index)),
             spill_cache: spill_cache(),
+            spine: SpineSlot::new(),
         })
     }
 
@@ -260,6 +269,12 @@ where
         };
 
         ArtifactStoreMut::commit(self, instructions).await?;
+
+        // Bulk loads are where canonicalization pays: one explicit pass at
+        // the end of the import, rather than per commit (which the buffered
+        // path exists to amortize) or on sync (where buffered novelty near
+        // the root actually makes diffs exchange FEWER blocks).
+        self.canonicalize().await?;
 
         Ok(())
     }
@@ -370,11 +385,13 @@ where
         index.select_data(self.storage.clone(), of, the).await
     }
 
-    /// Stream every [`Artifact`] matching `selector`.
+    /// Stream every fact matching `selector`, as borrowed-access
+    /// [`ArtifactView`]s: read fields off the view, or call
+    /// [`ArtifactView::to_owned`] for a materialized [`Artifact`].
     pub fn select(
         &self,
         selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 'static + ConditionalSend
     {
         let index = self.index.clone();
         let storage = self.storage.clone();
@@ -398,6 +415,15 @@ where
     /// Data committed this way carries no [`Version`](crate::history::Version)
     /// tag and records no history — version-controlled writes go through the
     /// branch commit path in `dialog-repository` instead.
+    ///
+    /// Writes land through the buffered (hitchhiker) write path and the
+    /// published root is the BUFFERED form: valid and publishable (a node's
+    /// hash covers its buffered ops, so the root identifies the content
+    /// exactly), but not *canonical* — the same fact set hashes differently
+    /// depending on where its ops currently sit. Callers that need the
+    /// deterministic canonical root (e.g. for fast-forward convergence
+    /// detection by root equality) invoke [`Artifacts::canonicalize`]
+    /// explicitly. See the `buffered` module docs for the full contract.
     async fn commit_instructions<Instructions>(
         &mut self,
         instructions: Instructions,
@@ -412,52 +438,23 @@ where
 
             // The per-instruction EAV/AEV/VAE key writes (and
             // cardinality-one supersession) are the shared
-            // `ArtifactTreeExt::apply`. This method adds only
-            // the surrounding transaction bookkeeping — base-revision
-            // capture, revision persistence, pointer advance, and the
-            // rollback below.
+            // `write_instructions` loop, running against the buffered
+            // write target. This method adds only the surrounding
+            // transaction bookkeeping — base-revision capture, revision
+            // persistence, pointer advance, and the rollback below.
             let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
-            index
-                .apply(&mut self.storage, &mut delta, instructions)
-                .await?;
+            apply_buffered_reusing(
+                &self.spine,
+                &mut index,
+                &mut self.storage,
+                &mut delta,
+                None,
+                instructions,
+                false,
+            )
+            .await?;
 
-            // Persist the tree's pending nodes before minting a revision;
-            // a revision must only reference durable blocks.
-            stream::iter(delta.flush().map(|(_, buffer)| buffer))
-                .map(|buffer| {
-                    let mut storage = self.storage.clone();
-                    async move {
-                        let digest = *buffer.blake3_hash().as_bytes();
-                        storage.set(digest, buffer.into_vec()).await
-                    }
-                })
-                .buffer_unordered(FLUSH_CONCURRENCY)
-                .try_collect::<()>()
-                .await?;
-
-            let root = index.root();
-            let next_revision = if root == NULL_BLAKE3_HASH {
-                None
-            } else {
-                Some(IndexRoot::new(root.as_bytes()))
-            };
-
-            let revision_hash = if let Some(revision) = &next_revision {
-                self.storage.write(&revision).await?;
-                revision.as_reference().await?
-            } else {
-                NULL_REVISION_HASH
-            };
-
-            // Advance the effective pointer to the latest version of this DB
-            self.storage
-                .set(
-                    make_reference(self.identifier.as_bytes()),
-                    revision_hash.to_vec(),
-                )
-                .await?;
-
-            Ok(revision_hash) as Result<Blake3Hash, DialogArtifactsError>
+            Self::publish_root(&mut self.storage, &self.identifier, index.root(), delta).await
         }
         .await;
 
@@ -468,6 +465,96 @@ where
                 Err(error)
             }
         }
+    }
+
+    /// Canonicalizes the indexes: flushes every buffered write down to the
+    /// leaves, so the resulting root is the deterministic canonical form of
+    /// the store's fact set, then publishes it as a new revision.
+    ///
+    /// Ordinary [`commit`](crate::ArtifactStoreMut::commit)s publish the
+    /// buffered form, whose root depends on where the buffered ops sit; two
+    /// stores holding identical facts therefore only hash identically after
+    /// both canonicalize. This is deliberately a separate, explicit operation:
+    /// canonicalizing per commit costs the full leaf rebuild the buffered path
+    /// exists to amortize, and canonicalizing on sync would HURT — buffered
+    /// novelty sits near the root, so two replicas differ in a few top blocks
+    /// instead of many leaf paths, and the diff exchanges fewer blocks. The
+    /// place to canonicalize is the end of a bulk load (see
+    /// [`Artifacts::import`]), or wherever a caller explicitly wants the
+    /// canonical root.
+    pub async fn canonicalize(&mut self) -> Result<Blake3Hash, DialogArtifactsError> {
+        let base_revision = self.revision().await?;
+
+        let transaction_result = async {
+            let mut index = self.index.write().await;
+
+            let mut delta: Delta<NodeHash, TreeBuffer> = Delta::zero();
+            let batch = BufferedBatch::apply_reusing(
+                &self.spine,
+                &index,
+                &mut self.storage,
+                None,
+                stream::empty(),
+            )
+            .await?;
+            *index = batch.seal(&self.storage, &mut delta, true).await?;
+
+            Self::publish_root(&mut self.storage, &self.identifier, index.root(), delta).await
+        }
+        .await;
+
+        match transaction_result {
+            Ok(revision) => Ok(revision),
+            Err(error) => {
+                self.reset(Some(base_revision)).await?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Persists `delta`'s pending nodes, mints a revision for `root`, and
+    /// advances the store's head pointer to it. The flush completes before the
+    /// revision is written: a revision must only reference durable blocks.
+    async fn publish_root(
+        storage: &mut Storage<CborEncoder, Backend>,
+        identifier: &str,
+        root: &NodeHash,
+        mut delta: Delta<NodeHash, TreeBuffer>,
+    ) -> Result<Blake3Hash, DialogArtifactsError> {
+        stream::iter(delta.flush().map(|(_, buffer)| buffer))
+            .map(|buffer| {
+                let mut storage = storage.clone();
+                async move {
+                    let digest = *buffer.blake3_hash().as_bytes();
+                    storage.set(digest, buffer.into_vec()).await
+                }
+            })
+            .buffer_unordered(FLUSH_CONCURRENCY)
+            .try_collect::<()>()
+            .await?;
+
+        let next_revision = if root == NULL_BLAKE3_HASH {
+            None
+        } else {
+            Some(IndexRoot::new(root.as_bytes()))
+        };
+
+        let revision_hash = if let Some(revision) = &next_revision {
+            storage.write(&revision).await?;
+            revision.as_reference().await?
+        } else {
+            NULL_REVISION_HASH
+        };
+
+        // Advance the effective pointer to the latest version of this DB
+        storage
+            .set(
+                make_reference(identifier.as_bytes()),
+                revision_hash.to_vec(),
+            )
+            .await?;
+
+        Ok(revision_hash)
     }
 }
 
@@ -482,7 +569,7 @@ where
     fn select(
         &self,
         selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend
+    ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 'static + ConditionalSend
     {
         let index = self.index.clone();
         let storage = self.storage.clone();
@@ -537,12 +624,64 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use crate::tree::distribution;
     use crate::{
-        Artifact, ArtifactSelector, ArtifactStoreMutExt, Artifacts, Attribute,
+        Artifact, ArtifactSelector, ArtifactStoreMutExt, ArtifactViewStream, Artifacts, Attribute,
         DialogArtifactsError, Entity, Instruction, NULL_REVISION_HASH, Value, make_reference,
     };
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// A store that keeps its live spine across commits must publish exactly
+    /// the revisions a store that re-opens its root from bytes before every
+    /// commit publishes. This is the Artifacts-level pin of the spine-reuse
+    /// contract: same instruction batches, same revision hash after every
+    /// commit, and identical reads at the end.
+    #[dialog_common::test]
+    async fn it_commits_identically_when_the_spine_is_reused() -> Result<()> {
+        let reused_backend = MemoryStorageBackend::default();
+        let fresh_backend = MemoryStorageBackend::default();
+        let mut reused = Artifacts::open("spine-pin".into(), reused_backend.clone()).await?;
+
+        fn batch_instructions(batch: u32) -> Result<Vec<Instruction>> {
+            (0..3u32)
+                .map(|i| {
+                    let n = batch * 3 + i;
+                    Ok(Instruction::Assert(Artifact {
+                        the: Attribute::from_str("test/value")?,
+                        of: Entity::from_str(&format!(
+                            "entity:00000000-0000-0000-0000-{:012}",
+                            n % 40
+                        ))?,
+                        is: Value::String(format!("value {n}")),
+                        cause: None,
+                    }))
+                })
+                .collect()
+        }
+
+        for batch in 0..30u32 {
+            let live = reused.commit(batch_instructions(batch)?).await?;
+            // The oracle re-opens the store (and therefore the root frame)
+            // before every commit, so its spine slot never carries anything.
+            let mut fresh = Artifacts::open("spine-pin".into(), fresh_backend.clone()).await?;
+            let cold = fresh.commit(batch_instructions(batch)?).await?;
+            assert_eq!(
+                live, cold,
+                "spine reuse changed the published revision at batch {batch}"
+            );
+        }
+
+        let selector = ArtifactSelector::new().the(Attribute::from_str("test/value")?);
+        let reused_rows: Vec<Artifact> = reused
+            .select(selector.clone())
+            .owned()
+            .try_collect()
+            .await?;
+        let fresh = Artifacts::open("spine-pin".into(), fresh_backend.clone()).await?;
+        let fresh_rows: Vec<Artifact> = fresh.select(selector).owned().try_collect().await?;
+        assert_eq!(reused_rows.len(), fresh_rows.len());
+        Ok(())
+    }
 
     /// On-demand bug-tracker footprint: seeds the same 300 bugs the query
     /// benchmark uses (seven `squash.bug/*` facts each) into a disk-backed store
@@ -922,6 +1061,7 @@ mod tests {
             let scan_start = std::time::Instant::now();
             let selected: Vec<Artifact> = facts
                 .select(ArtifactSelector::new().the(the))
+                .owned()
                 .try_collect()
                 .await?;
             let scan_elapsed = scan_start.elapsed();
@@ -981,6 +1121,7 @@ mod tests {
             .is(sample.is.clone());
         let results: Vec<Artifact> = artifacts
             .select(selector)
+            .owned()
             .map(|artifact| artifact.unwrap())
             .collect()
             .await;
@@ -1020,8 +1161,9 @@ mod tests {
             .commit(data.clone().into_iter().map(Instruction::Assert))
             .await?;
 
-        let fact_stream =
-            facts.select(ArtifactSelector::new().the(Attribute::from_str("profile/name")?));
+        let fact_stream = facts
+            .select(ArtifactSelector::new().the(Attribute::from_str("profile/name")?))
+            .owned();
 
         let mut facts: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
         facts.sort_by(entity_order);
@@ -1062,6 +1204,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().the(Attribute::from_str("person/name")?))
+            .owned()
             .map(|fact| fact.unwrap())
             .collect()
             .await;
@@ -1117,15 +1260,18 @@ mod tests {
 
     /// Assert + retract of a fact in the same batch, when that fact had **no
     /// prior committed value**, leaves nothing behind: the assert and retract
-    /// cancel at the tree, no tombstone is written, and the root is unchanged.
-    /// This is the transient-command shape (a concept asserted then retracted
-    /// in one commit) that used to churn the branch head on every occurrence.
+    /// cancel at the tree and no tombstone is written. This is the
+    /// transient-command shape (a concept asserted then retracted in one
+    /// commit) that used to churn the branch head on every occurrence.
+    ///
+    /// Commit roots are the buffered form and so path-dependent; the
+    /// "left no key" pin is on the CANONICAL root, reached explicitly.
     #[dialog_common::test]
     async fn it_leaves_no_key_when_assert_and_retract_a_novel_fact_in_one_batch() -> Result<()> {
         let (storage_backend, _temp) = make_target_storage().await?;
         let mut facts = Artifacts::anonymous(storage_backend).await?;
 
-        let base_root = facts
+        facts
             .commit(once(Instruction::Assert(Artifact {
                 the: Attribute::from_str("user/name")?,
                 of: Entity::new()?,
@@ -1133,6 +1279,7 @@ mod tests {
                 cause: None,
             })))
             .await?;
+        let base_root = facts.canonicalize().await?;
 
         let session = Attribute::from_str("user/session")?;
         let transient = Artifact {
@@ -1141,15 +1288,13 @@ mod tests {
             is: Value::String("ephemeral".into()),
             cause: None,
         };
-        let after_root = facts
-            .commit(
-                vec![
-                    Instruction::Assert(transient.clone()),
-                    Instruction::Retract(transient.clone()),
-                ]
-                .into_iter(),
-            )
+        facts
+            .commit(vec![
+                Instruction::Assert(transient.clone()),
+                Instruction::Retract(transient.clone()),
+            ])
             .await?;
+        let after_root = facts.canonicalize().await?;
 
         // No tree churn: the novel fact left no key at all.
         assert_eq!(
@@ -1159,6 +1304,7 @@ mod tests {
         // And the fact is not queryable.
         let hits: Vec<Artifact> = facts
             .select(ArtifactSelector::new().the(session))
+            .owned()
             .try_collect()
             .await?;
         assert!(hits.is_empty(), "the transient fact must not be queryable");
@@ -1201,6 +1347,7 @@ mod tests {
         // The fact is gone from queries.
         let hits: Vec<Artifact> = facts
             .select(ArtifactSelector::new().the(name))
+            .owned()
             .try_collect()
             .await?;
         assert!(
@@ -1245,6 +1392,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().the_starting_with("person/"))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 2, "two person/* facts");
@@ -1300,6 +1448,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().of_starting_with("urn:alpha:"))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 1, "short prefix selects on key bytes");
@@ -1309,6 +1458,7 @@ mod tests {
         assert!(long_prefix.len() > 32, "the prefix outruns the raw head");
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().of_starting_with(long_prefix))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1368,6 +1518,7 @@ mod tests {
         // "Al" spans two attributes (name + city) on the same entity.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_starting_with("Al"))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 2, "two values begin with Al");
@@ -1382,6 +1533,7 @@ mod tests {
         // A narrower prefix isolates one value.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_starting_with("Ali"))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 1);
@@ -1390,6 +1542,7 @@ mod tests {
         // A prefix that matches nothing returns nothing.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_starting_with("Zzz"))
+            .owned()
             .try_collect()
             .await?;
         assert!(selected.is_empty(), "no value begins with Zzz");
@@ -1435,6 +1588,7 @@ mod tests {
         // float, and boolean neighbors are non-matches, not errors.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(20)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1469,6 +1623,7 @@ mod tests {
                     .of(mixed)
                     .is_at_least(Value::UnsignedInt(20)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1486,6 +1641,7 @@ mod tests {
                     .is_at_least(Value::UnsignedInt(20))
                     .is_at_most(Value::Float(40.0)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert!(selected.is_empty(), "mixed-type bounds match nothing");
@@ -1496,6 +1652,7 @@ mod tests {
                     .is_at_least(Value::UnsignedInt(50))
                     .is_at_most(Value::UnsignedInt(20)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert!(selected.is_empty(), "inverted bounds match nothing");
@@ -1543,6 +1700,7 @@ mod tests {
         let probe = format!("{stem}-apple");
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_starting_with(&probe))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 1, "the probe distinguishes the tails");
@@ -1558,6 +1716,7 @@ mod tests {
                     .the(body.clone())
                     .is_at_least(Value::String(bound)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1593,6 +1752,7 @@ mod tests {
             .await?;
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().of(both))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 2, "same-prefix large values coexist");
@@ -1644,6 +1804,7 @@ mod tests {
                     .is_starting_with("a")
                     .is_at_most(Value::String("am".into())),
             )
+            .owned()
             .try_collect()
             .await?;
         let mut values: Vec<String> = selected
@@ -1668,6 +1829,7 @@ mod tests {
                     .is_starting_with("a")
                     .is_less_than(Value::String("am".into())),
             )
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), 2, "exclusive bound drops the boundary");
@@ -1702,6 +1864,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_least(Value::Float(0.0)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1712,6 +1875,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_most(Value::Float(-0.0)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1772,6 +1936,7 @@ mod tests {
                     .of(alice.clone())
                     .is_at_least(Value::UnsignedInt(30)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert!(
@@ -1788,6 +1953,7 @@ mod tests {
                     .of(alice.clone())
                     .is_starting_with("Zzz"),
             )
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1806,6 +1972,7 @@ mod tests {
         // String band by their leading bytes.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_starting_with("Zzz"))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(
@@ -1818,6 +1985,7 @@ mod tests {
         // prefix is not a string and must not match.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().of(bob).is_starting_with("Al"))
+            .owned()
             .try_collect()
             .await?;
         assert!(
@@ -1865,6 +2033,7 @@ mod tests {
 
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(selected.len(), expected, "every float fact reads back");
@@ -1926,6 +2095,7 @@ mod tests {
         // Inclusive lower bound.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(30)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(values(&selected), vec![30, 40, 50], ">= 30");
@@ -1933,6 +2103,7 @@ mod tests {
         // Exclusive lower bound drops the boundary value.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_greater_than(Value::UnsignedInt(30)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(values(&selected), vec![40, 50], "> 30");
@@ -1940,6 +2111,7 @@ mod tests {
         // Inclusive upper bound.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_most(Value::UnsignedInt(20)))
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(values(&selected), vec![10, 20], "<= 20");
@@ -1949,6 +2121,7 @@ mod tests {
             .select(
                 ArtifactSelector::new().is_between(Value::UnsignedInt(20), Value::UnsignedInt(40)),
             )
+            .owned()
             .try_collect()
             .await?;
         assert_eq!(values(&selected), vec![20, 30, 40], "[20, 40]");
@@ -1956,6 +2129,7 @@ mod tests {
         // A range that spans nothing.
         let selected: Vec<Artifact> = facts
             .select(ArtifactSelector::new().is_at_least(Value::UnsignedInt(1000)))
+            .owned()
             .try_collect()
             .await?;
         assert!(selected.is_empty(), ">= 1000 matches nothing");
@@ -1978,7 +2152,9 @@ mod tests {
             .commit(data.into_iter().map(Instruction::Assert))
             .await?;
 
-        let stream = artifacts.select(ArtifactSelector::new().the("item/id".parse()?));
+        let stream = artifacts
+            .select(ArtifactSelector::new().the("item/id".parse()?))
+            .owned();
 
         tokio::pin!(stream);
 
@@ -2007,9 +2183,14 @@ mod tests {
             artifacts
                 .commit(data.into_iter().map(Instruction::Assert))
                 .await?;
+            // `import` ends with an explicit canonicalization pass, so the
+            // round-trip pin below compares canonical revisions; reach the
+            // canonical form on the source side too.
+            artifacts.canonicalize().await?;
 
             let ids = artifacts
                 .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
+                .owned()
                 .map(|result| result.unwrap())
                 .collect::<Vec<Artifact>>()
                 .await;
@@ -2027,6 +2208,7 @@ mod tests {
 
         let actual_ids = artifacts
             .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
+            .owned()
             .map(|result| result.unwrap())
             .collect::<Vec<Artifact>>()
             .await;
@@ -2062,7 +2244,9 @@ mod tests {
             (storage_backend.reads(), storage_backend.writes())
         };
 
-        let fact_stream = facts.select(ArtifactSelector::new().of(entity.clone()).is(name.clone()));
+        let fact_stream = facts
+            .select(ArtifactSelector::new().of(entity.clone()).is(name.clone()))
+            .owned();
 
         let results: Vec<Artifact> = fact_stream.map(|result| result.unwrap()).collect().await;
 
@@ -2087,8 +2271,10 @@ mod tests {
         // The threshold-based geometric distribution gives an exact 1/m
         // split at every level, so the tree is flatter than the bit-batch
         // distribution (whose upper levels averaged only 2-4 children) and a
-        // point query walks one fewer block to reach its leaf.
-        assert_eq!(net_reads, 2);
+        // point query walks one fewer block to reach its leaf. The root
+        // itself is served by the node cache the last persist seeded, so it
+        // costs no backend read at all.
+        assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -2119,11 +2305,13 @@ mod tests {
             (storage_backend.reads(), storage_backend.writes())
         };
 
-        let fact_stream = facts.select(
-            ArtifactSelector::new()
-                .the(attribute.clone())
-                .is(name.clone()),
-        );
+        let fact_stream = facts
+            .select(
+                ArtifactSelector::new()
+                    .the(attribute.clone())
+                    .is(name.clone()),
+            )
+            .owned();
 
         let results: Vec<Artifact> = fact_stream.map(|result| result.unwrap()).collect().await;
 
@@ -2148,8 +2336,10 @@ mod tests {
         // The threshold-based geometric distribution gives an exact 1/m
         // split at every level, so the tree is flatter than the bit-batch
         // distribution (whose upper levels averaged only 2-4 children) and a
-        // point query walks one fewer block to reach its leaf.
-        assert_eq!(net_reads, 2);
+        // point query walks one fewer block to reach its leaf. The root
+        // itself is served by the node cache the last persist seeded, so it
+        // costs no backend read at all.
+        assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -2228,7 +2418,9 @@ mod tests {
             (storage_backend.reads(), storage_backend.writes())
         };
 
-        let fact_stream = facts.select(ArtifactSelector::new().is(Value::String("name64".into())));
+        let fact_stream = facts
+            .select(ArtifactSelector::new().is(Value::String("name64".into())))
+            .owned();
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
         assert_eq!(results.len(), 1);
@@ -2244,12 +2436,14 @@ mod tests {
         // The threshold-based geometric distribution gives an exact 1/m
         // split at every level, so the tree is flatter than the bit-batch
         // distribution (whose upper levels averaged only 2-4 children) and
-        // reaching a leaf costs fewer block reads.
-        assert_eq!(net_reads, 2);
+        // reaching a leaf costs fewer block reads; the root is served by the
+        // node cache the last persist seeded.
+        assert_eq!(net_reads, 1);
         assert_eq!(net_writes, 0);
 
-        let fact_stream =
-            facts.select(ArtifactSelector::new().the(Attribute::from_str("item/id")?));
+        let fact_stream = facts
+            .select(ArtifactSelector::new().the(Attribute::from_str("item/id")?))
+            .owned();
 
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
@@ -2270,8 +2464,9 @@ mod tests {
         // reference, which changes leaf boundaries and the tree's shape, so the
         // scan's bounded descent touches a different set of blocks than the
         // reference layout did. Byte-paced boundaries (the default max_segment)
-        // pack this fixture's leaves so the descent lands on one fewer block.
-        assert_eq!(net_reads, 4);
+        // pack this fixture's leaves so the descent lands on one fewer block,
+        // and the cached root saves one more backend read.
+        assert_eq!(net_reads, 3);
         assert_eq!(net_writes, 0);
 
         Ok(())
@@ -2296,6 +2491,7 @@ mod tests {
 
         let results = artifacts
             .select(ArtifactSelector::new().is(Value::UnsignedInt(123)))
+            .owned()
             .map(|result| result.unwrap().of)
             .collect::<BTreeSet<Entity>>()
             .await;
@@ -2329,6 +2525,7 @@ mod tests {
 
         let results = artifacts
             .select(ArtifactSelector::new().is(Value::UnsignedInt(123)))
+            .owned()
             .map(|result| result.unwrap().of)
             .collect::<BTreeSet<Entity>>()
             .await;
@@ -2362,6 +2559,12 @@ mod tests {
 
         facts_two.commit(reordered_data).await?;
 
+        // Commit roots are the buffered form, whose hash depends on op order;
+        // insertion-order independence is a property of the CANONICAL form,
+        // reached explicitly.
+        facts_one.canonicalize().await?;
+        facts_two.canonicalize().await?;
+
         assert_eq!(facts_one.revision().await, facts_two.revision().await);
 
         Ok(())
@@ -2385,11 +2588,14 @@ mod tests {
 
         assert_eq!(revision, restored_revision);
 
-        let fact_stream = facts.select(ArtifactSelector::new().is(Value::String("name10".into())));
+        let fact_stream = facts
+            .select(ArtifactSelector::new().is(Value::String("name10".into())))
+            .owned();
         let results: Vec<Artifact> = fact_stream.map(|fact| fact.unwrap()).collect().await;
 
-        let restored_fact_stream =
-            restored_facts.select(ArtifactSelector::new().is(Value::String("name10".into())));
+        let restored_fact_stream = restored_facts
+            .select(ArtifactSelector::new().is(Value::String("name10".into())))
+            .owned();
         let restored_results: Vec<Artifact> = restored_fact_stream
             .map(|fact| fact.unwrap())
             .collect()
@@ -2432,6 +2638,7 @@ mod tests {
 
         let results = artifacts
             .select(ArtifactSelector::new().of(entity))
+            .owned()
             .collect::<Vec<Result<Artifact, DialogArtifactsError>>>()
             .await;
 
@@ -2466,6 +2673,7 @@ mod tests {
 
         let results = artifacts
             .select(ArtifactSelector::new().the("item/id".parse()?))
+            .owned()
             .map(|result| result.unwrap())
             .collect::<Vec<Artifact>>()
             .await;
@@ -2559,6 +2767,7 @@ mod tests {
         // Verify the data exists
         let results = artifacts
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2592,6 +2801,7 @@ mod tests {
         // Verify the data exists
         let results = artifacts
             .select(ArtifactSelector::new().the(attribute.clone()))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2603,6 +2813,7 @@ mod tests {
         // Verify data is gone (empty state)
         let results = artifacts
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2671,6 +2882,7 @@ mod tests {
         // Query the data to verify it was stored
         let results = artifacts_mut
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2769,6 +2981,7 @@ mod tests {
         // A select reconstructs the exact value by fetching the block.
         let results = artifacts
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2818,6 +3031,7 @@ mod tests {
             // Either way the value reconstructs.
             let results = artifacts
                 .select(ArtifactSelector::new().of(entity))
+                .owned()
                 .map(|r| r.unwrap())
                 .collect::<Vec<_>>()
                 .await;
@@ -2865,6 +3079,7 @@ mod tests {
                 .await?;
             let results = artifacts
                 .select(ArtifactSelector::new().of(entity))
+                .owned()
                 .map(|r| r.unwrap())
                 .collect::<Vec<_>>()
                 .await;
@@ -2901,6 +3116,7 @@ mod tests {
 
             let results = artifacts
                 .select(ArtifactSelector::new().of(entity).the(attribute.clone()))
+                .owned()
                 .map(|r| r.unwrap())
                 .collect::<Vec<_>>()
                 .await;
@@ -2934,6 +3150,7 @@ mod tests {
 
         let results = artifacts
             .select(ArtifactSelector::new().of(entity))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -2979,6 +3196,7 @@ mod tests {
         );
         let results = artifacts
             .select(ArtifactSelector::new().the(attribute))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;
@@ -3033,6 +3251,7 @@ mod tests {
         }
         let results = artifacts
             .select(ArtifactSelector::new().is(wanted.clone()))
+            .owned()
             .map(|r| r.unwrap())
             .collect::<Vec<_>>()
             .await;

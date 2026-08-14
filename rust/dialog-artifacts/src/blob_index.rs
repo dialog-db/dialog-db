@@ -174,6 +174,27 @@ pub trait BlobIndexExt {
             + Clone
             + ConditionalSync;
 
+    /// Retract a blob reference from the index.
+    ///
+    /// Writes a tombstone ([`State::Removed`]) at the blob's key rather than
+    /// deleting the entry, so the removal replicates and merges like a fact
+    /// retraction instead of being resurrected by a union with an older tree.
+    /// The blob's bytes are not touched; reclaiming bytes no index references
+    /// is a separate, local concern.
+    ///
+    /// Idempotent: retracting an unreferenced hash writes the same tombstone.
+    /// A later [`put_blob`](BlobIndexExt::put_blob) re-references the blob.
+    async fn retract_blob<S>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        hash: &Blake3Hash,
+    ) -> Result<(), DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync;
+
     /// Look up a blob's record, or `None` if it is not in the index.
     async fn get_blob<S>(
         &self,
@@ -232,6 +253,24 @@ impl BlobIndexExt for ArtifactTree {
             .edit()
             .insert(key, record.into_state(), &storage)
             .await?;
+        *self = transient.persist(delta)?;
+        Ok(())
+    }
+
+    async fn retract_blob<S>(
+        &mut self,
+        store: &mut S,
+        delta: &mut Delta<NodeHash, Buffer>,
+        hash: &Blake3Hash,
+    ) -> Result<(), DialogArtifactsError>
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync,
+    {
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        let key = BlobKey::new(hash).into_key();
+        let transient = self.edit().insert(key, State::Removed, &storage).await?;
         *self = transient.persist(delta)?;
         Ok(())
     }
@@ -349,6 +388,151 @@ mod tests {
                 (hash(3), BlobRecord::new(3)),
             ]
         );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_retracts_a_blob_reference() -> Result<(), DialogArtifactsError> {
+        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
+        let mut delta = Delta::zero();
+        let mut tree = ArtifactTree::empty();
+
+        for seed in [1u8, 2] {
+            tree.put_blob(
+                &mut store,
+                &mut delta,
+                &hash(seed),
+                BlobRecord::new(seed as u64),
+            )
+            .await?;
+            for (_, buffer) in delta.flush() {
+                store
+                    .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                    .await?;
+            }
+        }
+
+        tree.retract_blob(&mut store, &mut delta, &hash(1)).await?;
+        for (_, buffer) in delta.flush() {
+            store
+                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                .await?;
+        }
+
+        assert_eq!(tree.get_blob(&store, &hash(1)).await?, None);
+        assert!(!tree.has_blob(&store, &hash(1)).await?);
+
+        // The other reference is untouched, and listing skips the tombstone.
+        assert_eq!(
+            tree.get_blob(&store, &hash(2)).await?,
+            Some(BlobRecord::new(2))
+        );
+        let listed: Vec<_> = tree.list_blobs(store).try_collect().await?;
+        assert_eq!(listed, vec![(hash(2), BlobRecord::new(2))]);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_re_references_a_blob_after_retraction() -> Result<(), DialogArtifactsError> {
+        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
+        let mut delta = Delta::zero();
+        let mut tree = ArtifactTree::empty();
+
+        let flush = |store: &mut MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+                     delta: &mut Delta<NodeHash, Buffer>| {
+            let buffers: Vec<_> = delta.flush().collect();
+            let mut store = store.clone();
+            async move {
+                for (_, buffer) in buffers {
+                    store
+                        .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                        .await?;
+                }
+                Ok::<_, DialogArtifactsError>(())
+            }
+        };
+
+        tree.put_blob(&mut store, &mut delta, &hash(1), BlobRecord::new(10))
+            .await?;
+        flush(&mut store, &mut delta).await?;
+        tree.retract_blob(&mut store, &mut delta, &hash(1)).await?;
+        flush(&mut store, &mut delta).await?;
+        tree.put_blob(&mut store, &mut delta, &hash(1), BlobRecord::new(10))
+            .await?;
+        flush(&mut store, &mut delta).await?;
+
+        assert_eq!(
+            tree.get_blob(&store, &hash(1)).await?,
+            Some(BlobRecord::new(10))
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_surfaces_a_retraction_as_removed_in_the_differential()
+    -> Result<(), DialogArtifactsError> {
+        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
+        let mut delta = Delta::zero();
+
+        let flush = |store: &mut MemoryStorageBackend<Blake3Hash, Vec<u8>>,
+                     delta: &mut Delta<NodeHash, Buffer>| {
+            let buffers: Vec<_> = delta.flush().collect();
+            let mut store = store.clone();
+            async move {
+                for (_, buffer) in buffers {
+                    store
+                        .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                        .await?;
+                }
+                Ok::<_, DialogArtifactsError>(())
+            }
+        };
+
+        let mut checkpoint = ArtifactTree::empty();
+        checkpoint
+            .put_blob(&mut store, &mut delta, &hash(1), BlobRecord::new(10))
+            .await?;
+        flush(&mut store, &mut delta).await?;
+
+        let mut current = checkpoint.clone();
+        current
+            .retract_blob(&mut store, &mut delta, &hash(1))
+            .await?;
+        flush(&mut store, &mut delta).await?;
+
+        let changes: Vec<_> = blob_changes(checkpoint, current, store)
+            .try_collect()
+            .await?;
+        assert_eq!(changes, vec![BlobChange::Removed(hash(1))]);
+        Ok(())
+    }
+
+    /// Retracting a hash the index never referenced writes a tombstone and
+    /// stays a no-op for readers and for shipment: the differential's added
+    /// tombstone decodes to `None`, which `shipment_ref` classifies as
+    /// nothing to ship.
+    #[dialog_common::test]
+    async fn it_ships_nothing_for_a_retraction_of_an_unreferenced_blob()
+    -> Result<(), DialogArtifactsError> {
+        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
+        let mut delta = Delta::zero();
+
+        let checkpoint = ArtifactTree::empty();
+        let mut current = checkpoint.clone();
+        current
+            .retract_blob(&mut store, &mut delta, &hash(9))
+            .await?;
+        for (_, buffer) in delta.flush() {
+            store
+                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                .await?;
+        }
+
+        assert_eq!(current.get_blob(&store, &hash(9)).await?, None);
+        let changes: Vec<_> = blob_changes(checkpoint, current, store)
+            .try_collect()
+            .await?;
+        assert!(changes.is_empty(), "nothing to un-ship: {changes:?}");
         Ok(())
     }
 
