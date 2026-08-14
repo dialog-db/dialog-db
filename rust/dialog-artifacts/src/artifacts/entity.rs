@@ -116,6 +116,16 @@ impl Entity {
         (**self).as_str()
     }
 
+    /// Reconstructs an [`Entity`] from a string read back out of the index,
+    /// verifying it is a canonical URI rendering (see [`Uri::from_stored`]).
+    /// A string that fails the check is a corrupt or foreign-written entry
+    /// and errors as [`CorruptEntry`](DialogArtifactsError::CorruptEntry),
+    /// which scan paths treat as an ignorable row. The key bytes are still
+    /// derived (they are not stored alongside the string).
+    pub(crate) fn from_stored(s: &str) -> Result<Self, DialogArtifactsError> {
+        Self::try_from(Uri::from_stored(s)?)
+    }
+
     /// Get the raw byte representation of the [`Entity`] as it should be
     /// formatted for use in an index key.
     pub fn key_bytes(&self) -> &[u8; ENTITY_LENGTH] {

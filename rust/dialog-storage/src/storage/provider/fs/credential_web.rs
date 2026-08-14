@@ -27,10 +27,7 @@ const KEY: &str = "key";
 impl FileSystem {
     /// Handle for the credential key at `credential/key/{address}`.
     fn credential_key(&self, address: &str) -> Result<super::FileSystemHandle, CredentialError> {
-        self.resolve(CREDENTIAL)
-            .and_then(|c| c.resolve(KEY))
-            .and_then(|c| c.resolve(address))
-            .map_err(|e| CredentialError::Storage(e.to_string()))
+        Ok(self.resolve(CREDENTIAL)?.resolve(KEY)?.resolve(address)?)
     }
 }
 
@@ -40,11 +37,7 @@ impl Provider<Load<Credential>> for FileSystem {
         &self,
         input: Capability<Load<Credential>>,
     ) -> Result<Credential, CredentialError> {
-        let bytes = self
-            .credential_key(input.address())?
-            .read()
-            .await
-            .map_err(|e| CredentialError::Storage(e.to_string()))?;
+        let bytes = self.credential_key(input.address())?.read().await?;
         Credential::identity(&bytes).map_err(|e| CredentialError::Corrupted(e.to_string()))
     }
 }
@@ -55,9 +48,7 @@ impl Provider<Save<Credential>> for FileSystem {
         // Only the public identity is persisted; a non-extractable web signer
         // cannot be stored, and the identity is all the FS layout needs.
         let bytes = input.credential().to_identity_bytes();
-        self.credential_key(input.address())?
-            .write(&bytes)
-            .await
-            .map_err(|e| CredentialError::Storage(e.to_string()))
+        self.credential_key(input.address())?.write(&bytes).await?;
+        Ok(())
     }
 }

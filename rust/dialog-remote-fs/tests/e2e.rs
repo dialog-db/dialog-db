@@ -119,6 +119,7 @@ async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
     let results: Vec<_> = branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -184,6 +185,7 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
     let results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()

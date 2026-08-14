@@ -52,6 +52,41 @@ impl DecodedKeys {
     pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
         (0..self.len()).map(|index| self.get(index).expect("index in range"))
     }
+
+    /// Position of the first key at or above `probe` (the partition
+    /// point): where a range starting at `probe` enters this leaf. O(log n)
+    /// key comparisons against the linear walk a front-coded stream needs.
+    pub fn lower_bound(&self, probe: &[u8]) -> usize {
+        let mut low = 0usize;
+        let mut high = self.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.get(middle).expect("index in range") < probe {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        low
+    }
+
+    /// Position of the key equal to `probe`, or `None`. Keys are stored in
+    /// entry (sorted) order, so this is a binary search — O(log n) key
+    /// comparisons against the linear front-coded stream a fresh decode
+    /// requires.
+    pub fn binary_search(&self, probe: &[u8]) -> Option<usize> {
+        let mut low = 0usize;
+        let mut high = self.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match self.get(middle).expect("index in range").cmp(probe) {
+                Ordering::Less => low = middle + 1,
+                Ordering::Greater => high = middle,
+                Ordering::Equal => return Some(middle),
+            }
+        }
+        None
+    }
 }
 
 /// A tree node in its serialized, content-addressed form.
@@ -373,6 +408,68 @@ where
         child: u32,
         entries: Vec<NoveltyEntry<Value>>,
     ) -> Result<Self, DialogSearchTreeError> {
+        let (count, layout, columns) = Self::key_columns::<Key>(&entries)?;
+
+        let mut polarity = Vec::with_capacity(entries.len());
+        let mut values = Vec::new();
+        for entry in entries {
+            match entry.op {
+                NoveltyOp::Assert(value) => {
+                    polarity.push(1);
+                    values.push(value);
+                }
+                NoveltyOp::Retract => polarity.push(0),
+            }
+        }
+
+        Ok(Self {
+            child,
+            count,
+            layout,
+            columns,
+            polarity,
+            values,
+        })
+    }
+
+    /// [`from_entries`](Self::from_entries) without consuming the op list:
+    /// the values are cloned into the buffer instead of moved. Exists for
+    /// the non-consuming persist, which must keep the decoded ops live for
+    /// later appends while embedding their encoding into the frame.
+    pub fn from_entries_ref<Key: self::Key>(
+        child: u32,
+        entries: &[NoveltyEntry<Value>],
+    ) -> Result<Self, DialogSearchTreeError> {
+        let (count, layout, columns) = Self::key_columns::<Key>(entries)?;
+
+        let mut polarity = Vec::with_capacity(entries.len());
+        let mut values = Vec::new();
+        for entry in entries {
+            match &entry.op {
+                NoveltyOp::Assert(value) => {
+                    polarity.push(1);
+                    values.push(value.clone());
+                }
+                NoveltyOp::Retract => polarity.push(0),
+            }
+        }
+
+        Ok(Self {
+            child,
+            count,
+            layout,
+            columns,
+            polarity,
+            values,
+        })
+    }
+
+    /// The key side of the buffer encoding, shared by the consuming and
+    /// borrowing constructors: layout classification plus the columnar
+    /// encode of every key.
+    fn key_columns<Key: self::Key>(
+        entries: &[NoveltyEntry<Value>],
+    ) -> Result<(u32, u8, Vec<ColumnData>), DialogSearchTreeError> {
         let count = entries.len() as u32;
         if entries.is_empty() {
             return Err(DialogSearchTreeError::Node(
@@ -419,26 +516,27 @@ where
             (MIXED_LAYOUT, vec![ColumnData::Arena { prefix, stream }])
         };
 
-        let mut polarity = Vec::with_capacity(entries.len());
-        let mut values = Vec::new();
-        for entry in entries {
-            match entry.op {
-                NoveltyOp::Assert(value) => {
-                    polarity.push(1);
-                    values.push(value);
-                }
-                NoveltyOp::Retract => polarity.push(0),
-            }
-        }
+        Ok((count, layout, columns))
+    }
 
-        Ok(Self {
-            child,
-            count,
-            layout,
-            columns,
-            polarity,
-            values,
-        })
+    /// The buffered weight this sealed buffer carries (key bytes plus value
+    /// payload weights, retracts charged at 16), for the byte-capped flush
+    /// trigger: computed by streaming the key columns, with no entry
+    /// materialization.
+    pub fn weight<Key: self::Key>(&self) -> Result<usize, DialogSearchTreeError> {
+        let mut weight = 0usize;
+        let mut keys = self.keys::<Key>()?;
+        while let Some((_, key)) = keys.next_key()? {
+            weight += key.len();
+        }
+        weight += self
+            .values
+            .iter()
+            .map(|value| value.payload_weight())
+            .sum::<usize>();
+        weight += 16 * self.polarity.iter().filter(|&&p| p == 0).count();
+        weight += crate::entry::ENTRY_ENCODING_OVERHEAD * self.count as usize;
+        Ok(weight)
     }
 
     /// The op count claimed by `count`, validated against the polarity and
@@ -489,13 +587,27 @@ where
     /// polarity column; an assert clones its value from the assert-aligned
     /// value table.
     pub fn op_at(&self, at: usize) -> Result<NoveltyOp<Value>, DialogSearchTreeError> {
+        let slot = self.polarity[..at.min(self.polarity.len())]
+            .iter()
+            .filter(|&&p| p == 1)
+            .count();
+        self.op_with_slot(at, slot)
+    }
+
+    /// The op at entry `at` given its value-table `slot` (the number of
+    /// asserts before it), for readers that track the slot while streaming
+    /// the buffer instead of re-scanning the polarity column per op.
+    pub(crate) fn op_with_slot(
+        &self,
+        at: usize,
+        slot: usize,
+    ) -> Result<NoveltyOp<Value>, DialogSearchTreeError> {
         match self.polarity.get(at) {
             None => Err(DialogSearchTreeError::Encoding(
                 "Novelty entry out of range".into(),
             )),
             Some(0) => Ok(NoveltyOp::Retract),
             Some(1) => {
-                let slot = self.polarity[..at].iter().filter(|&&p| p == 1).count();
                 let value = self.values.get(slot).ok_or_else(|| {
                     DialogSearchTreeError::Encoding("Novelty value out of range".into())
                 })?;
@@ -510,21 +622,30 @@ where
     /// The winning op for `key` in this buffer, or `None` when the key is not
     /// buffered here. The buffer is sorted by key with the newest op for a key
     /// last, so the scan keeps the last equal key and stops at the first
-    /// greater one; only the winner's value is decoded.
+    /// greater one; the winner's value-table slot is tracked as the polarity
+    /// column is walked, and only the winner's value is decoded.
     pub fn resolve<Key: self::Key>(
         &self,
         key: &[u8],
     ) -> Result<Option<NoveltyOp<Value>>, DialogSearchTreeError> {
         let mut keys = self.keys::<Key>()?;
-        let mut winner = None;
+        let mut winner: Option<(usize, usize)> = None;
+        let mut asserts = 0usize;
         while let Some((at, entry_key)) = keys.next_key()? {
+            let slot = asserts;
+            // `keys()` validated every polarity byte as 0 or 1.
+            if self.polarity.get(at).copied() == Some(1) {
+                asserts += 1;
+            }
             match entry_key.cmp(key) {
                 Ordering::Less => {}
-                Ordering::Equal => winner = Some(at),
+                Ordering::Equal => winner = Some((at, slot)),
                 Ordering::Greater => break,
             }
         }
-        winner.map(|at| self.op_at(at)).transpose()
+        winner
+            .map(|(at, slot)| self.op_with_slot(at, slot))
+            .transpose()
     }
 
     /// Decodes the whole buffer to owned entries, in entry order: the lift a
