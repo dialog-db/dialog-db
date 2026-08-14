@@ -6,7 +6,7 @@
 
 use base58::ToBase58;
 use dialog_capability::access::{
-    AuthorizeError, Certificate, CertificateStore, Delegation, Protocol, Prove, Retain,
+    AuthorizeError, Certificate, CertificateStore, Delegation, Export, Protocol, Prove, Retain,
 };
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -50,6 +50,20 @@ where
         Ok(certificates)
     }
 
+    /// Decode every stored certificate across all sessions, for migration.
+    async fn export(&self) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        let sessions = self.sessions.read();
+        let mut certificates = Vec::new();
+        for session in sessions.values() {
+            for bytes in session.certificates.values() {
+                if let Ok(cert) = <P::Certificate as Certificate>::decode(bytes) {
+                    certificates.push(cert);
+                }
+            }
+        }
+        Ok(certificates)
+    }
+
     /// Store a delegation's certificates for future lookups.
     ///
     /// Each certificate is stored keyed by
@@ -75,6 +89,22 @@ where
         }
 
         Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<P> Provider<Export<P>> for Volatile
+where
+    P: Protocol,
+    P::Certificate: ConditionalSend + ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        _input: Capability<Export<P>>,
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        CertificateStore::<P>::export(self).await
     }
 }
 

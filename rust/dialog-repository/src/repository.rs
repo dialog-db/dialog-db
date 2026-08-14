@@ -13,6 +13,9 @@ use dialog_operator::access::Access as ProfileAccess;
 use dialog_operator::{Profile, SpaceHandle};
 use dialog_varsig::Principal;
 
+mod access;
+pub use access::*;
+
 mod archive;
 pub use archive::*;
 

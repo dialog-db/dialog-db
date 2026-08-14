@@ -84,6 +84,7 @@ impl OperatorBuilder {
             storage,
             directory: self.directory,
             network: self.network,
+            access: None,
         };
 
         // Create delegations for allowed capabilities

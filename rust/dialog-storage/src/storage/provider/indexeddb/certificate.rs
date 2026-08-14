@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::access::{
-    AuthorizeError, Certificate, CertificateStore, Delegation, Protocol, Prove, Retain,
+    AuthorizeError, Certificate, CertificateStore, Delegation, Export, Protocol, Prove, Retain,
 };
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_varsig::Did;
@@ -65,6 +65,34 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
             .await
     }
 
+    async fn export(&self) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        let has_store = self.connection.borrow().stores.contains(CERTIFICATE);
+        if !has_store {
+            return Ok(Vec::new());
+        }
+
+        let store = self.store(CERTIFICATE).await?;
+        store
+            .query(|object_store| async move {
+                let values = object_store.get_all(None, None).await.map_err(|e| {
+                    AuthorizeError::Unavailable {
+                        detail: format!("query: {e:?}"),
+                    }
+                })?;
+
+                let mut certs = Vec::new();
+                for value in values {
+                    let array = js_sys::Uint8Array::new(&value);
+                    let bytes = array.to_vec();
+                    if let Ok(cert) = <P::Certificate as Certificate>::decode(&bytes) {
+                        certs.push(cert);
+                    }
+                }
+                Ok(certs)
+            })
+            .await
+    }
+
     async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError> {
         let certs = delegation.certificates();
         if certs.is_empty() {
@@ -102,6 +130,19 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
         }
 
         Ok(())
+    }
+}
+
+#[async_trait(?Send)]
+impl<P> Provider<Export<P>> for IndexedDb
+where
+    P: Protocol,
+{
+    async fn execute(
+        &self,
+        _input: Capability<Export<P>>,
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        CertificateStore::<P>::export(self).await
     }
 }
 

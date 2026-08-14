@@ -4,7 +4,7 @@
 
 use base58::ToBase58;
 use dialog_capability::access::{
-    AuthorizeError, Certificate, CertificateStore, Delegation, Protocol, Prove, Retain,
+    AuthorizeError, Certificate, CertificateStore, Delegation, Export, Protocol, Prove, Retain,
 };
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -69,6 +69,45 @@ where
         Ok(certificates)
     }
 
+    /// Walk `certificate/{audience}/{subject}/` and decode every stored
+    /// certificate, for migration.
+    async fn export(&self) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        let root = match self.certificate() {
+            Ok(root) => root,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let audiences = match root.list().await {
+            Ok(entries) => entries,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let mut certificates = Vec::new();
+        for audience in audiences {
+            let audience_dir = root.resolve(&audience)?;
+            let subjects = match audience_dir.list().await {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for subject in subjects {
+                let subject_dir = audience_dir.resolve(&subject)?;
+                let entries = match subject_dir.list().await {
+                    Ok(entries) => entries,
+                    Err(_) => continue,
+                };
+                for entry in entries {
+                    let handle = subject_dir.resolve(&entry)?;
+                    if let Ok(bytes) = handle.read().await
+                        && let Ok(cert) = <P::Certificate as Certificate>::decode(&bytes)
+                    {
+                        certificates.push(cert);
+                    }
+                }
+            }
+        }
+
+        Ok(certificates)
+    }
+
     /// Store a delegation's certificates as files for future lookups.
     async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError> {
         for cert in delegation.certificates() {
@@ -94,6 +133,21 @@ where
         }
 
         Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<P> Provider<Export<P>> for FileSystem
+where
+    P: Protocol,
+    P::Certificate: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        _input: Capability<Export<P>>,
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        CertificateStore::<P>::export(self).await
     }
 }
 
