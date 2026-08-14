@@ -289,6 +289,11 @@ pub enum PullError {
     /// An artifact decode during pull failed.
     #[error("Artifact decode failed during pull: {0}")]
     Artifact(#[from] DialogArtifactsError),
+
+    /// Materializing the adopted head after the pull failed
+    /// ([`Pull::download`](crate::Pull::download)).
+    #[error("Download after pull failed: {0}")]
+    Download(#[from] DownloadError),
 }
 
 /// Errors specific to a push operation.
@@ -572,6 +577,19 @@ mod tests {
         assert!(matches!(reason, AuthorizeError::Revoked { .. }));
         assert_revoked(&push.to_string());
     }
+}
+
+/// Errors from materializing a branch's content locally
+/// ([`Branch::download`](crate::Branch::download)).
+#[derive(Error, Debug)]
+pub enum DownloadError {
+    /// Loading the branch's configured remote failed.
+    #[error("Failed to load remote for download: {0}")]
+    LoadRemote(#[from] LoadRemoteError),
+
+    /// The materializing walk failed.
+    #[error("Download walk failed: {0}")]
+    Snapshot(#[from] SnapshotError),
 }
 
 /// Errors from snapshot export and import.

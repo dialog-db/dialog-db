@@ -74,7 +74,6 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Write as BlobWrite;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
-use dialog_effects::blob::{Import as EnvelopeImport, Read as EnvelopeRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_ucan::{UcanCertificate, UcanDelegation};
 use futures_util::stream;
@@ -137,107 +136,6 @@ impl<'a> Delegations<'a> {
             branch: self.branch,
             chain,
         }
-    }
-
-    /// Hydrate every retained delegation into local storage: the tree
-    /// blocks its facts live in (a pulled tree adopts subtrees by link,
-    /// leaving their blocks remote until read) and its envelope blob.
-    /// The operator runs this when the branch head moves — the
-    /// authorization walk deliberately reads only local state, so this
-    /// is the step that brings that state local.
-    pub fn hydrate(self) -> HydrateDelegations<'a> {
-        HydrateDelegations {
-            branch: self.branch,
-        }
-    }
-}
-
-/// Hydrate retained delegation envelopes from the branch's remote.
-/// Created by [`Delegations::hydrate`].
-pub struct HydrateDelegations<'a> {
-    branch: &'a Branch,
-}
-
-impl HydrateDelegations<'_> {
-    /// Fetch every retained delegation's fact blocks and envelope that
-    /// are not yet local, returning how many delegations are locally
-    /// provable afterward. The scan warms exactly what the walk reads:
-    /// the audience index it discovers candidates through, each
-    /// delegation entity's own facts, and the envelope bytes admission
-    /// decodes. A delegation the remote cannot serve is skipped: the
-    /// prover treats it as no candidate, and a later attempt can
-    /// complete it.
-    pub async fn perform<Env>(self, env: &Env) -> Result<usize, CommitError>
-    where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<EnvelopeRead>
-            + Provider<EnvelopeImport>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<Fork<RemoteSite, EnvelopeRead>>
-            + ConditionalSync
-            + 'static,
-    {
-        use dialog_artifacts::ArtifactSelector;
-        use futures_util::StreamExt as _;
-
-        let branch = self.branch;
-        let store = index_store(branch, env).await;
-        let facts = crate::Select::new(
-            branch,
-            ArtifactSelector::new().the(
-                DELEGATION_AUDIENCE
-                    .parse()
-                    .expect("the audience attribute is valid"),
-            ),
-        )
-        .execute(store.clone())
-        .await
-        .map_err(DialogArtifactsError::from)?;
-        futures_util::pin_mut!(facts);
-
-        let mut entities = Vec::new();
-        {
-            let mut seen = HashSet::new();
-            while let Some(fact) = facts.next().await {
-                let Ok(artifact) = fact.and_then(|view| view.to_owned()) else {
-                    continue;
-                };
-                if seen.insert(artifact.of.to_string()) {
-                    entities.push(artifact.of);
-                }
-            }
-        }
-
-        let mut hydrated = 0;
-        for entity in entities {
-            // Warm the entity's own fact blocks: the walk reads them
-            // through the entity ordering, which the audience scan above
-            // does not touch.
-            let entity_facts =
-                crate::Select::new(branch, ArtifactSelector::new().of(entity.clone()))
-                    .execute(store.clone())
-                    .await
-                    .map_err(DialogArtifactsError::from)?;
-            futures_util::pin_mut!(entity_facts);
-            while entity_facts.next().await.is_some() {}
-
-            // Local-first read with remote fallback: a hit caches the
-            // bytes locally, a miss (remote cannot serve it either) is
-            // skipped.
-            let Ok(mut reader) = crate::Blob::from(entity)
-                .read(branch.into())
-                .perform(env)
-                .await
-            else {
-                continue;
-            };
-            while let Ok(Some(_)) = reader.next().await {}
-            hydrated += 1;
-        }
-        Ok(hydrated)
     }
 }
 

@@ -38,6 +38,7 @@
 //! upstream as the walk proceeds, which is what makes the result complete.
 
 use std::collections::HashSet;
+use std::marker::PhantomData;
 
 use async_stream::try_stream;
 use dialog_artifacts::tree::TreeStorageBridge;
@@ -93,9 +94,16 @@ impl Block {
 }
 
 /// An immutable view of a repository at one revision.
+///
+/// Holds the repository's subject rather than the repository itself:
+/// everything an export touches — the archive catalog, the blob channel —
+/// derives from the subject, which lets a [`Branch`](crate::Branch) mint
+/// a snapshot of its own repository too (see
+/// [`Branch::download`](crate::Branch::download)).
 pub struct Snapshot<'a, C: Principal = Credential> {
-    repository: &'a Repository<C>,
+    subject: Subject,
     revision: Revision,
+    repository: PhantomData<&'a C>,
 }
 
 impl<C: Principal> Repository<C> {
@@ -108,8 +116,21 @@ impl<C: Principal> Repository<C> {
     /// from an upstream (see [`SnapshotExport::download`]).
     pub fn snapshot(&self, revision: Revision) -> Snapshot<'_, C> {
         Snapshot {
-            repository: self,
+            subject: self.subject(),
             revision,
+            repository: PhantomData,
+        }
+    }
+}
+
+impl Snapshot<'static> {
+    /// An immutable view of `subject`'s repository at `revision`, for
+    /// callers that hold a branch rather than a repository.
+    pub(crate) fn of(subject: Subject, revision: Revision) -> Self {
+        Snapshot {
+            subject,
+            revision,
+            repository: PhantomData,
         }
     }
 }
@@ -122,7 +143,7 @@ impl<C: Principal> Snapshot<'_, C> {
 
     /// The archive catalog this snapshot's blocks live in.
     pub(crate) fn index(&self) -> Capability<Catalog> {
-        self.repository.subject().archive().index()
+        self.subject.clone().archive().index()
     }
 }
 
@@ -258,7 +279,7 @@ impl<C: Principal> SnapshotExport<'_, C> {
             + 'static,
     {
         let catalog = self.snapshot.index();
-        let subject = self.snapshot.repository.subject();
+        let subject = self.snapshot.subject.clone();
         let upstream = match &self.reach {
             Reach::Download(remote) => Some(remote.clone()),
             Reach::Complete | Reach::Sparse => None,

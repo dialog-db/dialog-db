@@ -37,6 +37,9 @@ pub use commit::*;
 mod delegation;
 pub use delegation::*;
 
+mod download;
+pub use download::*;
+
 mod export;
 pub use export::*;
 
