@@ -116,7 +116,6 @@ impl ProveDelegation<'_> {
     {
         let branch = self.branch;
         let access = &self.access;
-        let duration = &self.duration;
 
         let subject = match &access.subject {
             UcanSubject::Specific(did) => did.clone(),
@@ -169,7 +168,7 @@ impl ProveDelegation<'_> {
                     // Direct grant: admit immediately. The first one whose
                     // envelope verifies completes the chain.
                     if let Some(admitted) = self
-                        .admit(branch, env, &candidate, access, duration)
+                        .admit(branch, env, &candidate, &hop.audience, &subject)
                         .await?
                     {
                         admitted_direct = Some(admitted);
@@ -198,7 +197,7 @@ impl ProveDelegation<'_> {
             // candidates and queue the next hops.
             for candidate in deferred {
                 let Some((certificate, range)) = self
-                    .admit(branch, env, &candidate, access, duration)
+                    .admit(branch, env, &candidate, &hop.audience, &subject)
                     .await?
                 else {
                     continue;
@@ -310,15 +309,17 @@ impl ProveDelegation<'_> {
     }
 
     /// Fetch and decode a candidate's envelope and run the authoritative
-    /// verification (command cover and policy). `None` means the envelope
-    /// rejected a claim its facts admitted; the walk moves on.
+    /// verification (identity linkage, command cover and policy). `None`
+    /// means the envelope is unavailable, undecodable, inconsistent with
+    /// the facts that routed it here, or rejected a claim its facts
+    /// admitted; the walk moves on to the next candidate.
     async fn admit<Env>(
         &self,
         branch: &Branch,
         env: &Env,
         candidate: &Candidate,
-        access: &Scope,
-        duration: &TimeRange,
+        audience: &Did,
+        subject: &Did,
     ) -> Result<Option<(UcanCertificate, TimeRange)>, AuthorizeError>
     where
         Env: Provider<Get>
@@ -332,32 +333,73 @@ impl ProveDelegation<'_> {
             + ConditionalSync
             + 'static,
     {
-        let mut reader = Blob::from(candidate.entity.clone())
+        // An unavailable or unreadable envelope skips the candidate rather
+        // than aborting the walk: another candidate, or a later direct
+        // grant, can still prove the claim. The certificate-store walk has
+        // no such failure mode (a listed certificate's bytes are always
+        // present), but a replica that pulled the facts without hydrating
+        // an envelope does.
+        let mut bytes = Vec::new();
+        let mut reader = match Blob::from(candidate.entity.clone())
             .read(branch.into())
             .perform(env)
             .await
-            .map_err(|error| malformed("envelope unavailable", error))?;
-        let mut bytes = Vec::new();
-        while let Some(chunk) = reader
-            .next()
-            .await
-            .map_err(|error| malformed("envelope read failed", error))?
         {
-            bytes.extend(chunk);
+            Ok(reader) => reader,
+            Err(error) => {
+                tracing::warn!(%error, "delegation envelope unavailable; skipping candidate");
+                return Ok(None);
+            }
+        };
+        loop {
+            match reader.next().await {
+                Ok(Some(chunk)) => bytes.extend(chunk),
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "delegation envelope unreadable; skipping candidate");
+                    return Ok(None);
+                }
+            }
+        }
+        let certificate = match UcanCertificate::decode(&bytes) {
+            Ok(certificate) => certificate,
+            Err(error) => {
+                tracing::warn!(%error, "delegation envelope undecodable; skipping candidate");
+                return Ok(None);
+            }
+        };
+
+        // The facts routed this envelope here, but the envelope is the
+        // authority: a drifted record (any peer with push access can write
+        // `dialog.ucan/*` facts the envelope does not back) must not
+        // splice a broken link into the chain.
+        if certificate.issuer() != &candidate.issuer
+            || certificate.audience() != audience
+            || certificate.subject().is_some_and(|did| did != subject)
+        {
+            tracing::warn!(
+                entity = %candidate.entity,
+                "delegation facts disagree with their envelope; skipping candidate"
+            );
+            return Ok(None);
         }
 
-        let certificate = UcanCertificate::decode(&bytes)?;
-        let Ok(range) = certificate.verify(access) else {
+        let Ok(range) = certificate.verify(&self.access) else {
             return Ok(None);
         };
-        if !range.covers(duration) {
+        if !range.covers(&self.duration) {
             return Ok(None);
         }
-        debug_assert_eq!(
-            (range.not_before, range.expiration),
-            (candidate.range.not_before, candidate.range.expiration),
-            "fact bounds must mirror the envelope's"
-        );
+        if (range.not_before, range.expiration)
+            != (candidate.range.not_before, candidate.range.expiration)
+        {
+            // The envelope's bounds prevail (they just passed the cover
+            // check); drifted fact bounds only mis-prefilter candidates.
+            tracing::warn!(
+                entity = %candidate.entity,
+                "delegation fact bounds drifted from their envelope"
+            );
+        }
         Ok(Some((certificate, range)))
     }
 }
@@ -371,7 +413,7 @@ mod tests {
     use crate::RepositoryExt as _;
     use anyhow::Result;
     use dialog_capability::Subject;
-    use dialog_capability::access::{CertificateStore, Prove};
+    use dialog_capability::access::{CertificateStore, Delegation as _, Prove};
     use dialog_credentials::Ed25519Signer;
     use dialog_network::Network;
     use dialog_operator::helpers::unique_name;
@@ -776,6 +818,218 @@ mod tests {
             )
             .await;
         assert!(matches!(proof, Err(AuthorizeError::UnprovenSubject { .. })));
+        Ok(())
+    }
+
+    /// Assert hand-crafted `dialog.ucan/*` facts on `entity` — the shape a
+    /// peer with push access can plant without a matching envelope, since
+    /// the namespace write gate holds only on the local write path.
+    async fn plant_facts(
+        harness: &Harness,
+        entity: &Entity,
+        issuer: &Did,
+        audience: &Did,
+        subject: &Did,
+    ) -> Result<()> {
+        use dialog_artifacts::{Attribute, Instruction};
+        use futures_util::stream;
+
+        let fact = |attribute: &str, value: &str| -> Result<Instruction> {
+            Ok(Instruction::Assert(Artifact {
+                the: Attribute::try_from(attribute.to_string())?,
+                of: entity.clone(),
+                is: Value::String(value.to_string()),
+                cause: None,
+            }))
+        };
+        let command = Command(vec!["storage".to_string()]).to_string();
+        let instructions = vec![
+            fact(DELEGATION_AUDIENCE, audience.as_ref())?,
+            fact(DELEGATION_SUBJECT, subject.as_ref())?,
+            fact(DELEGATION_ISSUER, issuer.as_ref())?,
+            fact(DELEGATION_COMMAND, &command)?,
+        ];
+        harness
+            .branch
+            .commit(stream::iter(instructions))
+            .machinery()
+            .perform(&harness.operator)
+            .await?;
+        Ok(())
+    }
+
+    /// A retracted delegation must stop proving: retraction is the closest
+    /// thing this system has to revocation.
+    #[dialog_common::test]
+    async fn it_stops_proving_after_a_retract() -> Result<()> {
+        let harness = Harness::new("prove-retract").await?;
+        let space = signer().await;
+        let holder = signer().await;
+        let chain = delegate(&space, &holder, UcanSubject::Specific(space.did())).await;
+
+        harness.retain(chain.clone()).await?;
+        let proven = harness
+            .branch
+            .delegations()
+            .prove(holder.did(), scope(&space, &["storage"]))
+            .perform(&harness.operator)
+            .await;
+        assert!(proven.is_ok(), "the grant proves before the retract");
+
+        harness
+            .branch
+            .delegations()
+            .retract(chain)
+            .perform(&harness.operator)
+            .await?;
+        let verdict = harness
+            .branch
+            .delegations()
+            .prove(holder.did(), scope(&space, &["storage"]))
+            .perform(&harness.operator)
+            .await;
+        assert!(
+            matches!(verdict, Err(AuthorizeError::UnprovenSubject { .. })),
+            "a retracted delegation must stop proving: {:?}",
+            verdict.err()
+        );
+        Ok(())
+    }
+
+    /// A single retained chain of several certificates decomposes into one
+    /// candidate per certificate and proves end to end — every other test
+    /// retains single-certificate chains, leaving the decomposition loop
+    /// unexercised.
+    #[dialog_common::test]
+    async fn it_retains_and_proves_a_multi_certificate_chain() -> Result<()> {
+        let harness = Harness::new("prove-chain-retain").await?;
+        let space = signer().await;
+        let mid = signer().await;
+        let holder = signer().await;
+
+        let root = DelegationBuilder::new()
+            .issuer(space.clone())
+            .audience(&mid)
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await
+            .unwrap();
+        let leaf = DelegationBuilder::new()
+            .issuer(mid.clone())
+            .audience(&holder)
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await
+            .unwrap();
+        let chain = UcanDelegation::new(DelegationChain::try_from(vec![root, leaf])?);
+
+        harness.retain(chain).await?;
+        let proof = harness
+            .parity(
+                &holder.did(),
+                scope(&space, &["storage"]),
+                TimeRange::unbounded(),
+            )
+            .await;
+        assert_eq!(
+            proof.expect("the decomposed chain proves").proofs().len(),
+            2,
+            "both certificates of the chain assemble into the proof"
+        );
+        Ok(())
+    }
+
+    /// Facts with no envelope bytes behind them (a replica that pulled the
+    /// facts but never hydrated the blob, or a merge that split the retain
+    /// commit) must be skipped, not abort the walk — and must not stop a
+    /// healthy candidate from proving.
+    #[dialog_common::test]
+    async fn it_skips_a_candidate_whose_envelope_is_unavailable() -> Result<()> {
+        let harness = Harness::new("prove-missing-envelope").await?;
+        let space = signer().await;
+        let holder = signer().await;
+
+        let ghost_hash: dialog_storage::Blake3Hash = [7u8; 32];
+        let ghost = Entity::from_blob(&ghost_hash)?;
+        plant_facts(&harness, &ghost, &space.did(), &holder.did(), &space.did()).await?;
+
+        let verdict = harness
+            .branch
+            .delegations()
+            .prove(holder.did(), scope(&space, &["storage"]))
+            .perform(&harness.operator)
+            .await;
+        assert!(
+            matches!(verdict, Err(AuthorizeError::UnprovenSubject { .. })),
+            "a dangling candidate is a skip, not an abort: {:?}",
+            verdict.err()
+        );
+
+        harness
+            .retain(delegate(&space, &holder, UcanSubject::Specific(space.did())).await)
+            .await?;
+        let proof = harness
+            .branch
+            .delegations()
+            .prove(holder.did(), scope(&space, &["storage"]))
+            .perform(&harness.operator)
+            .await;
+        assert!(
+            proof.is_ok(),
+            "the healthy grant proves despite the dangling candidate: {:?}",
+            proof.err()
+        );
+        Ok(())
+    }
+
+    /// Facts that disagree with the envelope they point at — here spoofing
+    /// the issuer as the subject itself, turning an unrelated certificate
+    /// into an apparent direct grant — must not assemble into a proof: the
+    /// envelope is the authority.
+    #[dialog_common::test]
+    async fn it_rejects_facts_that_disagree_with_their_envelope() -> Result<()> {
+        let harness = Harness::new("prove-drifted-facts").await?;
+        let space = signer().await;
+        let mid = signer().await;
+        let holder = signer().await;
+
+        // A real envelope issued by `mid`, stored as a blob without retain.
+        let certificate = delegate(&mid, &holder, UcanSubject::Specific(space.did()))
+            .await
+            .certificates()
+            .remove(0);
+        use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+        let bytes: Vec<u8> = certificate
+            .encode()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let mut sink = harness
+            .branch
+            .archive()
+            .blob()
+            .write()
+            .perform(&harness.operator)
+            .await?;
+        sink.write_all(&bytes).await?;
+        let hash = sink.finish().await?;
+        let index_hash: dialog_storage::Blake3Hash = *hash.as_bytes();
+        let entity = Entity::from_blob(&index_hash)?;
+
+        // Facts claiming `space` itself issued it: an apparent direct grant.
+        plant_facts(&harness, &entity, &space.did(), &holder.did(), &space.did()).await?;
+
+        let verdict = harness
+            .branch
+            .delegations()
+            .prove(holder.did(), scope(&space, &["storage"]))
+            .perform(&harness.operator)
+            .await;
+        assert!(
+            matches!(verdict, Err(AuthorizeError::UnprovenSubject { .. })),
+            "spoofed facts must not assemble a proof from a mismatched envelope: {:?}",
+            verdict.err()
+        );
         Ok(())
     }
 }
