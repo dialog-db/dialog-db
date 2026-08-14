@@ -208,10 +208,12 @@ impl Select<'_> {
 /// A [`Select`] whose streams materialize every row into an owned
 /// [`Artifact`] — the explicit opt-in produced by [`Select::to_owned`].
 ///
-/// The query pipeline above the branch scan (`ArtifactStream`, the k-way
-/// merge, the `Changes` overlay) still traffics in owned `Artifact`s, so it
-/// ingests through this form. Threading views through that pipeline — so a
-/// query only materializes rows that survive its filters — is the follow-up.
+/// The query pipeline itself traffics in borrowed-access views
+/// (`ArtifactStream` yields [`ArtifactView`]s; the k-way merge and the
+/// `Changes` overlay operate on them, and the engine materializes only the
+/// rows its filters admit). This form is for CONSUMERS that want every row
+/// owned — a collect-everything read, an export — where materializing from
+/// the scan's own key parse beats a per-row view + `to_owned` round trip.
 pub struct SelectOwned<'a>(Select<'a>);
 
 impl SelectOwned<'_> {

@@ -37,7 +37,8 @@ use futures_util::{StreamExt, stream};
 /// scans by construction (the prolly tree stores entries in that
 /// order) and true of `Provider<Select> for Changes` by construction
 /// (it sorts its materialized vec). Implemented as a streaming k-way
-/// merge with peekable inputs.
+/// merge over per-stream head slots, each holding the front row and its
+/// sort key.
 ///
 /// # Order: "as-if merged into one tree"
 ///
@@ -70,8 +71,6 @@ use futures_util::{StreamExt, stream};
 /// fingerprint iff they are the same `(the, of, is, cause)` claim — no
 /// value decode needed.
 pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStream<'a> {
-    use std::pin::Pin;
-
     if streams.is_empty() {
         return Box::pin(stream::empty());
     }
@@ -83,24 +82,28 @@ pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStr
         return streams.into_iter().next().expect("len == 1");
     }
 
-    // Pair every row with its sort key ONCE as it enters the merge, so the
-    // k-way head comparison below reads a cached key instead of re-deriving
-    // it on every peek round (the pre-view code re-encoded each head's value
-    // once per competing stream per yielded item).
-    let mut peekable: Vec<_> = streams
-        .into_iter()
-        .map(|stream| {
-            stream
-                .map(|row| {
-                    let view = row?;
-                    let key = view.sort_key()?;
-                    Ok::<_, dialog_artifacts::DialogArtifactsError>((key, view))
-                })
-                .peekable()
-        })
-        .collect();
+    let mut streams = streams;
 
     Box::pin(async_stream::try_stream! {
+        // One head slot per input: the stream's current front row paired
+        // with its sort key, computed ONCE per row as the slot fills. The
+        // minimum-head scan below compares slots by reference and the
+        // winner is moved out — no per-round key clone, no re-derivation
+        // (the pre-view code re-encoded each head's value once per
+        // competing stream per yielded item; the peekable-based merge
+        // after it still cloned the winning key on every beat).
+        let mut heads: Vec<Option<(SortKey, ArtifactView)>> = Vec::with_capacity(streams.len());
+        for stream in &mut streams {
+            heads.push(match stream.next().await {
+                None => None,
+                Some(row) => {
+                    let view = row?;
+                    let key = view.sort_key()?;
+                    Some((key, view))
+                }
+            });
+        }
+
         // Fingerprints already yielded within the current (the, of) run.
         // Cleared whenever the run advances to a new group.
         let mut current_group: Option<(Vec<u8>, Vec<u8>)> = None;
@@ -108,30 +111,32 @@ pub(crate) fn merge_grouped<'a>(streams: Vec<ArtifactStream<'a>>) -> ArtifactStr
 
         loop {
             let mut min_idx: Option<usize> = None;
-            let mut min_sort: Option<SortKey> = None;
-            for (i, s) in peekable.iter_mut().enumerate() {
-                match Pin::new(s).peek().await {
-                    None => continue,
-                    Some(Err(_)) => {
-                        min_idx = Some(i);
-                        break;
-                    }
-                    Some(Ok((key, _))) => {
-                        // Clone only when this head beats the running
-                        // minimum; the key was computed once at stream
-                        // entry, never re-derived here.
-                        if min_sort.as_ref().is_none_or(|cur| key < cur) {
-                            min_sort = Some(key.clone());
-                            min_idx = Some(i);
+            for (i, slot) in heads.iter().enumerate() {
+                if let Some((key, _)) = slot {
+                    let beats = match min_idx {
+                        Some(min) => {
+                            let (min_key, _) = heads[min].as_ref().expect("min slot filled");
+                            key < min_key
                         }
+                        None => true,
+                    };
+                    if beats {
+                        min_idx = Some(i);
                     }
                 }
             }
             let Some(idx) = min_idx else { break };
-            let (key, view) = peekable[idx]
-                .next()
-                .await
-                .expect("peek returned Some, so next must too")?;
+            let (key, view) = heads[idx].take().expect("minimum chosen from filled slot");
+            // Refill the winner's slot from its stream before yielding, so
+            // the next round sees every live head.
+            heads[idx] = match streams[idx].next().await {
+                None => None,
+                Some(row) => {
+                    let next_view = row?;
+                    let next_key = next_view.sort_key()?;
+                    Some((next_key, next_view))
+                }
+            };
 
             let (the, of, tail) = key;
             let group = (the, of);
