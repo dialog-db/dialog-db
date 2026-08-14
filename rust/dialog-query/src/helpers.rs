@@ -26,6 +26,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use dialog_artifacts::inspect::Load;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Instruction,
@@ -41,7 +42,9 @@ use dialog_network::Network;
 use dialog_operator::DeriveOperator as _;
 use dialog_operator::helpers::{generate_data, unique_name};
 use dialog_operator::{Operator, Profile};
-use dialog_repository::{Branch, NetworkedIndex, RemoteSite, Repository, RepositoryExt as _};
+use dialog_repository::{
+    Branch, NetworkedIndex, RemoteSite, Repository, RepositoryArchiveExt as _, RepositoryExt as _,
+};
 use dialog_search_tree::audit as tree_audit;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::{Blake3Hash, DialogStorageError, JournaledStorage, StorageBackend};
@@ -436,6 +439,28 @@ where
 impl<Env: ConditionalSync> Provider<SelectRules> for JoinEnv<'_, Env> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         self.rules.acquire(&input)
+    }
+}
+
+// Raw node loads for resolver premises: read the branch's archive
+// catalog through the same counting store scans use, so resolver
+// block reads land in the shared read journal too.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<Env> Provider<Load> for JoinEnv<'_, Env>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
+        let store = NetworkedIndex::new(self.operator, self.branch.archive().index(), None);
+        let counting = CountingStore::new(store, self.journal.clone());
+        Ok(counting.get(&input).await?)
     }
 }
 

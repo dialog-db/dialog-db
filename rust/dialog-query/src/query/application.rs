@@ -1,13 +1,11 @@
 use async_stream::try_stream;
-use dialog_artifacts::{Entity, Select};
-use dialog_capability::Provider;
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_artifacts::Entity;
+use dialog_common::ConditionalSend;
 
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::EvaluationError;
 use crate::selection;
 use crate::selection::Match;
-use crate::source::SelectRules;
 
 use super::Output;
 
@@ -53,7 +51,7 @@ pub trait Application: Clone + ConditionalSend + 'static {
         env: &'a Env,
     ) -> impl selection::Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync;
+        Env: crate::Scope<'a>;
 
     /// Convert a match into a concrete result value.
     fn realize(&self, input: selection::Match) -> Result<Self::Conclusion, EvaluationError>;
@@ -80,7 +78,7 @@ pub trait Application: Clone + ConditionalSend + 'static {
     /// Execute this query against an environment, returning a stream of typed results.
     fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Self::Conclusion> + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
         Self: Sized,
     {
         let query = self.clone();

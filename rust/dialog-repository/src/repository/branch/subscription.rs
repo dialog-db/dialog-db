@@ -64,6 +64,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::selector::Constrained;
@@ -106,6 +107,58 @@ pub struct Demand {
     /// affect any row — it invalidates the whole result, not one
     /// entity's slice.
     rules: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
+    /// Whether the evaluation read a revision-bearing metadata
+    /// attribute (`dialog.branch/tree` & co). Those facts are
+    /// overlay-injected — never in the tree — so no tree diff can
+    /// register that they changed; the flag routes the poll straight
+    /// to re-evaluation when the head moves. See
+    /// [`Subscription::poll`].
+    head: Arc<AtomicBool>,
+    /// The overlay-injected branch entities whose EAV slices carry
+    /// the head-bearing attributes — anchored by the subscription
+    /// before evaluation ([`Demand::anchor_metadata`]). An
+    /// attribute-unconstrained scan reads every attribute of the
+    /// entities it covers, so it must flip `head` — but only when its
+    /// entity slice can actually hold one of these entities. Without
+    /// the anchor set, every dynamic-attribute probe (e.g. an
+    /// optional premise expanding an entity's attributes) would flip
+    /// `head` permanently and silently disable incremental
+    /// maintenance for the subscription.
+    metadata: Arc<Mutex<BTreeSet<Entity>>>,
+}
+
+/// The overlay-injected attributes whose values change whenever the
+/// branch head moves. `dialog.branch/name` and `dialog.branch/replica`
+/// are deliberately NOT here: they are stable per branch, so a query
+/// reading only them need not re-evaluate per commit.
+const HEAD_ATTRIBUTES: [&str; 3] = [
+    "dialog.branch/tree",
+    "dialog.branch/edition",
+    "dialog.branch/revision",
+];
+
+/// Whether a selector could read a head-bearing metadata attribute:
+/// an exact `the` match, a covering `the` prefix, or no attribute
+/// constraint over an entity slice that can hold the metadata
+/// entities (`metadata` — the anchored branch entities).
+fn selects_head(selector: &ArtifactSelector<Constrained>, metadata: &BTreeSet<Entity>) -> bool {
+    if let Some(attribute) = selector.attribute() {
+        return HEAD_ATTRIBUTES.contains(&attribute.as_str());
+    }
+    if let Some(prefix) = selector.attribute_prefix() {
+        return HEAD_ATTRIBUTES
+            .iter()
+            .any(|attribute| attribute.starts_with(prefix));
+    }
+    // No attribute constraint: the scan reads every attribute in its
+    // entity slice, the metadata included — unless the slice is
+    // pinned to an entity that carries none of it (the common
+    // dynamic-attribute probe over an ordinary entity). Entity-
+    // unconstrained (including value-keyed) scans stay conservative.
+    match selector.entity() {
+        Some(entity) => metadata.contains(entity),
+        None => true,
+    }
 }
 
 /// Insert a range into a cover, merging overlaps: the cover stays a
@@ -159,6 +212,22 @@ impl Demand {
     /// scanned range would fail to invalidate the reader.
     pub(crate) fn record(&self, selector: &ArtifactSelector<Constrained>) {
         record_range(&self.facts, selector_range(selector, &default_manifest()));
+        let metadata = self.metadata.lock().expect("demand metadata lock");
+        if selects_head(selector, &metadata) {
+            self.head.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Anchor the branch entity that carries the head-bearing
+    /// metadata attributes, so entity-pinned attribute-unconstrained
+    /// scans over *other* entities do not flip the head flag. Called
+    /// by the subscription before each evaluation; idempotent, and
+    /// sticky across the Arc-backed clones recording flows through.
+    pub(crate) fn anchor_metadata(&self, entity: Entity) {
+        self.metadata
+            .lock()
+            .expect("demand metadata lock")
+            .insert(entity);
     }
 
     /// Record a rule-discovery scan's demanded range.
@@ -205,6 +274,12 @@ impl Demand {
     /// Whether nothing was demanded.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Whether the evaluation read a revision-bearing metadata
+    /// attribute, making the result head-dependent.
+    pub fn depends_on_head(&self) -> bool {
+        self.head.load(Ordering::Relaxed)
     }
 }
 
@@ -403,31 +478,38 @@ where
             if current == self.revision {
                 return Ok(None);
             }
-            match self.touched(env, &current).await? {
-                Touched::Nothing => {
-                    self.revision = current;
-                    return Ok(None);
-                }
-                Touched::Facts {
-                    subjects,
-                    facts,
-                    asserted,
-                    retracted,
-                } => {
-                    if let Some(delta) = self
-                        .maintain(env, &subjects, &facts, &asserted, &retracted)
-                        .await?
-                    {
-                        self.maintenances += 1;
+            // A head-dependent result — one that read
+            // `dialog.branch/tree` & co — changes on every commit by
+            // construction (the binding itself moves), and those
+            // metadata facts are overlay-injected, invisible to the
+            // tree diff below. Skip the gate and re-evaluate.
+            if !self.demand.depends_on_head() {
+                match self.touched(env, &current).await? {
+                    Touched::Nothing => {
                         self.revision = current;
-                        return Ok(Some(delta));
+                        return Ok(None);
                     }
-                    // Not maintainable for this query/rule shape:
-                    // fall through to a full recompute.
+                    Touched::Facts {
+                        subjects,
+                        facts,
+                        asserted,
+                        retracted,
+                    } => {
+                        if let Some(delta) = self
+                            .maintain(env, &subjects, &facts, &asserted, &retracted)
+                            .await?
+                        {
+                            self.maintenances += 1;
+                            self.revision = current;
+                            return Ok(Some(delta));
+                        }
+                        // Not maintainable for this query/rule shape:
+                        // fall through to a full recompute.
+                    }
+                    // A rule-range change can install or change a rule,
+                    // which can affect any row: recompute.
+                    Touched::Rules => {}
                 }
-                // A rule-range change can install or change a rule,
-                // which can affect any row: recompute.
-                Touched::Rules => {}
             }
         }
 
@@ -641,6 +723,8 @@ where
                 let layer = QueryLayer::from(&self.branch);
                 let overlay = layer.overlay(&operator);
                 let tombstones = tombstones_from(&overlay);
+                self.demand
+                    .anchor_metadata(self.branch.metadata(&operator).branch.this);
                 // Typed with the *named* env lifetime (owned branch
                 // clone, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
@@ -756,6 +840,7 @@ where
             let layer = QueryLayer::from(&self.branch);
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
+            demand.anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let mut query_env: QueryEnv<'a, Env> = QueryEnv::new(
@@ -808,6 +893,8 @@ where
             let layer = QueryLayer::from(&self.branch);
             let overlay = layer.overlay(&operator);
             let tombstones = tombstones_from(&overlay);
+            self.demand
+                .anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
             let query_env: QueryEnv<'a, Env> = QueryEnv::new(
@@ -845,6 +932,43 @@ mod tests {
     use dialog_query::types::Any;
     use dialog_query::{AttributeQuery, Claim, Term, the};
     use std::collections::BTreeMap;
+
+    /// The head flag flips only for scans that can actually read the
+    /// overlay-injected metadata: a head attribute pinned by `the`,
+    /// or an attribute-unconstrained scan whose entity slice can hold
+    /// the anchored branch entity. An entity-pinned dynamic-attribute
+    /// scan over an ordinary entity (the shape every optional-premise
+    /// probe records) must NOT flip it — that would silently disable
+    /// incremental maintenance for the whole subscription.
+    #[dialog_common::test]
+    fn it_keeps_entity_pinned_attribute_scans_head_independent() -> anyhow::Result<()> {
+        use dialog_artifacts::ArtifactSelector;
+
+        let branch_entity = Entity::new()?;
+        let ordinary = Entity::new()?;
+
+        let demand = super::Demand::new();
+        demand.anchor_metadata(branch_entity.clone());
+
+        demand.record(&ArtifactSelector::new().of(ordinary));
+        assert!(
+            !demand.depends_on_head(),
+            "a dynamic-attribute scan of an ordinary entity must stay incremental"
+        );
+
+        demand.record(&ArtifactSelector::new().the("dialog.branch/name".parse()?));
+        assert!(
+            !demand.depends_on_head(),
+            "stable branch attributes are deliberately not head-bearing"
+        );
+
+        demand.record(&ArtifactSelector::new().of(branch_entity));
+        assert!(
+            demand.depends_on_head(),
+            "the branch entity's own slice carries the head attributes"
+        );
+        Ok(())
+    }
 
     /// Compile-time proof that the poll future is `Send` on native
     /// (`ConditionalSend` = `Send` there, nothing on wasm): the
@@ -2623,6 +2747,76 @@ mod tests {
         assert!(delta.asserted.is_empty(), "an empty group yields no row");
         assert_eq!(totals(subscription.results()), vec![(dept_a.clone(), 100)]);
         assert_eq!(subscription.maintenances(), 0, "recompute-per-poll");
+        Ok(())
+    }
+
+    /// A head-dependent subscription — one that reads the
+    /// overlay-injected `BranchRevision` metadata — re-fires on every
+    /// commit. Those facts never live in the tree, so the demand-cover
+    /// diff can never register that they changed: without
+    /// [`Demand::depends_on_head`] routing the poll straight to
+    /// re-evaluation, this subscription would silently pin the stale
+    /// revision forever (the gap documented in
+    /// `notes/tree-relations.md`).
+    #[dialog_common::test]
+    async fn it_refires_head_dependent_subscriptions_on_commit() -> anyhow::Result<()> {
+        use crate::schema;
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(
+                the!("person/name")
+                    .of(Entity::new()?)
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let replica = schema::Replica::new(profile.did(), branch.of().clone());
+        let branch_concept = schema::Branch::new(&replica, "main");
+        let mut subscription = branch.subscribe(Query::<schema::BranchRevision> {
+            this: branch_concept.this.clone().into(),
+            tree: Term::var("tree"),
+            edition: Term::var("edition"),
+            revision: Term::var("revision"),
+        });
+
+        let initial = subscription
+            .poll(&operator)
+            .await?
+            .expect("first poll evaluates");
+        assert_eq!(initial.asserted.len(), 1, "one revision row");
+        let first_tree = initial.asserted[0].tree.clone();
+        assert!(
+            subscription.demand().depends_on_head(),
+            "reading BranchRevision marks the demand head-dependent"
+        );
+
+        // The commit's fact writes are irrelevant to the query; only
+        // the overlay-injected revision metadata moves.
+        branch
+            .transaction()
+            .assert(the!("person/name").of(Entity::new()?).is("Bob".to_string()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("a head-dependent subscription re-fires on commit");
+        assert_eq!(delta.asserted.len(), 1, "the new revision row arrives");
+        assert_ne!(
+            delta.asserted[0].tree, first_tree,
+            "the tree binding moved to the new root"
+        );
+        assert_eq!(delta.retracted.len(), 1, "the old revision row retracts");
         Ok(())
     }
 

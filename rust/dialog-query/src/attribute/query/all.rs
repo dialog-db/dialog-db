@@ -7,7 +7,6 @@ use crate::formula::number::Numeric;
 use crate::query::Application;
 use crate::query::Output;
 use crate::selection::{Match, Selection};
-use crate::source::SelectRules;
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, Record};
 use crate::{
@@ -16,7 +15,6 @@ use crate::{
 };
 use dialog_artifacts::{Artifact, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
@@ -301,7 +299,7 @@ impl AttributeQueryAll {
         selection: M,
     ) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         let selector = self;
         try_stream! {
@@ -348,7 +346,7 @@ impl AttributeQueryAll {
     /// Execute this query, returning a stream of claims.
     pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Claim> + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
         Self: Sized,
     {
         Application::perform(self, env)
@@ -360,7 +358,7 @@ impl Application for AttributeQueryAll {
 
     fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         self.evaluate(env, selection)
     }

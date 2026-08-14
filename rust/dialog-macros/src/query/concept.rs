@@ -400,9 +400,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 env: &'__a __Env,
             ) -> impl dialog_query::Selection + '__a
             where
-                __Env: dialog_query::Provider<dialog_query::Select<'__a>>
-                    + dialog_query::Provider<dialog_query::source::SelectRules>
-                    + dialog_query::ConditionalSync,
+                __Env: dialog_query::Scope<'__a>,
             {
                 let application: dialog_query::ConceptQuery = self.into();
                 application.evaluate(selection, env)
@@ -471,9 +469,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 env: &'__a __Env,
             ) -> impl dialog_query::Output<#struct_name> + '__a
             where
-                __Env: dialog_query::Provider<dialog_query::Select<'__a>>
-                    + dialog_query::Provider<dialog_query::source::SelectRules>
-                    + dialog_query::ConditionalSync,
+                __Env: dialog_query::Scope<'__a>,
             {
                 dialog_query::Application::perform(self, env)
             }
