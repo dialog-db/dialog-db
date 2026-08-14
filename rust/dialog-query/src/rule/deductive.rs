@@ -10,8 +10,9 @@ use crate::optional::OptionalAttributeQuery;
 pub use crate::planner::Plan;
 pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
+use crate::reduce::{Reduce, ReduceEntry, ReduceSpec};
 use crate::rule::analyzer::AnalyzedRule;
-use crate::rule::{Compile, RuleKind, fmt_rule_schema};
+use crate::rule::{Compile, RuleKind, compile_rule, fmt_rule_schema};
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
@@ -19,7 +20,9 @@ use crate::{Environment, Term};
 use descriptor::DeductiveRuleDescriptor;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::iter;
 
 /// A deductive rule that has passed analysis: verified for every
 /// invariant and plannable by construction.
@@ -55,6 +58,56 @@ impl DeductiveRule {
     /// (set-widened) sources, and confirms the body is plannable.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
         <Self as Compile>::compile(conclusion, premises)
+    }
+
+    /// Analyze a *reducing* rule: [`Self::new`] plus a `reduce`
+    /// clause, keyed by head field name. Every reduce key must name
+    /// a head (`deduce`) field — an unknown key fails with
+    /// [`TypeError::ReducedFieldNotInHead`] before analysis — and
+    /// the reduce-specific analysis (field collision, typed entry
+    /// construction, output/head unification, input grounding) runs
+    /// with the shared pipeline. An empty map compiles a plain rule.
+    pub fn with_reduce(
+        conclusion: ConceptDescriptor,
+        premises: Vec<Premise>,
+        reduce: BTreeMap<String, ReduceSpec>,
+    ) -> Result<Self, TypeError> {
+        if let Some(field) = reduce
+            .keys()
+            .find(|field| !conclusion.with().keys().any(|name| name == field.as_str()))
+        {
+            return Err(TypeError::ReducedFieldNotInHead {
+                field: field.clone(),
+            });
+        }
+        compile_rule::<Self>(conclusion, premises, reduce.into_iter().collect())
+    }
+
+    /// The checked `reduce` clause entries, in head-field order.
+    /// Empty for a plain rule.
+    pub fn reduce(&self) -> &[ReduceEntry] {
+        &self.analysis.reduce
+    }
+
+    /// The runtime fold for a reducing rule: the [`Reduce`] over the
+    /// *derived* grouping fields (`this` plus every head field not in
+    /// the reduce clause) and the checked entries. `None` for a
+    /// plain rule.
+    pub fn reducer(&self) -> Option<Reduce> {
+        if self.analysis.reduce.is_empty() {
+            return None;
+        }
+        let reduced = |name: &str| self.analysis.reduce.iter().any(|entry| entry.field == name);
+        let groups = iter::once("this".to_string())
+            .chain(
+                self.conclusion()
+                    .with()
+                    .keys()
+                    .filter(|name| !reduced(name))
+                    .map(String::from),
+            )
+            .collect();
+        Some(Reduce::new(groups, self.analysis.reduce.clone()))
     }
 
     /// Returns the conclusion predicate for this rule.
@@ -113,6 +166,12 @@ impl DeductiveRule {
             deduce: self.conclusion().clone(),
             when,
             unless,
+            reduce: self
+                .analysis
+                .reduce
+                .iter()
+                .map(|entry| (entry.field.clone(), ReduceSpec::from(entry)))
+                .collect(),
         }
     }
 

@@ -649,4 +649,82 @@ mod tests {
 
         Ok(())
     }
+
+    /// An uncommitted *reducing* rule staged on a transaction
+    /// resolves as a transient overlay rule: the pending view folds
+    /// pending facts without the rule or the data being committed.
+    #[dialog_common::test]
+    async fn it_resolves_reducing_rules_pending_in_the_transaction() -> anyhow::Result<()> {
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        use dialog_query::{ConceptQuery, Parameters};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // dept-total(this, total: sum(?salary)) grouped by department.
+        let rule = {
+            let json = serde_json::json!({
+                "deduce": { "with": {
+                    "total": { "the": "org/dept-total", "as": "UnsignedInteger" }
+                }},
+                "when": [{
+                    "assert": { "with": {
+                        "dept": { "the": "org/dept", "as": "Entity" },
+                        "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "employee" } },
+                        "dept": { "?": { "name": "this" } },
+                        "salary": { "?": { "name": "salary" } }
+                    }
+                }],
+                "reduce": {
+                    "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
+                }
+            });
+            let descriptor: DeductiveRuleDescriptor =
+                serde_json::from_value(json).expect("descriptor parses");
+            descriptor.compile().expect("reducing rule compiles")
+        };
+        let dept_total = rule.conclusion().clone();
+
+        let dept: Entity = "id:dept-a".parse()?;
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let tx = branch
+            .transaction()
+            .assert(
+                the!("db.rule/conclusion")
+                    .of(rule.this())
+                    .is(dept_total.this()),
+            )
+            .assert(the!("db.rule/source").of(rule.this()).is(rule.encode()))
+            .assert(the!("org/dept").of(alice.clone()).is(dept.clone()))
+            .assert(the!("org/salary").of(alice.clone()).is(3u32))
+            .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))
+            .assert(the!("org/salary").of(bob.clone()).is(4u32));
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("dept"));
+        terms.insert("total".into(), Term::var("total"));
+        let rows = tx
+            .query()
+            .select(ConceptQuery {
+                predicate: dept_total,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            rows.len(),
+            1,
+            "the pending reducing rule folds pending facts"
+        );
+        assert_eq!(*rows[0].entity(), dept);
+        assert_eq!(rows[0].get::<u64>("total")?, 7);
+
+        Ok(())
+    }
 }

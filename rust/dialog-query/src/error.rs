@@ -8,6 +8,7 @@ use std::fmt;
 use crate::artifact::{ArtifactTypeError, DialogArtifactsError, Type, Value};
 pub use crate::environment::Environment;
 pub use crate::proposition::Proposition;
+use crate::reduce::Aggregator;
 pub use crate::rule::Rule;
 pub use crate::rule::deductive::DeductiveRule;
 use crate::term::Term;
@@ -280,6 +281,72 @@ pub enum TypeError {
         /// The malformed attribute string.
         actual: String,
     },
+
+    /// A reduce entry applies an aggregator to an input whose type
+    /// cannot feed it: no present shape of the input meets the
+    /// aggregator's requirement (`sum`/`avg` need numeric input,
+    /// `min`/`max` comparable input). Raised at construction by
+    /// [`ReduceEntry::try_new`](crate::reduce::ReduceEntry::try_new),
+    /// never at evaluation.
+    #[error(
+        "Reduce field \"{field}\" applies {aggregator} to a {actual} input, \
+         but {aggregator} requires {required}"
+    )]
+    ReduceInput {
+        /// The reduce output field being declared.
+        field: String,
+        /// The aggregator that cannot consume the input.
+        aggregator: Aggregator,
+        /// The aggregator's input requirement.
+        required: Box<Kind>,
+        /// The declared or inferred type of the input.
+        actual: Box<Kind>,
+    },
+
+    /// A `reduce` block names an output field the rule's head
+    /// (`deduce`) does not declare. The map is keyed by head field
+    /// name — a key with no head field has nothing to bind. Raised
+    /// at descriptor construction, before analysis.
+    #[error("Reduce block names field \"{field}\" which the rule's head does not declare")]
+    ReducedFieldNotInHead {
+        /// The unknown reduce key.
+        field: String,
+    },
+
+    /// A body premise binds a variable with the same name as a
+    /// *reduced* head field: the fold defines that field, so the
+    /// body binding is a second definition for it. Always authored
+    /// confusion; a hard error, sibling of
+    /// [`RequiredHeadFromOptional`](Self::RequiredHeadFromOptional).
+    #[error(
+        "Rule {rule}: field \"{field}\" is defined by the reduce clause, \
+         but a body premise also binds a variable named \"{field}\" — \
+         two definitions for one field. Rename the body variable."
+    )]
+    ReducedFieldCollision {
+        /// The offending rule.
+        rule: Box<Rule>,
+        /// The doubly defined field.
+        field: String,
+    },
+
+    /// A reduce entry's output type does not unify with its head
+    /// field's declared content type: no value the fold can produce
+    /// inhabits the declared type.
+    #[error(
+        "Reduce field \"{field}\": {aggregator} produces {output}, \
+         which does not unify with the head field's declared type {declared}"
+    )]
+    ReduceOutput {
+        /// The reduce output field.
+        field: String,
+        /// The aggregator whose output mismatches.
+        aggregator: Aggregator,
+        /// The fold's output type.
+        output: Box<Kind>,
+        /// The head field's declared type.
+        declared: Box<Kind>,
+    },
 }
 
 impl From<AnalyzerError> for TypeError {
@@ -490,6 +557,21 @@ pub enum EvaluationError {
         message: String,
     },
 
+    /// An aggregation fold failed at evaluation time: overflow past
+    /// the `i128` accumulator, an incomparable pair under `min`/`max`,
+    /// a non-numeric input to a numeric fold, or mixed integer/float
+    /// inputs in one group. Milestone A2 makes most of these
+    /// unconstructable statically; this is the runtime backstop.
+    #[error("Reduce {aggregator} over field {field:?} failed: {reason}")]
+    Reduce {
+        /// The reduce output field being computed.
+        field: String,
+        /// Display name of the aggregator that failed.
+        aggregator: String,
+        /// Why the fold failed.
+        reason: String,
+    },
+
     /// The queried concept's dependency closure contains a cycle
     /// through negation: some rule concluding `concept` negates
     /// `negated` inside the same dependency cycle, so the negation
@@ -507,6 +589,29 @@ pub enum EvaluationError {
         concept: String,
         /// The negated concept inside the same cycle.
         negated: String,
+    },
+
+    /// The queried concept's dependency closure contains a cycle
+    /// through aggregation: some *reducing* rule concluding
+    /// `concept` folds over `aggregated` inside the same dependency
+    /// cycle, so the fold reads a relation the cycle itself is
+    /// still deriving. No stratified semantics exists for such a
+    /// program. Exact sibling of
+    /// [`NegationThroughRecursion`](Self::NegationThroughRecursion):
+    /// rules are installed unconditionally (replicas must converge
+    /// on the merged rule set), so this surfaces at query time, on
+    /// exactly the queries whose closure is ill-stratified.
+    #[error(
+        "Aggregation through recursion: rules for {concept} fold over \
+         {aggregated} inside the same dependency cycle; no stratified \
+         semantics exists"
+    )]
+    AggregationThroughRecursion {
+        /// The concluding concept whose reducing rule folds into
+        /// its cycle.
+        concept: String,
+        /// The aggregated concept inside the same cycle.
+        aggregated: String,
     },
 
     /// A recursive concept's semi-naive fixpoint did not converge
@@ -726,4 +831,19 @@ pub enum AnalysisError {
         /// The conclusion concept's URI.
         concept: String,
     },
+    /// A body premise binds a variable named as a *reduced* head
+    /// field — two definitions for one field. See
+    /// [`TypeError::ReducedFieldCollision`].
+    #[error("body premise binds reduced field {field}")]
+    ReducedFieldCollision {
+        /// The doubly defined field.
+        field: String,
+    },
+    /// A reduce entry failed its type check: the carried
+    /// [`TypeError`] is one of the entry-scoped variants
+    /// ([`TypeError::ReduceInput`], [`TypeError::ReduceOutput`],
+    /// [`TypeError::ReducedFieldNotInHead`]), passed through
+    /// unchanged by rule compilation.
+    #[error("{0}")]
+    Reduce(Box<TypeError>),
 }

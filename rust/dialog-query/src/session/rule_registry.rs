@@ -1,4 +1,4 @@
-use super::dependencies::{NegationViolation, ProgramAnalysis};
+use super::dependencies::{ProgramAnalysis, Violation};
 use crate::Entity;
 use crate::EvaluationError;
 use crate::concept::descriptor::ConceptDescriptor;
@@ -46,9 +46,10 @@ impl RuleRegistry {
     /// Registration is *unconditional* with respect to
     /// stratification: rules can be installed concurrently on
     /// multiple replicas and the merged set must converge, so
-    /// whole-set properties (recursion, negation through recursion)
-    /// are checked by [`validate`](Self::validate) and at query
-    /// time, never here. Only lock poisoning errors.
+    /// whole-set properties (recursion, negation or aggregation
+    /// through recursion) are checked by
+    /// [`validate`](Self::validate) and at query time, never here.
+    /// Only lock poisoning errors.
     pub fn register(&mut self, rule: DeductiveRule) -> Result<(), EvaluationError> {
         let entity = rule.conclusion().this();
         self.rules
@@ -67,7 +68,8 @@ impl RuleRegistry {
     ///
     /// Runs the query-time dependency check over the concept's
     /// closure first: an ill-stratified closure fails with
-    /// [`EvaluationError::NegationThroughRecursion`], so
+    /// [`EvaluationError::NegationThroughRecursion`] or
+    /// [`EvaluationError::AggregationThroughRecursion`], so
     /// ill-stratified regions of the program fail exactly the
     /// queries that touch them. When the concept itself sits on a
     /// (stratified) dependency cycle, the returned rules carry the
@@ -146,7 +148,7 @@ impl RuleRegistry {
     /// Callers decide what to do: surface as a warning after an
     /// install, refuse to proceed after a merge, or ignore and let
     /// queries fail individually.
-    pub fn validate(&self) -> Result<Vec<NegationViolation>, EvaluationError> {
+    pub fn validate(&self) -> Result<Vec<Violation>, EvaluationError> {
         Ok(self.analysis()?.violations().to_vec())
     }
 
