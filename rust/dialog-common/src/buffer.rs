@@ -1,4 +1,4 @@
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::fmt::{Formatter, Result as FmtResult};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -26,6 +26,7 @@ struct BufferInner {
     bytes: AlignedVec,
     hash: OnceLock<Blake3Hash>,
     decoded: OnceLock<Decoded>,
+    validated: OnceLock<TypeId>,
     touches: AtomicU32,
 }
 
@@ -113,6 +114,34 @@ impl Buffer {
         Ok(self.memoized())
     }
 
+    /// Whether these bytes have already been validated as archived type `T`
+    /// (see [`mark_validated`](Self::mark_validated)).
+    ///
+    /// The buffer is immutable and every clone shares one interior, so a
+    /// successful validation holds for the buffer's whole lifetime: a `true`
+    /// here lets a reader take rkyv's unchecked access path instead of
+    /// re-walking the archive's bytecheck on every touch. The slot stores the
+    /// [`TypeId`] of the archived type that was validated, so an access as a
+    /// *different* archived type never inherits another type's validation.
+    pub fn is_validated<T>(&self) -> bool
+    where
+        T: 'static,
+    {
+        self.0.validated.get() == Some(&TypeId::of::<T>())
+    }
+
+    /// Records that these bytes passed a full bytecheck validation as
+    /// archived type `T`. One validation per buffer: a later mark with a
+    /// different type is ignored (that access keeps re-validating, which is
+    /// correct, just not memoized — in practice a buffer plays exactly one
+    /// archived role).
+    pub fn mark_validated<T>(&self)
+    where
+        T: 'static,
+    {
+        let _ = self.0.validated.set(TypeId::of::<T>());
+    }
+
     /// Converts this [`Buffer`] into an owned `Vec<u8>`.
     ///
     /// This always copies: the bytes live in an [`AlignedVec`], whose
@@ -159,6 +188,7 @@ impl From<AlignedVec> for Buffer {
             bytes: value,
             hash: OnceLock::new(),
             decoded: OnceLock::new(),
+            validated: OnceLock::new(),
             touches: AtomicU32::new(0),
         }))
     }

@@ -168,6 +168,7 @@ mod traversal;
 pub use traversal::*;
 
 mod tree;
+mod validate;
 pub use tree::*;
 
 mod hitchhiker;
