@@ -544,10 +544,13 @@ impl ResolverQuery {
 
     /// Estimate the cost of this resolver given the environment.
     ///
-    /// `None` while the node-reference input is unbound: node hashes
-    /// are not enumerable, and an unbound scan is the one shape that
-    /// would degrade subscriptions — the planner refuses to schedule
-    /// it until a join binds the input.
+    /// `None` while the node-reference input is an unbound variable:
+    /// node hashes are not enumerable, and an unbound scan is the one
+    /// shape that would degrade subscriptions — the planner refuses to
+    /// schedule it until a join binds the input. A *blank* `of` (a
+    /// query that never names the input at all) is scheduled but can
+    /// match nothing: every row fails the reference lookup, so such a
+    /// query returns empty rather than erroring.
     pub fn estimate(&self, env: &Environment) -> Option<usize> {
         self.of().is_bound(env).then_some(RESOLVER_COST)
     }

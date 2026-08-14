@@ -1534,6 +1534,211 @@ mod resolver_tests {
         }
     }
 
+    /// Commit `count` facts with padded values and return the branch +
+    /// root reference: enough leaf weight forces an index root, so the
+    /// span/descent surface runs against a real multi-level tree.
+    async fn committed_wide_branch(
+        repo: &Repository<impl dialog_capability::Principal>,
+        operator: &Operator<VolatileSpace>,
+        count: usize,
+    ) -> anyhow::Result<(Branch, String)> {
+        let branch = repo.branch("main").open().perform(operator).await?;
+        let pad = "p".repeat(160);
+        let mut tx = branch.transaction();
+        for at in 0..count {
+            tx = tx.assert(
+                the!("test/name")
+                    .of(Entity::new()?)
+                    .is(format!("entry-{at}-{pad}")),
+            );
+        }
+        tx.commit().perform(operator).await?;
+        let revision = branch
+            .revision()
+            .expect("branch has a revision after commit");
+        let tree_bytes: &[u8] = revision.tree.hash();
+        Ok((branch, ToBase58::to_base58(tree_bytes)))
+    }
+
+    /// A blank `of` (a query that never names the node reference) is
+    /// scheduled but matches nothing: zero rows, no error. The planner
+    /// only refuses an unbound *variable* input.
+    #[dialog_common::test]
+    async fn it_yields_nothing_for_a_blank_reference() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, _root) = committed_branch(&repo, &operator).await?;
+
+        let rows: Vec<ResolverConclusion> = branch
+            .query()
+            .select(ResolverQuery::TreeNode(TreeNodeQuery {
+                of: Term::<Value>::blank().into(),
+                kind: Term::var("kind"),
+                size: Term::var("size"),
+                count: Term::var("count"),
+                scale: Term::var("scale"),
+                novelty: Term::var("novelty"),
+            }))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(
+            rows.is_empty(),
+            "a blank reference matches nothing: {rows:?}"
+        );
+        Ok(())
+    }
+
+    /// A tree wide enough for an index root runs the whole span
+    /// surface end to end: one contiguous span row per child, and the
+    /// descent chain (span node -> tree/node -> tree/key) reaches real
+    /// segment entries.
+    #[dialog_common::test]
+    async fn it_descends_a_multi_level_tree() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_wide_branch(&repo, &operator, 800).await?;
+
+        let node: Vec<ResolverConclusion> = branch
+            .query()
+            .select(tree_node(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            text(&node[0], "kind"),
+            "index",
+            "800 padded entries must outgrow one segment: {node:?}"
+        );
+        let children = unsigned(&node[0], "count") as usize;
+
+        let spans: Vec<ResolverConclusion> = branch
+            .query()
+            .select(tree_span(&root))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(spans.len(), children, "one span row per child");
+        for pair in spans.windows(2) {
+            assert_eq!(
+                pair[0].get("until"),
+                pair[1].get("separator"),
+                "spans tile the key space: {spans:?}"
+            );
+        }
+
+        // Descend every child; leaves must carry the committed entries.
+        let mut entries = 0usize;
+        for span in &spans {
+            let child = text(span, "node");
+            let child_node: Vec<ResolverConclusion> = branch
+                .query()
+                .select(tree_node(&child))
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(child_node.len(), 1, "child answers tree/node");
+            if text(&child_node[0], "kind") == "segment" {
+                let keys: Vec<ResolverConclusion> = branch
+                    .query()
+                    .select(tree_key(&child))
+                    .perform(&operator)
+                    .try_vec()
+                    .await?;
+                assert_eq!(
+                    keys.len(),
+                    unsigned(&child_node[0], "count") as usize,
+                    "one key row per segment entry"
+                );
+                entries += keys.len();
+            }
+        }
+        assert!(
+            entries >= 800,
+            "the leaves carry at least the committed facts, got {entries}"
+        );
+        Ok(())
+    }
+
+    /// The flagship join shape: a premise binds the node reference as
+    /// a VARIABLE and the resolver consumes it — through a deductive
+    /// rule, so this also covers resolver premises in rule bodies and
+    /// the planner ordering the resolver after its binding premise.
+    #[dialog_common::test]
+    async fn it_joins_resolvers_on_a_bound_reference() -> anyhow::Result<()> {
+        use dialog_query::concept::query::ConceptQuery;
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        use dialog_query::{ConceptConclusion, Parameters};
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, root) = committed_branch(&repo, &operator).await?;
+
+        // A committed fact carries the root reference; the rule joins
+        // it into `tree/node` through the `?root` variable.
+        let probe = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("probe/tree").of(probe.clone()).is(root.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "root": { "the": "probe/described-root", "as": "Text" },
+                "kind": { "the": "probe/described-kind", "as": "Text" }
+            }},
+            "when": [
+                {
+                    "assert": { "with": {
+                        "root": { "the": "probe/tree", "as": "Text" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "root": { "?": { "name": "root" } }
+                    }
+                },
+                {
+                    "assert": "tree/node",
+                    "where": {
+                        "of": { "?": { "name": "root" } },
+                        "kind": { "?": { "name": "kind" } }
+                    }
+                }
+            ]
+        }))?;
+        let rule = descriptor.compile().expect("the joining rule compiles");
+        let conclusion = rule.conclusion().clone();
+        branch
+            .transaction()
+            .assert(
+                the!("db.rule/conclusion")
+                    .of(rule.this())
+                    .is(conclusion.this()),
+            )
+            .assert(the!("db.rule/source").of(rule.this()).is(rule.encode()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("root".into(), Term::var("root"));
+        terms.insert("kind".into(), Term::var("kind"));
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: conclusion,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "the join yields one row: {rows:?}");
+        Ok(())
+    }
+
     /// The committed root answers `tree/node` through the ordinary
     /// query path: one row, a real kind, a positive size, and a count.
     #[dialog_common::test]
