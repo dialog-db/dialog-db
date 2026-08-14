@@ -1296,18 +1296,18 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
 use dialog_remote_ucan_s3::UcanAddress;
 use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
-/// Alice creates a repo, delegates to Bob, Bob pulls, commits, pushes,
-/// then Alice pulls Bob's changes.
 /// The login flow: the ACCOUNT repository is the durable home of
 /// delegations, and a device regains access by pulling it. A space
 /// delegates to the account; the account's access branch (holding that
 /// grant) is pushed to the access service. A device profile "logs in":
 /// it retains the account-to-profile powerline locally, adds the account
 /// as the upstream of its own access branch, and pulls. The pull adopts
-/// the account's delegation records and hydrates their envelopes, and
-/// the operator then proves access to the space through the three-hop
-/// chain: space to account (pulled), account to profile (retained at
-/// login), profile to operator (in-memory session).
+/// the account's delegation records; on the first prove after the head
+/// moves the operator hydrates their blocks and envelopes (authorized by
+/// the retained powerline plus the in-memory session — the proofs that
+/// are already local), then proves access to the space through the
+/// three-hop chain: space to account (pulled), account to profile
+/// (retained at login), profile to operator (in-memory session).
 #[dialog_common::test]
 async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result<()> {
     use dialog_capability::access::{

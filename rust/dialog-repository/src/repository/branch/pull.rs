@@ -14,7 +14,6 @@ use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
-use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::{ContentAddressedStorage as TreeStorage, Delta};
 
@@ -103,30 +102,12 @@ impl<'a> Pull<'a> {
             + Provider<Publish>
             + Provider<Identify>
             + Provider<Attest>
-            + Provider<BlobRead>
-            + Provider<BlobImport>
             + Provider<Fork<RemoteSite, Get>>
             + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
             + 'static,
     {
-        let branch = self.branch;
-        let pulled = Box::pin(self.prepare(env)).await?.commit(env).await?;
-
-        // Hydrate the retained delegation envelopes the adopted tree
-        // references: facts arrive with the tree, envelope bytes replicate
-        // lazily, and the authorization walk deliberately reads only local
-        // state — this is where sync brings that state. Best-effort: a
-        // delegation the remote cannot serve yet is simply not a usable
-        // candidate until a later pull completes it.
-        if pulled.is_some()
-            && let Err(error) = branch.delegations().hydrate().perform(env).await
-        {
-            tracing::warn!(%error, "failed to hydrate delegation envelopes after pull");
-        }
-
-        Ok(pulled)
+        Box::pin(self.prepare(env)).await?.commit(env).await
     }
 
     /// Phase one: fetch the upstream, rebase local changes onto it, and persist

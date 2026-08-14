@@ -139,11 +139,12 @@ impl<'a> Delegations<'a> {
         }
     }
 
-    /// Hydrate every retained delegation's envelope into the local blob
-    /// store. Pull runs this after adopting an upstream: facts arrive with
-    /// the tree, but envelope bytes replicate lazily, and the
-    /// authorization walk deliberately reads only local state — sync is
-    /// what brings the state.
+    /// Hydrate every retained delegation into local storage: the tree
+    /// blocks its facts live in (a pulled tree adopts subtrees by link,
+    /// leaving their blocks remote until read) and its envelope blob.
+    /// The operator runs this when the branch head moves — the
+    /// authorization walk deliberately reads only local state, so this
+    /// is the step that brings that state local.
     pub fn hydrate(self) -> HydrateDelegations<'a> {
         HydrateDelegations {
             branch: self.branch,
@@ -158,10 +159,14 @@ pub struct HydrateDelegations<'a> {
 }
 
 impl HydrateDelegations<'_> {
-    /// Fetch every retained delegation's envelope that is not yet local,
-    /// returning how many envelopes are locally readable afterward. An
-    /// envelope the remote cannot serve is skipped: the prover treats it
-    /// as no candidate, and a later pull can complete it.
+    /// Fetch every retained delegation's fact blocks and envelope that
+    /// are not yet local, returning how many delegations are locally
+    /// provable afterward. The scan warms exactly what the walk reads:
+    /// the audience index it discovers candidates through, each
+    /// delegation entity's own facts, and the envelope bytes admission
+    /// decodes. A delegation the remote cannot serve is skipped: the
+    /// prover treats it as no candidate, and a later attempt can
+    /// complete it.
     pub async fn perform<Env>(self, env: &Env) -> Result<usize, CommitError>
     where
         Env: Provider<Get>
@@ -188,20 +193,41 @@ impl HydrateDelegations<'_> {
                     .expect("the audience attribute is valid"),
             ),
         )
-        .execute(store)
+        .execute(store.clone())
         .await
         .map_err(DialogArtifactsError::from)?;
         futures_util::pin_mut!(facts);
 
+        let mut entities = Vec::new();
+        {
+            let mut seen = HashSet::new();
+            while let Some(fact) = facts.next().await {
+                let Ok(artifact) = fact.and_then(|view| view.to_owned()) else {
+                    continue;
+                };
+                if seen.insert(artifact.of.to_string()) {
+                    entities.push(artifact.of);
+                }
+            }
+        }
+
         let mut hydrated = 0;
-        while let Some(fact) = facts.next().await {
-            let Ok(artifact) = fact.and_then(|view| view.to_owned()) else {
-                continue;
-            };
+        for entity in entities {
+            // Warm the entity's own fact blocks: the walk reads them
+            // through the entity ordering, which the audience scan above
+            // does not touch.
+            let entity_facts =
+                crate::Select::new(branch, ArtifactSelector::new().of(entity.clone()))
+                    .execute(store.clone())
+                    .await
+                    .map_err(DialogArtifactsError::from)?;
+            futures_util::pin_mut!(entity_facts);
+            while entity_facts.next().await.is_some() {}
+
             // Local-first read with remote fallback: a hit caches the
             // bytes locally, a miss (remote cannot serve it either) is
             // skipped.
-            let Ok(mut reader) = crate::Blob::from(artifact.of)
+            let Ok(mut reader) = crate::Blob::from(entity)
                 .read(branch.into())
                 .perform(env)
                 .await

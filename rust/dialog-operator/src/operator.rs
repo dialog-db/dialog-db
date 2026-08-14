@@ -11,9 +11,11 @@ mod test;
 
 pub use builder::{DeriveOperator, OperatorBuilder, OperatorError};
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
-use dialog_repository::Branch;
+use dialog_repository::{Branch, CommitError};
 use dialog_ucan::UcanCertificate;
 use parking_lot::Mutex;
 
@@ -28,6 +30,27 @@ use dialog_identity::Authority;
 use dialog_network::Network;
 use dialog_storage::provider::storage::Storage;
 use dialog_varsig::{Did, Principal};
+
+/// One hydration run over the access branch: fetch the delegation
+/// records and envelopes the current head references that are not yet
+/// local, through the full network-capable environment.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type HydrationFuture = Pin<Box<dyn Future<Output = Result<usize, CommitError>> + Send>>;
+/// One hydration run over the access branch (single-threaded wasm form).
+#[cfg(target_arch = "wasm32")]
+pub(crate) type HydrationFuture = Pin<Box<dyn Future<Output = Result<usize, CommitError>>>>;
+
+/// The dyn-erased delegation hydrator installed at build time.
+///
+/// Erased because naming the remote fork providers as bounds on the
+/// `Prove` provider itself would close the trait cycle the local-only
+/// walk exists to break (Prove -> Fork -> Authorize -> Prove); at the
+/// build site the concrete operator satisfies them without any cycle.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type Hydrator = Box<dyn Fn() -> HydrationFuture + Send + Sync>;
+/// The dyn-erased delegation hydrator (single-threaded wasm form).
+#[cfg(target_arch = "wasm32")]
+pub(crate) type Hydrator = Box<dyn Fn() -> HydrationFuture>;
 
 /// An operating environment built from a [`Profile`](crate::profile::Profile).
 ///
@@ -80,6 +103,14 @@ pub struct Operator<S: Clone> {
 
     /// Resolved-chain cache (see `operator/access.rs`).
     chains: Arc<Mutex<access::ChainCache>>,
+
+    /// Hydrates the access branch when its head moves: the authorization
+    /// walk reads only local state, and this is what brings that state
+    /// local after a pull. Deliberately EMPTY on the operator clone the
+    /// hydrator itself runs against — proving the hydration fetches must
+    /// resolve from what is already local, or the recursion would never
+    /// bottom out.
+    hydrator: Arc<OnceLock<Hydrator>>,
 }
 
 impl<S: Clone> Operator<S> {
