@@ -2714,4 +2714,119 @@ mod tests {
         );
         Ok(())
     }
+
+    /// A subscription over a recursive component seeded by a reducing
+    /// rule must stay correct through change in both directions: a new
+    /// contributor REPLACES the group's folded row (which additive
+    /// seeding cannot model naively), and a retraction SHRINKS it
+    /// (which per-row DRed suspicion cannot model naively). Whichever
+    /// path the evaluator takes — the fixpoint guards' recompute
+    /// fallback or maintenance with seed re-folding — the deltas must
+    /// replace the folded rows exactly, through the recursive step
+    /// included. Nothing else exercises this shape end to end.
+    #[dialog_common::test]
+    async fn it_recomputes_recursive_components_seeded_by_reducing_rules() -> anyhow::Result<()> {
+        use concepts::{Dept, DeptTotal, HasParent, Parent, Salary, Staffed, Total};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let dept_a: Entity = "id:dept-a".parse()?;
+        let dept_b: Entity = "id:dept-b".parse()?;
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+
+        // Step rule closing the recursive component: a child
+        // department inherits its parent's total.
+        let step = concept_rule(
+            DeptTotal::descriptor(),
+            vec![
+                concept_premise(
+                    HasParent::descriptor(),
+                    &[("this", "this"), ("parent", "p")],
+                ),
+                concept_premise(
+                    DeptTotal::descriptor(),
+                    &[("this", "p"), ("total", "total")],
+                ),
+            ],
+        );
+
+        let transaction = branch
+            .transaction()
+            .assert(Staffed {
+                this: alice.clone(),
+                dept: Dept(dept_a.clone()),
+                salary: Salary(100),
+            })
+            .assert(Parent::of(dept_b.clone()).is(dept_a.clone()));
+        with_rule(with_rule(transaction, &dept_total_rule()), &step)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let mut subscription = branch.subscribe(Query::<DeptTotal>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(
+            totals(&initial.asserted),
+            vec![(dept_a.clone(), 100), (dept_b.clone(), 100)],
+            "the fold seeds the fixpoint and the child inherits it"
+        );
+        assert_eq!(subscription.recomputes(), 1);
+
+        // Growth: a second contributor flows through the fold AND the
+        // recursive step — via recompute, never additive maintenance.
+        branch
+            .transaction()
+            .assert(Staffed {
+                this: bob.clone(),
+                dept: Dept(dept_a.clone()),
+                salary: Salary(50),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("growth");
+        assert_eq!(
+            totals(&delta.asserted),
+            vec![(dept_a.clone(), 150), (dept_b.clone(), 150)]
+        );
+        assert_eq!(
+            totals(&delta.retracted),
+            vec![(dept_a.clone(), 100), (dept_b.clone(), 100)]
+        );
+
+        // Shrinkage: a retraction shrinks the group — via recompute,
+        // never DRed.
+        branch
+            .transaction()
+            .retract(Staffed {
+                this: alice.clone(),
+                dept: Dept(dept_a.clone()),
+                salary: Salary(100),
+            })
+            .commit()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("shrinkage");
+        assert_eq!(
+            totals(&delta.asserted),
+            vec![(dept_a.clone(), 50), (dept_b.clone(), 50)]
+        );
+        assert_eq!(
+            totals(&delta.retracted),
+            vec![(dept_a.clone(), 150), (dept_b.clone(), 150)]
+        );
+
+        assert!(
+            subscription.results().contains(&DeptTotal {
+                this: dept_b.clone(),
+                total: Total(50),
+            }),
+            "the retained table carries the recursively derived row"
+        );
+        Ok(())
+    }
 }

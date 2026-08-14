@@ -935,6 +935,40 @@ mod tests {
         assert_eq!(rule.reduce().len(), 2);
     }
 
+    /// A reducing rule's optional non-reduced head field joins the
+    /// derived grouping set, so leaving it unbound by the body — legal
+    /// for a plain rule, which simply omits the field — would fail
+    /// every evaluation at runtime when the fold looks the grouping
+    /// term up. It is rejected at compile instead.
+    #[dialog_common::test]
+    fn it_rejects_unbound_optional_grouping_field() {
+        use crate::error::TypeError;
+
+        let def: DeductiveRuleDescriptor = serde_json::from_value(json!({
+            "deduce": { "with": {
+                "memo": { "the": "org.dept/memo", "as": "Text", "optional": true },
+                "total": { "the": "org.dept/total", "as": "UnsignedInteger" }
+            }},
+            "when": [{
+                "assert": { "with": {
+                    "dept": { "the": "org.employee/dept", "as": "Entity" },
+                    "salary": { "the": "org.employee/salary", "as": "UnsignedInteger" }
+                }},
+                "where": {
+                    "this": { "?": { "name": "employee" } },
+                    "dept": { "?": { "name": "this" } },
+                    "salary": { "?": { "name": "salary" } }
+                }
+            }],
+            "reduce": { "total": { "apply": "sum", "of": { "?": { "name": "salary" } } } }
+        }))
+        .unwrap();
+        match def.compile() {
+            Err(TypeError::UnboundVariable { variable, .. }) => assert_eq!(variable, "memo"),
+            other => panic!("expected UnboundVariable, got {other:?}"),
+        }
+    }
+
     /// An aggregator whose requirement the input type cannot meet is
     /// a construction-time type error, surfaced by the analyzer.
     #[dialog_common::test]

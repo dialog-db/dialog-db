@@ -225,11 +225,31 @@ pub(crate) fn compile_rule<T: Compile>(
     // output. *Reduced* fields are exempt — the fold defines them,
     // never the body — but each fold's input variable must itself be
     // bound by the body.
+    let reduced = |name: &str| analysis.reduce.iter().any(|entry| entry.field == name);
     let unbound = conclusion
         .required_operands()
-        .filter(|name| !analysis.reduce.iter().any(|entry| entry.field == *name))
+        .filter(|name| !reduced(name))
         .find(|name| !join.binds.contains(name))
         .map(String::from)
+        .or_else(|| {
+            // A reducing rule's optional non-reduced fields join the
+            // derived grouping set, and the fold looks every grouping
+            // term up on every row — a never-bound one would fail
+            // every evaluation at runtime, where a plain rule simply
+            // omits it from the conclusion. Reject it here instead.
+            (!analysis.reduce.is_empty())
+                .then(|| {
+                    conclusion
+                        .with()
+                        .iter()
+                        .filter(|(_, attribute)| attribute.is_optional())
+                        .map(|(name, _)| name)
+                        .filter(|name| !reduced(name))
+                        .find(|name| !join.binds.contains(name))
+                        .map(String::from)
+                })
+                .flatten()
+        })
         .or_else(|| {
             analysis
                 .reduce
