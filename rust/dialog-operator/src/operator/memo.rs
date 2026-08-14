@@ -537,4 +537,69 @@ mod tests {
             "a chain proven against one certificate store does not answer for another"
         );
     }
+
+    /// The memo's key deliberately excludes parameters, so the recall-time
+    /// re-verification is all that stands between a memoized chain and a
+    /// policy bypass: a hit whose parameters the chain's policy refuses
+    /// must be rejected.
+    #[dialog_common::test]
+    async fn it_rejects_a_recall_whose_parameters_the_policy_refuses() {
+        use dialog_ucan_core::delegation::policy::predicate::Predicate;
+        use dialog_ucan_core::delegation::policy::selector::filter::Filter;
+        use dialog_ucan_core::delegation::policy::selector::select::Select;
+        use ipld_core::ipld::Ipld;
+
+        let subject = signer().await;
+        let operator = signer().await;
+        let addressed_to = signer().await.did();
+        let certificates = CountingStore::default();
+        let memo = ProofMemo::default();
+        let now = 1_000;
+
+        let constrained = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator)
+            .subject(UcanSubject::Specific(subject.did()))
+            .command(vec!["storage".to_string()])
+            .policy(vec![Predicate::Equal(
+                Select::new(vec![Filter::Field("space".to_string())]),
+                Ipld::String("alpha".to_string()),
+            )])
+            .try_build()
+            .await
+            .unwrap();
+        CertificateStore::<Ucan>::save(
+            &certificates,
+            &UcanDelegation::new(DelegationChain::new(constrained)),
+        )
+        .await
+        .unwrap();
+
+        let mut allowed = scope(&subject, &["storage"]);
+        allowed.parameters = Parameters(
+            [("space".to_string(), Ipld::String("alpha".to_string()))]
+                .into_iter()
+                .collect(),
+        );
+        let allowed = Prove::<Ucan>::new(operator.did(), allowed);
+        prove(&certificates, &memo, &addressed_to, &allowed, now)
+            .await
+            .unwrap();
+        assert!(
+            memo.recall::<Ucan>(&addressed_to, &allowed, now).is_some(),
+            "parameters the policy covers recall the memoized chain"
+        );
+
+        let mut refused = scope(&subject, &["storage"]);
+        refused.parameters = Parameters(
+            [("space".to_string(), Ipld::String("beta".to_string()))]
+                .into_iter()
+                .collect(),
+        );
+        let refused = Prove::<Ucan>::new(operator.did(), refused);
+        assert!(
+            memo.recall::<Ucan>(&addressed_to, &refused, now).is_none(),
+            "a recall hit must be rejected when the chain's policy refuses this request's parameters"
+        );
+    }
 }
