@@ -2529,4 +2529,78 @@ mod tests {
         );
         Ok(())
     }
+
+    /// A rules-free transaction commit carries the trigger footprint
+    /// forward to the head it publishes, so the steady-state no-rules
+    /// commit never re-pays the footprint range scans; a commit that
+    /// installs a rule must NOT carry it (the next dispatch rescans).
+    #[dialog_common::test]
+    async fn it_carries_the_footprint_across_rule_free_commits() -> Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/note")
+                    .of("doc:1".parse::<Entity>()?)
+                    .is("n".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let head = branch.revision().expect("committed");
+        assert!(
+            branch.rule_cache().footprint(&head).is_some(),
+            "a rules-free commit records the footprint at its new head"
+        );
+
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/note")
+                    .of("doc:2".parse::<Entity>()?)
+                    .is("n".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let head = branch.revision().expect("committed");
+        assert!(
+            branch.rule_cache().footprint(&head).is_some(),
+            "the carried footprint keeps riding rules-free commits"
+        );
+
+        let stamp: InductiveRule = serde_json::from_value(json!({
+            "assert!": {
+                "with": { "target": { "the": "result.carry/target", "as": "Entity" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "target": { "the": "cmd.carry/target", "as": "Entity" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "target": { "?": { "name": "target" } }
+                }
+            }]
+        }))
+        .expect("rule compiles");
+        branch
+            .transaction()
+            .assert(stamp)
+            .commit()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        let head = branch.revision().expect("committed");
+        assert!(
+            branch.rule_cache().footprint(&head).is_none(),
+            "a rule install invalidates the footprint; the next dispatch rescans"
+        );
+        Ok(())
+    }
 }

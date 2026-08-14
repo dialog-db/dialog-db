@@ -2,6 +2,7 @@ mod induce;
 mod query;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 
+use crate::rules::{TriggerFootprint, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision};
 use dialog_artifacts::{Changes, Instruction, Statement, Update};
 use dialog_capability::{Fork, Provider};
@@ -176,6 +177,22 @@ impl<'a> TransactionCommit<'a> {
         let mut changes = self.changes;
         induce::induce(self.branch, &mut changes, self.transients, env).await?;
 
+        // The trigger footprint is a pure function of the committed
+        // `dialog.rule/on` and `dialog.rule/reads` facts, so a commit
+        // touching neither (checked after induction, which may fold
+        // rule installs into the batch) carries the cached footprint
+        // forward to the head it publishes. Without this every commit
+        // advances the head past the cache's key and the steady-state
+        // no-rules commit re-pays both footprint range scans.
+        let previous = self.branch.revision();
+        let touches_rules = {
+            let on = on_attr();
+            let reads = reads_attr();
+            changes
+                .iter()
+                .any(|(_, attribute, _)| *attribute == on || *attribute == reads)
+        };
+
         let mut commit = self.branch.commit(changes.into_stream());
         if self.allow_empty {
             commit = commit.allow_empty();
@@ -194,6 +211,20 @@ impl<'a> TransactionCommit<'a> {
         let cell = self.branch.induction_cell();
         if cell.content().as_ref() != Some(&revision) {
             cell.publish(revision.clone()).perform(env).await?;
+        }
+
+        if !touches_rules {
+            let footprint = match previous {
+                // A genesis commit sees an empty branch: no committed
+                // rules exist, so the empty footprint is exact.
+                None => Some(TriggerFootprint::default()),
+                Some(previous) => self.branch.rule_cache().footprint(&previous),
+            };
+            if let Some(footprint) = footprint {
+                self.branch
+                    .rule_cache()
+                    .record_footprint(revision.clone(), footprint);
+            }
         }
         Ok(revision)
     }
