@@ -386,14 +386,14 @@ mod tests {
     use dialog_credentials::Ed25519Signer;
     use dialog_effects::blob::BlobReader;
     use dialog_network::Network;
-    use dialog_operator::{Operator, Profile};
+    use dialog_operator::{DeriveOperator as _, Operator, Profile};
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_ucan_core::subject::Subject as UcanSubject;
     use dialog_ucan_core::{DelegationBuilder, DelegationChain};
     use dialog_varsig::Principal as _;
     use futures_util::StreamExt as _;
 
-    use crate::helpers::unique_name;
+    use dialog_operator::helpers::unique_name;
 
     async fn delegate(
         issuer: &Ed25519Signer,

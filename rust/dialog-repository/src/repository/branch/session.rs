@@ -682,7 +682,8 @@ mod rule_tests {
 
     use super::*;
     use crate::Branch;
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
+    use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
     use dialog_query::rule::DeductiveRuleDescriptor;

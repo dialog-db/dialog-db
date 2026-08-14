@@ -7,7 +7,8 @@
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::access::{
-    AuthorizeError, Certificate, CertificateStore, Delegation, Export, Protocol, Prove, Retain,
+    AuthorizeError, Certificate, CertificateStore, Delegation, Export, Forget, Protocol, Prove,
+    Retain,
 };
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_varsig::Did;
@@ -93,6 +94,38 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
             .await
     }
 
+    async fn forget(&self, certificates: &[P::Certificate]) -> Result<(), AuthorizeError> {
+        let has_store = self.connection.borrow().stores.contains(CERTIFICATE);
+        if has_store {
+            let store = self.store(CERTIFICATE).await?;
+            for cert in certificates {
+                let bytes = cert.encode()?;
+                let id = blake3::hash(&bytes).as_bytes().to_base58();
+                let subject_segment = match cert.subject() {
+                    Some(did) => did.to_string(),
+                    None => "_".to_string(),
+                };
+                let key = format!(
+                    "{}/{subject_segment}/{}.{id}",
+                    cert.audience(),
+                    cert.issuer()
+                );
+                let js_key = JsValue::from_str(&key);
+                store
+                    .transact(|object_store| async move {
+                        object_store.delete(&js_key).await.map_err(|e| {
+                            AuthorizeError::Unavailable {
+                                detail: format!("delete: {e:?}"),
+                            }
+                        })?;
+                        Ok::<(), AuthorizeError>(())
+                    })
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError> {
         let certs = delegation.certificates();
         if certs.is_empty() {
@@ -143,6 +176,18 @@ where
         _input: Capability<Export<P>>,
     ) -> Result<Vec<P::Certificate>, AuthorizeError> {
         CertificateStore::<P>::export(self).await
+    }
+}
+
+#[async_trait(?Send)]
+impl<P> Provider<Forget<P>> for IndexedDb
+where
+    P: Protocol,
+    P::Certificate: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    async fn execute(&self, input: Capability<Forget<P>>) -> Result<(), AuthorizeError> {
+        let certificates = &Forget::<P>::of(&input).certificates;
+        CertificateStore::<P>::forget(self, certificates).await
     }
 }
 

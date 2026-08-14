@@ -6,9 +6,9 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use dialog_operator::DeriveOperator as _;
 use std::collections::HashSet;
 
-use crate::helpers::{test_operator_with_profile, unique_name};
 use crate::{
     Blob, Branch, Index, Item, NetworkedIndex, Repository, RepositoryArchiveExt as _,
     RepositoryExt as _, Revision, SiteAddress, SnapshotError,
@@ -23,6 +23,7 @@ use dialog_capability::Subject;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_credentials::SignerCredential;
 use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 // Only the native-only tests below construct one.
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::BlobError;

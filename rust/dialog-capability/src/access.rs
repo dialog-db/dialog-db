@@ -430,6 +430,37 @@ where
     type Output = Result<(), AuthorizeError>;
 }
 
+/// Forget effect — removes specific certificates from a store.
+///
+/// An [`Effect`](crate::Effect) on [`Access`]. The counterpart of
+/// [`Export`] for migration: after certificates are re-retained
+/// elsewhere, this drains exactly those from the store they came from,
+/// leaving everything else in place.
+#[derive(Serialize, Deserialize, Attenuate)]
+#[serde(bound(
+    serialize = "P::Certificate: Serialize",
+    deserialize = "P::Certificate: for<'a> Deserialize<'a>"
+))]
+pub struct Forget<P: Protocol> {
+    /// The certificates to remove.
+    pub certificates: Vec<P::Certificate>,
+}
+
+impl<P: Protocol> Forget<P> {
+    /// Create a new forget request.
+    pub fn new(certificates: Vec<P::Certificate>) -> Self {
+        Self { certificates }
+    }
+}
+
+impl<P: Protocol> crate::Effect for Forget<P>
+where
+    P::Certificate: Serialize + for<'de> Deserialize<'de> + ConditionalSend + 'static,
+{
+    type Of = Access;
+    type Output = Result<(), AuthorizeError>;
+}
+
 /// Export effect — enumerates every retained certificate.
 ///
 /// An [`Effect`](crate::Effect) on [`Access`]. The subject DID in the
@@ -494,6 +525,10 @@ pub trait CertificateStore<P: Protocol> {
     /// Enumerate every certificate this store retains, for migration into
     /// another store (see [`Export`]).
     async fn export(&self) -> Result<Vec<P::Certificate>, AuthorizeError>;
+
+    /// Remove specific certificates from this store (see [`Forget`]).
+    /// Removing an absent certificate is a no-op.
+    async fn forget(&self, certificates: &[P::Certificate]) -> Result<(), AuthorizeError>;
 
     /// Resolve a delegation chain for the given claim.
     ///

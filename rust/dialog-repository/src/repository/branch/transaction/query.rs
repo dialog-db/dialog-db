@@ -166,10 +166,11 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
     use crate::schema;
     use crate::schema::DidExt as _;
     use dialog_artifacts::Entity;
+    use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::query::Output;
     use dialog_query::{Concept, Query, Term, the};
 

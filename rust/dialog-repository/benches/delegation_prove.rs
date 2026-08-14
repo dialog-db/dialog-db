@@ -17,13 +17,14 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dialog_capability::Subject;
+use dialog_capability::access::Access as AccessAttenuation;
 use dialog_capability::access::{CertificateStore, Prove, TimeRange};
 use dialog_credentials::Ed25519Signer;
 use dialog_effects::storage::{Directory, Location};
 use dialog_network::Network;
-use dialog_operator::AccessProvider as _;
+use dialog_operator::DeriveOperator as _;
 use dialog_operator::{Operator, Profile};
-use dialog_repository::{Branch, RepositoryExt as _, SyncedAccess};
+use dialog_repository::{Branch, RepositoryExt as _};
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::provider::{FileSystem, Volatile};
 use dialog_storage::resource::Resource as _;
@@ -76,6 +77,39 @@ async fn open_branch(name: &str) -> (Branch, Operator<VolatileSpace>) {
         .unwrap();
     let branch = repo.branch("main").open().perform(&operator).await.unwrap();
     (branch, operator)
+}
+
+/// An operator whose access branch retains `n` direct grants from
+/// `space` to `holder`, retained through the operator's own Retain
+/// effect so its branch handle observes every commit.
+async fn operator_with_retained(
+    space: &Ed25519Signer,
+    holder: &Ed25519Signer,
+    n: usize,
+) -> Operator<VolatileSpace> {
+    use dialog_capability::access::Retain;
+    let storage = Storage::volatile();
+    let profile = Profile::open(format!("delegation-cached-{n}-{}", std::process::id()))
+        .perform(&storage)
+        .await
+        .unwrap();
+    let operator = profile
+        .derive(b"bench")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage)
+        .await
+        .unwrap();
+    for _ in 0..n {
+        let chain = delegate(space, &holder.did(), UcanSubject::Specific(space.did())).await;
+        Subject::from(operator.profile_did())
+            .attenuate(AccessAttenuation)
+            .invoke(Retain::<Ucan>::new(chain))
+            .perform(&operator)
+            .await
+            .unwrap();
+    }
+    operator
 }
 
 /// All three backends holding the same delegations.
@@ -187,17 +221,30 @@ fn bench_prove(c: &mut Criterion) {
                 })
             });
 
-            // The resolved-chain cache over the same store: after the
-            // first iteration warms it, every prove is a verified hit.
-            // Only successful chains cache, so the miss shape is skipped.
+            // The operator's resolved-chain cache over its access branch:
+            // the same N delegations retained through the operator's
+            // Retain effect, proved through its Prove effect. The first
+            // iteration warms the cache; every later prove is a verified
+            // hit. Only successful chains cache, so the miss shape is
+            // skipped.
             if expect_ok {
-                let synced = SyncedAccess::new(backends.branch.clone(), backends.operator.clone());
+                let (cached_principal, cached_access, cached_operator) = rt.block_on(async {
+                    let space = Ed25519Signer::generate().await.unwrap();
+                    let holder = Ed25519Signer::generate().await.unwrap();
+                    let operator = operator_with_retained(&space, &holder, n).await;
+                    (holder.did(), scope(&space.did()), operator)
+                });
+                let profile_did = cached_operator.profile_did();
                 group.bench_function(BenchmarkId::new("tree-cached", n), |b| {
                     b.to_async(&rt).iter(|| {
-                        let mut claim = Prove::<Ucan>::new(principal.clone(), access.clone());
+                        let mut claim =
+                            Prove::<Ucan>::new(cached_principal.clone(), cached_access.clone());
                         claim.duration = TimeRange::unbounded();
+                        let invocation = dialog_capability::Subject::from(profile_did.clone())
+                            .attenuate(AccessAttenuation)
+                            .invoke(claim);
                         async {
-                            synced.prove(claim).await.unwrap();
+                            invocation.perform(&cached_operator).await.unwrap();
                         }
                     })
                 });

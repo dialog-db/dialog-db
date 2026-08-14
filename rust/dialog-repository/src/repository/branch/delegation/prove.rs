@@ -369,13 +369,13 @@ mod tests {
 
     use super::*;
     use crate::RepositoryExt as _;
-    use crate::helpers::unique_name;
     use anyhow::Result;
     use dialog_capability::Subject;
     use dialog_capability::access::{CertificateStore, Prove};
     use dialog_credentials::Ed25519Signer;
     use dialog_network::Network;
-    use dialog_operator::{Operator, Profile};
+    use dialog_operator::helpers::unique_name;
+    use dialog_operator::{DeriveOperator as _, Operator, Profile};
     use dialog_storage::provider::Volatile;
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_ucan::{Parameters, Ucan, UcanDelegation};

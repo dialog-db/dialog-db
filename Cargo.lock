@@ -1167,6 +1167,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-identity"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-storage",
+ "dialog-ucan",
+ "dialog-ucan-core",
+ "dialog-varsig",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-macros"
 version = "0.1.0"
 dependencies = [
@@ -1204,9 +1223,11 @@ dependencies = [
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
+ "dialog-identity",
  "dialog-network",
  "dialog-remote-s3",
  "dialog-remote-ucan-s3",
+ "dialog-repository",
  "dialog-storage",
  "dialog-ucan",
  "dialog-ucan-core",
@@ -1214,6 +1235,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "getrandom 0.2.16",
+ "parking_lot",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
@@ -1388,6 +1410,7 @@ dependencies = [
  "dialog-common",
  "dialog-credentials",
  "dialog-effects",
+ "dialog-identity",
  "dialog-network",
  "dialog-operator",
  "dialog-query",

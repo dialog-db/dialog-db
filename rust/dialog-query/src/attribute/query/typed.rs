@@ -174,7 +174,7 @@ mod tests {
     use crate::query::Output;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
 
     mod person {
         use crate::Attribute;

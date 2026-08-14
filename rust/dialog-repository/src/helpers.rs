@@ -2,18 +2,42 @@ use std::any::type_name;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::{Repository, RepositoryExt as _};
 use dialog_capability::{Command, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_credentials::Credential;
-use dialog_operator::{Operator, Profile};
-use dialog_storage::provider::storage::VolatileSpace;
 use parking_lot::Mutex;
 
-// Re-export operator-level helpers.
-pub use dialog_operator::helpers::{
-    generate_data, test_operator, test_operator_with_profile, unique_name,
-};
+// Operator-dependent helpers (test_operator, unique_name, ...) live in
+// `dialog_operator::helpers`: the operator sits above this crate, so tests
+// import them from there via the dev-dependency. `test_repo` is the one
+// exception: it returns THIS crate's types, and through the dev-dependency
+// cycle the operator's copy of this crate is a distinct compilation — its
+// `Repository` is not `crate::Repository` — so this crate's tests need a
+// local one built from `crate::` paths.
+
+/// Create a test repository (this crate's types) using the given operator
+/// as the effect environment.
+#[cfg(test)]
+pub async fn test_repo(
+    operator: &dialog_operator::Operator<VolatileSpaceForTests>,
+    profile: &dialog_identity::Profile,
+) -> crate::Repository<dialog_credentials::Credential> {
+    use crate::RepositoryExt as _;
+    use dialog_identity::SpaceHandle;
+    use dialog_operator::helpers::unique_name;
+    let handle = SpaceHandle {
+        profile_did: dialog_varsig::Principal::did(profile),
+        name: unique_name("repo"),
+    };
+    handle
+        .open()
+        .perform(operator)
+        .await
+        .expect("test_repo: failed to open repository")
+}
+
+/// The volatile space type test operators run over.
+#[cfg(test)]
+use dialog_storage::provider::storage::VolatileSpace as VolatileSpaceForTests;
 
 /// A [`Provider`] wrapper that tallies every effect execution by its
 /// type name, so a test can measure an operation's cost in effect
@@ -75,17 +99,4 @@ where
         *self.counts.lock().entry(type_name::<C>()).or_insert(0) += 1;
         self.inner.execute(input).await
     }
-}
-
-/// Create a test repository using the given operator and profile.
-pub async fn test_repo(
-    operator: &Operator<VolatileSpace>,
-    profile: &Profile,
-) -> Repository<Credential> {
-    profile
-        .repository(unique_name("repo"))
-        .open()
-        .perform(operator)
-        .await
-        .expect("test_repo: failed to open repository")
 }

@@ -38,6 +38,7 @@ use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_network::Network;
+use dialog_operator::DeriveOperator as _;
 use dialog_operator::helpers::{generate_data, unique_name};
 use dialog_operator::{Operator, Profile};
 use dialog_repository::{Branch, NetworkedIndex, RemoteSite, Repository, RepositoryExt as _};

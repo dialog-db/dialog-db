@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-helpers = ["dep:anyhow", "dialog-operator/helpers"]
+helpers = ["dep:anyhow"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
@@ -21,7 +21,7 @@ tracing = { workspace = true }
 dialog-artifacts = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
-dialog-operator = { workspace = true }
+dialog-identity = { workspace = true }
 dialog-query = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }

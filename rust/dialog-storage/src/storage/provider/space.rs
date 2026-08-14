@@ -41,7 +41,9 @@
 //! how higher-level runtimes (`Storage`) can construct mounted spaces
 //! without knowing the concrete provider types.
 
-use dialog_capability::access::{AuthorizeError, Export, Protocol, Prove, Retain as AccessRetain};
+use dialog_capability::access::{
+    AuthorizeError, Export, Forget, Protocol, Prove, Retain as AccessRetain,
+};
 use dialog_capability::{Capability, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
@@ -162,6 +164,25 @@ where
         &self,
         input: Capability<Export<P>>,
     ) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        input.perform(&self.certificate).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Archive, Memory, Credential, Certificate, Blob, P> Provider<Forget<P>>
+    for Space<Archive, Memory, Credential, Certificate, Blob>
+where
+    P: Protocol,
+    P::Certificate:
+        serde::Serialize + for<'de> serde::Deserialize<'de> + ConditionalSend + ConditionalSync,
+    Certificate: Provider<Forget<P>> + ConditionalSend + ConditionalSync,
+    Archive: ConditionalSend + ConditionalSync,
+    Memory: ConditionalSend + ConditionalSync,
+    Credential: ConditionalSend + ConditionalSync,
+    Blob: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Forget<P>>) -> Result<(), AuthorizeError> {
         input.perform(&self.certificate).await
     }
 }

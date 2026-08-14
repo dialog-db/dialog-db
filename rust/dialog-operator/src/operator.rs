@@ -9,18 +9,22 @@ mod space;
 #[cfg(test)]
 mod test;
 
-pub use access::AccessProvider;
-pub use builder::{OperatorBuilder, OperatorError};
+pub use builder::{DeriveOperator, OperatorBuilder, OperatorError};
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use crate::Authority;
+use dialog_repository::Branch;
+use dialog_ucan::UcanCertificate;
+use parking_lot::Mutex;
+
+use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_effects::authority::{Attest, Identify, Operator as AuthOperator};
 use dialog_effects::credential::Secret;
 use dialog_effects::storage as storage_fx;
 use dialog_effects::{archive, blob, credential, memory};
+use dialog_identity::Authority;
 use dialog_network::Network;
 use dialog_storage::provider::storage::Storage;
 use dialog_varsig::{Did, Principal};
@@ -62,24 +66,31 @@ pub struct Operator<S: Clone> {
     /// Network dispatch for fork invocations.
     network: Network,
 
-    /// Optional override for where proofs are resolved and delegations
-    /// retained (see [`AccessProvider`]). `None` routes access effects to
-    /// the storage certificate provider.
-    access: Option<Arc<dyn AccessProvider>>,
+    /// The session grants: profile-to-operator delegations minted in
+    /// memory at build time, one per allowed scope. Never persisted — the
+    /// operator key derives from the profile key, so any device holding
+    /// the profile re-mints identical authority on demand.
+    session: Arc<Vec<UcanCertificate>>,
+
+    /// The profile repository's access branch, opened at build time.
+    /// Proofs resolve from its `dialog.ucan/*` facts and retained
+    /// delegations commit into it.
+    delegations: Arc<OnceLock<Branch>>,
+
+    /// Resolved-chain cache (see `operator/access.rs`).
+    chains: Arc<Mutex<access::ChainCache>>,
 }
 
 impl<S: Clone> Operator<S> {
-    /// Install an [`AccessProvider`], returning an operator whose access
-    /// effects (prove, retain) resolve through it instead of the storage
-    /// certificate provider.
-    pub fn with_access(mut self, access: Arc<dyn AccessProvider>) -> Self {
-        self.access = Some(access);
-        self
-    }
-
-    /// The installed access override, if any.
-    pub(crate) fn access(&self) -> Option<&Arc<dyn AccessProvider>> {
-        self.access.as_ref()
+    /// The profile repository's access branch this operator serves proofs
+    /// from, or an error before build wires it (unreachable through the
+    /// public API).
+    pub(crate) fn delegations(&self) -> Result<&Branch, AuthorizeError> {
+        self.delegations
+            .get()
+            .ok_or_else(|| AuthorizeError::Malformed {
+                detail: "operator access branch is not wired".to_string(),
+            })
     }
 
     /// The operator's DID (the ephemeral/derived session key).

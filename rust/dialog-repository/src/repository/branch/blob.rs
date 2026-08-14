@@ -644,12 +644,12 @@ mod tests {
 
     use super::Blob;
     use crate::RepositoryExt as _;
-    use crate::helpers::unique_name;
     use anyhow::Result;
     use dialog_capability::Subject;
     use dialog_effects::blob::{BlobError, BlobReader, ByteRange};
     use dialog_network::Network;
-    use dialog_operator::Profile;
+    use dialog_operator::helpers::unique_name;
+    use dialog_operator::{DeriveOperator as _, Profile};
     use dialog_storage::provider::storage::Storage;
     use futures_util::stream;
 

@@ -25,8 +25,9 @@ use dialog_artifacts::history::{Context, context_of};
 use dialog_artifacts::{Artifact, Instruction, Value};
 
 use crate::RepositoryExt as _;
-use crate::helpers::{Counting, test_operator_with_profile, unique_name};
+use crate::helpers::Counting;
 use dialog_artifacts::tree::TreeStorageBridge;
+use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 
 fn assert_fact(entity: usize, value: &str) -> Instruction {
     Instruction::Assert(Artifact {

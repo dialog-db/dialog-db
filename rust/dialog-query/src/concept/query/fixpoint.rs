@@ -1268,7 +1268,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     /// The `ancestor` concept: `this` plus one entity-valued
@@ -2192,7 +2192,7 @@ mod derived_edge_tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     /// A derived edge concept: concluded by a rule over the raw

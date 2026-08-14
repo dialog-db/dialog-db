@@ -329,7 +329,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::{Value, the};
     use dialog_artifacts::{Artifact, Attribute, Cause};
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use std::str::FromStr;
 
     macro_rules! assert_relation {

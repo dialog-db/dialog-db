@@ -1,3 +1,4 @@
+use crate::DeriveOperator as _;
 use std::str::FromStr;
 
 use crate::{Operator, Profile};
@@ -54,6 +55,20 @@ pub async fn test_operator_with_profile() -> (Operator<VolatileSpace>, Profile) 
         .await
         .unwrap();
     (operator, profile)
+}
+
+/// Create a test repository using the given operator and profile.
+pub async fn test_repo(
+    operator: &Operator<VolatileSpace>,
+    profile: &Profile,
+) -> dialog_repository::Repository<dialog_credentials::Credential> {
+    use dialog_repository::RepositoryExt as _;
+    profile
+        .repository(unique_name("repo"))
+        .open()
+        .perform(operator)
+        .await
+        .expect("test_repo: failed to open repository")
 }
 
 /// Generate deterministic test data consisting of facts that reference a

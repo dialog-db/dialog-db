@@ -393,7 +393,7 @@ mod tests {
     use crate::term::Term;
     use crate::the;
     use anyhow::Result;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     // Define a Person concept for testing via `#[derive(Concept)]`.

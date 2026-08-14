@@ -339,8 +339,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::PushError;
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
     use anyhow::Result;
+    use dialog_operator::helpers::test_operator_with_profile;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::{StreamExt as _, stream};
@@ -506,8 +507,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_folds_tracking_updates_when_pushing_from_a_stale_handle() -> Result<()> {
         use crate::Upstream;
-        use crate::helpers::test_operator_with_profile;
         use crate::helpers::test_repo;
+        use dialog_operator::helpers::test_operator_with_profile;
 
         let (operator, profile) = test_operator_with_profile().await;
         let repo = test_repo(&operator, &profile).await;

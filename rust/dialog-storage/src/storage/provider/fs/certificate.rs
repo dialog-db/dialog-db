@@ -4,7 +4,8 @@
 
 use base58::ToBase58;
 use dialog_capability::access::{
-    AuthorizeError, Certificate, CertificateStore, Delegation, Export, Protocol, Prove, Retain,
+    AuthorizeError, Certificate, CertificateStore, Delegation, Export, Forget, Protocol, Prove,
+    Retain,
 };
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -108,6 +109,32 @@ where
         Ok(certificates)
     }
 
+    /// Delete each certificate's file, recomputing the same
+    /// `certificate/{audience}/{subject}/{issuer}.{hash}` path `save`
+    /// writes. Absent files are a no-op.
+    async fn forget(&self, certificates: &[P::Certificate]) -> Result<(), AuthorizeError> {
+        for cert in certificates {
+            let bytes = cert.encode()?;
+            let id = blake3::hash(&bytes).as_bytes().to_base58();
+            let subject_segment = match cert.subject() {
+                Some(did) => did.to_string(),
+                None => "_".to_string(),
+            };
+            let filename = format!("{}.{id}", cert.issuer());
+            let handle = match self
+                .certificate()
+                .and_then(|c| c.resolve(cert.audience().as_ref()))
+                .and_then(|c| c.resolve(&subject_segment))
+                .and_then(|c| c.resolve(&filename))
+            {
+                Ok(handle) => handle,
+                Err(_) => continue,
+            };
+            let _ = handle.remove().await;
+        }
+        Ok(())
+    }
+
     /// Store a delegation's certificates as files for future lookups.
     async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError> {
         for cert in delegation.certificates() {
@@ -148,6 +175,20 @@ where
         _input: Capability<Export<P>>,
     ) -> Result<Vec<P::Certificate>, AuthorizeError> {
         CertificateStore::<P>::export(self).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<P> Provider<Forget<P>> for FileSystem
+where
+    P: Protocol,
+    P::Certificate:
+        serde::Serialize + for<'de> serde::Deserialize<'de> + ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Forget<P>>) -> Result<(), AuthorizeError> {
+        let certificates = &Forget::<P>::of(&input).certificates;
+        CertificateStore::<P>::forget(self, certificates).await
     }
 }
 

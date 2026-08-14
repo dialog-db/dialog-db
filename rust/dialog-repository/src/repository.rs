@@ -9,8 +9,8 @@
 use dialog_capability::{Capability, Did, Subject};
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::space::SpaceSubjectExt;
-use dialog_operator::access::Access as ProfileAccess;
-use dialog_operator::{Profile, SpaceHandle};
+use dialog_identity::access::Access as ProfileAccess;
+use dialog_identity::{Profile, SpaceHandle};
 use dialog_varsig::Principal;
 
 mod access;
@@ -200,9 +200,10 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::helpers::{test_operator_with_profile, test_repo, unique_name};
+    use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
     use dialog_remote_s3::Address as S3Address;
     use futures_util::StreamExt;
     use futures_util::stream;
@@ -609,8 +610,8 @@ mod tests {
     mod delegation_tests {
 
         use super::*;
-        use crate::helpers::{test_operator_with_profile, unique_name};
         use dialog_effects::memory as fx_memory;
+        use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 
         #[dialog_common::test]
         async fn it_delegates_repo_to_profile_and_claims() -> Result<()> {
@@ -755,7 +756,8 @@ mod tests {
 
     mod query_engine {
 
-        use crate::helpers::{test_operator_with_profile, test_repo};
+        use crate::helpers::test_repo;
+        use dialog_operator::helpers::test_operator_with_profile;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term};
 
@@ -1044,7 +1046,8 @@ mod tests {
     mod query_session {
 
         use super::query_engine::{Employee, employee};
-        use crate::helpers::{test_operator_with_profile, test_repo};
+        use crate::helpers::test_repo;
+        use dialog_operator::helpers::test_operator_with_profile;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
@@ -2093,7 +2096,7 @@ mod tests {
     mod profile_as_repository {
 
         use super::*;
-        use crate::helpers::test_operator_with_profile;
+        use dialog_operator::helpers::test_operator_with_profile;
         use dialog_query::{Entity, the};
 
         #[dialog_common::test]
