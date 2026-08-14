@@ -52,6 +52,24 @@ pub struct Storage<S: Clone> {
     router: Router<S>,
 }
 
+/// Cloning yields a second handle onto the *same* spaces, not a second
+/// set of them: the pool behind `loader` and `router` is already
+/// `Arc`-shared, which is what makes two handles safe to hold at once.
+///
+/// Callers need this whenever an environment that owns a `Storage` has
+/// to be rebuilt while the old one stays live — swapping an `Operator`
+/// for a freshly keyed one, say. Handing the replacement its own
+/// `Storage::new()` would open a second set of connections to the same
+/// databases and let already-open handles drift from newly opened ones.
+impl<S: Clone> Clone for Storage<S> {
+    fn clone(&self) -> Self {
+        Self {
+            loader: self.loader.clone(),
+            router: self.router.clone(),
+        }
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<S, P> Provider<Prove<P>> for Storage<S>
@@ -122,6 +140,48 @@ mod tests {
     use dialog_effects::prelude::*;
     use dialog_effects::storage::{LocationExt, Storage as StorageFx};
     use dialog_varsig::Principal;
+
+    #[dialog_common::test]
+    async fn it_shares_mounted_spaces_with_a_clone() {
+        let env = Storage::volatile();
+        let clone = env.clone();
+        let credential = test_credential().await;
+
+        let cred = StorageFx::profile("shared")
+            .create(credential)
+            .perform(&env)
+            .await
+            .unwrap();
+
+        assert!(
+            clone.contains(&cred.did()),
+            "a clone must see spaces mounted through the original"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_resolves_a_location_to_one_did_across_clones() {
+        let env = Storage::volatile();
+        let clone = env.clone();
+        let credential = test_credential().await;
+
+        let created = StorageFx::profile("stable")
+            .create(credential)
+            .perform(&env)
+            .await
+            .unwrap();
+        let loaded = StorageFx::profile("stable")
+            .load()
+            .perform(&clone)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            loaded.did(),
+            created.did(),
+            "the location mapping is shared, so a clone resolves the same space"
+        );
+    }
 
     #[dialog_common::test]
     async fn it_creates_profile_with_sugar() {

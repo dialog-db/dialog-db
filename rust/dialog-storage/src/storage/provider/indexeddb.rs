@@ -355,10 +355,6 @@ pub enum IndexedDbError {
     #[error("Store error: {0}")]
     Store(String),
 
-    /// Value conversion failed.
-    #[error("Value conversion error: {0}")]
-    Conversion(String),
-
     /// No database exists at the requested name (a `load` of something
     /// that was never created).
     #[error("IndexedDB database not found: {0}")]
@@ -378,7 +374,11 @@ impl From<IndexedDbError> for CredentialError {
 /// the material needed to decide could not be fetched.
 impl From<IndexedDbError> for AuthorizeError {
     fn from(e: IndexedDbError) -> Self {
-        Self::Malformed(e.to_string())
+        // The database failing is our machinery, not the caller's
+        // material.
+        Self::Unavailable {
+            detail: e.to_string(),
+        }
     }
 }
 

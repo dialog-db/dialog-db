@@ -237,6 +237,15 @@ impl Key {
         self.0.first().copied().unwrap_or(u8::MIN)
     }
 
+    /// Return the content-addressed value block referenced by a spilled key.
+    ///
+    /// This works for every variable-key ordering, including history keys.
+    /// Callers remain responsible for deciding whether the key's state makes
+    /// the referenced block live (for example, retraction tombstones do not).
+    pub fn value_spill_hash(&self) -> Option<&[u8]> {
+        varkey::value_spill_hash(self.as_ref(), self.tag())
+    }
+
     /// Sets the tag byte and returns the modified key
     pub fn set_tag(mut self, tag: u8) -> Self {
         if self.0.is_empty() {

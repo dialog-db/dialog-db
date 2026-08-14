@@ -52,7 +52,7 @@ impl BlobSource for FileBlobSource {
     async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
         match self.0.next().await {
             Some(Ok(chunk)) => Ok(Some(chunk)),
-            Some(Err(e)) => Err(BlobError::Io(e.to_string())),
+            Some(Err(e)) => Err(BlobError::Storage(e.to_string())),
             None => Ok(None),
         }
     }
@@ -95,7 +95,7 @@ impl BlobSink for FileBlobSink {
         self.writer
             .write_all(bytes)
             .await
-            .map_err(|e| BlobError::Io(e.to_string()))
+            .map_err(|e| BlobError::Storage(e.to_string()))
     }
 
     async fn finish(self: Box<Self>) -> Result<Blake3Hash, BlobError> {
