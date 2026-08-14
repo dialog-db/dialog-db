@@ -15,9 +15,9 @@
 //! ```
 
 use std::fmt;
-use std::io;
 use std::str;
 
+use crate::Rejection;
 use base58::ToBase58;
 use dialog_capability::access::AuthorizeError;
 pub use dialog_capability::{
@@ -261,24 +261,19 @@ pub enum MemoryError {
     #[error("Storage error: {0}")]
     Storage(String),
 
-    /// Authorization error.
-    #[error("Authorization error: {0}")]
-    Authorization(String),
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
 
-    /// IO error.
-    #[error("IO error: {0}")]
-    Io(#[from] io::Error),
+    /// The request was not authorized.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
 }
 
 impl From<StorageError> for MemoryError {
     fn from(e: StorageError) -> Self {
         Self::Storage(e.to_string())
-    }
-}
-
-impl From<AuthorizeError> for MemoryError {
-    fn from(e: AuthorizeError) -> Self {
-        Self::Authorization(e.to_string())
     }
 }
 

@@ -171,10 +171,6 @@ pub enum StorageError {
     /// Backend storage error.
     #[error("Storage error: {0}")]
     Storage(String),
-
-    /// The credential at the location is invalid.
-    #[error("Invalid credential: {0}")]
-    InvalidCredential(String),
 }
 
 /// Sugar: build a storage capability chain for a profile.
