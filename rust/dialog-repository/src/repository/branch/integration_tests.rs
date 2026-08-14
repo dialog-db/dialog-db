@@ -1298,6 +1298,189 @@ use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
 /// Alice creates a repo, delegates to Bob, Bob pulls, commits, pushes,
 /// then Alice pulls Bob's changes.
+/// The login flow: the ACCOUNT repository is the durable home of
+/// delegations, and a device regains access by pulling it. A space
+/// delegates to the account; the account's access branch (holding that
+/// grant) is pushed to the access service. A device profile "logs in":
+/// it retains the account-to-profile powerline locally, adds the account
+/// as the upstream of its own access branch, and pulls. The pull adopts
+/// the account's delegation records and hydrates their envelopes, and
+/// the operator then proves access to the space through the three-hop
+/// chain: space to account (pulled), account to profile (retained at
+/// login), profile to operator (in-memory session).
+#[dialog_common::test]
+async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result<()> {
+    use dialog_capability::access::{
+        Access as AccessAttenuation, Proof as _, Prove, Retain, TimeRange,
+    };
+    use dialog_credentials::{Credential as RawCredential, Ed25519Signer, SignerCredential};
+    use dialog_effects::storage::{LocationExt as _, Storage as StorageFx};
+    use dialog_operator::DeriveOperator as _;
+    use dialog_ucan::{Parameters, Scope, Ucan, UcanDelegation};
+    use dialog_ucan_core::command::Command as UcanCommand;
+    use dialog_ucan_core::subject::Subject as UcanSubject;
+    use dialog_ucan_core::{DelegationBuilder, DelegationChain};
+    use dialog_varsig::Principal as _;
+
+    let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    // --- The account: its own identity, its own repository, the durable
+    // home of delegations. ---
+    let account_storage = Storage::volatile();
+    let account_signer = Ed25519Signer::generate().await?;
+    let account_name = unique_name("account");
+    StorageFx::profile(account_name.clone())
+        .create(RawCredential::Signer(SignerCredential::from(
+            account_signer.clone(),
+        )))
+        .perform(&account_storage)
+        .await?;
+    let account_profile = Profile::load(account_name)
+        .perform(&account_storage)
+        .await?;
+    let account_operator = account_profile
+        .derive(b"account-device")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(account_storage)
+        .await?;
+
+    // A space grants the ACCOUNT (not a profile): the durable direction,
+    // so a compromised device profile cannot cost the access.
+    let space = Ed25519Signer::generate().await?;
+    let space_grant = DelegationBuilder::new()
+        .issuer(space.clone())
+        .audience(&account_signer)
+        .subject(UcanSubject::Specific(space.did()))
+        .command(vec!["storage".to_string()])
+        .try_build()
+        .await?;
+    Subject::from(account_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+            DelegationChain::new(space_grant),
+        )))
+        .perform(&account_operator)
+        .await?;
+
+    // Publish the account's access branch to the access service.
+    let account_repo = crate::Repository::from(&account_profile);
+    let account_origin = account_repo
+        .remote("origin")
+        .create(ucan_site.clone())
+        .perform(&account_operator)
+        .await?;
+    let account_branch = account_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&account_operator)
+        .await?;
+    let account_remote_branch = account_origin
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&account_operator)
+        .await?;
+    account_branch
+        .set_upstream(account_remote_branch)
+        .perform(&account_operator)
+        .await?;
+    assert!(
+        account_branch
+            .push()
+            .perform(&account_operator)
+            .await?
+            .is_some()
+    );
+
+    // --- The device: fresh profile and operator. "Login" retains the
+    // account-to-profile powerline locally (handed over out of band) and
+    // points the profile's access branch at the account. ---
+    let device_storage = Storage::volatile();
+    let device_profile = Profile::open(unique_name("device"))
+        .perform(&device_storage)
+        .await?;
+    let device_operator = device_profile
+        .derive(b"device")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(device_storage)
+        .await?;
+
+    let login_grant = DelegationBuilder::new()
+        .issuer(account_signer.clone())
+        .audience(&device_profile.did())
+        .subject(UcanSubject::Any)
+        .command(vec![])
+        .try_build()
+        .await?;
+    Subject::from(device_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+            DelegationChain::new(login_grant),
+        )))
+        .perform(&device_operator)
+        .await?;
+
+    let device_repo = crate::Repository::from(&device_profile);
+    let device_origin = device_repo
+        .remote("account")
+        .create(ucan_site)
+        .subject(account_profile.did())
+        .perform(&device_operator)
+        .await?;
+    let device_branch = device_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    let device_remote_branch = device_origin
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    device_branch
+        .set_upstream(device_remote_branch)
+        .perform(&device_operator)
+        .await?;
+
+    // The pull IS the login's data path: authorized by the retained
+    // powerline plus the in-memory session, it adopts the account's
+    // delegation records and hydrates their envelopes.
+    assert!(
+        device_branch
+            .pull()
+            .perform(&device_operator)
+            .await?
+            .is_some(),
+        "the login pull adopts the account's delegations"
+    );
+
+    // The device now proves access to the space through the full ladder:
+    // space -> account (pulled), account -> profile (login), profile ->
+    // operator (session).
+    let mut claim = Prove::<Ucan>::new(
+        device_operator.did(),
+        Scope {
+            subject: UcanSubject::Specific(space.did()),
+            command: UcanCommand(vec!["storage".to_string()]),
+            parameters: Parameters::default(),
+        },
+    );
+    claim.duration = TimeRange::unbounded();
+    let proof = Subject::from(device_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(claim)
+        .perform(&device_operator)
+        .await?;
+    assert_eq!(
+        proof.proofs().len(),
+        3,
+        "space -> account -> profile -> operator"
+    );
+
+    Ok(())
+}
+
 /// The upgrade path, end to end over the access service and local S3:
 /// a delegation sitting in the LEGACY certificate store (as an old
 /// install left it) no longer authorizes anything — the operator serves
