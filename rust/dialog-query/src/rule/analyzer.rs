@@ -29,14 +29,15 @@
 
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
-use crate::error::AnalysisError;
+use crate::error::{AnalysisError, TypeError};
 use crate::planner::categorize;
 use crate::premise::Negation;
 use crate::proposition::Proposition;
+use crate::reduce::{ReduceEntry, ReduceSpec};
 use crate::rule::RuleKind;
 use crate::rule::types::TypeEnv;
-use crate::type_system::Type as Kind;
 use crate::type_system::unifier::Context;
+use crate::type_system::{Primitive, Type as Kind};
 use crate::{Entity, Environment, Premise, Term};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -194,6 +195,11 @@ pub struct AnalyzedRule {
     /// Per-premise variable usage and dependency edges. Indexed
     /// in the same order as `premises`.
     pub graph: DependencyGraph,
+    /// The checked `reduce` clause entries, one per reduced head
+    /// field, in field-name order. Empty for a plain rule. The
+    /// grouping fields are *derived* wherever evaluation needs them
+    /// (the head fields not reduced), never stored.
+    pub reduce: Vec<ReduceEntry>,
 }
 
 impl AnalyzedRule {
@@ -207,6 +213,7 @@ impl AnalyzedRule {
             premises,
             types: Arc::new(TypeEnv::new()),
             graph: DependencyGraph::default(),
+            reduce: Vec::new(),
         }
     }
 
@@ -248,10 +255,15 @@ impl AnalyzedRule {
     /// re-evaluating the whole query. Concept premises are
     /// cross-entity by construction (the target entity is a field
     /// value, not the subject), so any rule carrying one is
-    /// non-local.
+    /// non-local. A *reducing* rule is never local regardless of its
+    /// premises: its folds read the whole relation, so one entity's
+    /// fact change moves its entire group's row.
     pub fn is_entity_local(&self) -> bool {
         fn of_is_this(term: &Term<Entity>) -> bool {
             matches!(term, Term::Variable { name: Some(name), .. } if name == "this")
+        }
+        if !self.reduce.is_empty() {
+            return false;
         }
         self.premises.iter().all(|premise| match premise {
             Premise::Assert(Proposition::Attribute(query)) => of_is_this(query.of()),
@@ -282,11 +294,87 @@ pub fn analyze(
     premises: Vec<Premise>,
     kind: RuleKind,
 ) -> Result<AnalyzedRule, AnalysisError> {
-    let types = Arc::new(
-        TypeEnv::infer(&premises).map_err(|err| AnalysisError::Inference {
-            reason: err.to_string(),
-        })?,
-    );
+    analyze_with(conclusion, premises, kind, Vec::new())
+}
+
+/// [`analyze`] with a `reduce` clause: `(field, spec)` pairs in
+/// head-field order, empty for a plain rule.
+///
+/// Beyond the plain-rule checks, the reduce clause adds:
+///
+/// 1. Every reduced field must be a head field (defense in depth —
+///    the descriptor enforces this at construction).
+/// 2. No body premise may mention a variable named as a reduced
+///    field: the fold defines that field, so a body binding would be
+///    a second definition ([`AnalysisError::ReducedFieldCollision`]).
+/// 3. Each entry is constructed through the *checked*
+///    [`ReduceEntry::try_new`] against the body-inferred type of its
+///    input variable, so an incompatible aggregator/input pair is a
+///    type error here, not a fold-time failure.
+/// 4. Each entry's output type must unify (present parts meet) with
+///    the head field's declared content type.
+/// 5. Each entry's output type is recorded in the [`TypeEnv`] under
+///    the field's name, so the *existing* required-head optionality
+///    check fires when an identity-less fold (`min`/`max`/`avg`)
+///    over an optional input feeds a required head field — no new
+///    rule for that case.
+pub fn analyze_with(
+    conclusion: ConceptDescriptor,
+    premises: Vec<Premise>,
+    kind: RuleKind,
+    reduce: Vec<(String, ReduceSpec)>,
+) -> Result<AnalyzedRule, AnalysisError> {
+    let mut types = TypeEnv::infer(&premises).map_err(|err| AnalysisError::Inference {
+        reason: err.to_string(),
+    })?;
+
+    let mut entries = Vec::with_capacity(reduce.len());
+    for (field, spec) in reduce {
+        if !conclusion.with().keys().any(|name| name == field) {
+            return Err(AnalysisError::Reduce(Box::new(
+                TypeError::ReducedFieldNotInHead { field },
+            )));
+        }
+        // The body must not define the field the fold defines. The
+        // TypeEnv has an entry for every variable a positive premise
+        // mentions, which covers every body binding site.
+        if types.get(&field).is_some() {
+            return Err(AnalysisError::ReducedFieldCollision { field });
+        }
+        // The fold's input type: the body-inferred type of its input
+        // variable. A constant input carries its own kind; an input
+        // the body never binds falls back to "any present value" —
+        // the grounding check after planning rejects it as unbound.
+        let input_type = match spec.of.name() {
+            Some(name) => types.get(name).cloned(),
+            None => spec.of.kind(),
+        }
+        .unwrap_or_else(|| Kind::from(Primitive::ALL));
+        let entry = ReduceEntry::try_new(field.clone(), spec.apply, spec.of, &input_type)
+            .map_err(|error| AnalysisError::Reduce(Box::new(error)))?;
+        let output = entry
+            .output_type(&input_type)
+            .expect("a checked entry has an output type by construction");
+        // The output's present shapes must inhabit the head field's
+        // declared type. The raw output (optionality included) is
+        // what enters the TypeEnv, so the required-head check below
+        // still sees an identity-less fold's Nothing.
+        if let Some((_, field_descriptor)) =
+            conclusion.with().iter().find(|(name, _)| *name == field)
+            && let Some(declared) = field_descriptor.content_type().map(Kind::from)
+            && output.clone().required().intersect(&declared).is_none()
+        {
+            return Err(AnalysisError::Reduce(Box::new(TypeError::ReduceOutput {
+                field,
+                aggregator: entry.aggregator,
+                output: Box::new(output),
+                declared: Box::new(declared),
+            })));
+        }
+        types.insert(&field, output);
+        entries.push(entry);
+    }
+    let types = Arc::new(types);
 
     // Required heads must not admit `Nothing`.
     if let Some(variable) = conclusion
@@ -357,6 +445,7 @@ pub fn analyze(
         premises,
         types,
         graph,
+        reduce: entries,
     })
 }
 

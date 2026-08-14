@@ -40,13 +40,14 @@ use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
 use crate::history::{Cause as HistoryCause, Claim, Record, Version};
+use crate::key::value_payload as build_value_payload;
 use crate::{
-    Artifact, ArtifactSelector, ArtifactWriter, AttributeKey, AttributeKeyPart, Datum,
-    DialogArtifactsError, EntityKey, EntityKeyPart, Instruction, Key, KeyView, KeyViewConstruct,
-    KeyViewMut, SelectorMatch, State, Value, ValueDataType, ValueKey, encode_bytes,
-    encode_value_owned,
+    ATTRIBUTE_KEY_TAG, Artifact, ArtifactSelector, ArtifactView, ArtifactWriter, AttributeKey,
+    AttributeKeyPart, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart,
+    Instruction, Key, KeyView, KeyViewConstruct, KeyViewMut, SelectorMatch, State, VALUE_KEY_TAG,
+    Value, ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, ValuePayload, ValueRef, parse_key_ref},
-    key::{artifact_index_keys, reproject_index_keys, value_spills},
+    key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
     match_selector_and_key_ref,
     selector::Constrained,
     value_predicates_admit,
@@ -131,8 +132,9 @@ where
 }
 
 /// Writes a spilling value's raw bytes as a content-addressed block into the
-/// raw archive block `store`, keyed by the value's 32-byte reference. A no-op
-/// for a value that stays inline (its bytes live in the key). Idempotent:
+/// raw archive block `store`, keyed by the value's 32-byte reference (both
+/// taken from the instruction's single [`EncodedValue`] pass). A no-op for a
+/// value that stays inline (its bytes live in the key). Idempotent:
 /// content-addressed, so the same value writes the same block.
 ///
 /// This uses the raw backend directly, NOT the tree's `ContentAddressedStorage`
@@ -140,15 +142,13 @@ where
 /// living in the same store the tree nodes do.
 async fn store_spilled_value<S>(
     store: &mut S,
-    artifact: &Artifact,
-    manifest: &Manifest,
+    spill: Option<(Blake3Hash, Vec<u8>)>,
 ) -> Result<(), DialogArtifactsError>
 where
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>,
 {
-    if value_spills(&artifact.is, manifest) {
-        let reference = artifact.is.to_reference();
-        store.set(reference, artifact.is.to_bytes()).await?;
+    if let Some((reference, raw)) = spill {
+        store.set(reference, raw).await?;
     }
     Ok(())
 }
@@ -451,8 +451,27 @@ fn apply_prefix_bounds<K: KeyViewMut>(
     if selector.attribute().is_none()
         && let Some(prefix) = selector.attribute_prefix()
     {
-        let lo = prefix_lower(prefix.as_bytes());
-        let hi = prefix_upper(prefix.as_bytes());
+        // A name-shape constraint under a whole-domain prefix narrows
+        // the range to the shape's contiguous first-byte class within
+        // the domain: positions (`A`–`Z`) occupy one sub-range, symbols
+        // (`a`–`z`) another, so the scan touches only the demanded half
+        // of a mixed domain. The class byte extends the prefix on each
+        // edge; a prefix not ending at the name boundary (`/`) leaves
+        // the shape to the per-entry check.
+        let (lo, hi) = match selector.name_shape() {
+            Some(shape) if prefix.ends_with('/') => {
+                let (first, last) = shape.first_byte_class();
+                let mut lo = prefix.as_bytes().to_vec();
+                lo.push(first);
+                let mut hi = prefix.as_bytes().to_vec();
+                hi.push(last);
+                (prefix_lower(&lo), prefix_upper(&hi))
+            }
+            _ => (
+                prefix_lower(prefix.as_bytes()),
+                prefix_upper(prefix.as_bytes()),
+            ),
+        };
         start = start.set_attribute(AttributeKeyPart(&lo));
         end = end.set_attribute(AttributeKeyPart(&hi));
     }
@@ -689,8 +708,11 @@ pub trait ArtifactTreeExt {
             + Clone
             + ConditionalSync;
 
-    /// Scan the tree for [`Artifact`]s matching the given constrained
-    /// selector.
+    /// Scan the tree for facts matching the given constrained selector,
+    /// yielding each as a borrowed-access [`ArtifactView`] rather than a
+    /// materialized [`Artifact`] — the caller decides per row whether to
+    /// read a field off the view or [`to_owned`](ArtifactView::to_owned)
+    /// the whole fact.
     ///
     /// Picks the EAV/AEV/VAE index based on which field of the
     /// selector is constrained (entity / value / attribute, in that
@@ -703,6 +725,32 @@ pub trait ArtifactTreeExt {
     /// spilled value blocks across scans so a repeated read of the same large
     /// value skips the store fetch.
     fn scan<'s, S>(
+        self,
+        store: S,
+        cache: SpillCache,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + ConditionalSend
+    where
+        Self: Sized,
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync
+            + 's;
+
+    /// Like [`scan`](Self::scan), but yields every row as an owned
+    /// [`Artifact`] materialized from the scan's OWN key parse.
+    ///
+    /// This is the fast path for consumers that materialize every row (a
+    /// `select(..).to_owned()`, an export): the scan already parsed each
+    /// key once for selector matching and spill resolution, and
+    /// reconstruction reuses that parse. Routing the same rows through
+    /// [`ArtifactView`]s and per-row
+    /// [`to_owned`](crate::ArtifactView::to_owned) parses every key a
+    /// second time — measured at double-digit percent on large
+    /// scan-and-materialize workloads. Consumers that read only some
+    /// fields, or only some rows, should keep using
+    /// [`scan`](Self::scan)'s views and pay materialization selectively.
+    fn scan_owned<'s, S>(
         self,
         store: S,
         cache: SpillCache,
@@ -773,9 +821,16 @@ impl ArtifactTreeExt for ArtifactTree {
         // Open one transient edit batch over this tree's spine and apply every
         // instruction's writes to it in flight, so the whole instruction stream
         // costs a single persist instead of one full tree rebuild per key.
-        let (transient, changed) =
-            write_instructions(transient, store, &storage, version, &manifest, instructions)
-                .await?;
+        let (transient, changed) = write_instructions(
+            transient,
+            store,
+            &storage,
+            version,
+            &manifest,
+            instructions,
+            WriteScope::Application,
+        )
+        .await?;
         // Seal the whole batch with a single bottom-up persist into the
         // caller's delta.
         *self = transient.persist(delta)?;
@@ -914,7 +969,7 @@ impl ArtifactTreeExt for ArtifactTree {
         store: S,
         cache: SpillCache,
         selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
+    ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + ConditionalSend
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + Clone
@@ -934,20 +989,89 @@ impl ArtifactTreeExt for ArtifactTree {
             let manifest = tree.manifest(&storage).await?;
             let range = selector_range(&selector, &manifest);
 
-            let stream = tree.stream_range(range, &storage);
+            let stream = tree.stream_range_handles(range, &storage);
             tokio::pin!(stream);
             for await item in stream {
                 let raw = item?;
-                // Parse each entry's key ONCE into borrowed components, and reuse
-                // that single parse for matching, spill resolution, and
-                // reconstruction. The previous flow re-split the key many times
-                // per entry (once per `KeyView` accessor in `matches_selector`,
-                // again in the spill lookup, again in reconstruction); on the
-                // variable-length M3 key that per-entry re-splitting dominated
-                // scan cost.
+                // Parse each entry's key ONCE into borrowed components for
+                // matching and spill resolution. Nothing else is materialized
+                // here: the entry's key and payload travel into the yielded
+                // view as-is, and the consumer decides per row whether to
+                // borrow a field or reconstruct the whole fact.
                 // A key that does not parse is corruption; dropping it
                 // silently would make the corrupt entry vanish from results
                 // with no signal.
+                let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                    DialogArtifactsError::InvalidKey(
+                        "scanned entry's key does not parse".to_string(),
+                    )
+                })?;
+                let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
+                if verdict == SelectorMatch::Excluded {
+                    continue;
+                }
+                if !matches!(raw.value, State::Added(_)) {
+                    continue;
+                }
+                let spilled = match &parts.value {
+                    ValueRef::Spilled { hash, .. } => {
+                        Some(fetch_spilled_reference(&raw_store, &cache, hash).await?)
+                    }
+                    ValueRef::Inline(_) => None,
+                };
+                // A NeedsValue verdict means some value predicate's answer
+                // lies beyond the spilled value's in-key prefix; the block is
+                // in hand now (it was fetched for the view anyway), so
+                // re-check semantically before yielding. Only the value is
+                // decoded for the check — not the entity or attribute.
+                if verdict == SelectorMatch::NeedsValue
+                    && !value_predicates_admit(
+                        &selector,
+                        &decode_value_parts(&parts, spilled.clone())?,
+                    )
+                {
+                    continue;
+                }
+                let State::Added(datum) = raw.value else {
+                    unreachable!("Added state checked above")
+                };
+                yield ArtifactView::new(raw.key, datum, spilled);
+            }
+        }
+    }
+
+    fn scan_owned<'s, S>(
+        self,
+        store: S,
+        cache: SpillCache,
+        selector: ArtifactSelector<Constrained>,
+    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's + ConditionalSend
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync
+            + 's,
+    {
+        let tree = self;
+        // Keep the raw backend to fetch spilled value blocks by reference; the
+        // bridge below is only for reading tree nodes.
+        let raw_store = store.clone();
+        let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+        try_stream! {
+            // Both the scan range and the per-entry match must be built under
+            // the manifest the stored facts were WRITTEN with — see `scan`.
+            let manifest = tree.manifest(&storage).await?;
+            let range = selector_range(&selector, &manifest);
+
+            let stream = tree.stream_range_handles(range, &storage);
+            tokio::pin!(stream);
+            for await item in stream {
+                let raw = item?;
+                // Parse each entry's key ONCE into borrowed components, and
+                // reuse that single parse for matching, spill resolution,
+                // AND reconstruction — this path materializes every
+                // surviving row, so deferring the reconstruction to a view
+                // would only buy a second key walk.
                 let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
                     DialogArtifactsError::InvalidKey(
                         "scanned entry's key does not parse".to_string(),
@@ -966,11 +1090,24 @@ impl ArtifactTreeExt for ArtifactTree {
                     }
                     ValueRef::Inline(_) => None,
                 };
-                let artifact = Artifact::from_key_ref_datum_value(&parts, datum, spilled)?;
+                // A row whose stored bytes fail read-side validation (a
+                // non-canonical entity, a broken attribute — `CorruptEntry`)
+                // is a corrupt or foreign-written entry: skip it with a
+                // warning rather than failing the whole query. Structural
+                // key corruption (the parse above) stays loud — see the
+                // comment there.
+                let artifact = match Artifact::from_key_ref_datum_value(&parts, datum, spilled) {
+                    Ok(artifact) => artifact,
+                    Err(DialogArtifactsError::CorruptEntry(reason)) => {
+                        tracing::warn!(%reason, "ignoring corrupt stored row in scan");
+                        continue;
+                    }
+                    Err(error) => Err(error)?,
+                };
                 // A NeedsValue verdict means some value predicate's answer
-                // lies beyond the spilled value's in-key prefix; the block is
-                // in hand now (it was fetched for reconstruction anyway), so
-                // re-check semantically before yielding.
+                // lies beyond the spilled value's in-key prefix; the value
+                // is materialized now, so re-check semantically before
+                // yielding.
                 if verdict == SelectorMatch::NeedsValue
                     && !value_predicates_admit(&selector, &artifact.is)
                 {
@@ -1009,6 +1146,32 @@ pub fn selector_range(
     selector: &ArtifactSelector<Constrained>,
     manifest: &Manifest,
 ) -> RangeInclusive<Key> {
+    // One bound = one `KeyParts` mutation + one `build_key`. The previous
+    // construction chained `min()/max().apply_selector(..)`, and every
+    // `set_*` in that chain re-parsed and re-built the whole key — around
+    // ten parse/build round-trips per range, which a join pays once per
+    // outer binding; it measured as a third of engine query time. Applying
+    // the selector's exact fields onto the parts directly is equivalent by
+    // construction: `set_*` parses the built bound back into exactly these
+    // parts and mutates the same field.
+    let exact_bound = |tag: u8, upper: bool| {
+        let mut parts = if upper {
+            varkey::KeyParts::max(tag)
+        } else {
+            varkey::KeyParts::min(tag)
+        };
+        if let Some(entity) = selector.entity() {
+            parts.entity = EntityKeyPart::from(entity).raw().to_vec();
+        }
+        if let Some(attribute) = selector.attribute() {
+            parts.attribute = AttributeKeyPart::from(attribute).raw().to_vec();
+        }
+        if let Some(value) = selector.value() {
+            parts.value_type = value.data_type();
+            parts.value = build_value_payload(value, manifest);
+        }
+        Key::from(varkey::build_key(&parts))
+    };
     if selector.entity().is_some()
         || (selector.entity_prefix().is_some()
             && selector.value().is_none()
@@ -1016,8 +1179,8 @@ pub fn selector_range(
             && selector.attribute_prefix().is_none())
     {
         let (start, end) = apply_prefix_bounds(
-            <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
-            <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+            EntityKey(exact_bound(ENTITY_KEY_TAG, false)),
+            EntityKey(exact_bound(ENTITY_KEY_TAG, true)),
             selector,
             manifest,
         );
@@ -1028,16 +1191,16 @@ pub fn selector_range(
         || selector.value_upper().is_some()
     {
         let (start, end) = apply_prefix_bounds(
-            <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
-            <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+            ValueKey(exact_bound(VALUE_KEY_TAG, false)),
+            ValueKey(exact_bound(VALUE_KEY_TAG, true)),
             selector,
             manifest,
         );
         start.into_key()..=end.into_key()
     } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
         let (start, end) = apply_prefix_bounds(
-            <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
-            <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+            AttributeKey(exact_bound(ATTRIBUTE_KEY_TAG, false)),
+            AttributeKey(exact_bound(ATTRIBUTE_KEY_TAG, true)),
             selector,
             manifest,
         );
@@ -1046,6 +1209,23 @@ pub fn selector_range(
         // `Constrained` guarantees at least one field is set.
         unreachable!("ArtifactSelector will always have at least one field specified")
     }
+}
+
+/// Which attribute namespaces an instruction stream may write.
+///
+/// The `dialog.` namespace is reserved for machinery-written facts (revision
+/// records, delegation records): [`Application`](WriteScope::Application)
+/// writes reject it, so at the library level such facts cannot be corrupted
+/// through the ordinary write path. Machinery write paths pass
+/// [`Machinery`](WriteScope::Machinery) and take responsibility for what they
+/// write — the same trust level as [`ArtifactTreeExt::record`], which appends
+/// reserved entries without instructions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteScope {
+    /// Ordinary application data: reserved attributes are rejected.
+    Application,
+    /// Machinery-written facts: reserved attributes are permitted.
+    Machinery,
 }
 
 /// Applies an instruction stream to any [`ArtifactWriter`], returning the
@@ -1086,9 +1266,10 @@ pub async fn write_instructions<W, S, I>(
     version: Option<Version>,
     manifest: &Manifest,
     instructions: I,
+    scope: WriteScope,
 ) -> Result<(W, bool), DialogArtifactsError>
 where
-    W: ArtifactWriter,
+    W: ArtifactWriter + ConditionalSend,
     S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
         + Clone
         + ConditionalSync,
@@ -1108,7 +1289,7 @@ where
     let mut history_records: BTreeMap<Key, Record> = BTreeMap::new();
     let mut changed = false;
     let buffer_record = |records: &mut BTreeMap<Key, Record>, record: Record, version: &Version| {
-        let (key, _) = record.clone().into_entry(version, manifest);
+        let key = record.key(version, manifest);
         match records.remove(&key) {
             None => {
                 records.insert(key, record);
@@ -1132,17 +1313,25 @@ where
 
     tokio::pin!(instructions);
     while let Some(instruction) = instructions.next().await {
-        // The `dialog.` namespace is reserved for version-control
-        // machinery (revision records — see
-        // `history::RevisionRecord`), which writes through
-        // [`ArtifactTreeExt::record`] rather than instructions. At the
-        // library level lineage therefore cannot be corrupted through
-        // the ordinary write path.
-        {
+        // The `dialog.` namespace is reserved for machinery (revision
+        // records — see `history::RevisionRecord` — and delegation
+        // records), written through [`ArtifactTreeExt::record`] or a
+        // [`WriteScope::Machinery`] stream. At the library level such
+        // facts therefore cannot be corrupted through the ordinary
+        // write path. Two prefixes are carved out of the application
+        // gate: `dialog.rule/*` (rule storage) and `dialog.concept/*`
+        // (concept markers), whose integrity is semantic rather than
+        // positional — rules are content-addressed, so a forged rule
+        // fact fails the hydration check upstream and is inert.
+        if scope == WriteScope::Application {
             let (Instruction::Assert(artifact)
             | Instruction::Replace(artifact)
             | Instruction::Retract(artifact)) = &instruction;
-            if artifact.the.as_str().starts_with("dialog.") {
+            let the = artifact.the.as_str();
+            if the.starts_with("dialog.")
+                && !the.starts_with("dialog.rule/")
+                && !the.starts_with("dialog.concept/")
+            {
                 return Err(DialogArtifactsError::ReservedAttribute(
                     artifact.the.to_string(),
                 ));
@@ -1151,13 +1340,17 @@ where
         match instruction {
             Instruction::Assert(artifact) => {
                 changed = true;
+                // ONE value encode per instruction: the payload feeds all
+                // three index keys, and a spilling value's block bytes and
+                // reference come from the same pass.
+                let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys(&artifact, manifest);
+                    artifact_index_keys_with(&artifact, encoded.payload);
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact; the key holds only the
                 // 32-byte reference to it.
-                store_spilled_value(store, &artifact, manifest).await?;
+                store_spilled_value(store, encoded.spill).await?;
 
                 // A version-tagged assertion records its history: an
                 // assertion is purely additive, so it supersedes nothing.
@@ -1189,12 +1382,15 @@ where
                 }
                 let added = State::Added(datum);
                 transient = transient
-                    .write(entity_key.clone(), added.clone(), storage)
+                    .write_all(
+                        vec![
+                            (entity_key, added.clone()),
+                            (attribute_key, added.clone()),
+                            (value_key, added),
+                        ],
+                        storage,
+                    )
                     .await?;
-                transient = transient
-                    .write(attribute_key.clone(), added.clone(), storage)
-                    .await?;
-                transient = transient.write(value_key, added, storage).await?;
             }
             Instruction::Replace(artifact) => {
                 let entity_key = EntityKey::from_artifact(&artifact, manifest);
@@ -1304,23 +1500,28 @@ where
                     continue;
                 }
 
+                // ONE value encode per instruction, exactly as in `Assert`.
+                let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys(&artifact, manifest);
+                    artifact_index_keys_with(&artifact, encoded.payload);
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact.
-                store_spilled_value(store, &artifact, manifest).await?;
+                store_spilled_value(store, encoded.spill).await?;
 
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
                 let added = State::Added(datum);
                 transient = transient
-                    .write(entity_key.clone(), added.clone(), storage)
+                    .write_all(
+                        vec![
+                            (entity_key, added.clone()),
+                            (attribute_key, added.clone()),
+                            (value_key, added),
+                        ],
+                        storage,
+                    )
                     .await?;
-                transient = transient
-                    .write(attribute_key.clone(), added.clone(), storage)
-                    .await?;
-                transient = transient.write(value_key, added, storage).await?;
             }
             Instruction::Retract(artifact) => {
                 let (entity_key, attribute_key, value_key) =
@@ -1388,13 +1589,18 @@ where
     // collides exactly when the record key does, and both then carry
     // the same folded lineage.
     if let Some(version) = &version {
-        for record in history_records.into_values() {
-            if let Some((key, entry)) = record.coverage_entry(version) {
-                transient = transient.write(key, entry, storage).await?;
+        let mut entries = Vec::with_capacity(history_records.len() * 2);
+        for (key, record) in history_records {
+            if let Some(coverage) = record.coverage_entry(version) {
+                entries.push(coverage);
             }
-            let (key, entry) = record.into_entry(version, manifest);
-            transient = transient.write(key, entry, storage).await?;
+            // The map key IS the record's history key (that is what the fold
+            // deduplicated on), so the write reuses it instead of rebuilding
+            // it from the claim.
+            let entry = record.into_datum(version);
+            entries.push((key, entry));
         }
+        transient = transient.write_all(entries, storage).await?;
     }
 
     Ok((transient, changed))
@@ -1534,6 +1740,344 @@ mod spill_cache_tests {
         let cache = spill_cache();
         assert_eq!(fetch_spilled_cached(&store, &cache, &key).await?, None);
         assert_eq!(fetch_spilled(&store, &key).await?, None);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::selector_range;
+    use crate::key::default_manifest;
+    use crate::{ArtifactSelector, NameShape};
+
+    /// A name shape under a whole-domain prefix narrows the scanned
+    /// key range itself: each shape's first-byte class is contiguous,
+    /// so the domain range splits into a position half strictly below
+    /// a symbol half, and a shape-constrained scan touches only its
+    /// half instead of sweeping the domain and filtering.
+    #[dialog_common::test]
+    fn it_narrows_domain_ranges_by_name_shape() {
+        let manifest = default_manifest();
+        let domain = || ArtifactSelector::new().the_starting_with("todo.list/");
+
+        let all = selector_range(&domain(), &manifest);
+        let positions = selector_range(&domain().with_name_shape(NameShape::Position), &manifest);
+        let symbols = selector_range(&domain().with_name_shape(NameShape::Symbol), &manifest);
+
+        assert!(
+            all.start() < positions.start() && positions.end() < all.end(),
+            "the position half is strictly inside the domain range"
+        );
+        assert!(
+            all.start() < symbols.start() && symbols.end() < all.end(),
+            "the symbol half is strictly inside the domain range"
+        );
+        assert!(
+            positions.end() < symbols.start(),
+            "the halves are disjoint, positions below symbols"
+        );
+
+        // A partial prefix does not end at the name boundary, so the
+        // shape cannot extend it: the range stays the prefix range and
+        // the shape remains a per-entry filter.
+        let partial = ArtifactSelector::new().the_starting_with("todo.li");
+        let partial_shaped = selector_range(
+            &partial.clone().with_name_shape(NameShape::Position),
+            &manifest,
+        );
+        assert_eq!(
+            selector_range(&partial, &manifest),
+            partial_shaped,
+            "a mid-domain prefix range is unchanged by a shape"
+        );
+    }
+}
+
+#[cfg(test)]
+mod selector_range_tests {
+    #![allow(unexpected_cfgs)]
+    // The dialog_common::test macro requires async test fns; this pure
+    // construction test awaits nothing.
+    #![allow(clippy::unused_async)]
+
+    use std::ops::RangeInclusive;
+
+    use std::str::FromStr as _;
+
+    use super::{apply_prefix_bounds, selector_range};
+    use crate::key::default_manifest;
+    use crate::selector::Constrained;
+    use crate::{
+        ArtifactSelector, Attribute, AttributeKey, Entity, EntityKey, Key, KeyViewConstruct,
+        KeyViewMut as _, Value, ValueKey,
+    };
+    use dialog_search_tree::Manifest;
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    /// The range construction `selector_range` replaced: chained
+    /// `min()/max().apply_selector(..)` view mutations (each a full key
+    /// parse + rebuild), fed through the same `apply_prefix_bounds`. The
+    /// rewrite claimed byte-equivalence by construction; this pin holds it
+    /// to that claim across the selector shapes and value sizes that pick
+    /// different encodings.
+    fn legacy_selector_range(
+        selector: &ArtifactSelector<Constrained>,
+        manifest: &Manifest,
+    ) -> RangeInclusive<Key> {
+        if selector.entity().is_some()
+            || (selector.entity_prefix().is_some()
+                && selector.value().is_none()
+                && selector.attribute().is_none()
+                && selector.attribute_prefix().is_none())
+        {
+            let (start, end) = apply_prefix_bounds(
+                <EntityKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
+                <EntityKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+                selector,
+                manifest,
+            );
+            start.into_key()..=end.into_key()
+        } else if selector.value().is_some()
+            || selector.value_prefix().is_some()
+            || selector.value_lower().is_some()
+            || selector.value_upper().is_some()
+        {
+            let (start, end) = apply_prefix_bounds(
+                <ValueKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
+                <ValueKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+                selector,
+                manifest,
+            );
+            start.into_key()..=end.into_key()
+        } else if selector.attribute().is_some() || selector.attribute_prefix().is_some() {
+            let (start, end) = apply_prefix_bounds(
+                <AttributeKey<Key> as KeyViewConstruct>::min().apply_selector(selector, manifest),
+                <AttributeKey<Key> as KeyViewConstruct>::max().apply_selector(selector, manifest),
+                selector,
+                manifest,
+            );
+            start.into_key()..=end.into_key()
+        } else {
+            unreachable!("ArtifactSelector will always have at least one field specified")
+        }
+    }
+
+    fn entity() -> Entity {
+        Entity::from_str("did:key:z6Mk2WiNvjBbuWZ8jYNmFzh4uFyt8iqwpDND6ymg6KnKzchw")
+            .expect("valid entity")
+    }
+
+    fn attribute() -> Attribute {
+        Attribute::from_str("person/name").expect("valid attribute")
+    }
+
+    /// Values chosen to straddle every encoding decision the bound
+    /// construction makes: short inline strings, strings AT and just past
+    /// the spill threshold (which flip the bound's payload from a full
+    /// inline encoding to a prefix + hash), numerics with fixed-width
+    /// encodings, negative and fractional floats, booleans, raw bytes, and
+    /// an entity-valued reference.
+    fn probe_values(manifest: &Manifest) -> Vec<Value> {
+        let spill_at = manifest.inline_n as usize;
+        vec![
+            Value::String("Alice".into()),
+            Value::String("x".repeat(spill_at.saturating_sub(1))),
+            Value::String("x".repeat(spill_at)),
+            Value::String("x".repeat(spill_at + 1)),
+            Value::String("x".repeat(spill_at * 2)),
+            Value::UnsignedInt(0),
+            Value::UnsignedInt(u128::from(u64::MAX)),
+            Value::SignedInt(-42),
+            Value::Float(-0.5),
+            Value::Boolean(true),
+            Value::Bytes(vec![0xFF; 9]),
+            Value::Entity(entity()),
+        ]
+    }
+
+    fn selector_matrix(manifest: &Manifest) -> Vec<ArtifactSelector<Constrained>> {
+        let mut matrix: Vec<ArtifactSelector<Constrained>> = vec![
+            ArtifactSelector::new().of(entity()),
+            ArtifactSelector::new().the(attribute()),
+            ArtifactSelector::new().of(entity()).the(attribute()),
+            ArtifactSelector::new().the_starting_with("person/"),
+            ArtifactSelector::new().of_starting_with("did:key:"),
+            ArtifactSelector::new().is_starting_with("Al"),
+            ArtifactSelector::new()
+                .the(attribute())
+                .is_starting_with("Al"),
+            ArtifactSelector::new().is_at_least(Value::UnsignedInt(10)),
+            ArtifactSelector::new().is_at_most(Value::Float(0.0)),
+            ArtifactSelector::new()
+                .is_at_least(Value::UnsignedInt(5))
+                .is_at_most(Value::UnsignedInt(50)),
+        ];
+        for value in probe_values(manifest) {
+            matrix.push(ArtifactSelector::new().is(value.clone()));
+            matrix.push(ArtifactSelector::new().the(attribute()).is(value.clone()));
+            matrix.push(
+                ArtifactSelector::new()
+                    .of(entity())
+                    .the(attribute())
+                    .is(value),
+            );
+        }
+        matrix
+    }
+
+    /// Every selector shape must produce byte-identical ranges through the
+    /// direct-parts construction and the legacy view-mutation chain, under
+    /// the default manifest and under one with a shifted spill threshold
+    /// (which moves the inline-vs-spill decision for the probe values).
+    #[dialog_common::test]
+    async fn it_builds_ranges_identical_to_the_view_chain() {
+        let mut shifted = default_manifest();
+        shifted.inline_n = 24;
+        for manifest in [default_manifest(), shifted] {
+            for (at, selector) in selector_matrix(&manifest).into_iter().enumerate() {
+                let fast = selector_range(&selector, &manifest);
+                let legacy = legacy_selector_range(&selector, &manifest);
+                assert_eq!(
+                    fast.start().as_ref(),
+                    legacy.start().as_ref(),
+                    "selector {at}: range START diverged (inline_n {})",
+                    manifest.inline_n
+                );
+                assert_eq!(
+                    fast.end().as_ref(),
+                    legacy.end().as_ref(),
+                    "selector {at}: range END diverged (inline_n {})",
+                    manifest.inline_n
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod corrupt_row_tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{ArtifactTree, ArtifactTreeExt, spill_cache};
+    use crate::key::varkey::{KeyParts, ValuePayload, build_key};
+    use crate::{
+        ATTRIBUTE_KEY_TAG, Artifact, ArtifactSelector, ArtifactViewStream as _, Datum,
+        ENTITY_KEY_TAG, Instruction, Key, State, VALUE_KEY_TAG, Value, ValueDataType,
+        encode_value_owned,
+    };
+    use dialog_search_tree::Delta;
+    use dialog_storage::{Blake3Hash, MemoryStorageBackend, StorageBackend};
+    use futures_util::{TryStreamExt, stream};
+
+    /// Manufactures a tree whose persisted nodes carry both valid facts and
+    /// crafted entries with invalid entities, written through the TREE layer —
+    /// below the artifacts layer's validating constructors — exactly as a
+    /// buggy or hostile writer would produce them. The entities cover both
+    /// failure classes: a string that is no URI at all, and one that parses
+    /// but is not its own canonical rendering.
+    async fn poisoned_tree()
+    -> anyhow::Result<(ArtifactTree, MemoryStorageBackend<Blake3Hash, Vec<u8>>)> {
+        let mut store = MemoryStorageBackend::default();
+        let mut delta = Delta::zero();
+        let mut tree = ArtifactTree::empty();
+
+        let valid: Vec<Instruction> = ["user:alice", "user:bob", "user:carol"]
+            .into_iter()
+            .map(|of| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("attribute"),
+                    of: of.parse().expect("entity"),
+                    is: Value::String(of.to_string()),
+                    cause: None,
+                })
+            })
+            .collect();
+        tree.apply(&mut store, &mut delta, stream::iter(valid))
+            .await?;
+
+        let corrupt = [
+            b"not a uri at all".to_vec(),
+            b"HTTPS://Example.com/".to_vec(),
+        ];
+        let mut entries = Vec::new();
+        for entity in corrupt {
+            // All three orderings, as a real writer would index a fact, so
+            // the poison is visible whichever index a selector dispatches to.
+            for tag in [ENTITY_KEY_TAG, ATTRIBUTE_KEY_TAG, VALUE_KEY_TAG] {
+                let parts = KeyParts {
+                    tag,
+                    entity: entity.clone(),
+                    attribute: b"user/name".to_vec(),
+                    value_type: ValueDataType::String,
+                    value: ValuePayload::Inline(encode_value_owned(&Value::String("evil".into()))),
+                    version: None,
+                };
+                entries.push((
+                    Key::from(build_key(&parts)),
+                    State::Added(Datum {
+                        cause: None,
+                        blob: None,
+                        version: None,
+                        collapsed: vec![],
+                        supersedes: vec![],
+                        retraction: false,
+                    }),
+                ));
+            }
+        }
+        tree.record(&mut store, &mut delta, entries).await?;
+
+        for (_, buffer) in delta.flush() {
+            store
+                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
+                .await?;
+        }
+        Ok((tree, store))
+    }
+
+    /// The owned scan silently skips manufactured corrupt rows: every valid
+    /// fact comes back, no row errors, and the corrupt entries are absent.
+    #[dialog_common::test]
+    async fn it_skips_corrupt_rows_in_owned_scans() -> anyhow::Result<()> {
+        let (tree, store) = poisoned_tree().await?;
+        let selector = ArtifactSelector::new().the("user/name".parse()?);
+        let rows: Vec<Artifact> = tree
+            .scan_owned(store, spill_cache(), selector)
+            .try_collect()
+            .await?;
+        let mut entities: Vec<String> = rows.iter().map(|row| row.of.to_string()).collect();
+        entities.sort();
+        assert_eq!(entities, ["user:alice", "user:bob", "user:carol"]);
+        Ok(())
+    }
+
+    /// The view scan yields every row without paying validation (corrupt
+    /// included), and `.owned()` — the query engine's materialization — is
+    /// where the corrupt ones drop out.
+    #[dialog_common::test]
+    async fn it_skips_corrupt_rows_when_materializing_views() -> anyhow::Result<()> {
+        let (tree, store) = poisoned_tree().await?;
+        let selector = ArtifactSelector::new().the("user/name".parse()?);
+
+        let views: Vec<_> = tree
+            .clone()
+            .scan(store.clone(), spill_cache(), selector.clone())
+            .try_collect()
+            .await?;
+        assert_eq!(views.len(), 5, "corrupt rows still scan as views");
+
+        let rows: Vec<Artifact> = tree
+            .scan(store, spill_cache(), selector)
+            .owned()
+            .try_collect()
+            .await?;
+        assert_eq!(rows.len(), 3, "materialization drops the corrupt rows");
         Ok(())
     }
 }

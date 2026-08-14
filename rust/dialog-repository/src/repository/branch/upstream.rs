@@ -175,33 +175,34 @@ impl Upstreams {
 /// Construct via the `From<&Branch>` and `From<&RemoteBranch>` impls;
 /// `branch.set_upstream(&local_or_remote)` invokes them implicitly.
 pub enum UpstreamBranch {
-    /// A local branch upstream.
-    Local(Branch),
+    /// A local branch upstream. Both variants are boxed: the handles
+    /// are large and this enum is a short-lived constructor argument.
+    Local(Box<Branch>),
     /// A remote branch upstream.
-    Remote(RemoteBranch),
+    Remote(Box<RemoteBranch>),
 }
 
 impl From<&Branch> for UpstreamBranch {
     fn from(branch: &Branch) -> Self {
-        UpstreamBranch::Local(branch.clone())
+        UpstreamBranch::Local(Box::new(branch.clone()))
     }
 }
 
 impl From<Branch> for UpstreamBranch {
     fn from(branch: Branch) -> Self {
-        UpstreamBranch::Local(branch)
+        UpstreamBranch::Local(Box::new(branch))
     }
 }
 
 impl From<&RemoteBranch> for UpstreamBranch {
     fn from(branch: &RemoteBranch) -> Self {
-        UpstreamBranch::Remote(branch.clone())
+        UpstreamBranch::Remote(Box::new(branch.clone()))
     }
 }
 
 impl From<RemoteBranch> for UpstreamBranch {
     fn from(branch: RemoteBranch) -> Self {
-        UpstreamBranch::Remote(branch)
+        UpstreamBranch::Remote(Box::new(branch))
     }
 }
 

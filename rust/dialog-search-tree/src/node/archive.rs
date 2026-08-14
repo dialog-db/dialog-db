@@ -356,20 +356,74 @@ where
     /// winners.
     pub fn op_at(&self, at: usize) -> Result<NoveltyOp<Value>, DialogSearchTreeError> {
         self.checked_count()?;
+        // The value table is aligned with the assert entries in entry order:
+        // this entry's slot is the number of asserts before it.
+        let slot = self.polarity[..at.min(self.polarity.len())]
+            .iter()
+            .filter(|&&p| p == 1)
+            .count();
+        self.op_with_slot(at, slot)
+    }
+
+    /// The op at entry `at` given its value-table `slot` (the number of
+    /// asserts before it), for readers that track the slot while streaming
+    /// the buffer instead of re-scanning the polarity column per op.
+    ///
+    /// The caller must have validated the buffer (every streaming read goes
+    /// through [`keys`](Self::keys), whose [`checked_count`](Self::checked_count)
+    /// pins the polarity and value tables), so a wrong slot can at worst
+    /// surface as an out-of-range error here, never a silent misread of a
+    /// well-formed buffer.
+    pub(crate) fn op_with_slot(
+        &self,
+        at: usize,
+        slot: usize,
+    ) -> Result<NoveltyOp<Value>, DialogSearchTreeError> {
         match self.polarity.get(at) {
             None => Err(malformed("Novelty entry out of range")),
             Some(0) => Ok(NoveltyOp::Retract),
-            _ => {
-                // The value table is aligned with the assert entries in entry
-                // order: this entry's slot is the number of asserts before it.
-                let slot = self.polarity[..at].iter().filter(|&&p| p == 1).count();
+            Some(1) => {
                 let value = self
                     .values
                     .get(slot)
                     .ok_or_else(|| malformed("Novelty value out of range"))?;
                 Ok(NoveltyOp::Assert(into_owned::<Value>(value)?))
             }
+            Some(_) => Err(malformed("Novelty polarity is neither assert nor retract")),
         }
+    }
+
+    /// The winning op for `key` in this buffer, or `None` when the key is not
+    /// buffered here: the archived counterpart of
+    /// [`NoveltyBuffer::resolve`](crate::NoveltyBuffer::resolve).
+    ///
+    /// One streaming pass: keys arrive in sorted order, so the walk stops at
+    /// the first key past the probe; within a key the last op wins (equal keys
+    /// are contiguous, newest last). The value-table slot is tracked as the
+    /// polarity column is walked, so resolving costs no per-op re-scan, and
+    /// only the winner's value is decoded.
+    pub fn resolve<Key: self::Key>(
+        &self,
+        key: &[u8],
+    ) -> Result<Option<NoveltyOp<Value>>, DialogSearchTreeError> {
+        let mut keys = self.keys::<Key>()?;
+        let mut winner: Option<(usize, usize)> = None;
+        let mut asserts = 0usize;
+        while let Some((at, candidate)) = keys.next_key()? {
+            let slot = asserts;
+            // `keys()` validated every polarity byte as 0 or 1.
+            if self.polarity.get(at).copied() == Some(1) {
+                asserts += 1;
+            }
+            match candidate.cmp(key) {
+                Ordering::Less => {}
+                Ordering::Equal => winner = Some((at, slot)),
+                Ordering::Greater => break,
+            }
+        }
+        winner
+            .map(|(at, slot)| self.op_with_slot(at, slot))
+            .transpose()
     }
 
     /// Decodes the whole buffer to owned entries, in entry order.
@@ -458,6 +512,29 @@ where
         };
         let columns: Vec<_> = self.columns.iter().map(archived_column_slices).collect();
         StreamingLeaf::new(&schema, &columns, count)
+    }
+
+    /// Visit this segment's entries in order, handing each key and value to
+    /// `visit`.
+    ///
+    /// Streams the keys and pairs each with its index-aligned value rather
+    /// than materializing the leaf, so a caller that already holds the node
+    /// can read its entries without a second walk of the tree to reach the
+    /// same rows.
+    pub fn for_each_entry<Key, Visit>(&self, mut visit: Visit) -> Result<(), DialogSearchTreeError>
+    where
+        Key: self::Key,
+        Visit: FnMut(&[u8], &Value::Archived) -> Result<(), DialogSearchTreeError>,
+    {
+        let mut keys = self.keys::<Key>()?;
+        while let Some((at, key)) = keys.next_key()? {
+            let value = self
+                .values
+                .get(at)
+                .ok_or_else(|| malformed("Segment value is out of range for its key"))?;
+            visit(key, value)?;
+        }
+        Ok(())
     }
 
     /// The first (minimum) key of this segment, decoded to its bytes: one

@@ -184,7 +184,7 @@ mod tests {
     use crate::the;
     use crate::{Cardinality, Proposition, Term, Value};
     use dialog_artifacts::Entity;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
 
     #[dialog_common::test]
     fn it_plans_two_fact_applications() {

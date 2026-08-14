@@ -101,18 +101,77 @@ pub(crate) const VALUE_DATA_TYPE_LENGTH: usize = 1;
 /// written, and a reader that used different ones would encode its probe
 /// differently from the stored fact and miss it.
 pub(crate) fn value_payload(value: &Value, manifest: &Manifest) -> ValuePayload {
-    let encoded = encode_value_owned(value);
-    if encoded.len() <= manifest.inline_n as usize {
-        ValuePayload::Inline(encoded)
-    } else {
+    EncodedValue::new(value, manifest).payload
+}
+
+/// A [`Value`]'s single per-instruction encoding: the key payload plus, for a
+/// spilling value, the raw block bytes and their 32-byte reference.
+///
+/// The commit path builds this ONCE per instruction and threads it through key
+/// building and the spill store. Before this existed the same value was
+/// re-encoded (and, when spilled, re-hashed) by the key builder, the spill
+/// check, and the spill store separately — three to five full passes per
+/// instruction on the write hot path.
+pub(crate) struct EncodedValue {
+    /// The payload the index keys carry for this value.
+    pub payload: ValuePayload,
+    /// A spilling value's archive block: its 32-byte reference (the hash the
+    /// key's spill tail carries) and the raw value bytes to store under it.
+    /// `None` for a value that stays inline.
+    pub spill: Option<(dialog_storage::Blake3Hash, Vec<u8>)>,
+}
+
+impl EncodedValue {
+    /// Encodes `value` under `manifest`, making the inline-vs-spill decision
+    /// exactly as [`value_payload`] does (it delegates here).
+    pub(crate) fn new(value: &Value, manifest: &Manifest) -> Self {
+        let inline_n = manifest.inline_n as usize;
+        // Short-circuit: when a provable lower bound on the encoded length
+        // already exceeds the threshold, the value spills without running the
+        // full order-preserving encode (which is only needed for its length
+        // here — the spilled payload is built from the RAW bytes below).
+        if encoded_len_lower_bound(value) <= inline_n {
+            let encoded = encode_value_owned(value);
+            if encoded.len() <= inline_n {
+                return Self {
+                    payload: ValuePayload::Inline(encoded),
+                    spill: None,
+                };
+            }
+        }
         let raw = value.to_bytes();
         let take = (manifest.spill_prefix as usize).min(raw.len());
         let mut prefix = Vec::new();
         crate::encode_bytes(&raw[..take], &mut prefix);
-        ValuePayload::Spilled {
-            prefix,
-            hash: value.to_reference().to_vec(),
+        let reference = crate::make_reference(&raw);
+        Self {
+            payload: ValuePayload::Spilled {
+                prefix,
+                hash: reference.to_vec(),
+            },
+            spill: Some((reference, raw)),
         }
+    }
+}
+
+/// A lower bound on the length of `value`'s order-preserving encoding,
+/// computed without allocating.
+///
+/// Byte-string types escape and terminate, so their encoding is strictly
+/// longer than the raw bytes; numerics encode at their exact fixed width. A
+/// `Symbol`'s raw form (`Attribute::key_bytes`, fixed-width padded) does NOT
+/// bound its encoding (the string form), so it reports 0 and never
+/// short-circuits.
+fn encoded_len_lower_bound(value: &Value) -> usize {
+    match value {
+        Value::Bytes(bytes) => bytes.len(),
+        Value::Record(bytes) => bytes.len(),
+        Value::String(string) => string.len(),
+        Value::Entity(entity) => entity.as_str().len(),
+        Value::UnsignedInt(_) | Value::SignedInt(_) => 16,
+        Value::Float(_) => 8,
+        Value::Boolean(_) => 1,
+        Value::Symbol(_) => 0,
     }
 }
 
@@ -128,14 +187,6 @@ pub(crate) fn default_manifest() -> Manifest {
     Manifest::default()
 }
 
-/// Whether `value` spills under `manifest` (its encoded form exceeds
-/// `inline_n`, so the key carries a prefix plus the whole-value hash and the
-/// value's raw bytes must be archived as a block). The single source of truth
-/// the payload builder and the key builder share.
-pub(crate) fn value_spills(value: &Value, manifest: &Manifest) -> bool {
-    value_payload(value, manifest).is_reference()
-}
-
 /// Builds all three index keys — `(EAV, AEV, VAE)` — for an artifact from a
 /// single field-encoding pass: the entity/attribute bytes and the value
 /// payload are computed once and serialized per ordering.
@@ -149,12 +200,22 @@ pub(crate) fn artifact_index_keys(
     artifact: &crate::Artifact,
     manifest: &Manifest,
 ) -> (Key, Key, Key) {
+    artifact_index_keys_with(artifact, value_payload(&artifact.is, manifest))
+}
+
+/// [`artifact_index_keys`] with the value payload already in hand, so a caller
+/// that also needs the spill block (the instruction loop, via
+/// [`EncodedValue`]) encodes the value exactly once.
+pub(crate) fn artifact_index_keys_with(
+    artifact: &crate::Artifact,
+    payload: ValuePayload,
+) -> (Key, Key, Key) {
     let mut parts = varkey::KeyParts {
         tag: ENTITY_KEY_TAG,
         entity: artifact.of.as_str().as_bytes().to_vec(),
         attribute: artifact.the.as_str().as_bytes().to_vec(),
         value_type: artifact.is.data_type(),
-        value: value_payload(&artifact.is, manifest),
+        value: payload,
         // The fact orderings carry no version; only history/coverage keys do.
         version: None,
     };
@@ -235,6 +296,15 @@ impl Key {
     /// Returns the tag byte that identifies the key type (entity, attribute, or value)
     pub fn tag(&self) -> u8 {
         self.0.first().copied().unwrap_or(u8::MIN)
+    }
+
+    /// Return the content-addressed value block referenced by a spilled key.
+    ///
+    /// This works for every variable-key ordering, including history keys.
+    /// Callers remain responsible for deciding whether the key's state makes
+    /// the referenced block live (for example, retraction tombstones do not).
+    pub fn value_spill_hash(&self) -> Option<&[u8]> {
+        varkey::value_spill_hash(self.as_ref(), self.tag())
     }
 
     /// Sets the tag byte and returns the modified key

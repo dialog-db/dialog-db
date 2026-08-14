@@ -11,16 +11,19 @@
 //! The analysis builds the Apt-Blair-Walker dependency graph over
 //! concepts: one node per concept, an edge from a rule's conclusion
 //! to each concept its body references, tagged with the polarity of
-//! the reference (`unless` premises are negative). Tarjan's
-//! algorithm computes the strongly connected components; a concept
-//! is *recursive* when its component is non-trivial, and a negative
-//! edge inside a component is a stratification violation (no
-//! stratified semantics exists for the program).
+//! the reference (`unless` premises are negative; every positive
+//! premise of a *reducing* rule is aggregating — its fold reads the
+//! complete relation). Tarjan's algorithm computes the strongly
+//! connected components; a concept is *recursive* when its component
+//! is non-trivial, and a negative or aggregating edge inside a
+//! component is a stratification violation (the rule reads a set the
+//! cycle itself is still deriving, so no stratified semantics exists
+//! for the program).
 //!
 //! Callers consume the analysis two ways:
 //!
 //! - [`RuleRegistry::validate`](super::rule_registry::RuleRegistry::validate)
-//!   returns every [`NegationViolation`] in the program, for callers
+//!   returns every [`Violation`] in the program, for callers
 //!   that want immediate feedback after an install or a merge.
 //! - [`RuleRegistry::acquire`](super::rule_registry::RuleRegistry::acquire)
 //!   runs the targeted [`ProgramAnalysis::check`] over the queried
@@ -40,15 +43,21 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 
 /// Polarity of a dependency edge: whether the rule body references
-/// the concept positively (an ordinary premise) or under `unless`.
-/// Negative edges inside a dependency cycle are stratification
-/// violations.
+/// the concept positively (an ordinary premise), under `unless`, or
+/// from a *reducing* rule whose fold must read the complete
+/// relation. Negative and aggregating edges inside a dependency
+/// cycle are stratification violations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarity {
     /// The body asserts the concept.
     Positive,
     /// The body negates the concept (`unless`).
     Negative,
+    /// The body asserts the concept from a rule with a `reduce`
+    /// clause: the rule's folds consume the premise's full
+    /// relation, so like negation the reference demands a complete
+    /// lower stratum.
+    Aggregating,
 }
 
 /// A stratification violation: some rule concluding `concept`
@@ -63,16 +72,48 @@ pub struct NegationViolation {
     pub negated: Entity,
 }
 
+/// A stratification violation: some *reducing* rule concluding
+/// `concept` folds over `aggregated`, and both live in the same
+/// dependency cycle, so the fold reads a relation the cycle itself
+/// is still deriving. No stratified semantics exists for such a
+/// program. Exact sibling of [`NegationViolation`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AggregationViolation {
+    /// The concluding concept whose reducing rule folds into its
+    /// own cycle.
+    pub concept: Entity,
+    /// The aggregated concept inside the same cycle.
+    pub aggregated: Entity,
+}
+
+/// Any stratification violation in the program: an edge that
+/// demands a complete lower stratum (negative or aggregating)
+/// landing inside its own dependency cycle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Violation {
+    /// A negative edge inside its own cycle.
+    Negation(NegationViolation),
+    /// An aggregating edge inside its own cycle.
+    Aggregation(AggregationViolation),
+}
+
 /// The dependency edges a rule's body contributes: one per concept
-/// premise, negative when the premise sits under `unless`. The
-/// target's full descriptor rides along so concepts that never got
-/// a registry entry still contribute their structural edges.
+/// premise — negative when the premise sits under `unless`,
+/// aggregating when the rule carries a `reduce` clause (its folds
+/// read each positive premise's complete relation). The target's
+/// full descriptor rides along so concepts that never got a
+/// registry entry still contribute their structural edges.
 fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
+    let positive = if rule.reduce().is_empty() {
+        Polarity::Positive
+    } else {
+        Polarity::Aggregating
+    };
     rule.analysis()
         .premises()
         .filter_map(|premise| match premise {
             Premise::Assert(Proposition::Concept(query)) => {
-                Some((query.predicate.clone(), Polarity::Positive))
+                Some((query.predicate.clone(), positive))
             }
             Premise::Unless(Negation(Proposition::Concept(query))) => {
                 Some((query.predicate.clone(), Polarity::Negative))
@@ -109,8 +150,9 @@ pub struct ProgramAnalysis {
     /// Strongly connected component id per concept. Two recursive
     /// concepts with the same id are on the same cycle.
     component: HashMap<Entity, usize>,
-    /// Every negative edge that lands inside its own component.
-    violations: Vec<NegationViolation>,
+    /// Every negative or aggregating edge that lands inside its own
+    /// component.
+    violations: Vec<Violation>,
 }
 
 /// The shape of a queried concept's dependency closure, as
@@ -200,19 +242,27 @@ impl ProgramAnalysis {
             }
         }
 
-        // A negative edge whose endpoints share a component negates
-        // a set the cycle is still deriving.
+        // A negative or aggregating edge whose endpoints share a
+        // component reads a set the cycle is still deriving.
         let mut violations = Vec::new();
         for node in &nodes {
             let Some(out) = edges.get(node) else { continue };
             for (target, polarity) in out {
-                if *polarity == Polarity::Negative
-                    && component[index_of[node]] == component[index_of[target]]
-                {
-                    violations.push(NegationViolation {
+                if component[index_of[node]] != component[index_of[target]] {
+                    continue;
+                }
+                match polarity {
+                    Polarity::Negative => violations.push(Violation::Negation(NegationViolation {
                         concept: node.clone(),
                         negated: target.clone(),
-                    });
+                    })),
+                    Polarity::Aggregating => {
+                        violations.push(Violation::Aggregation(AggregationViolation {
+                            concept: node.clone(),
+                            aggregated: target.clone(),
+                        }))
+                    }
+                    Polarity::Positive => {}
                 }
             }
         }
@@ -233,7 +283,7 @@ impl ProgramAnalysis {
 
     /// Every stratification violation in the program, in
     /// deterministic (concept-sorted) order.
-    pub fn violations(&self) -> &[NegationViolation] {
+    pub fn violations(&self) -> &[Violation] {
         &self.violations
     }
 
@@ -258,10 +308,11 @@ impl ProgramAnalysis {
 
     /// Check the queried concept's dependency closure: an
     /// ill-stratified closure fails with
-    /// [`EvaluationError::NegationThroughRecursion`]; otherwise the
-    /// closure is classified [`Closure::Recursive`] when it contains
-    /// a cycle (the fixpoint evaluator's cue) or [`Closure::Acyclic`]
-    /// for ordinary top-down evaluation.
+    /// [`EvaluationError::NegationThroughRecursion`] or
+    /// [`EvaluationError::AggregationThroughRecursion`]; otherwise
+    /// the closure is classified [`Closure::Recursive`] when it
+    /// contains a cycle (the fixpoint evaluator's cue) or
+    /// [`Closure::Acyclic`] for ordinary top-down evaluation.
     ///
     /// Takes the descriptor rather than the entity because the
     /// queried concept may be unknown to the analysis (never
@@ -295,11 +346,20 @@ impl ProgramAnalysis {
         }
 
         for violation in &self.violations {
-            if seen.contains(&violation.concept) {
-                return Err(EvaluationError::NegationThroughRecursion {
-                    concept: violation.concept.to_string(),
-                    negated: violation.negated.to_string(),
-                });
+            match violation {
+                Violation::Negation(negation) if seen.contains(&negation.concept) => {
+                    return Err(EvaluationError::NegationThroughRecursion {
+                        concept: negation.concept.to_string(),
+                        negated: negation.negated.to_string(),
+                    });
+                }
+                Violation::Aggregation(aggregation) if seen.contains(&aggregation.concept) => {
+                    return Err(EvaluationError::AggregationThroughRecursion {
+                        concept: aggregation.concept.to_string(),
+                        aggregated: aggregation.aggregated.to_string(),
+                    });
+                }
+                _ => {}
             }
         }
         if order.iter().any(|entity| self.recursive.contains(entity)) {
@@ -385,9 +445,11 @@ mod tests {
     use super::*;
     use crate::attribute::{AttributeDescriptor, Cardinality, Type};
     use crate::concept::query::ConceptQuery;
+    use crate::reduce::{Aggregator, ReduceSpec};
     use crate::session::RuleRegistry;
     use crate::types::Any;
     use crate::{ConceptFieldDescriptor, Parameters, Term};
+    use std::collections::BTreeMap;
 
     /// A one-field concept in the given domain: `{domain}/name` as
     /// text. Distinct domains produce distinct concept identities.
@@ -458,10 +520,10 @@ mod tests {
         let violations = registry.validate().expect("validate");
         assert_eq!(
             violations,
-            vec![NegationViolation {
+            vec![Violation::Negation(NegationViolation {
                 concept: safe.this(),
                 negated: blocked.this(),
-            }]
+            })]
         );
 
         assert!(registry.is_recursive(&safe.this()).unwrap());
@@ -644,5 +706,258 @@ mod tests {
                 .is_some(),
             "the cycle is visible from both ends"
         );
+    }
+
+    /// A one-field unsigned-integer concept in the given domain:
+    /// `{domain}/total`. The head shape every reducing rule below
+    /// concludes.
+    fn totals(domain: &str) -> ConceptDescriptor {
+        ConceptDescriptor::try_from(vec![(
+            "total",
+            AttributeDescriptor::new(
+                format!("{domain}/total").parse().expect("valid selector"),
+                "",
+                Cardinality::One,
+                Some(Type::UnsignedInt),
+            ),
+        )])
+        .expect("concept builds")
+    }
+
+    /// A positive premise over `target` binding `this` and the
+    /// given field to the named variable.
+    fn premise(target: &ConceptDescriptor, field: &str, var: &str) -> Premise {
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Entity>::var("this").into());
+        terms.insert(field.to_string(), Term::<Any>::var(var));
+        Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: target.clone(),
+        }))
+    }
+
+    /// A reducing rule concluding `conclusion` (a [`totals`]
+    /// concept) that counts the `field` bindings of `target` into
+    /// `total`.
+    fn reducing(
+        conclusion: &ConceptDescriptor,
+        target: &ConceptDescriptor,
+        field: &str,
+    ) -> DeductiveRule {
+        let mut reduce = BTreeMap::new();
+        reduce.insert(
+            "total".to_string(),
+            ReduceSpec {
+                apply: Aggregator::Count,
+                of: Term::var("input"),
+            },
+        );
+        DeductiveRule::with_reduce(
+            conclusion.clone(),
+            vec![premise(target, field, "input")],
+            reduce,
+        )
+        .expect("locally the rule compiles; any cycle is a program property")
+    }
+
+    /// The aggregation mirror of the negation scenario: a reducing
+    /// rule whose body reads its own conclusion is an aggregating
+    /// edge inside its own component. The install is unconditional,
+    /// validate() reports the violation, and only queries touching
+    /// the cycle fail.
+    #[dialog_common::test]
+    fn it_accepts_and_reports_aggregation_through_recursion() {
+        let dept = totals("dept");
+        let person = concept("person");
+
+        let mut registry = RuleRegistry::new();
+        registry
+            .register(reducing(&dept, &dept, "total"))
+            .expect("install is unconditional");
+
+        let violations = registry.validate().expect("validate");
+        assert_eq!(
+            violations,
+            vec![Violation::Aggregation(AggregationViolation {
+                concept: dept.this(),
+                aggregated: dept.this(),
+            })]
+        );
+
+        match registry.acquire(&dept) {
+            Err(EvaluationError::AggregationThroughRecursion {
+                concept,
+                aggregated,
+            }) => {
+                assert_eq!(concept, dept.this().to_string());
+                assert_eq!(aggregated, dept.this().to_string());
+            }
+            other => panic!("expected AggregationThroughRecursion, got {other:?}"),
+        }
+        assert!(
+            registry.acquire(&person).is_ok(),
+            "concepts outside the ill-stratified region still answer"
+        );
+    }
+
+    /// An aggregating edge closing a cycle through a second rule:
+    /// `dept` reduces over `audit`, and a plain rule derives
+    /// `audit` from `dept`. Each install is valid alone; together
+    /// the whole cycle is poisoned.
+    #[dialog_common::test]
+    fn it_reports_aggregation_cycle_through_a_second_rule() {
+        let dept = totals("dept");
+        let audit = totals("audit");
+
+        let mut registry = RuleRegistry::new();
+        registry
+            .register(reducing(&dept, &audit, "total"))
+            .expect("install is unconditional");
+        registry
+            .register(
+                DeductiveRule::new(audit.clone(), vec![premise(&dept, "total", "total")])
+                    .expect("rule compiles"),
+            )
+            .expect("install is unconditional");
+
+        assert_eq!(
+            registry.validate().expect("validate"),
+            vec![Violation::Aggregation(AggregationViolation {
+                concept: dept.this(),
+                aggregated: audit.this(),
+            })]
+        );
+
+        assert!(matches!(
+            registry.acquire(&dept),
+            Err(EvaluationError::AggregationThroughRecursion { .. })
+        ));
+        assert!(
+            matches!(
+                registry.acquire(&audit),
+                Err(EvaluationError::AggregationThroughRecursion { .. })
+            ),
+            "the whole cycle is poisoned"
+        );
+    }
+
+    /// Aggregation *over* a recursive concept is well-stratified:
+    /// the recursive component computes below and the fold reads
+    /// its completed relation. The reducing conclusion itself stays
+    /// non-recursive.
+    #[dialog_common::test]
+    fn it_accepts_aggregation_over_lower_stratum_recursion() {
+        let same = concept("same");
+        let dept = totals("dept");
+
+        let mut registry = RuleRegistry::new();
+        registry.register(rule(&same, &[&same], &[])).unwrap();
+        registry.register(reducing(&dept, &same, "name")).unwrap();
+
+        assert!(registry.validate().unwrap().is_empty(), "stratified");
+        assert!(registry.is_recursive(&same.this()).unwrap());
+        assert!(!registry.is_recursive(&dept.this()).unwrap());
+        let rules = registry
+            .acquire(&dept)
+            .expect("aggregation over a completed lower stratum answers");
+        assert!(
+            rules.recursion().is_none(),
+            "the reducing conclusion is not itself recursive"
+        );
+        assert!(
+            registry.acquire(&same).unwrap().recursion().is_some(),
+            "the lower stratum still evaluates via the fixpoint"
+        );
+    }
+
+    /// Both edge kinds in one program: negation and aggregation
+    /// over acyclic lower strata are accepted together, and closing
+    /// a cycle through either edge rejects with that edge's own
+    /// error while concepts below both strata keep answering.
+    #[dialog_common::test]
+    fn it_stratifies_combined_negation_and_aggregation() {
+        let person = concept("person");
+        let banned = concept("banned");
+        let safe = concept("safe");
+        let dept = totals("dept");
+
+        // Well-stratified: safe negates banned, dept counts safe.
+        let mut registry = RuleRegistry::new();
+        registry
+            .register(rule(&safe, &[&person], &[&banned]))
+            .unwrap();
+        registry.register(reducing(&dept, &safe, "name")).unwrap();
+        assert!(registry.validate().unwrap().is_empty());
+        assert!(registry.acquire(&safe).is_ok());
+        assert!(registry.acquire(&dept).is_ok());
+
+        // One cycle through negation and one through aggregation:
+        // each region fails with its own error.
+        let blocked = concept("blocked");
+        let audit = totals("audit");
+        let mut merged = RuleRegistry::new();
+        merged
+            .register(rule(&safe, &[&person], &[&blocked]))
+            .unwrap();
+        merged.register(rule(&blocked, &[&safe], &[])).unwrap();
+        merged.register(reducing(&audit, &audit, "total")).unwrap();
+
+        let violations = merged.validate().unwrap();
+        assert_eq!(violations.len(), 2, "one violation per edge kind");
+        assert!(
+            violations
+                .iter()
+                .any(|violation| matches!(violation, Violation::Negation(_)))
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|violation| matches!(violation, Violation::Aggregation(_)))
+        );
+        assert!(matches!(
+            merged.acquire(&safe),
+            Err(EvaluationError::NegationThroughRecursion { .. })
+        ));
+        assert!(matches!(
+            merged.acquire(&audit),
+            Err(EvaluationError::AggregationThroughRecursion { .. })
+        ));
+        assert!(
+            merged.acquire(&person).is_ok(),
+            "concepts below both strata still answer"
+        );
+    }
+
+    /// The post-merge case for aggregation, mirroring the negation
+    /// merge test: each registry is valid alone; extending one with
+    /// the other closes a cycle through an aggregating edge, and
+    /// the merged analysis reports it.
+    #[dialog_common::test]
+    fn it_reports_aggregation_violation_closed_by_merge() {
+        let dept = totals("dept");
+        let audit = totals("audit");
+
+        let mut replica_a = RuleRegistry::new();
+        replica_a
+            .register(reducing(&dept, &audit, "total"))
+            .unwrap();
+        assert!(replica_a.validate().unwrap().is_empty());
+        assert!(replica_a.acquire(&dept).is_ok(), "valid before the merge");
+
+        let mut replica_b = RuleRegistry::new();
+        replica_b
+            .register(
+                DeductiveRule::new(audit.clone(), vec![premise(&dept, "total", "total")])
+                    .expect("rule compiles"),
+            )
+            .unwrap();
+        assert!(replica_b.validate().unwrap().is_empty());
+
+        replica_a.extend(&replica_b).unwrap();
+        assert_eq!(replica_a.validate().unwrap().len(), 1);
+        assert!(matches!(
+            replica_a.acquire(&dept),
+            Err(EvaluationError::AggregationThroughRecursion { .. })
+        ));
     }
 }

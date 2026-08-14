@@ -143,7 +143,10 @@ impl<const N: usize> Key for [u8; N] {
 /// Trait for types that can be used as values in a search tree.
 ///
 /// Values must be cloneable and serializable.
-pub trait Value: Clone + Debug + Sized + Archive + ConditionalSend {
+// The `'static` admits keying a buffer's validation memo by the archived
+// type's `TypeId` (see `PersistentNode::body`); values are owned data, so
+// this constrains no implementor.
+pub trait Value: Clone + Debug + Sized + Archive + ConditionalSend + 'static {
     /// The weight this value's payload contributes to its entry for byte
     /// pacing (`Manifest::max_segment`): an estimate of the value's encoded
     /// footprint in a leaf, in bytes. A pure function of the value's

@@ -37,7 +37,6 @@ dialog-ucan-core = { workspace = true }
 dialog-varsig = { workspace = true }
 ipld-core = { workspace = true }
 parking_lot = { workspace = true }
-reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
@@ -73,6 +72,7 @@ wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

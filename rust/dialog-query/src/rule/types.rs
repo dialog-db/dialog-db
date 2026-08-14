@@ -323,6 +323,15 @@ impl TypeEnv {
         self.by_name.get(name)
     }
 
+    /// Record a variable's type directly, bypassing inference. Used
+    /// by the analyzer for variables the *rule itself* defines
+    /// rather than any premise — a reduce entry's output field — so
+    /// downstream checks (the required-head optionality check in
+    /// particular) see them through the same environment.
+    pub fn insert(&mut self, name: impl Into<String>, kind: Kind) {
+        self.by_name.insert(name.into(), kind);
+    }
+
     /// The narrowing steps recorded during inference, in premise
     /// order: which premise constrained which variable, from what
     /// to what.

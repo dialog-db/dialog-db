@@ -46,7 +46,7 @@ where
             let mut writer =
                 CompressorWriter::new(&mut compressed, BUFFER_SIZE, COMPRESSION_LEVEL, WINDOW_SIZE);
             writer.write(value.as_ref()).map_err(|error| {
-                DialogStorageError::StorageBackend(format!("Could not compress blob: {error}"))
+                DialogStorageError::Storage(format!("Could not compress blob: {error}"))
             })?;
         }
 
@@ -62,9 +62,7 @@ where
             {
                 let mut reader = Decompressor::new(value.as_ref(), BUFFER_SIZE);
                 reader.read_to_end(&mut decompressed).map_err(|error| {
-                    DialogStorageError::StorageBackend(format!(
-                        "Could not decompress blob: {error}"
-                    ))
+                    DialogStorageError::Storage(format!("Could not decompress blob: {error}"))
                 })?;
             }
             Ok(Some(decompressed.into()))

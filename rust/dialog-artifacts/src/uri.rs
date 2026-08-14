@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::Error as _};
 use url::Url;
 
 use base58::ToBase58;
@@ -19,13 +19,36 @@ use crate::{DialogArtifactsError, ENTITY_LENGTH, make_reference, mutable_slice};
 /// plain string URIs (which typically represent an [`Entity`]) and their other
 /// representations such as their byte representation when used as a component
 /// of an index key.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// Internally this holds the NORMALIZED string form: parsing goes through
+/// [`url::Url`] once at every ingest boundary ([`FromStr`], deserialization),
+/// and what is stored is the parser's normalized rendering. Strings read back
+/// out of the index are exactly these normalized renderings, so the read path
+/// admits them via [`from_stored`](Uri::from_stored), which verifies they are
+/// canonical (parse + equality with the parse's own rendering) and adopts the
+/// stored string without re-rendering it. A stored string that fails that
+/// check is a corrupt or foreign-written entry; it is rejected as
+/// [`CorruptEntry`](DialogArtifactsError::CorruptEntry) so readers can ignore
+/// the row. Either way a [`Uri`] holds a valid canonical URI by construction.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
-pub struct Uri(Url);
+pub struct Uri(Box<str>);
 
 impl Hash for Uri {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.as_str().hash(state);
+        self.0.hash(state);
+    }
+}
+
+impl<'de> Deserialize<'de> for Uri {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialization is an ingest boundary: the bytes may come from
+        // anywhere, so they get the full parse-and-normalize treatment.
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(D::Error::custom)
     }
 }
 
@@ -48,8 +71,48 @@ impl Uri {
 
         format!("did:key:{key}")
             .parse()
-            .map(Self)
             .map_err(|error| DialogArtifactsError::InvalidEntity(format!("{error}")))
+    }
+
+    /// Builds a [`Uri`] from a string read back out of the index, validating
+    /// that it is a URI in CANONICAL form: it parses as a [`url::Url`] and it
+    /// is exactly the parser's own rendering of itself.
+    ///
+    /// Every entity string this crate writes into the index is the normalized
+    /// rendering of a parsed [`url::Url`] ([`FromStr`] or deserialization
+    /// stores nothing else), so for our own data the canonicality check always
+    /// passes and the stored string is adopted as-is — no re-render, no second
+    /// allocation. A string that fails either check did not come from this
+    /// writer: the entry is corrupt or foreign, and the error is
+    /// [`CorruptEntry`](DialogArtifactsError::CorruptEntry) so scan paths can
+    /// ignore the row rather than fail the query. An [`Entity`](crate::Entity)
+    /// therefore holds a valid canonical URI by construction on every path,
+    /// stored reads included.
+    pub(crate) fn from_stored(s: &str) -> Result<Self, DialogArtifactsError> {
+        // The cheap proof first: for the common entity shapes (did:key,
+        // user:, blob: — opaque-path non-special URIs) canonicality is
+        // PROVEN by a single byte scan, ~free per row. Everything else
+        // takes the real parse below. Same invariant either way.
+        if is_provably_canonical(s) {
+            return Ok(Self(s.into()));
+        }
+        let url: Url = s.parse().map_err(|error| {
+            DialogArtifactsError::CorruptEntry(format!("stored entity is not a URI: {error}"))
+        })?;
+        // Canonicality subsumes the whitespace/control guard in `from_str`:
+        // `url::Url::parse` strips those characters, so a string containing
+        // them can never equal its own parse's rendering.
+        if url.as_str() != s {
+            return Err(DialogArtifactsError::CorruptEntry(format!(
+                "stored entity is not a canonical URI rendering: {s:?}"
+            )));
+        }
+        Ok(Self(s.into()))
+    }
+
+    /// The URI as its normalized string.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
     /// Convert this [`Uri`] to the byte representation expected for use as part
@@ -74,26 +137,103 @@ impl Uri {
             Ok(key_bytes) as Result<[u8; 64], io::Error>
         };
 
-        format(self.0.as_str().as_bytes()).map_err(|error| {
+        format(self.0.as_bytes()).map_err(|error| {
             DialogArtifactsError::InvalidEntity(format!("Could not format as key bytes: {error}"))
         })
     }
 }
 
+/// Proves — without parsing — that `url::Url::parse(s)` would succeed and
+/// render exactly `s`, for a conservative subset of URIs: a lowercase
+/// non-special scheme followed by a non-empty OPAQUE path (no leading `/`)
+/// made of unreserved/sub-delim ASCII. For that subset the WHATWG parse is
+/// the identity function:
+///
+/// - the scheme is already lowercase, so scheme normalization changes
+///   nothing;
+/// - the scheme is not special (`http`/`https`/`ws`/`wss`/`ftp`/`file`), so
+///   no host/port/path normalization applies;
+/// - the path does not start with `/`, so it parses as a cannot-be-a-base
+///   opaque path, which the parser copies verbatim (percent-encoding only
+///   C0 controls and non-ASCII — both excluded from the accepted alphabet);
+/// - `%`, `?`, `#`, `\`, `[`, `]`, whitespace, and controls are all
+///   excluded, so no percent-decoding, query/fragment, or stripping rules
+///   can fire.
+///
+/// This covers the entity shapes this crate itself generates (`did:key:…`,
+/// `user:…`, `blob:…`) at the cost of one byte scan; anything else — real
+/// `https://` URLs included — simply returns `false` and the caller runs
+/// the genuine parse. A `false` here is NEVER a verdict, only a fallback.
+/// The equivalence claim is pinned against `url` itself by a generative
+/// test below.
+fn is_provably_canonical(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let Some(colon) = bytes.iter().position(|&b| b == b':') else {
+        return false;
+    };
+    let (scheme, rest) = (&bytes[..colon], &bytes[colon + 1..]);
+    let scheme_ok = match scheme.split_first() {
+        Some((&first, tail)) => {
+            first.is_ascii_lowercase()
+                && tail.iter().all(|&b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'.' | b'-')
+                })
+        }
+        None => false,
+    };
+    if !scheme_ok
+        || matches!(
+            scheme,
+            b"http" | b"https" | b"ws" | b"wss" | b"ftp" | b"file"
+        )
+    {
+        return false;
+    }
+    // A leading `/` selects a hierarchical (non-opaque) path, where dot
+    // segments collapse; `//` selects an authority. Only opaque paths are
+    // provable, so both fall back.
+    if rest.is_empty() || rest[0] == b'/' {
+        return false;
+    }
+    rest.iter().all(|&b| {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b':' | b'/'
+                    | b'.'
+                    | b'-'
+                    | b'_'
+                    | b'~'
+                    | b'+'
+                    | b'='
+                    | b'@'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b','
+                    | b';'
+            )
+    })
+}
+
 impl Display for Uri {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}", **self)
+        f.write_str(&self.0)
     }
 }
 
 impl From<Uri> for String {
     fn from(value: Uri) -> Self {
-        (*value).to_string()
+        value.0.into()
     }
 }
 
 impl Deref for Uri {
-    type Target = Url;
+    type Target = str;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -123,9 +263,32 @@ impl FromStr for Uri {
                 "URI must not contain whitespace or control characters: {s:?}"
             )));
         }
-        Ok(Self(s.parse().map_err(|error| {
-            DialogArtifactsError::InvalidUri(format!("{error}"))
-        })?))
+        // A provably canonical input IS its own normalized rendering, so the
+        // parse below would return it unchanged: skip it. Same proof (and
+        // the same fallback) as the stored-read path in `from_stored`.
+        if is_provably_canonical(s) {
+            return Ok(Uri(s.into()));
+        }
+        // Parse plainly, with no memo. A memo here looks attractive (joins
+        // re-parse the same entity per outer binding) but any bounded,
+        // admit-on-miss cache inverts into pure overhead the moment a scan
+        // materializes more DISTINCT entities than it can hold: every row
+        // then pays the parse PLUS the memo's bookkeeping. Measured on the
+        // query benches, a 4096-entry memo regressed 10k-row
+        // scan-and-materialize by ~31% while buying joins only ~8% at
+        // 1000 rows (their gains come from the engine, not this parse) —
+        // and sieve eviction or second-sight admission only shrank, never
+        // removed, the loss. (Strings coming back OUT of the index go
+        // through `from_stored` instead, which validates canonicality
+        // without re-rendering.)
+        //
+        // What is stored is the parser's normalized rendering, not the
+        // input string — that is what makes `from_stored`'s canonicality
+        // check exact: our own writes always pass it.
+        let url: Url = s
+            .parse()
+            .map_err(|error| DialogArtifactsError::InvalidUri(format!("{error}")))?;
+        Ok(Uri(String::from(url).into()))
     }
 }
 
@@ -141,6 +304,111 @@ impl TryFrom<String> for Uri {
 mod tests {
     use crate::Entity;
     use anyhow::Result;
+
+    use super::Uri;
+    use crate::DialogArtifactsError;
+
+    /// The canonicality prover accepts exactly the opaque non-special
+    /// shapes it documents, and refuses everything whose WHATWG handling
+    /// is non-trivial — including the hierarchical case the parser really
+    /// does rewrite, proving the fallback matters.
+    #[test]
+    fn it_proves_only_opaque_non_special_shapes() {
+        use super::is_provably_canonical;
+        assert!(is_provably_canonical("did:key:z6MkExample"));
+        assert!(is_provably_canonical("user:alice"));
+        assert!(is_provably_canonical("blob:3vQB7B6MrGQZaxCuFg4oh"));
+        assert!(is_provably_canonical("user:alice/profile"));
+        // Not provable — each falls back to the real parse:
+        assert!(!is_provably_canonical("https://google.com/")); // special scheme
+        assert!(!is_provably_canonical("wss:x")); // special scheme
+        assert!(!is_provably_canonical("a:/x")); // hierarchical path
+        assert!(!is_provably_canonical("a://h")); // authority
+        assert!(!is_provably_canonical("A:b")); // uppercase scheme
+        assert!(!is_provably_canonical("a:%41")); // percent escape
+        assert!(!is_provably_canonical("a:b c")); // whitespace
+        assert!(!is_provably_canonical("a:")); // empty path
+        assert!(!is_provably_canonical("noscheme"));
+        // The refused hierarchical shape is genuinely rewritten by the
+        // parser (dot segments collapse), so refusing it is load-bearing:
+        let url: url::Url = "a:/b/../c".parse().expect("parses");
+        assert_eq!(url.as_str(), "a:/c");
+    }
+
+    /// The prover is SOUND: every string it accepts parses via `url::Url`
+    /// to exactly itself. (Completeness is not claimed — `false` only means
+    /// the caller runs the real parse.) Deterministic generative pin
+    /// against `url` itself, over an alphabet that straddles the accepted
+    /// set with the characters whose WHATWG handling is non-trivial.
+    #[test]
+    fn it_never_proves_a_non_canonical_string() {
+        use super::is_provably_canonical;
+        const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/.-_~+=@!$&'()*,;%?#\\[] <>\"^`{|}";
+        const SCHEMES: &[&str] = &[
+            "did:key:", "user:", "blob:", "a:", "x-y.z+w:", "wss:", "file:",
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        };
+        let mut proved = 0u32;
+        for round in 0..200_000u32 {
+            let len = (next() % 24 + 1) as usize;
+            let tail: String = (0..len)
+                .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize] as char)
+                .collect();
+            // Half the rounds force a plausible scheme so the accept path is
+            // exercised heavily; half probe raw noise.
+            let s = if round % 2 == 0 {
+                format!(
+                    "{}{}",
+                    SCHEMES[(next() % SCHEMES.len() as u64) as usize],
+                    tail
+                )
+            } else {
+                tail
+            };
+            if is_provably_canonical(&s) {
+                proved += 1;
+                let url: url::Url = s.parse().unwrap_or_else(|error| {
+                    panic!("prover accepted an unparseable string {s:?}: {error}")
+                });
+                assert_eq!(url.as_str(), s, "prover accepted a non-canonical string");
+            }
+        }
+        assert!(
+            proved > 5_000,
+            "the accept path was barely exercised: {proved}"
+        );
+    }
+
+    /// `from_stored` admits exactly the canonical renderings `from_str`
+    /// stores, and rejects both non-URIs and valid-but-non-canonical
+    /// strings as `CorruptEntry`.
+    #[test]
+    fn it_validates_stored_strings_as_canonical_uris() {
+        assert!(Uri::from_stored("https://google.com/").is_ok());
+        assert!(Uri::from_stored("did:key:z6MkExample").is_ok());
+        assert!(matches!(
+            Uri::from_stored("not a uri"),
+            Err(DialogArtifactsError::CorruptEntry(_))
+        ));
+        // Parses as a URL, but is not the parser's own rendering of itself.
+        assert!(matches!(
+            Uri::from_stored("HTTPS://Google.com"),
+            Err(DialogArtifactsError::CorruptEntry(_))
+        ));
+
+        // Whatever `from_str` normalizes and stores, `from_stored` admits:
+        // the canonicality check is exact for this writer's own output.
+        for raw in ["HTTPS://Google.com", "https://example.com", "user:alice"] {
+            let parsed: Uri = raw.parse().expect("parses");
+            assert!(Uri::from_stored(parsed.as_str()).is_ok(), "{raw}");
+        }
+    }
 
     #[test]
     fn it_can_convert_to_key_bytes() -> Result<()> {

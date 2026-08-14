@@ -251,7 +251,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::the;
     use crate::{Type, Value};
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
 
     fn optional_nickname() -> OptionalAttributeQuery {
         OptionalAttributeQuery::new(

@@ -279,7 +279,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::statement::Statement;
     use crate::{Environment, Planner};
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     mod person {

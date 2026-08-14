@@ -95,7 +95,7 @@ impl DelegationChain {
     /// The container format is: `{ "ctn-v1": [delegation_0_bytes, ...] }`
     /// where delegations are in subject-first (root-to-leaf) order.
     pub fn to_bytes(&self) -> Result<Vec<u8>, ContainerError> {
-        Container::from(self).to_bytes()
+        Container::from(self).into_bytes()
     }
 
     /// Get the CIDs for use in invocation proofs field.
@@ -328,10 +328,7 @@ impl From<&DelegationChain> for Container {
 
         for cid in &chain.proof_cids {
             if let Some(delegation) = chain.delegations.get(cid) {
-                // Note: This unwrap is safe because we're serializing from a valid delegation
-                if let Ok(bytes) = serde_ipld_dagcbor::to_vec(delegation.as_ref()) {
-                    tokens.push(bytes);
-                }
+                tokens.push(delegation.encoded().to_vec());
             }
         }
 

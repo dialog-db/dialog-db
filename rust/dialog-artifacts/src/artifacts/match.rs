@@ -15,7 +15,7 @@
 use std::cmp::Ordering;
 
 use crate::{
-    ArtifactSelector, Value, ValueDataType,
+    ArtifactSelector, NameShape, Value, ValueDataType,
     artifacts::selector::Constrained,
     decode_bytes_cow, decode_value,
     key::value_payload,
@@ -128,6 +128,36 @@ pub fn match_selector_and_key_ref(
         let bytes = prefix.as_bytes();
         let segment = key.attribute.as_ref();
         if bytes.len() > segment.len() || &segment[..bytes.len()] != bytes {
+            return SelectorMatch::Excluded;
+        }
+    }
+
+    if let Some(name) = selector.attribute_name() {
+        let segment = key.attribute.as_ref();
+        let name_half = match segment.iter().position(|&byte| byte == b'/') {
+            Some(delimiter) => &segment[delimiter + 1..],
+            // Attributes always carry the delimiter; fail closed on a
+            // key that somehow lacks one.
+            None => return SelectorMatch::Excluded,
+        };
+        if name_half != name.as_str().as_bytes() {
+            return SelectorMatch::Excluded;
+        }
+    }
+
+    if let Some(shape) = selector.name_shape() {
+        // The same coarse first-byte classification the range bounds
+        // use, so a filtered scan and a range-narrowed scan agree on
+        // exactly which keys match (strict vocabulary enforcement is
+        // the consumer's re-check). A name half missing or empty is
+        // neither shape: fail closed.
+        let segment = key.attribute.as_ref();
+        let classified = segment
+            .iter()
+            .position(|&byte| byte == b'/')
+            .and_then(|delimiter| segment.get(delimiter + 1))
+            .and_then(|&first| NameShape::classify(first));
+        if classified != Some(shape) {
             return SelectorMatch::Excluded;
         }
     }

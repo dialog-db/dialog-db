@@ -56,7 +56,7 @@ where
             .add_object_store(ObjectStore::new(MEMORY_STORE).auto_increment(false))
             .build()
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         Ok(IndexedDbStorageBackend {
             db: Rc::new(db),
@@ -80,10 +80,10 @@ where
         let tx = self
             .db
             .transaction(&[INDEX_STORE], TransactionMode::ReadWrite)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
         let store = tx
             .store(INDEX_STORE)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         // Base58 encode key for better DevTools readability
         let key = JsValue::from_str(&key.as_ref().to_base58());
@@ -92,11 +92,11 @@ where
         store
             .put(&value, Some(&key))
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         tx.done()
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         Ok(())
     }
@@ -105,10 +105,10 @@ where
         let tx = self
             .db
             .transaction(&[INDEX_STORE], TransactionMode::ReadOnly)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
         let store = tx
             .store(INDEX_STORE)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         // Base58 encode key for lookup
         let key = JsValue::from_str(&key.as_ref().to_base58());
@@ -116,7 +116,7 @@ where
         let Some(value) = store
             .get(key)
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?
         else {
             return Ok(None);
         };
@@ -124,7 +124,7 @@ where
         let out = value
             .dyn_into::<Uint8Array>()
             .map_err(|value| {
-                DialogStorageError::StorageBackend(format!(
+                DialogStorageError::Storage(format!(
                     "Failed to downcast value to bytes: {:?}",
                     value
                 ))
@@ -132,7 +132,7 @@ where
             .to_vec();
         tx.done()
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         Ok(Some(Value::from(out)))
     }
@@ -173,17 +173,17 @@ where
         let tx = self
             .db
             .transaction(&[MEMORY_STORE], TransactionMode::ReadOnly)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
         let store = tx
             .store(MEMORY_STORE)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         // Treat address as UTF-8 string for DevTools readability
         let key = address_to_string(address)?;
         let entry = store
             .get(key)
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         let Some(entry) = entry else {
             return Ok(None);
@@ -191,7 +191,7 @@ where
 
         let bytes = entry
             .dyn_into::<Uint8Array>()
-            .map_err(|_| DialogStorageError::StorageBackend("Value is not Uint8Array".to_string()))?
+            .map_err(|_| DialogStorageError::Storage("Value is not Uint8Array".to_string()))?
             .to_vec();
 
         let hash = Blake3Hash::hash(&bytes);
@@ -207,10 +207,10 @@ where
         let tx = self
             .db
             .transaction(&[MEMORY_STORE], TransactionMode::ReadWrite)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
         let store = tx
             .store(MEMORY_STORE)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         // Treat address as UTF-8 string for DevTools readability
         let key = address_to_string(address)?;
@@ -219,15 +219,13 @@ where
         let current = store
             .get(key.clone())
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         let current_hash = if let Some(entry) = &current {
             let bytes = entry
                 .clone()
                 .dyn_into::<Uint8Array>()
-                .map_err(|_| {
-                    DialogStorageError::StorageBackend("Value is not Uint8Array".to_string())
-                })?
+                .map_err(|_| DialogStorageError::Storage("Value is not Uint8Array".to_string()))?
                 .to_vec();
             Some(Blake3Hash::hash(&bytes))
         } else {
@@ -247,7 +245,7 @@ where
 
                 // Check edition only if we need to write
                 if current_hash.as_ref() != edition {
-                    return Err(DialogStorageError::StorageBackend(
+                    return Err(DialogStorageError::Storage(
                         "CAS condition failed: edition mismatch".to_string(),
                     ));
                 }
@@ -256,11 +254,11 @@ where
                 store
                     .put(&entry, Some(&key))
                     .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+                    .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
                 tx.done()
                     .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+                    .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
                 Ok(Some(hash))
             }
@@ -272,7 +270,7 @@ where
 
                 // Check edition only if we need to delete
                 if current_hash.as_ref() != edition {
-                    return Err(DialogStorageError::StorageBackend(
+                    return Err(DialogStorageError::Storage(
                         "CAS condition failed: edition mismatch".to_string(),
                     ));
                 }
@@ -280,11 +278,11 @@ where
                 store
                     .delete(key)
                     .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+                    .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
                 tx.done()
                     .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+                    .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
                 Ok(None)
             }
@@ -316,10 +314,10 @@ where
         let tx = self
             .db
             .transaction(&[INDEX_STORE], TransactionMode::ReadWrite)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
         let store = tx
             .store(INDEX_STORE)
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         tokio::pin!(stream);
 
@@ -333,14 +331,14 @@ where
         }
 
         store.put_all(entries.into_iter()).await.map_err(|error| {
-            DialogStorageError::StorageBackend(format!(
+            DialogStorageError::Storage(format!(
                 "Failed while writing bulk entries to IndexedDB: {error}"
             ))
         })?;
 
         tx.done()
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
         Ok(())
     }
@@ -356,7 +354,7 @@ fn bytes_to_typed_array(bytes: &[u8]) -> JsValue {
 /// Addresses are expected to be valid UTF-8.
 fn address_to_string<Key: AsRef<[u8]>>(address: &Key) -> Result<JsValue, DialogStorageError> {
     let s = std::str::from_utf8(address.as_ref())
-        .map_err(|e| DialogStorageError::StorageBackend(format!("Invalid UTF-8 address: {e}")))?;
+        .map_err(|e| DialogStorageError::Storage(format!("Invalid UTF-8 address: {e}")))?;
     Ok(JsValue::from_str(s))
 }
 

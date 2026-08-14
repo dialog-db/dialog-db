@@ -16,6 +16,7 @@ use std::fmt;
 
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::Disjunction;
+use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
 use crate::source::SelectRules;
@@ -271,6 +272,7 @@ impl ConceptQuery {
         try_stream! {
             let mut plan = None;
             let mut table: Option<Vec<fixpoint::Row>> = None;
+            let mut reduced: Vec<fixpoint::Row> = Vec::new();
 
             for await each in selection {
                 let input = each?;
@@ -292,6 +294,16 @@ impl ConceptQuery {
                             None => fixpoint::evaluate(&app.predicate, analysis, env).await?,
                         });
                     } else {
+                        // A reducing rule's fold reads its whole body
+                        // relation, so caller bindings must never
+                        // restrict the body: each reducing rule's
+                        // folded rows are computed once, over the full
+                        // relation, and the caller's bindings join
+                        // against the output — the fixpoint-table
+                        // shape. The plain rules plan as usual.
+                        for rule in rules.reducing() {
+                            reduced.extend(reduce_rows(rule, env).await?);
+                        }
                         plan = Some(rules.plan(&app.terms, &input));
                     }
                 }
@@ -303,6 +315,12 @@ impl ConceptQuery {
                         }
                     }
                     continue;
+                }
+
+                for row in reduced.iter() {
+                    if let Some(merged) = fixpoint::join(&input, &app.terms, row)? {
+                        yield merged;
+                    }
                 }
                 let plan = plan.as_ref().unwrap();
 
@@ -323,6 +341,35 @@ impl ConceptQuery {
             }
         }
     }
+}
+
+/// Evaluate one reducing rule to its folded conclusion rows: the
+/// body plans and evaluates at *empty* scope (the fold must see the
+/// full relation, never a caller-restricted slice), the [`Reduce`]
+/// fold groups by the non-reduced head fields and computes each
+/// entry, and every folded match projects to a conclusion row for
+/// the caller join. Recomputed per query — incremental maintenance
+/// is milestone A5.
+///
+/// [`Reduce`]: crate::reduce::Reduce
+async fn reduce_rows<'a, Env>(
+    rule: &DeductiveRule,
+    env: &'a Env,
+) -> Result<Vec<fixpoint::Row>, EvaluationError>
+where
+    Env: crate::Scope<'a>,
+{
+    let reducer = rule
+        .reducer()
+        .expect("only rules with a reduce clause reach reduce_rows");
+    let body = rule
+        .plan(&Environment::new())
+        .evaluate(Match::new().seed(), env);
+    let folded = reducer.fold(body).await?;
+    Ok(folded
+        .iter()
+        .map(|matched| fixpoint::project(rule.conclusion(), matched))
+        .collect())
 }
 
 impl Display for ConceptQuery {
@@ -357,7 +404,7 @@ mod tests {
         Proposition, Query, Term, Type, Value,
     };
     use dialog_artifacts::Entity;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
@@ -1420,5 +1467,699 @@ mod tests {
             serde_json::from_value::<ConceptQuery>(extra_field).is_ok(),
             "unknown fields must be ignored on deserialize"
         );
+    }
+
+    /// Reducing-rule evaluation: the `reduce` clause end to end
+    /// through `ConceptQuery::evaluate` (milestone A3,
+    /// `notes/aggregation.md`).
+    mod reducing {
+        use super::*;
+        use crate::reduce::{Aggregator, ReduceSpec};
+        use crate::rule::DeductiveRuleDescriptor;
+        use std::collections::BTreeMap;
+
+        fn compile(json: serde_json::Value) -> DeductiveRule {
+            let descriptor: DeductiveRuleDescriptor =
+                serde_json::from_value(json).expect("descriptor parses");
+            descriptor.compile().expect("rule compiles")
+        }
+
+        /// `DeptTotal { total: sum(?salary) }` grouped by the
+        /// department entity: the body reads the anonymous employee
+        /// concept, binding the department as `?this`.
+        fn dept_total_rule() -> DeductiveRule {
+            compile(serde_json::json!({
+                "deduce": { "with": {
+                    "total": { "the": "org.dept/total", "as": "UnsignedInteger" }
+                }},
+                "when": [{
+                    "assert": { "with": {
+                        "dept": { "the": "org.employee/dept", "as": "Entity" },
+                        "salary": { "the": "org.employee/salary", "as": "UnsignedInteger" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "employee" } },
+                        "dept": { "?": { "name": "this" } },
+                        "salary": { "?": { "name": "salary" } }
+                    }
+                }],
+                "reduce": {
+                    "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
+                }
+            }))
+        }
+
+        #[dialog_common::test]
+        async fn it_evaluates_grouped_sum() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let dept_a: Entity = "id:dept-a".parse()?;
+            let dept_b: Entity = "id:dept-b".parse()?;
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+            let carol: Entity = "id:carol".parse()?;
+
+            branch
+                .transaction()
+                .assert(
+                    the!("org.employee/dept")
+                        .of(alice.clone())
+                        .is(dept_a.clone()),
+                )
+                .assert(the!("org.employee/salary").of(alice.clone()).is(100u32))
+                .assert(the!("org.employee/dept").of(bob.clone()).is(dept_a.clone()))
+                .assert(the!("org.employee/salary").of(bob.clone()).is(50u32))
+                .assert(
+                    the!("org.employee/dept")
+                        .of(carol.clone())
+                        .is(dept_b.clone()),
+                )
+                .assert(the!("org.employee/salary").of(carol.clone()).is(70u32))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let rule = dept_total_rule();
+            let conclusion = rule.conclusion().clone();
+            let mut registry = RuleRegistry::new();
+            registry.register(rule)?;
+            let source = TestEnv::new(&branch, &operator, registry);
+
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("dept"));
+            terms.insert("total".into(), Term::var("total"));
+            let rows = ConceptQuery {
+                terms,
+                predicate: conclusion,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+
+            let mut totals: Vec<(String, Value)> = rows
+                .iter()
+                .map(|row| {
+                    Ok((
+                        Entity::try_from(row.lookup(&Term::var("dept"))?.content()?)?.to_string(),
+                        row.lookup(&Term::var("total"))?.content()?,
+                    ))
+                })
+                .collect::<Result<_, EvaluationError>>()?;
+            totals.sort_by(|a, b| a.0.cmp(&b.0));
+            assert_eq!(
+                totals,
+                vec![
+                    ("id:dept-a".to_string(), Value::UnsignedInt(150)),
+                    ("id:dept-b".to_string(), Value::UnsignedInt(70)),
+                ],
+                "one folded row per department"
+            );
+            Ok(())
+        }
+
+        /// A caller arriving with a grouping field bound joins into
+        /// the folded output; the fold itself still ran over the full
+        /// relation, so the dept-bound total equals the unrestricted
+        /// query's row for that dept.
+        #[dialog_common::test]
+        async fn it_folds_the_full_group_under_caller_binding() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let dept_a: Entity = "id:dept-a".parse()?;
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+
+            branch
+                .transaction()
+                .assert(
+                    the!("org.employee/dept")
+                        .of(alice.clone())
+                        .is(dept_a.clone()),
+                )
+                .assert(the!("org.employee/salary").of(alice.clone()).is(100u32))
+                .assert(the!("org.employee/dept").of(bob.clone()).is(dept_a.clone()))
+                .assert(the!("org.employee/salary").of(bob.clone()).is(50u32))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let rule = dept_total_rule();
+            let conclusion = rule.conclusion().clone();
+            let mut registry = RuleRegistry::new();
+            registry.register(rule)?;
+            let source = TestEnv::new(&branch, &operator, registry);
+
+            // Unrestricted: one group, total 150.
+            let mut open_terms = Parameters::new();
+            open_terms.insert("this".into(), Term::var("dept"));
+            open_terms.insert("total".into(), Term::var("total"));
+            let open = ConceptQuery {
+                terms: open_terms,
+                predicate: conclusion.clone(),
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert_eq!(open.len(), 1);
+            let unrestricted = open[0].lookup(&Term::var("total"))?.content()?;
+
+            // Dept bound as a constant: the same total, not a
+            // caller-sliced fold.
+            let mut bound_terms = Parameters::new();
+            bound_terms.insert("this".into(), Term::Constant(Value::Entity(dept_a.clone())));
+            bound_terms.insert("total".into(), Term::var("total"));
+            let bound = ConceptQuery {
+                terms: bound_terms,
+                predicate: conclusion.clone(),
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert_eq!(bound.len(), 1, "the bound dept still yields its group row");
+            assert_eq!(
+                bound[0].lookup(&Term::var("total"))?.content()?,
+                unrestricted,
+                "aggregation is over the relation, not the caller-restricted slice"
+            );
+
+            // A *reduced* field bound by the caller filters the
+            // folded output (join semantics), never the body.
+            let mut filter_terms = Parameters::new();
+            filter_terms.insert("this".into(), Term::var("dept"));
+            filter_terms.insert("total".into(), Term::Constant(Value::UnsignedInt(150)));
+            let filtered = ConceptQuery {
+                terms: filter_terms,
+                predicate: conclusion.clone(),
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert_eq!(
+                filtered.len(),
+                1,
+                "the matching group row survives the join"
+            );
+
+            let mut miss_terms = Parameters::new();
+            miss_terms.insert("this".into(), Term::var("dept"));
+            miss_terms.insert("total".into(), Term::Constant(Value::UnsignedInt(7)));
+            let missed = ConceptQuery {
+                terms: miss_terms,
+                predicate: conclusion,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert!(
+                missed.is_empty(),
+                "a non-matching total filters the group out"
+            );
+            Ok(())
+        }
+
+        /// The grouped-and-folded variable is well-defined at
+        /// evaluation: grouping by `?salary` while counting it yields
+        /// key x count, exactly Datomic's `[:find ?salary (sum ?salary)]`
+        /// shape.
+        #[dialog_common::test]
+        async fn it_pins_key_times_count_for_grouped_and_folded_variable() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let dept: Entity = "id:dept-a".parse()?;
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+            let carol: Entity = "id:carol".parse()?;
+
+            branch
+                .transaction()
+                .assert(the!("org.employee/dept").of(alice.clone()).is(dept.clone()))
+                .assert(the!("org.employee/salary").of(alice.clone()).is(100u32))
+                .assert(the!("org.employee/dept").of(bob.clone()).is(dept.clone()))
+                .assert(the!("org.employee/salary").of(bob.clone()).is(100u32))
+                .assert(the!("org.employee/dept").of(carol.clone()).is(dept.clone()))
+                .assert(the!("org.employee/salary").of(carol.clone()).is(200u32))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let rule = compile(serde_json::json!({
+                "deduce": { "with": {
+                    "salary": { "the": "org.dept/salary-band", "as": "UnsignedInteger" },
+                    "headcount": { "the": "org.dept/headcount", "as": "UnsignedInteger" }
+                }},
+                "when": [{
+                    "assert": { "with": {
+                        "dept": { "the": "org.employee/dept", "as": "Entity" },
+                        "salary": { "the": "org.employee/salary", "as": "UnsignedInteger" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "employee" } },
+                        "dept": { "?": { "name": "this" } },
+                        "salary": { "?": { "name": "salary" } }
+                    }
+                }],
+                "reduce": {
+                    "headcount": { "apply": "count", "of": { "?": { "name": "salary" } } }
+                }
+            }));
+            let conclusion = rule.conclusion().clone();
+            let mut registry = RuleRegistry::new();
+            registry.register(rule)?;
+            let source = TestEnv::new(&branch, &operator, registry);
+
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("dept"));
+            terms.insert("salary".into(), Term::var("salary"));
+            terms.insert("headcount".into(), Term::var("n"));
+            let rows = ConceptQuery {
+                terms,
+                predicate: conclusion,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+
+            let mut bands: Vec<(Value, Value)> = rows
+                .iter()
+                .map(|row| {
+                    Ok((
+                        row.lookup(&Term::var("salary"))?.content()?,
+                        row.lookup(&Term::var("n"))?.content()?,
+                    ))
+                })
+                .collect::<Result<_, EvaluationError>>()?;
+            bands.sort_by_key(|(salary, _)| format!("{salary:?}"));
+            assert_eq!(
+                bands,
+                vec![
+                    (Value::UnsignedInt(100), Value::UnsignedInt(2)),
+                    (Value::UnsignedInt(200), Value::UnsignedInt(1)),
+                ],
+                "grouping happens first; the fold counts within each key"
+            );
+            Ok(())
+        }
+
+        /// Optional-input `max`: a group whose inputs are all Absent
+        /// binds the reduced field Absent; a group with a present
+        /// input binds the maximum.
+        #[dialog_common::test]
+        async fn it_binds_absent_for_the_all_absent_group() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let dept_a: Entity = "id:dept-a".parse()?;
+            let dept_b: Entity = "id:dept-b".parse()?;
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+
+            // Alice (dept a) has a bonus; Bob (dept b) has none.
+            branch
+                .transaction()
+                .assert(
+                    the!("org.employee/dept")
+                        .of(alice.clone())
+                        .is(dept_a.clone()),
+                )
+                .assert(the!("org.employee/bonus").of(alice.clone()).is(25u32))
+                .assert(the!("org.employee/dept").of(bob.clone()).is(dept_b.clone()))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let rule = compile(serde_json::json!({
+                "deduce": { "with": {
+                    "headcount": { "the": "org.dept/headcount", "as": "UnsignedInteger" },
+                    "top": {
+                        "the": "org.dept/top-bonus",
+                        "as": "UnsignedInteger",
+                        "optional": true
+                    }
+                }},
+                "when": [{
+                    "assert": { "with": {
+                        "dept": { "the": "org.employee/dept", "as": "Entity" },
+                        "bonus": {
+                            "the": "org.employee/bonus",
+                            "as": "UnsignedInteger",
+                            "optional": true
+                        }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "employee" } },
+                        "dept": { "?": { "name": "this" } },
+                        "bonus": { "?": { "name": "bonus" } }
+                    }
+                }],
+                "reduce": {
+                    "headcount": { "apply": "count", "of": { "?": { "name": "bonus" } } },
+                    "top": { "apply": "max", "of": { "?": { "name": "bonus" } } }
+                }
+            }));
+            let conclusion = rule.conclusion().clone();
+            let mut registry = RuleRegistry::new();
+            registry.register(rule)?;
+            let source = TestEnv::new(&branch, &operator, registry);
+
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("dept"));
+            terms.insert("headcount".into(), Term::var("n"));
+            terms.insert("top".into(), Term::var("top"));
+            let rows = ConceptQuery {
+                terms,
+                predicate: conclusion,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert_eq!(rows.len(), 2, "both departments fold");
+
+            let mut found_a = false;
+            let mut found_b = false;
+            for row in &rows {
+                let dept = row.lookup(&Term::var("dept"))?.content()?;
+                let n = row.lookup(&Term::var("n"))?.content()?;
+                let top = row.lookup(&Term::var("top"))?;
+                match &dept {
+                    Value::Entity(e) if *e == dept_a => {
+                        assert_eq!(n, Value::UnsignedInt(1));
+                        assert_eq!(top, Binding::Present(Value::UnsignedInt(25)));
+                        found_a = true;
+                    }
+                    Value::Entity(e) if *e == dept_b => {
+                        assert_eq!(n, Value::UnsignedInt(0), "count has an identity");
+                        assert_eq!(top, Binding::Absent, "identity-less max binds Absent");
+                        found_b = true;
+                    }
+                    other => panic!("unexpected dept {other:?}"),
+                }
+            }
+            assert!(found_a && found_b);
+            Ok(())
+        }
+
+        /// Composition, stratum 1 over stratum 0: a *plain* rule
+        /// consumes a reducing rule's concept like any other.
+        #[dialog_common::test]
+        async fn it_composes_plain_rule_over_reducing_concept() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let dept_a: Entity = "id:dept-a".parse()?;
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+
+            branch
+                .transaction()
+                .assert(
+                    the!("org.employee/dept")
+                        .of(alice.clone())
+                        .is(dept_a.clone()),
+                )
+                .assert(the!("org.employee/salary").of(alice.clone()).is(100u32))
+                .assert(the!("org.employee/dept").of(bob.clone()).is(dept_a.clone()))
+                .assert(the!("org.employee/salary").of(bob.clone()).is(50u32))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let inner = dept_total_rule();
+            let inner_concept = serde_json::to_value(inner.conclusion())?;
+            let outer = compile(serde_json::json!({
+                "deduce": { "with": {
+                    "grand": { "the": "org.report/grand", "as": "UnsignedInteger" }
+                }},
+                "when": [{
+                    "assert": inner_concept,
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "total": { "?": { "name": "grand" } }
+                    }
+                }]
+            }));
+            let report = outer.conclusion().clone();
+            let mut registry = RuleRegistry::new();
+            registry.register(inner)?;
+            registry.register(outer)?;
+            let source = TestEnv::new(&branch, &operator, registry);
+
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("dept"));
+            terms.insert("grand".into(), Term::var("grand"));
+            let rows = ConceptQuery {
+                terms,
+                predicate: report,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].lookup(&Term::var("grand"))?.content()?,
+                Value::UnsignedInt(150),
+                "the plain rule reads the folded row"
+            );
+            Ok(())
+        }
+
+        /// Composition, reducing over reducing (two strata): org
+        /// totals fold the department totals, which fold the
+        /// employees.
+        #[dialog_common::test]
+        async fn it_composes_reducing_rule_over_reducing_concept() -> anyhow::Result<()> {
+            let (operator, profile) = test_operator_with_profile().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            let org_x: Entity = "id:org-x".parse()?;
+            let org_y: Entity = "id:org-y".parse()?;
+            let dept_a: Entity = "id:dept-a".parse()?;
+            let dept_b: Entity = "id:dept-b".parse()?;
+            let dept_c: Entity = "id:dept-c".parse()?;
+            let alice: Entity = "id:alice".parse()?;
+            let bob: Entity = "id:bob".parse()?;
+            let carol: Entity = "id:carol".parse()?;
+
+            branch
+                .transaction()
+                .assert(the!("org.dept/org").of(dept_a.clone()).is(org_x.clone()))
+                .assert(the!("org.dept/org").of(dept_b.clone()).is(org_x.clone()))
+                .assert(the!("org.dept/org").of(dept_c.clone()).is(org_y.clone()))
+                .assert(
+                    the!("org.employee/dept")
+                        .of(alice.clone())
+                        .is(dept_a.clone()),
+                )
+                .assert(the!("org.employee/salary").of(alice.clone()).is(10u32))
+                .assert(the!("org.employee/dept").of(bob.clone()).is(dept_b.clone()))
+                .assert(the!("org.employee/salary").of(bob.clone()).is(20u32))
+                .assert(
+                    the!("org.employee/dept")
+                        .of(carol.clone())
+                        .is(dept_c.clone()),
+                )
+                .assert(the!("org.employee/salary").of(carol.clone()).is(7u32))
+                .commit()
+                .perform(&operator)
+                .await?;
+
+            let inner = dept_total_rule();
+            let inner_concept = serde_json::to_value(inner.conclusion())?;
+            let outer = compile(serde_json::json!({
+                "deduce": { "with": {
+                    "grand": { "the": "org.report/grand", "as": "UnsignedInteger" }
+                }},
+                "when": [
+                    {
+                        "assert": inner_concept,
+                        "where": {
+                            "this": { "?": { "name": "dept" } },
+                            "total": { "?": { "name": "t" } }
+                        }
+                    },
+                    {
+                        "assert": { "with": {
+                            "org": { "the": "org.dept/org", "as": "Entity" }
+                        }},
+                        "where": {
+                            "this": { "?": { "name": "dept" } },
+                            "org": { "?": { "name": "this" } }
+                        }
+                    }
+                ],
+                "reduce": {
+                    "grand": { "apply": "sum", "of": { "?": { "name": "t" } } }
+                }
+            }));
+            let org_total = outer.conclusion().clone();
+            let mut registry = RuleRegistry::new();
+            registry.register(inner)?;
+            registry.register(outer)?;
+            let source = TestEnv::new(&branch, &operator, registry);
+
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("org"));
+            terms.insert("grand".into(), Term::var("grand"));
+            let rows = ConceptQuery {
+                terms,
+                predicate: org_total,
+            }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+
+            let mut grands: Vec<(String, Value)> = rows
+                .iter()
+                .map(|row| {
+                    Ok((
+                        Entity::try_from(row.lookup(&Term::var("org"))?.content()?)?.to_string(),
+                        row.lookup(&Term::var("grand"))?.content()?,
+                    ))
+                })
+                .collect::<Result<_, EvaluationError>>()?;
+            grands.sort_by(|a, b| a.0.cmp(&b.0));
+            assert_eq!(
+                grands,
+                vec![
+                    ("id:org-x".to_string(), Value::UnsignedInt(30)),
+                    ("id:org-y".to_string(), Value::UnsignedInt(7)),
+                ],
+                "two strata of folds compose"
+            );
+            Ok(())
+        }
+
+        /// Rule-level determinism: the same base facts inserted in
+        /// different orders yield identical folded rows.
+        #[dialog_common::test]
+        async fn it_is_deterministic_across_insertion_orders() -> anyhow::Result<()> {
+            let dept_a: Entity = "id:dept-a".parse()?;
+            let dept_b: Entity = "id:dept-b".parse()?;
+            let people: Vec<(Entity, Entity, u32)> = vec![
+                ("id:alice".parse()?, dept_a.clone(), 100),
+                ("id:bob".parse()?, dept_a.clone(), 50),
+                ("id:carol".parse()?, dept_b.clone(), 70),
+                ("id:dave".parse()?, dept_b.clone(), 5),
+            ];
+
+            let mut observed = Vec::new();
+            for order in [
+                people.clone(),
+                people.iter().rev().cloned().collect::<Vec<_>>(),
+            ] {
+                let (operator, profile) = test_operator_with_profile().await;
+                let repo = test_repo(&operator, &profile).await;
+                let branch = repo.branch("main").open().perform(&operator).await?;
+                let mut tx = branch.transaction();
+                for (person, dept, salary) in &order {
+                    tx = tx
+                        .assert(
+                            the!("org.employee/dept")
+                                .of(person.clone())
+                                .is(dept.clone()),
+                        )
+                        .assert(the!("org.employee/salary").of(person.clone()).is(*salary));
+                }
+                tx.commit().perform(&operator).await?;
+
+                let rule = dept_total_rule();
+                let conclusion = rule.conclusion().clone();
+                let mut registry = RuleRegistry::new();
+                registry.register(rule)?;
+                let source = TestEnv::new(&branch, &operator, registry);
+
+                let mut terms = Parameters::new();
+                terms.insert("this".into(), Term::var("dept"));
+                terms.insert("total".into(), Term::var("total"));
+                let rows = ConceptQuery {
+                    terms,
+                    predicate: conclusion,
+                }
+                .evaluate(Match::new().seed(), &source)
+                .try_vec()
+                .await?;
+                let mut totals: Vec<(String, Value)> = rows
+                    .iter()
+                    .map(|row| {
+                        Ok((
+                            Entity::try_from(row.lookup(&Term::var("dept"))?.content()?)?
+                                .to_string(),
+                            row.lookup(&Term::var("total"))?.content()?,
+                        ))
+                    })
+                    .collect::<Result<_, EvaluationError>>()?;
+                totals.sort_by(|a, b| a.0.cmp(&b.0));
+                observed.push(totals);
+            }
+            assert_eq!(
+                observed[0], observed[1],
+                "folded rows are independent of base-fact insertion order"
+            );
+            assert_eq!(observed[0].len(), 2);
+            Ok(())
+        }
+
+        /// A reducing rule whose body reads its own conclusion is an
+        /// aggregating edge inside its own strongly connected
+        /// component: rejected at acquire with the structured
+        /// stratification error, never silently mis-evaluated.
+        #[dialog_common::test]
+        async fn it_rejects_recursive_reducing_rule() -> anyhow::Result<()> {
+            let conclusion = ConceptDescriptor::try_from(vec![(
+                "total",
+                AttributeDescriptor::new(
+                    the!("org.dept/total"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            )])
+            .unwrap();
+
+            // Body reads the rule's own conclusion concept.
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("total".into(), Term::<Any>::var("s"));
+            let premises = vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: conclusion.clone(),
+            }))];
+            let mut reduce = BTreeMap::new();
+            reduce.insert(
+                "total".to_string(),
+                ReduceSpec {
+                    apply: Aggregator::Sum,
+                    of: Term::var("s"),
+                },
+            );
+            let rule = DeductiveRule::with_reduce(conclusion.clone(), premises, reduce)
+                .expect("locally the rule compiles; the cycle is a program property");
+
+            let mut registry = RuleRegistry::new();
+            registry.register(rule)?;
+            match registry.acquire(&conclusion) {
+                Err(EvaluationError::AggregationThroughRecursion {
+                    concept,
+                    aggregated,
+                }) => {
+                    assert_eq!(concept, conclusion.this().to_string());
+                    assert_eq!(
+                        aggregated,
+                        conclusion.this().to_string(),
+                        "the self-referential body is the aggregated concept"
+                    );
+                }
+                other => panic!("expected AggregationThroughRecursion, got {other:?}"),
+            }
+            Ok(())
+        }
     }
 }

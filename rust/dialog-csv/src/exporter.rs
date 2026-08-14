@@ -40,6 +40,14 @@ impl<W: AsyncWrite + Unpin + Send> Exporter for CsvExporter<W> {
     }
 
     async fn close(&mut self) -> Result<(), DialogArtifactsError> {
-        Ok(())
+        // Push everything the serializer buffered down to the underlying
+        // writer. Without this the tail of an export sits in the internal
+        // buffer, so a reader that opens the destination right after close
+        // sees a truncated file — the `it_roundtrips_via_file` flake, where
+        // release-mode timing dropped the last row.
+        self.writer
+            .flush()
+            .await
+            .map_err(|e| DialogArtifactsError::Export(e.to_string()))
     }
 }

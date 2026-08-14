@@ -116,6 +116,8 @@ define_formulas! {
 
     "dialog/key-part"         => KeyPart(super::key::KeyPart, super::key::KeyPartQuery),
     "dialog/separator-part"   => SeparatorPart(super::key::SeparatorPart, super::key::SeparatorPartQuery),
+    "dialog/position"         => Position(super::position::Position, super::position::PositionQuery),
+    "dialog/position-parts"   => PositionParts(super::position::PositionParts, super::position::PositionPartsQuery),
 }
 
 impl FormulaQuery {

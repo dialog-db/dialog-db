@@ -82,7 +82,7 @@ mod tests {
         Environment, Formula, Negation, Parameters, Premise, Proposition, Term, Type, Value,
     };
     use dialog_artifacts::Entity;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     /// Coalesce must take the *source* when the lookup finds a value
