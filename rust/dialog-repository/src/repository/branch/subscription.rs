@@ -833,13 +833,14 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use crate::RemoteSite;
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
     use dialog_artifacts::{Entity, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::{ConditionalSend, ConditionalSync};
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::Identify;
     use dialog_effects::memory::Resolve;
+    use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::attribute::The;
     use dialog_query::types::Any;
     use dialog_query::{AttributeQuery, Claim, Term, the};

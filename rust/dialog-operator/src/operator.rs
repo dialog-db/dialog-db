@@ -5,22 +5,26 @@
 mod access;
 mod builder;
 mod fork;
-mod memo;
 mod space;
 #[cfg(test)]
 mod test;
 
-pub use builder::{OperatorBuilder, OperatorError};
+pub use builder::{DeriveOperator, OperatorBuilder, OperatorError};
 
-use memo::ProofMemo;
+use std::sync::{Arc, OnceLock};
 
-use crate::Authority;
+use dialog_repository::Branch;
+use dialog_ucan::UcanCertificate;
+use parking_lot::Mutex;
+
+use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
 use dialog_effects::authority::{Attest, Identify, Operator as AuthOperator};
 use dialog_effects::credential::Secret;
 use dialog_effects::storage as storage_fx;
 use dialog_effects::{archive, blob, credential, memory};
+use dialog_identity::Authority;
 use dialog_network::Network;
 use dialog_storage::provider::storage::Storage;
 use dialog_varsig::{Did, Principal};
@@ -32,7 +36,7 @@ use dialog_varsig::{Did, Principal};
 /// - [`Storage`] for DID-routed effects
 /// - Base directory for resolving space names to storage locations
 /// - Remote for fork invocations
-#[derive(Provider)]
+#[derive(Provider, Clone)]
 pub struct Operator<S: Clone> {
     #[provide(Identify, Attest)]
     /// Provider for authority effects (identity and attestation).
@@ -63,12 +67,33 @@ pub struct Operator<S: Clone> {
     /// Network dispatch for fork invocations.
     network: Network,
 
-    /// Chains already proven against `storage`, so that repeated
-    /// authorizations do not walk the certificate store again.
-    memo: ProofMemo,
+    /// The session grants: profile-to-operator delegations minted in
+    /// memory at build time, one per allowed scope. Never persisted — the
+    /// operator key derives from the profile key, so any device holding
+    /// the profile re-mints identical authority on demand.
+    session: Arc<Vec<UcanCertificate>>,
+
+    /// The profile repository's access branch, opened at build time.
+    /// Proofs resolve from its `dialog.ucan/*` facts and retained
+    /// delegations commit into it.
+    delegations: Arc<OnceLock<Branch>>,
+
+    /// Resolved-chain cache (see `operator/access.rs`).
+    chains: Arc<Mutex<access::ChainCache>>,
 }
 
 impl<S: Clone> Operator<S> {
+    /// The profile repository's access branch this operator serves proofs
+    /// from, or an error before build wires it (unreachable through the
+    /// public API).
+    pub(crate) fn delegations(&self) -> Result<&Branch, AuthorizeError> {
+        self.delegations
+            .get()
+            .ok_or_else(|| AuthorizeError::Malformed {
+                detail: "operator access branch is not wired".to_string(),
+            })
+    }
+
     /// The operator's DID (the ephemeral/derived session key).
     pub fn did(&self) -> Did {
         self.authority.operator_did()

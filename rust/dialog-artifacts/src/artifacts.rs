@@ -70,7 +70,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::{EntityKey, KeyViewConstruct};
 
 use crate::tree::{
-    ArtifactTree, ArtifactTreeExt, SpillCache, TreeStorageBridge, fetch_spilled_cached, spill_cache,
+    ArtifactTree, ArtifactTreeExt, SpillCache, TreeStorageBridge, WriteScope, fetch_spilled_cached,
+    spill_cache,
 };
 use crate::{
     DialogArtifactsError, HASH_SIZE, Key, State,
@@ -495,6 +496,7 @@ where
                 &mut self.storage,
                 None,
                 stream::empty(),
+                WriteScope::Application,
             )
             .await?;
             *index = batch.seal(&self.storage, &mut delta, true).await?;

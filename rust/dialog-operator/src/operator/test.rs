@@ -1,5 +1,6 @@
+use crate::DeriveOperator as _;
 use crate::helpers::unique_name;
-use crate::profile::Profile;
+use dialog_identity::Profile;
 use dialog_network::Network;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 
@@ -271,31 +272,16 @@ mod tests {
     mod time_bound_tests {
         use super::*;
         use crate::Operator;
-        use crate::profile::Profile;
         use dialog_capability::Subject;
         use dialog_capability::access::{Authorization as _, Proof as _};
         use dialog_credentials::Ed25519Signer;
         use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt};
+        use dialog_identity::Profile;
         use dialog_ucan_core::time::Timestamp;
         use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
 
         fn ts(secs: u64) -> Timestamp {
             Timestamp::new(UNIX_EPOCH + Duration::from_secs(secs)).unwrap()
-        }
-
-        async fn build_operator_with_profile() -> (Operator<VolatileSpace>, Profile) {
-            let storage = Storage::volatile();
-            let profile = Profile::open(unique_name("time"))
-                .perform(&storage)
-                .await
-                .unwrap();
-            let operator = profile
-                .derive(b"test")
-                .allow(Subject::any())
-                .build(storage)
-                .await
-                .unwrap();
-            (operator, profile)
         }
 
         /// Build an operator WITHOUT a powerline delegation.
@@ -312,7 +298,13 @@ mod tests {
 
         #[dialog_common::test]
         async fn time_bounded_delegation_sets_proof_duration() {
-            let (operator, profile) = build_operator_with_profile().await;
+            // The RESTRICTED operator: with a powerline session grant the
+            // operator would prove through its own unbounded in-memory
+            // link (correctly, it holds the stronger authority) and the
+            // retained bounded delegation would never be consulted. With
+            // no session grant covering the scope, the retained
+            // certificate is the only chain and its bounds must carry.
+            let (operator, profile) = build_restricted_operator_with_profile().await;
 
             // Delegate with time bounds: valid from 1000 to 5000
             let chain = profile

@@ -42,7 +42,7 @@ mod tests {
         Type,
     };
     use dialog_capability::Provider;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use implicit_attr_test::{Name, Role};
 
     /// Lower a single proposition to its compiled `Plan` for the

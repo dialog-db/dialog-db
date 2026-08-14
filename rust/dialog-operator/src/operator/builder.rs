@@ -1,23 +1,40 @@
 //! Builder for constructing an Operator from a Profile.
 
-use super::{Operator, ProofMemo};
-use crate::Authority;
-use crate::profile::Profile;
-use crate::profile::access::Access as ProfileAccess;
-use dialog_capability::access::{Access, Authorization as _, Proof as _, Prove, Retain};
-use dialog_capability::{Ability, Capability, Constraint, Provider, Subject};
+use std::sync::{Arc, OnceLock};
+
+use super::Operator;
+use dialog_capability::{Ability, Capability, Constraint};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Directory;
+use dialog_identity::Authority;
+use dialog_identity::Profile;
 use dialog_network::Network;
+use dialog_repository::ACCESS_BRANCH;
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
-use dialog_ucan::{Scope, Ucan};
-use dialog_varsig::Principal;
+use dialog_ucan::{Scope, UcanCertificate};
+use dialog_ucan_core::DelegationBuilder;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use dialog_varsig::Signer;
 
 const OPERATOR_DERIVATION_CONTEXT: &str = "dialog-db operator derivation";
+
+/// Derive an operator from a profile.
+///
+/// An extension trait rather than an inherent method because [`Profile`]
+/// lives in `dialog-identity`, below this crate, and cannot name
+/// [`OperatorBuilder`].
+pub trait DeriveOperator {
+    /// Derive an operator from this profile with the given context seed.
+    fn derive(&self, context: impl Into<Vec<u8>>) -> OperatorBuilder;
+}
+
+impl DeriveOperator for Profile {
+    fn derive(&self, context: impl Into<Vec<u8>>) -> OperatorBuilder {
+        OperatorBuilder::new(self, context.into())
+    }
+}
 
 /// Builder for constructing an Operator from a Profile.
 pub struct OperatorBuilder {
@@ -66,61 +83,64 @@ impl OperatorBuilder {
     }
 
     /// Build the operator, deriving the operator key.
+    ///
+    /// Every allowed scope becomes a profile-to-operator delegation held
+    /// **in memory** — the session. Nothing is persisted: the operator key
+    /// derives from the profile key, so identical authority re-mints on
+    /// every build, and persisting it would only accumulate (one immortal
+    /// certificate per session was exactly the field pathology). The
+    /// operator is born on the profile repository's access branch, from
+    /// which every proof of cross-party authority resolves.
     pub async fn build<S>(self, storage: Storage<S>) -> Result<Operator<S>, OperatorError>
     where
         S: SpaceProvider + Clone + 'static,
-        S: Provider<Prove<Ucan>>,
-        S: Provider<Retain<Ucan>>,
     {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
         let credentials = Authority::new(
             "operator",
             Ed25519Signer::from(self.credential.clone()),
-            operator_signer,
+            operator_signer.clone(),
         );
 
+        // Mint the session: one in-memory grant per allowed scope.
+        let profile_signer = Ed25519Signer::from(self.credential.clone());
+        let mut session = Vec::with_capacity(self.allowed.len());
+        for scope in &self.allowed {
+            let delegation = DelegationBuilder::new()
+                .issuer(profile_signer.clone())
+                .audience(&operator_signer)
+                .subject(scope.subject.clone())
+                .command(scope.command.segments().clone())
+                .policy(scope.policy())
+                .try_build()
+                .await
+                .map_err(|e| OperatorError::Delegation(format!("{e:?}")))?;
+            session.push(UcanCertificate(delegation));
+        }
+
         let operator = Operator {
-            authority: credentials.clone(),
+            authority: credentials,
             storage,
             directory: self.directory,
             network: self.network,
-            memo: ProofMemo::default(),
+            session: Arc::new(session),
+            delegations: Arc::new(OnceLock::new()),
+            chains: Arc::default(),
         };
 
-        // Create delegations for allowed capabilities
-        if !self.allowed.is_empty() {
-            let profile_did = self.credential.did();
-            let signer = Ed25519Signer::from(self.credential.clone());
-            let access = ProfileAccess::new(&self.credential);
-            let operator_did = credentials.operator_did();
-
-            for scope in &self.allowed {
-                // Prove authority (self-grant for profile)
-                let proof = Subject::from(profile_did.clone())
-                    .attenuate(Access)
-                    .invoke(Prove::<Ucan>::new(profile_did.clone(), scope.clone()))
-                    .perform(&operator)
-                    .await
-                    .map_err(|e| OperatorError::Delegation(e.to_string()))?;
-
-                // Sign and delegate to operator
-                let authorization = proof
-                    .claim(signer.clone())
-                    .map_err(|e| OperatorError::Delegation(e.to_string()))?;
-
-                let delegation = authorization
-                    .delegate(operator_did.clone())
-                    .await
-                    .map_err(|e| OperatorError::Delegation(e.to_string()))?;
-
-                // Retain the delegation under the profile
-                access
-                    .save(delegation)
-                    .perform(&operator)
-                    .await
-                    .map_err(|e| OperatorError::Delegation(e.to_string()))?;
-            }
-        }
+        // Open the profile repository's access branch: the store every
+        // proof resolves from and every retained delegation commits into.
+        let repository = dialog_repository::Repository::from(self.credential.clone());
+        let branch = repository
+            .branch(ACCESS_BRANCH)
+            .open()
+            .perform(&operator)
+            .await
+            .map_err(|e| OperatorError::Delegation(format!("{e}")))?;
+        operator
+            .delegations
+            .set(branch)
+            .expect("freshly built operator has no access branch yet");
 
         Ok(operator)
     }

@@ -85,8 +85,9 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
     use anyhow::Result;
+    use dialog_operator::helpers::test_operator_with_profile;
 
     use dialog_artifacts::{Artifact, Instruction, Value};
     use futures_util::stream;

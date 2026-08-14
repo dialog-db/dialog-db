@@ -33,7 +33,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::{Term, the};
     use anyhow::Result;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
 
     #[dialog_common::test]
     async fn it_queries_via_fact_selector() -> Result<()> {

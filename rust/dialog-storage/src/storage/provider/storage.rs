@@ -10,7 +10,7 @@ mod web;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dialog_capability::access::{AuthorizeError, Protocol, Prove, Retain};
+use dialog_capability::access::{AuthorizeError, Export, Forget, Protocol, Prove, Retain};
 use dialog_capability::{Capability, Did, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
@@ -84,6 +84,40 @@ where
     Self: ConditionalSend + ConditionalSync,
 {
     async fn execute(&self, input: Capability<Prove<P>>) -> Result<P::Proof, AuthorizeError> {
+        input.perform(&self.router).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S, P> Provider<Export<P>> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    P: Protocol,
+    P::Certificate: ConditionalSend + ConditionalSync,
+    Router<S>: Provider<Export<P>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<Export<P>>,
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        input.perform(&self.router).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S, P> Provider<Forget<P>> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    P: Protocol,
+    P::Certificate:
+        serde::Serialize + for<'de> serde::Deserialize<'de> + ConditionalSend + ConditionalSync,
+    Router<S>: Provider<Forget<P>>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Forget<P>>) -> Result<(), AuthorizeError> {
         input.perform(&self.router).await
     }
 }

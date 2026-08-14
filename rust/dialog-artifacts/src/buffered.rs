@@ -50,7 +50,7 @@ use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
 use crate::history::Version;
-use crate::tree::{ArtifactTree, TreeStorageBridge, write_instructions};
+use crate::tree::{ArtifactTree, TreeStorageBridge, WriteScope, write_instructions};
 use crate::{Datum, DialogArtifactsError, Instruction, Key, State};
 
 /// The buffered counterpart of [`ArtifactTree`].
@@ -363,6 +363,7 @@ impl BufferedBatch {
         store: &mut S,
         version: Option<Version>,
         instructions: I,
+        scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -370,7 +371,7 @@ impl BufferedBatch {
             + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
-        Self::open_batch(tree, store, version, instructions, None).await
+        Self::open_batch(tree, store, version, instructions, scope, None).await
     }
 
     /// [`apply`](Self::apply) with a live spine carried across commits.
@@ -390,6 +391,7 @@ impl BufferedBatch {
         store: &mut S,
         version: Option<Version>,
         instructions: I,
+        scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
         S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
@@ -397,7 +399,15 @@ impl BufferedBatch {
             + ConditionalSync,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
-        Self::open_batch(tree, store, version, instructions, Some(slot.clone())).await
+        Self::open_batch(
+            tree,
+            store,
+            version,
+            instructions,
+            scope,
+            Some(slot.clone()),
+        )
+        .await
     }
 
     async fn open_batch<S, I>(
@@ -405,6 +415,7 @@ impl BufferedBatch {
         store: &mut S,
         version: Option<Version>,
         instructions: I,
+        scope: WriteScope,
         slot: Option<SpineSlot>,
     ) -> Result<Self, DialogArtifactsError>
     where
@@ -423,8 +434,16 @@ impl BufferedBatch {
             .as_ref()
             .and_then(|slot| slot.take(tree.root()))
             .unwrap_or_else(|| HitchhikerTree::open(tree));
-        let (buffered, changed) =
-            write_instructions(spine, store, &storage, version, &manifest, instructions).await?;
+        let (buffered, changed) = write_instructions(
+            spine,
+            store,
+            &storage,
+            version,
+            &manifest,
+            instructions,
+            scope,
+        )
+        .await?;
         Ok(Self {
             tree: buffered,
             cache: tree.node_cache(),
@@ -559,7 +578,8 @@ where
         + ConditionalSync,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
-    let batch = BufferedBatch::apply(tree, store, version, instructions).await?;
+    let batch =
+        BufferedBatch::apply(tree, store, version, instructions, WriteScope::Application).await?;
     let changed = batch.changed();
     *tree = batch.seal(store, delta, canonicalize).await?;
     Ok(changed)
@@ -583,7 +603,15 @@ where
         + ConditionalSync,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
-    let batch = BufferedBatch::apply_reusing(slot, tree, store, version, instructions).await?;
+    let batch = BufferedBatch::apply_reusing(
+        slot,
+        tree,
+        store,
+        version,
+        instructions,
+        WriteScope::Application,
+    )
+    .await?;
     let changed = batch.changed();
     *tree = batch.seal(store, delta, canonicalize).await?;
     Ok(changed)
@@ -599,7 +627,7 @@ mod tests {
     use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage, StorageBackend as _};
     use futures_util::stream;
 
-    use super::{BufferedBatch, apply_buffered};
+    use super::{BufferedBatch, WriteScope, apply_buffered};
     use crate::history::{Edition, Origin, Version};
     use crate::key::{FromKey as _, default_manifest};
     use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
@@ -965,6 +993,7 @@ mod tests {
             &mut batch_store,
             Some(version()),
             stream::iter(data()),
+            WriteScope::Application,
         )
         .await?;
         assert!(batch.changed(), "the data writes change the indexes");
@@ -990,6 +1019,7 @@ mod tests {
             &mut buffered_store,
             Some(version()),
             stream::iter(data()),
+            WriteScope::Application,
         )
         .await?;
         let batch = batch.record(&buffered_store, entries()).await?;

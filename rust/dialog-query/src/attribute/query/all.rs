@@ -581,7 +581,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::the;
     use crate::type_system::{Interval, IntervalBound, Refinement};
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use std::collections::BTreeSet;
 
     /// A prefix refinement stamped onto a variable term becomes a

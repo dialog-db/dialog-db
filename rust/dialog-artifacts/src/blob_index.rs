@@ -70,6 +70,20 @@ impl BlobRecord {
         })
     }
 
+    /// The tree entry recording this blob reference, for callers appending
+    /// machinery entries to an open batch (see `BufferedBatch::record`) rather
+    /// than editing the tree directly through
+    /// [`put_blob`](BlobIndexExt::put_blob).
+    pub fn entry(self, hash: &Blake3Hash) -> (crate::Key, State<Datum>) {
+        (BlobKey::new(hash).into_key(), self.into_state())
+    }
+
+    /// The tombstone entry retracting a blob reference, the batch-entry
+    /// counterpart of [`retract_blob`](BlobIndexExt::retract_blob).
+    pub fn retract_entry(hash: &Blake3Hash) -> (crate::Key, State<Datum>) {
+        (BlobKey::new(hash).into_key(), State::Removed)
+    }
+
     /// Decode a blob record from a tree value. `Removed` (a retracted entry)
     /// decodes to `None`.
     pub(crate) fn from_state(state: &State<Datum>) -> Result<Option<Self>, DialogArtifactsError> {

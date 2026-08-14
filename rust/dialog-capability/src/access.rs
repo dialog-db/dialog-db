@@ -19,6 +19,7 @@
 use crate::{Ability, Attenuate, Capability, Constraint, Did, Effect};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use thiserror::Error;
 
 /// Describes the scope of access being requested or granted.
@@ -448,6 +449,74 @@ where
     type Output = Result<(), AuthorizeError>;
 }
 
+/// Forget effect — removes specific certificates from a store.
+///
+/// An [`Effect`](crate::Effect) on [`Access`]. The counterpart of
+/// [`Export`] for migration: after certificates are re-retained
+/// elsewhere, this drains exactly those from the store they came from,
+/// leaving everything else in place.
+#[derive(Serialize, Deserialize, Attenuate)]
+#[serde(bound(
+    serialize = "P::Certificate: Serialize",
+    deserialize = "P::Certificate: for<'a> Deserialize<'a>"
+))]
+pub struct Forget<P: Protocol> {
+    /// The certificates to remove.
+    pub certificates: Vec<P::Certificate>,
+}
+
+impl<P: Protocol> Forget<P> {
+    /// Create a new forget request.
+    pub fn new(certificates: Vec<P::Certificate>) -> Self {
+        Self { certificates }
+    }
+}
+
+impl<P: Protocol> crate::Effect for Forget<P>
+where
+    P::Certificate: Serialize + for<'de> Deserialize<'de> + ConditionalSend + 'static,
+{
+    type Of = Access;
+    type Output = Result<(), AuthorizeError>;
+}
+
+/// Export effect — enumerates every retained certificate.
+///
+/// An [`Effect`](crate::Effect) on [`Access`]. The subject DID in the
+/// capability chain determines which store is enumerated. Exists for
+/// migration: a caller moving certificates from one store to another
+/// (the legacy per-provider certificate stores into the synced
+/// delegation records) reads them all through this rather than knowing
+/// each store's layout.
+#[derive(Serialize, Deserialize, Attenuate)]
+pub struct Export<P: Protocol> {
+    #[serde(skip)]
+    marker: PhantomData<fn() -> P>,
+}
+
+impl<P: Protocol> Export<P> {
+    /// Create a new export request.
+    pub fn new() -> Self {
+        Self {
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<P: Protocol> Default for Export<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P: Protocol> crate::Effect for Export<P>
+where
+    P::Certificate: 'static,
+{
+    type Of = Access;
+    type Output = Result<Vec<P::Certificate>, AuthorizeError>;
+}
+
 /// Storage backend for delegation proofs.
 ///
 /// Each storage backend (FileStore, Volatile, IndexedDb) implements this
@@ -471,6 +540,14 @@ pub trait CertificateStore<P: Protocol> {
 
     /// Store a delegation for future authorization lookups.
     async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError>;
+
+    /// Enumerate every certificate this store retains, for migration into
+    /// another store (see [`Export`]).
+    async fn export(&self) -> Result<Vec<P::Certificate>, AuthorizeError>;
+
+    /// Remove specific certificates from this store (see [`Forget`]).
+    /// Removing an absent certificate is a no-op.
+    async fn forget(&self, certificates: &[P::Certificate]) -> Result<(), AuthorizeError>;
 
     /// Resolve a delegation chain for the given claim.
     ///

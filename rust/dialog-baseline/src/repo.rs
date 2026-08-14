@@ -25,7 +25,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_effects::space::{Create as SpaceCreate, Load as SpaceLoad};
 use dialog_network::Network;
 use dialog_operator::helpers::unique_name;
-use dialog_operator::{Operator, Profile};
+use dialog_operator::{DeriveOperator as _, Operator, Profile};
 use dialog_repository::{Branch, RemoteSite, RepositoryExt as _};
 use dialog_storage::NativeTempSpace;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};

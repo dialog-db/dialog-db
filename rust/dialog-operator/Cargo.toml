@@ -22,7 +22,9 @@ dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
+dialog-identity = { workspace = true }
 dialog-network = { workspace = true }
+dialog-repository = { workspace = true }
 dialog-ucan-core = { workspace = true }
 dialog-ucan = { workspace = true }
 dialog-storage = { workspace = true }
@@ -35,6 +37,7 @@ ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
 rand_chacha = { workspace = true }
+parking_lot = { workspace = true }
 serde = { workspace = true }
 signature = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }

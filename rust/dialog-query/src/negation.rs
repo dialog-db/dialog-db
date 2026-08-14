@@ -87,7 +87,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::types::Any;
     use crate::{Environment, Premise, Term, Value};
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     /// Lower a single negated premise to its compiled `Plan` and

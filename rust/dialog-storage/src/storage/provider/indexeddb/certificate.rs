@@ -7,7 +7,8 @@
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::access::{
-    AuthorizeError, Certificate, CertificateStore, Delegation, Protocol, Prove, Retain,
+    AuthorizeError, Certificate, CertificateStore, Delegation, Export, Forget, Protocol, Prove,
+    Retain,
 };
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_varsig::Did;
@@ -65,6 +66,66 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
             .await
     }
 
+    async fn export(&self) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        let has_store = self.connection.borrow().stores.contains(CERTIFICATE);
+        if !has_store {
+            return Ok(Vec::new());
+        }
+
+        let store = self.store(CERTIFICATE).await?;
+        store
+            .query(|object_store| async move {
+                let values = object_store.get_all(None, None).await.map_err(|e| {
+                    AuthorizeError::Unavailable {
+                        detail: format!("query: {e:?}"),
+                    }
+                })?;
+
+                let mut certs = Vec::new();
+                for value in values {
+                    let array = js_sys::Uint8Array::new(&value);
+                    let bytes = array.to_vec();
+                    if let Ok(cert) = <P::Certificate as Certificate>::decode(&bytes) {
+                        certs.push(cert);
+                    }
+                }
+                Ok(certs)
+            })
+            .await
+    }
+
+    async fn forget(&self, certificates: &[P::Certificate]) -> Result<(), AuthorizeError> {
+        let has_store = self.connection.borrow().stores.contains(CERTIFICATE);
+        if has_store {
+            let store = self.store(CERTIFICATE).await?;
+            for cert in certificates {
+                let bytes = cert.encode()?;
+                let id = blake3::hash(&bytes).as_bytes().to_base58();
+                let subject_segment = match cert.subject() {
+                    Some(did) => did.to_string(),
+                    None => "_".to_string(),
+                };
+                let key = format!(
+                    "{}/{subject_segment}/{}.{id}",
+                    cert.audience(),
+                    cert.issuer()
+                );
+                let js_key = JsValue::from_str(&key);
+                store
+                    .transact(|object_store| async move {
+                        object_store.delete(js_key).await.map_err(|e| {
+                            AuthorizeError::Unavailable {
+                                detail: format!("delete: {e:?}"),
+                            }
+                        })?;
+                        Ok::<(), AuthorizeError>(())
+                    })
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn save(&self, delegation: &P::Delegation) -> Result<(), AuthorizeError> {
         let certs = delegation.certificates();
         if certs.is_empty() {
@@ -102,6 +163,31 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
         }
 
         Ok(())
+    }
+}
+
+#[async_trait(?Send)]
+impl<P> Provider<Export<P>> for IndexedDb
+where
+    P: Protocol,
+{
+    async fn execute(
+        &self,
+        _input: Capability<Export<P>>,
+    ) -> Result<Vec<P::Certificate>, AuthorizeError> {
+        CertificateStore::<P>::export(self).await
+    }
+}
+
+#[async_trait(?Send)]
+impl<P> Provider<Forget<P>> for IndexedDb
+where
+    P: Protocol,
+    P::Certificate: serde::Serialize + for<'de> serde::Deserialize<'de>,
+{
+    async fn execute(&self, input: Capability<Forget<P>>) -> Result<(), AuthorizeError> {
+        let certificates = &Forget::<P>::of(&input).certificates;
+        CertificateStore::<P>::forget(self, certificates).await
     }
 }
 

@@ -11,7 +11,6 @@ pub use open::OpenProfile;
 pub use save::SaveDelegation;
 pub use space::SpaceHandle;
 
-use crate::operator::OperatorBuilder;
 use dialog_capability::{Capability, Provider, SiteId, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::{Credential, SignerCredential};
@@ -69,11 +68,6 @@ impl Profile {
     /// Get an access handle for claiming and delegating capabilities.
     pub fn access(&self) -> access::Access<'_> {
         access::Access::new(&self.credential)
-    }
-
-    /// Derive an operator from this profile with the given context seed.
-    pub fn derive(&self, context: impl Into<Vec<u8>>) -> OperatorBuilder {
-        OperatorBuilder::new(self, context.into())
     }
 
     /// Get a handle to a named repository space under this profile.

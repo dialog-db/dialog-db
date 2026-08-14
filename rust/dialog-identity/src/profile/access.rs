@@ -24,6 +24,11 @@ impl<'a> Access<'a> {
     pub fn new(credential: &'a SignerCredential) -> Self {
         Self { credential }
     }
+
+    /// The signing credential this handle claims and delegates with.
+    pub fn signer(&self) -> &SignerCredential {
+        self.credential
+    }
 }
 
 impl<'a> Access<'a> {

@@ -802,9 +802,16 @@ impl ArtifactTreeExt for ArtifactTree {
         // Open one transient edit batch over this tree's spine and apply every
         // instruction's writes to it in flight, so the whole instruction stream
         // costs a single persist instead of one full tree rebuild per key.
-        let (transient, changed) =
-            write_instructions(transient, store, &storage, version, &manifest, instructions)
-                .await?;
+        let (transient, changed) = write_instructions(
+            transient,
+            store,
+            &storage,
+            version,
+            &manifest,
+            instructions,
+            WriteScope::Application,
+        )
+        .await?;
         // Seal the whole batch with a single bottom-up persist into the
         // caller's delta.
         *self = transient.persist(delta)?;
@@ -1185,6 +1192,23 @@ pub fn selector_range(
     }
 }
 
+/// Which attribute namespaces an instruction stream may write.
+///
+/// The `dialog.` namespace is reserved for machinery-written facts (revision
+/// records, delegation records): [`Application`](WriteScope::Application)
+/// writes reject it, so at the library level such facts cannot be corrupted
+/// through the ordinary write path. Machinery write paths pass
+/// [`Machinery`](WriteScope::Machinery) and take responsibility for what they
+/// write — the same trust level as [`ArtifactTreeExt::record`], which appends
+/// reserved entries without instructions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteScope {
+    /// Ordinary application data: reserved attributes are rejected.
+    Application,
+    /// Machinery-written facts: reserved attributes are permitted.
+    Machinery,
+}
+
 /// Applies an instruction stream to any [`ArtifactWriter`], returning the
 /// written target and whether the batch changed the indexes.
 ///
@@ -1223,6 +1247,7 @@ pub async fn write_instructions<W, S, I>(
     version: Option<Version>,
     manifest: &Manifest,
     instructions: I,
+    scope: WriteScope,
 ) -> Result<(W, bool), DialogArtifactsError>
 where
     W: ArtifactWriter + ConditionalSend,
@@ -1269,13 +1294,13 @@ where
 
     tokio::pin!(instructions);
     while let Some(instruction) = instructions.next().await {
-        // The `dialog.` namespace is reserved for version-control
-        // machinery (revision records — see
-        // `history::RevisionRecord`), which writes through
-        // [`ArtifactTreeExt::record`] rather than instructions. At the
-        // library level lineage therefore cannot be corrupted through
-        // the ordinary write path.
-        {
+        // The `dialog.` namespace is reserved for machinery (revision
+        // records — see `history::RevisionRecord` — and delegation
+        // records), written through [`ArtifactTreeExt::record`] or a
+        // [`WriteScope::Machinery`] stream. At the library level such
+        // facts therefore cannot be corrupted through the ordinary
+        // write path.
+        if scope == WriteScope::Application {
             let (Instruction::Assert(artifact)
             | Instruction::Replace(artifact)
             | Instruction::Retract(artifact)) = &instruction;

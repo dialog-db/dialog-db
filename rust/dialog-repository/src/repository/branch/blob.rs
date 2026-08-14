@@ -198,7 +198,7 @@ fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
 /// local, and the index nodes hydrate lazily. Fall back to the remote archive
 /// on a local miss (caching what lands), as `commit` does. With no remote
 /// upstream this degrades to a plain local index.
-async fn index_store<'e, Env>(branch: &Branch, env: &'e Env) -> NetworkedIndex<'e, Env>
+pub(crate) async fn index_store<'e, Env>(branch: &Branch, env: &'e Env) -> NetworkedIndex<'e, Env>
 where
     Env: Provider<Resolve> + ConditionalSync + 'static,
 {
@@ -644,12 +644,12 @@ mod tests {
 
     use super::Blob;
     use crate::RepositoryExt as _;
-    use crate::helpers::unique_name;
     use anyhow::Result;
     use dialog_capability::Subject;
     use dialog_effects::blob::{BlobError, BlobReader, ByteRange};
     use dialog_network::Network;
-    use dialog_operator::Profile;
+    use dialog_operator::helpers::unique_name;
+    use dialog_operator::{DeriveOperator as _, Profile};
     use dialog_storage::provider::storage::Storage;
     use futures_util::stream;
 
