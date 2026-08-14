@@ -57,6 +57,9 @@
 //! # }
 //! ```
 
+mod prove;
+pub use prove::*;
+
 use crate::repository::branch::blob::index_store;
 use crate::{Branch, CommitError, Index, RemoteSite};
 use dialog_artifacts::{
@@ -74,6 +77,7 @@ use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_ucan::{UcanCertificate, UcanDelegation};
 use futures_util::stream;
+use std::collections::HashSet;
 
 /// Attribute naming who receives the delegated authority.
 pub const DELEGATION_AUDIENCE: &str = "dialog.ucan/audience";
@@ -112,9 +116,15 @@ impl<'a> Delegations<'a> {
     /// Retain a delegation chain: decompose every certificate into its
     /// `dialog.ucan/*` facts plus its envelope blob, in one commit.
     pub fn retain(self, chain: UcanDelegation) -> RetainDelegation<'a> {
+        self.retain_all(vec![chain])
+    }
+
+    /// Retain many delegation chains in one commit — the bulk form of
+    /// [`retain`](Delegations::retain), for imports.
+    pub fn retain_all(self, chains: Vec<UcanDelegation>) -> RetainDelegation<'a> {
         RetainDelegation {
             branch: self.branch,
-            chain,
+            chains,
         }
     }
 
@@ -195,11 +205,11 @@ fn encode(certificate: &UcanCertificate) -> Result<Vec<u8>, CommitError> {
     })
 }
 
-/// Retain a delegation chain as one commit. Created by
-/// [`Delegations::retain`].
+/// Retain one or many delegation chains as one commit. Created by
+/// [`Delegations::retain`] or [`Delegations::retain_all`].
 pub struct RetainDelegation<'a> {
     branch: &'a Branch,
-    chain: UcanDelegation,
+    chains: Vec<UcanDelegation>,
 }
 
 impl RetainDelegation<'_> {
@@ -231,7 +241,8 @@ impl RetainDelegation<'_> {
         let mut instructions = Vec::new();
         let mut entries = Vec::new();
         let mut retained = Vec::new();
-        for certificate in self.chain.certificates() {
+        let mut batched = HashSet::new();
+        for certificate in self.chains.iter().flat_map(|chain| chain.certificates()) {
             let bytes = encode(&certificate)?;
 
             // The envelope bytes must be durable before the revision minted
@@ -245,7 +256,11 @@ impl RetainDelegation<'_> {
 
             // Idempotence: a certificate the tree already references was
             // retained with its facts in one commit, so there is nothing to
-            // add for it.
+            // add for it. Chains sharing a certificate (common: they share
+            // a proof prefix) contribute it to this batch once.
+            if !batched.insert(index_hash) {
+                continue;
+            }
             if let Some(tree) = &tree
                 && tree.get_blob(&store, &index_hash).await?.is_some()
             {

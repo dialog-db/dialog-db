@@ -1382,6 +1382,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base58",
+ "criterion",
  "dialog-artifacts",
  "dialog-capability",
  "dialog-common",

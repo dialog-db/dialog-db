@@ -69,6 +69,7 @@ wasm-bindgen-futures = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
 reqwest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
@@ -79,6 +80,10 @@ tokio = { workspace = true, features = [
     "rt",
     "rt-multi-thread",
 ] }
+
+[[bench]]
+name = "delegation_prove"
+harness = false
 
 [lints.rust]
 # This cfg is used by the dialog_common::test proc macro for wasm inner tests
