@@ -368,6 +368,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     let local: Vec<_> = branch_a
         .claims()
         .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .to_owned()
         .perform(&operator_a)
         .await?
         .collect::<Vec<_>>()
@@ -437,6 +438,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     let remote_side: Vec<_> = branch_b
         .claims()
         .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .to_owned()
         .perform(&operator_b)
         .await?
         .collect::<Vec<_>>()
@@ -570,6 +572,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
     let remaining: Vec<_> = branch_a
         .claims()
         .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .to_owned()
         .perform(&operator_a)
         .await?
         .collect::<Vec<_>>()
@@ -793,6 +796,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     let results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -875,6 +879,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
     let alice_results: Vec<_> = alice_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -885,6 +890,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
     let bob_results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -1027,6 +1033,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
     let bob_results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&bob_operator)
         .await?
         .collect::<Vec<_>>()
@@ -1058,6 +1065,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
     let alice_results: Vec<_> = alice_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&alice_operator)
         .await?
         .collect::<Vec<_>>()
@@ -1131,6 +1139,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
     let results: Vec<_> = branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -1192,6 +1201,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
     let no_remote_result = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await;
     assert!(
@@ -1210,6 +1220,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
     let results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -1229,6 +1240,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
     let cached_results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&operator)
         .await?
         .collect::<Vec<_>>()
@@ -1418,6 +1430,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
     let results: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&bob_operator)
         .await?
         .collect::<Vec<_>>()

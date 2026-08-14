@@ -393,6 +393,7 @@ mod tests {
     /// Settings for the server
     #[cfg(not(target_arch = "wasm32"))]
     #[derive(Debug, Clone, Default)]
+    #[allow(unused)]
     pub struct ServerSettings {
         pub port: u16,
     }

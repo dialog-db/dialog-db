@@ -10,8 +10,12 @@ use dialog_storage::Blake3Hash;
 use futures_util::{Stream, stream};
 
 use crate::{
-    Artifact, ArtifactSelector, DialogArtifactsError, Instruction, artifacts::selector::Constrained,
+    ArtifactSelector, ArtifactView, DialogArtifactsError, Instruction,
+    artifacts::selector::Constrained,
 };
+
+#[cfg(doc)]
+use crate::Artifact;
 
 /// A trait that may be implemented by anything that is capable of querying
 /// [`Artifact`]s.
@@ -21,15 +25,17 @@ pub trait ArtifactStore
 where
     Self: Sized,
 {
-    /// Query for [`Artifact`]s that match the given [`ArtifactSelector`].
-    /// Results are provided as a [`Stream`], implying that they are produced
-    /// from the implementation lazily.
+    /// Query for facts that match the given [`ArtifactSelector`].
+    /// Results are provided as a [`Stream`] of borrowed-access
+    /// [`ArtifactView`]s, implying that they are produced from the
+    /// implementation lazily; call [`ArtifactView::to_owned`] on a row to
+    /// materialize the full [`Artifact`].
     ///
     /// For additional details, see the documentation for [`ArtifactSelector`].
     fn select(
         &self,
         selector: ArtifactSelector<Constrained>,
-    ) -> impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 'static + ConditionalSend;
+    ) -> impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 'static + ConditionalSend;
 }
 
 /// A trait that may be implemented by anything that is capable of
