@@ -1290,6 +1290,178 @@ use dialog_remote_ucan_s3::helpers::UcanS3Address;
 
 /// Alice creates a repo, delegates to Bob, Bob pulls, commits, pushes,
 /// then Alice pulls Bob's changes.
+/// The upgrade path, end to end over the access service and local S3:
+/// a delegation sitting in the LEGACY certificate store (as an old
+/// install left it) no longer authorizes anything — the operator serves
+/// proofs from the access branch only — so resolving the remote branch
+/// revision fails. `profile.access().migrate()` moves the delegation
+/// into the branch and drains the legacy store; an operator built after
+/// the migration (migrate before build: the access branch is opened at
+/// build time) resolves the remote branch revision through the migrated
+/// credentials.
+#[dialog_common::test]
+async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<()> {
+    use crate::MigrateAccess as _;
+    use dialog_capability::access::{Access as AccessAttenuation, Export, Retain};
+    use dialog_operator::DeriveOperator as _;
+    use dialog_ucan::Ucan;
+
+    // --- Alice: repo, ownership, UCAN remote, initial push. ---
+    let (alice_operator, alice_profile) = test_operator_with_profile().await;
+    let alice_repo = alice_profile
+        .repository(unique_name("migrate-alice"))
+        .create()
+        .perform(&alice_operator)
+        .await?;
+    let ownership = alice_repo
+        .access()
+        .claim(&alice_repo)
+        .delegate(alice_profile.did())
+        .perform(&alice_operator)
+        .await?;
+    alice_profile
+        .access()
+        .save(ownership)
+        .perform(&alice_operator)
+        .await?;
+
+    let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+    let alice_origin = alice_repo
+        .remote("origin")
+        .create(ucan_site.clone())
+        .perform(&alice_operator)
+        .await?;
+    let alice_branch = alice_repo
+        .branch("main")
+        .open()
+        .perform(&alice_operator)
+        .await?;
+    let remote_branch = alice_origin
+        .branch("main")
+        .open()
+        .perform(&alice_operator)
+        .await?;
+    alice_branch
+        .set_upstream(remote_branch)
+        .perform(&alice_operator)
+        .await?;
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:alice".parse()?,
+            is: Value::String("Alice".into()),
+            cause: None,
+        })]))
+        .perform(&alice_operator)
+        .await?;
+    alice_branch.push().perform(&alice_operator).await?;
+
+    // --- Bob: the delegation lands in his LEGACY certificate store, the
+    // way an old install left it (storage-routed, not through the
+    // operator). ---
+    let bob_storage = Storage::volatile();
+    let bob_profile = Profile::open(unique_name("migrate-bob"))
+        .perform(&bob_storage)
+        .await?;
+    let delegation_to_bob = alice_profile
+        .access()
+        .claim(&alice_repo)
+        .delegate(bob_profile.did())
+        .perform(&alice_operator)
+        .await?;
+    Subject::from(bob_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Retain::<Ucan>::new(delegation_to_bob))
+        .perform(&bob_storage)
+        .await?;
+
+    let bob_operator = bob_profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(bob_storage.clone())
+        .await?;
+    let bob_repo = bob_profile
+        .repository(unique_name("migrate-bob-repo"))
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    let bob_origin = bob_repo
+        .remote("origin")
+        .create(ucan_site)
+        .subject(alice_repo.did())
+        .perform(&bob_operator)
+        .await?;
+    let bob_branch = bob_repo
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    let remote_branch = bob_origin
+        .branch("main")
+        .open()
+        .perform(&bob_operator)
+        .await?;
+    bob_branch
+        .set_upstream(remote_branch)
+        .perform(&bob_operator)
+        .await?;
+
+    // A legacy-store delegation authorizes nothing: resolving the remote
+    // branch revision refuses.
+    let refused = bob_branch.fetch().perform(&bob_operator).await;
+    assert!(
+        refused.is_err(),
+        "the legacy store must not authorize: {:?}",
+        refused.is_ok()
+    );
+
+    // Migrate: the delegation moves into Bob's access branch and the
+    // legacy store drains.
+    let retained = bob_profile.access().migrate().perform(&bob_storage).await?;
+    assert!(!retained.is_empty(), "the delegation chain migrated");
+    let remaining = Subject::from(bob_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Export::<Ucan>::new())
+        .perform(&bob_storage)
+        .await?;
+    assert!(
+        remaining.is_empty(),
+        "the legacy store drained: {} left",
+        remaining.len()
+    );
+
+    // Migrate before build: the operator opens its access branch at
+    // build time, so the post-migration operator sees the migrated
+    // credentials. Resolving the remote branch revision now succeeds.
+    let bob_operator = bob_profile
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(bob_storage)
+        .await?;
+    let fetched = bob_branch.fetch().perform(&bob_operator).await?;
+    assert!(
+        fetched.is_some(),
+        "the migrated credentials authorize the resolve"
+    );
+
+    // And the full pull works: Bob reads Alice's data.
+    bob_branch.pull().perform(&bob_operator).await?;
+    let facts: Vec<_> = bob_branch
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .perform(&bob_operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(facts.len(), 1, "Bob reads Alice's data after migration");
+
+    Ok(())
+}
+
 #[dialog_common::test]
 async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> {
     // Alice: create profile, operator, repo

@@ -12,16 +12,25 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 /// Generate a unique name with a prefix for test isolation.
+///
+/// The name carries the process id as well as a timestamp: the test
+/// runner starts one process per test, so the per-process counter alone
+/// cannot disambiguate two tests whose first call lands on the same
+/// clock tick — which is exactly how two concurrently running e2e tests
+/// intermittently collided on one temp vault directory and found each
+/// other's credentials in it.
 pub fn unique_name(prefix: &str) -> String {
     use dialog_common::time;
+    use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let ts = time::now()
         .duration_since(time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
+    let pid = process::id();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{prefix}-{ts}-{seq}")
+    format!("{prefix}-{ts}-{pid}-{seq}")
 }
 
 /// Build a test operator with a fresh profile and powerline delegation.

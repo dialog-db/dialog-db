@@ -284,21 +284,6 @@ mod tests {
             Timestamp::new(UNIX_EPOCH + Duration::from_secs(secs)).unwrap()
         }
 
-        async fn build_operator_with_profile() -> (Operator<VolatileSpace>, Profile) {
-            let storage = Storage::volatile();
-            let profile = Profile::open(unique_name("time"))
-                .perform(&storage)
-                .await
-                .unwrap();
-            let operator = profile
-                .derive(b"test")
-                .allow(Subject::any())
-                .build(storage)
-                .await
-                .unwrap();
-            (operator, profile)
-        }
-
         /// Build an operator WITHOUT a powerline delegation.
         /// Only explicitly delegated capabilities will be available.
         async fn build_restricted_operator_with_profile() -> (Operator<VolatileSpace>, Profile) {

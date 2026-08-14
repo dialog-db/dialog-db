@@ -428,6 +428,181 @@ mod tests {
         Ok(())
     }
 
+    /// The acceptance criterion: a delegation that lived in the legacy
+    /// store proves through an operator built AFTER migration — the
+    /// operator's walk finds it in the access branch and composes its own
+    /// session link on top.
+    #[dialog_common::test]
+    async fn it_proves_migrated_delegations_through_a_fresh_operator() -> Result<()> {
+        use dialog_capability::access::{Proof as _, Prove, TimeRange};
+        use dialog_operator::DeriveOperator as _;
+        use dialog_ucan::Scope;
+        use dialog_ucan_core::command::Command as UcanCommand;
+
+        let storage = Storage::volatile();
+        let profile = Profile::open(unique_name("migrate-prove"))
+            .perform(&storage)
+            .await?;
+        let space = signer().await;
+
+        // Legacy: space grants the profile.
+        seed_legacy(
+            &storage,
+            &profile,
+            &space,
+            profile.did(),
+            UcanSubject::Specific(space.did()),
+        )
+        .await;
+
+        profile.access().migrate().perform(&storage).await?;
+
+        let operator = profile
+            .derive(b"test")
+            .allow(dialog_capability::Subject::any())
+            .network(dialog_network::Network::default())
+            .build(storage)
+            .await?;
+
+        let mut claim = Prove::<Ucan>::new(
+            operator.did(),
+            Scope {
+                subject: UcanSubject::Specific(space.did()),
+                command: UcanCommand(vec!["storage".to_string()]),
+                parameters: dialog_ucan::Parameters::default(),
+            },
+        );
+        claim.duration = TimeRange::unbounded();
+        let proof = Subject::from(profile.did())
+            .attenuate(AccessAttenuation)
+            .invoke(claim)
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            proof.proofs().len(),
+            2,
+            "migrated space->profile chain composes with the session link"
+        );
+        Ok(())
+    }
+
+    /// Migration over the FILESYSTEM certificate store: the layout native
+    /// users actually hold. Exercises the fs `export` walk and `forget`
+    /// deletion end to end.
+    // Native only, feature-gated: `Storage::temp()` needs a real temp
+    // directory; under `web-integration-tests` the test macro emits a
+    // native wrapper that would find nothing to run behind a target gate.
+    #[cfg(not(feature = "web-integration-tests"))]
+    #[dialog_common::test]
+    async fn it_migrates_the_filesystem_store() -> Result<()> {
+        let storage = Storage::temp();
+        let profile = Profile::open(unique_name("migrate-fs"))
+            .perform(&storage)
+            .await?;
+        let space = signer().await;
+        let profile_signer = Ed25519Signer::from(profile.signer().clone());
+
+        // One migratable grant, one self-issued survivor.
+        let seed = |issuer: Ed25519Signer, audience: dialog_capability::Did, subject| {
+            let storage = &storage;
+            let profile = &profile;
+            async move {
+                let delegation = DelegationBuilder::new()
+                    .issuer(issuer)
+                    .audience(&audience)
+                    .subject(subject)
+                    .command(vec!["storage".to_string()])
+                    .try_build()
+                    .await
+                    .unwrap();
+                let chain = UcanDelegation::new(DelegationChain::new(delegation));
+                Subject::from(profile.did())
+                    .attenuate(AccessAttenuation)
+                    .invoke(Retain::<Ucan>::new(chain))
+                    .perform(storage)
+                    .await
+                    .unwrap();
+            }
+        };
+        seed(
+            space.clone(),
+            profile.did(),
+            UcanSubject::Specific(space.did()),
+        )
+        .await;
+        seed(
+            profile_signer.clone(),
+            space.did(),
+            UcanSubject::Specific(profile.did()),
+        )
+        .await;
+
+        let retained = profile.access().migrate().perform(&storage).await?;
+        assert_eq!(retained.len(), 1, "the cross-party grant migrates");
+
+        let remaining = Subject::from(profile.did())
+            .attenuate(AccessAttenuation)
+            .invoke(Export::<Ucan>::new())
+            .perform(&storage)
+            .await?;
+        assert_eq!(remaining.len(), 1, "the fs files drained on migration");
+        assert_eq!(remaining[0].issuer(), &profile.did());
+        Ok(())
+    }
+
+    /// The crash window between retain and drain: the branch already holds
+    /// the delegation but the legacy store was never drained. A rerun
+    /// retains nothing new (content-addressed) and still completes the
+    /// drain.
+    #[dialog_common::test]
+    async fn it_completes_the_drain_on_rerun() -> Result<()> {
+        let storage = Storage::volatile();
+        let profile = Profile::open(unique_name("migrate-rerun"))
+            .perform(&storage)
+            .await?;
+        let space = signer().await;
+        let profile_signer = Ed25519Signer::from(profile.signer().clone());
+
+        let certificate = seed_legacy(
+            &storage,
+            &profile,
+            &space,
+            profile.did(),
+            UcanSubject::Specific(space.did()),
+        )
+        .await;
+
+        // Simulate the crash: the branch already retained the delegation
+        // (as a completed first attempt would have), but the legacy store
+        // still holds it.
+        let env = MigrateEnv {
+            authority: Authority::new("profile", profile_signer.clone(), profile_signer.clone()),
+            storage: storage.clone(),
+        };
+        let branch = crate::Repository::from(profile_signer.clone())
+            .branch(ACCESS_BRANCH)
+            .open()
+            .perform(&env)
+            .await?;
+        branch
+            .delegations()
+            .retain(UcanDelegation::new(DelegationChain::new(
+                certificate.0.clone(),
+            )))
+            .perform(&env)
+            .await?;
+        assert_eq!(export(&storage, &profile).await.len(), 1);
+
+        // The rerun retains nothing new but must still drain.
+        let retained = profile.access().migrate().perform(&storage).await?;
+        assert!(retained.is_empty(), "already retained: nothing new");
+        assert!(
+            export(&storage, &profile).await.is_empty(),
+            "the rerun completes the drain"
+        );
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_is_a_noop_on_an_empty_store() -> Result<()> {
         let storage = Storage::volatile();
