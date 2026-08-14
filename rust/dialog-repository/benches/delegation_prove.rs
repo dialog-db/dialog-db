@@ -21,8 +21,9 @@ use dialog_capability::access::{CertificateStore, Prove, TimeRange};
 use dialog_credentials::Ed25519Signer;
 use dialog_effects::storage::{Directory, Location};
 use dialog_network::Network;
+use dialog_operator::AccessProvider as _;
 use dialog_operator::{Operator, Profile};
-use dialog_repository::{Branch, RepositoryExt as _};
+use dialog_repository::{Branch, RepositoryExt as _, SyncedAccess};
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
 use dialog_storage::provider::{FileSystem, Volatile};
 use dialog_storage::resource::Resource as _;
@@ -185,6 +186,22 @@ fn bench_prove(c: &mut Criterion) {
                     assert_eq!(result.is_ok(), expect_ok);
                 })
             });
+
+            // The resolved-chain cache over the same store: after the
+            // first iteration warms it, every prove is a verified hit.
+            // Only successful chains cache, so the miss shape is skipped.
+            if expect_ok {
+                let synced = SyncedAccess::new(backends.branch.clone(), backends.operator.clone());
+                group.bench_function(BenchmarkId::new("tree-cached", n), |b| {
+                    b.to_async(&rt).iter(|| {
+                        let mut claim = Prove::<Ucan>::new(principal.clone(), access.clone());
+                        claim.duration = TimeRange::unbounded();
+                        async {
+                            synced.prove(claim).await.unwrap();
+                        }
+                    })
+                });
+            }
         }
         group.finish();
     }
