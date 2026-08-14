@@ -603,6 +603,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
                 .the(DELEGATION_AUDIENCE.parse()?)
                 .is(Value::String(holder_did.clone())),
         )
+        .to_owned()
         .perform(&operator_b)
         .await?
         .collect::<Vec<_>>()
@@ -639,6 +640,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
                 .the(DELEGATION_AUDIENCE.parse()?)
                 .is(Value::String(holder_did)),
         )
+        .to_owned()
         .perform(&operator_b)
         .await?
         .collect::<Vec<_>>()
@@ -1457,6 +1459,7 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
     let facts: Vec<_> = bob_branch
         .claims()
         .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
         .perform(&bob_operator)
         .await?
         .collect::<Vec<_>>()
