@@ -8,7 +8,7 @@ pub mod policy;
 pub mod store;
 
 use crate::{
-    cid::to_dagcbor_cid,
+    cid::dagcbor_cid,
     command::Command,
     crypto::nonce::Nonce,
     envelope::{Envelope, EnvelopePayload, payload_tag::PayloadTag},
@@ -23,15 +23,36 @@ use serde::{
     de::{self, MapAccess, Visitor},
 };
 use serde_ipld_dagcbor::error::CodecError;
-use std::{borrow::Cow, collections::BTreeMap, fmt::Debug};
+use std::{borrow::Cow, collections::BTreeMap, fmt::Debug, sync::OnceLock};
 
 /// Grant or delegate a UCAN capability to another.
 ///
 /// This type implements the [UCAN Delegation spec](https://github.com/ucan-wg/delegation/blob/main/README.md).
 #[derive(Clone)]
-pub struct Delegation<S: Signature>(Envelope<S, DelegationPayload>);
+pub struct Delegation<S: Signature> {
+    envelope: Envelope<S, DelegationPayload>,
+    encoding: OnceLock<Encoding>,
+}
+
+/// The DAG-CBOR form of a delegation, and the CID that follows from it.
+///
+/// A delegation never changes after it is built, so both are pure
+/// functions of it and are computed at most once. A cloned delegation
+/// carries the encoding it already has.
+#[derive(Debug, Clone)]
+struct Encoding {
+    bytes: Vec<u8>,
+    cid: Cid,
+}
 
 impl<S: Signature> Delegation<S> {
+    fn new(envelope: Envelope<S, DelegationPayload>) -> Self {
+        Self {
+            envelope,
+            encoding: OnceLock::new(),
+        }
+    }
+
     /// Creates a blank [`DelegationBuilder`][builder::DelegationBuilder] instance.
     #[must_use]
     pub const fn builder() -> builder::DelegationBuilder<S> {
@@ -96,15 +117,36 @@ impl<S: Signature> Delegation<S> {
     /// Compute the CID for this delegation.
     #[must_use]
     pub fn to_cid(&self) -> Cid {
-        to_dagcbor_cid(&self)
+        self.encoding().cid
+    }
+
+    /// The DAG-CBOR encoding of this delegation, as it appears as a
+    /// token in a UCAN container.
+    #[must_use]
+    pub fn encoded(&self) -> &[u8] {
+        &self.encoding().bytes
+    }
+
+    /// # Panics
+    ///
+    /// Will panic if the delegation cannot be serialized. We assume that
+    /// all UCANs are compatible with IPLD, so this "should" never happen
+    /// unless something is deeply wrong.
+    fn encoding(&self) -> &Encoding {
+        self.encoding.get_or_init(|| {
+            #[allow(clippy::expect_used)]
+            let bytes = serde_ipld_dagcbor::to_vec(&self.envelope).expect("not serializable");
+            let cid = dagcbor_cid(&bytes);
+            Encoding { bytes, cid }
+        })
     }
 
     const fn signature(&self) -> &S {
-        &self.0.0
+        &self.envelope.0
     }
 
     const fn envelope(&self) -> &EnvelopePayload<S, DelegationPayload> {
-        &self.0.1
+        &self.envelope.1
     }
 
     const fn payload(&self) -> &DelegationPayload {
@@ -142,7 +184,7 @@ impl<S: Signature> Delegation<S> {
 
 impl<S: Signature> Debug for Delegation<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Delegation").field(&self.0).finish()
+        f.debug_tuple("Delegation").field(&self.envelope).finish()
     }
 }
 
@@ -151,14 +193,14 @@ impl<S: Signature> Serialize for Delegation<S> {
     where
         Ser: serde::Serializer,
     {
-        self.0.serialize(serializer)
+        self.envelope.serialize(serializer)
     }
 }
 
 impl<'de, S: Signature + for<'ze> Deserialize<'ze>> Deserialize<'de> for Delegation<S> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let envelope = Envelope::<S, DelegationPayload>::deserialize(deserializer)?;
-        Ok(Delegation(envelope))
+        Ok(Delegation::new(envelope))
     }
 }
 
@@ -631,6 +673,70 @@ mod tests {
         delegation.verify_signature(&resolver).await?;
 
         Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_computes_the_encoding_and_cid_once() {
+        let delegation = DelegationBuilder::<Ed25519Signature>::new()
+            .issuer(test_signer(90).await)
+            .audience(&test_did(91).await)
+            .subject(Subject::Specific(test_did(92).await))
+            .command(vec!["encode".to_string()])
+            .try_build()
+            .await
+            .unwrap();
+
+        assert!(
+            delegation.encoding.get().is_none(),
+            "a fresh delegation has not been encoded"
+        );
+
+        let cid = delegation.to_cid();
+        assert!(
+            delegation.encoding.get().is_some(),
+            "the first CID computes the encoding"
+        );
+
+        let bytes = delegation.encoded().as_ptr();
+        assert_eq!(delegation.to_cid(), cid);
+        assert_eq!(
+            delegation.encoded().as_ptr(),
+            bytes,
+            "later reads serve the same buffer rather than re-encoding"
+        );
+
+        assert_eq!(
+            delegation.encoded(),
+            serde_ipld_dagcbor::to_vec(&delegation).unwrap(),
+            "the cached encoding is the delegation's DAG-CBOR form"
+        );
+        assert_eq!(
+            cid,
+            crate::cid::to_dagcbor_cid(&delegation),
+            "the cached CID is the delegation's DAG-CBOR CID"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_carries_the_encoding_into_a_clone() {
+        let delegation = DelegationBuilder::<Ed25519Signature>::new()
+            .issuer(test_signer(93).await)
+            .audience(&test_did(94).await)
+            .subject(Subject::Specific(test_did(95).await))
+            .command(vec!["clone".to_string()])
+            .try_build()
+            .await
+            .unwrap();
+
+        let cid = delegation.to_cid();
+        let clone = delegation.clone();
+
+        assert!(
+            clone.encoding.get().is_some(),
+            "a clone inherits the encoding instead of recomputing it"
+        );
+        assert_eq!(clone.to_cid(), cid);
+        assert_eq!(clone.encoded(), delegation.encoded());
     }
 
     #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]

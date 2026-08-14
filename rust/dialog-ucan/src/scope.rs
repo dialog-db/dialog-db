@@ -72,6 +72,10 @@ pub struct Scope {
 }
 
 impl dialog_capability::access::Scope for Scope {
+    fn command(&self) -> &[String] {
+        self.command.segments()
+    }
+
     fn subject(&self) -> &dialog_varsig::Did {
         use dialog_ucan_core::subject::Subject as UcanSubject;
         match &self.subject {
