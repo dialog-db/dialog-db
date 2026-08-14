@@ -170,6 +170,15 @@ impl TryFrom<&str> for Position {
                 byte as char
             )));
         }
+        // Canonical form never ends with the minimum digit (trailing
+        // minimums are trimmed at construction). Accepting one here
+        // would let a logically equal peer-supplied position exist as
+        // a distinct byte string, splitting convergence.
+        if bytes.last() == Some(&B62_MIN) {
+            return Err(PositionError::Invalid(
+                "non-canonical: trailing minimum digit".into(),
+            ));
+        }
         Ok(Position(bytes.to_vec()))
     }
 }
@@ -453,10 +462,19 @@ mod patch {
                 };
                 // Nudge the tie-break digit (the last one) to the
                 // bias's head when the head fits strictly inside the
-                // gap at that offset.
+                // gap at that offset. The ceiling binds only while the
+                // found digits still share the bound's prefix: past a
+                // divergence every continuation sorts below the bound,
+                // so its digit at this offset is no constraint.
                 let offset = digits.len() - 1;
-                let fits = match (low.get(offset), high.and_then(|high| high.get(offset))) {
-                    (Some(&floor), Some(&ceiling)) => floor < head && head < ceiling,
+                let ceiling = high.and_then(|high| {
+                    let shared = (0..offset).all(|index| {
+                        digits[index] == high.get(index).copied().unwrap_or(super::B62_MIN)
+                    });
+                    shared.then(|| high.get(offset).copied()).flatten()
+                });
+                let fits = match (low.get(offset), ceiling) {
+                    (Some(&floor), Some(ceiling)) => floor < head && head < ceiling,
                     // The POC compares against absent digits as
                     // "false" (undefined comparisons), so a missing
                     // bound never admits the nudge.
@@ -497,9 +515,12 @@ mod patch {
     pub fn increment(patch: &[u8], bias: &[u8]) -> Vec<u8> {
         match digits_increment(patch, &B62) {
             None => append(patch, &[B62_MEDIAN]),
+            // The bias substitutes only when it sorts at or above the
+            // whole incremented string: a head-digit tie says nothing
+            // about the tail (`b0…` sorts BELOW `ba`).
             Some(digits) => match bias.first() {
                 None => digits,
-                Some(&head) if head >= digits[0] => bias.to_vec(),
+                Some(_) if bias >= digits.as_slice() => bias.to_vec(),
                 Some(_) => append(&digits, bias),
             },
         }
@@ -509,10 +530,23 @@ mod patch {
     /// smaller patch exists.
     pub fn decrement(patch: &[u8], bias: &[u8]) -> Option<Vec<u8>> {
         let digits = digits_decrement(patch, &B62).or_else(|| decrease(patch))?;
-        Some(match bias.first() {
-            None => digits,
-            Some(&head) if head <= digits[0] => bias.to_vec(),
-            Some(_) => append(&digits, bias),
+        if bias.is_empty() {
+            return Some(digits);
+        }
+        // The bias substitutes only when it sorts at or below the whole
+        // decremented string (a head-digit tie says nothing about the
+        // tail), and even the appended form can overshoot the original
+        // when the decrement trimmed digits off the end — the stepped
+        // string alone is the always-sound fallback.
+        let candidate = if bias <= digits.as_slice() {
+            bias.to_vec()
+        } else {
+            append(&digits, bias)
+        };
+        Some(if candidate.as_slice() < patch {
+            candidate
+        } else {
+            digits
         })
     }
 
@@ -708,11 +742,25 @@ fn digits_intermediate_bounded(begin: &[u8], end: Option<&[u8]>, ranges: &[(u8, 
     // Walk forward copying `from` until a non-consecutive gap admits
     // an intermediate digit. Missing high digits read one past the
     // maximum so a shorter (or open) upper bound leaves room below it.
+    //
+    // Once a digit of `from` is committed strictly below the bound's
+    // (the consecutive verdict), the bound's remaining digits are
+    // irrelevant: every continuation of the committed prefix already
+    // sorts below the bound, so the walk continues against the open
+    // bound. Consulting them instead — as the JS POC does — hands back
+    // "intermediates" BELOW `from` whenever the bound's tail digits
+    // sort below `from`'s (e.g. between `N0Az` and `N0B1`).
+    let mut bounded = true;
     while offset < digits.len() {
         let low = from.get(offset).copied().unwrap_or(min);
-        let high = to.and_then(|to| to.get(offset).copied()).unwrap_or(max + 1);
+        let high = if bounded {
+            to.and_then(|to| to.get(offset).copied()).unwrap_or(max + 1)
+        } else {
+            max + 1
+        };
         match digit_intermediate(low, high, ranges) {
             Digit::Equal | Digit::Consecutive => {
+                bounded = bounded && low == high;
                 digits[offset] = low;
                 offset += 1;
             }
@@ -941,5 +989,110 @@ mod tests {
         let digits = to_base62(&[255; 8]);
         assert!(digits.iter().all(|&digit| in_ranges(digit, &B62)));
         assert_eq!(Bias::derive(&[7; 32]).0.len(), BIAS_DIGITS);
+    }
+
+    /// Wedging between every adjacent pair of an append-built list must
+    /// stay strictly inside the gap. The JS POC's digit walk kept
+    /// consulting the upper bound's tail digits after the prefixes had
+    /// already diverged, handing back "intermediates" BELOW the lower
+    /// neighbor for gaps like `O0z..O1` — the exact shape plain appends
+    /// produce.
+    #[dialog_common::test]
+    fn it_wedges_between_appended_neighbors() {
+        let mut positions = vec![insert(&Bias::none(), ..).expect("first")];
+        for seed in 0..300u32 {
+            let last = positions.last().expect("non-empty");
+            let next = insert(&bias(&seed.to_be_bytes()), last..).expect("append");
+            positions.push(next);
+        }
+        for (index, pair) in positions.windows(2).enumerate() {
+            let (low, high) = (&pair[0], &pair[1]);
+            for member in [b"wedge".as_slice(), &[index as u8]] {
+                let mid = insert(&Bias::derive(member), low..high).expect("wedge");
+                assert!(
+                    low < &mid && &mid < high,
+                    "gap {index}: {low} < {mid} < {high} violated"
+                );
+            }
+        }
+    }
+
+    /// Randomized order invariant: inserting at random gaps with random
+    /// biases keeps every derived position strictly inside its gap and
+    /// the whole list byte-sorted in insertion order.
+    #[dialog_common::test]
+    fn it_stays_ordered_under_random_insertion() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut random = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let mut positions = vec![insert(&Bias::none(), ..).expect("first")];
+        for _ in 0..600 {
+            let draw = random();
+            let member = bias(&draw.to_be_bytes());
+            let gap = (random() as usize) % (positions.len() + 1);
+            let derived = if gap == 0 {
+                let first = &positions[0];
+                match insert(&member, ..first) {
+                    Ok(position) => position,
+                    // The absolute floor is a legal dead end.
+                    Err(PositionError::Exhausted) => continue,
+                    Err(error) => panic!("prepend failed: {error:?}"),
+                }
+            } else if gap == positions.len() {
+                let last = &positions[gap - 1];
+                insert(&member, last..).expect("append")
+            } else {
+                let (low, high) = (&positions[gap - 1], &positions[gap]);
+                let mid = insert(&member, low..high).expect("between");
+                // Equal neighbors absorb collisions; strict betweenness
+                // is only owed for a real gap.
+                if low < high {
+                    assert!(low < &mid && &mid < high, "{low} < {mid} < {high} violated");
+                }
+                mid
+            };
+            positions.insert(gap, derived);
+            let mut sorted = positions.clone();
+            sorted.sort();
+            assert_eq!(sorted, positions, "byte order must track list order");
+        }
+    }
+
+    /// The parse boundary rejects non-canonical spellings: a trailing
+    /// minimum digit would let a logically equal peer-supplied position
+    /// exist as a distinct byte string and split convergence.
+    #[dialog_common::test]
+    fn it_rejects_non_canonical_input() {
+        for bad in ["N0", "O000", "N0z0"] {
+            assert!(
+                Position::try_from(bad).is_err(),
+                "{bad:?} must not parse as canonical"
+            );
+        }
+        for good in ["N", "O1z", "A1"] {
+            Position::try_from(good).expect("canonical spelling parses");
+        }
+    }
+
+    /// The biased patch steps substitute the bias only when the WHOLE
+    /// bias sorts past the stepped string: a head-digit tie says
+    /// nothing about the tail.
+    #[dialog_common::test]
+    fn it_keeps_biased_patch_steps_ordered() {
+        let after = patch::increment(b"ba", b"b0xy");
+        assert!(
+            after.as_slice() > b"ba".as_slice(),
+            "increment must sort after: {after:?}"
+        );
+        let before = patch::decrement(b"b1", b"b8xy").expect("decrements");
+        assert!(
+            before.as_slice() < b"b1".as_slice(),
+            "decrement must sort before: {before:?}"
+        );
     }
 }
