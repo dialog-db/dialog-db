@@ -406,7 +406,7 @@ mod tests {
         Proposition, Query, Term, Type, Value,
     };
     use dialog_artifacts::Entity;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation

@@ -105,20 +105,18 @@ where
             .any(|candidate| <&Blake3Hash>::from(candidate) == hash)
     }
 
-    /// Index of the child whose subtree covers `key`: the last child whose
-    /// separator is at or below the key. A key below every separator (which
-    /// can only happen when the leftmost separator is non-empty) is clamped
-    /// to the leftmost child, whose subtree is the only place it could live.
+    /// Number of children whose separator is at or below `key`.
     ///
-    /// Compares the probe against the node prefix once, then against suffix
-    /// slices; no separator is reconstructed.
-    pub fn route(&self, key: &[u8]) -> Result<usize, DialogSearchTreeError> {
+    /// The shared core of [`route`](Self::route) and
+    /// [`children_spanning`](Self::children_spanning). Compares the probe
+    /// against the node prefix once, then binary-searches the suffix slices;
+    /// no separator is reconstructed. Because every separator starts with the
+    /// prefix, a probe that diverges from the prefix is decided for all
+    /// children at once.
+    fn children_at_or_below(&self, key: &[u8]) -> Result<usize, DialogSearchTreeError> {
         let prefix: &[u8] = &self.prefix;
         let shared = prefix.len().min(key.len());
-        // Children whose separator is <= key. Every separator starts with
-        // the prefix, so when the probe diverges from the prefix the
-        // comparison is decided for all children at once.
-        let below = match key[..shared].cmp(&prefix[..shared]) {
+        Ok(match key[..shared].cmp(&prefix[..shared]) {
             Ordering::Less => 0,
             Ordering::Greater => self.len(),
             Ordering::Equal if key.len() < prefix.len() => 0,
@@ -135,8 +133,78 @@ where
                 }
                 low
             }
+        })
+    }
+
+    /// Index of the child whose subtree covers `key`: the last child whose
+    /// separator is at or below the key. A key below every separator (which
+    /// can only happen when the leftmost separator is non-empty) is clamped
+    /// to the leftmost child, whose subtree is the only place it could live.
+    ///
+    /// Compares the probe against the node prefix once, then against suffix
+    /// slices; no separator is reconstructed.
+    pub fn route(&self, key: &[u8]) -> Result<usize, DialogSearchTreeError> {
+        Ok(self.children_at_or_below(key)?.saturating_sub(1))
+    }
+
+    /// The range of child indices whose subtrees can hold a key in the
+    /// half-open range `[lower, upper)`.
+    ///
+    /// The result is a **conservative superset**: it is exactly the children
+    /// whose separator span `[separator(i), separator(i+1))` intersects
+    /// `[lower, upper)`, which may include a child at either edge that holds
+    /// no key actually in the range (a child's true extent can stop short of
+    /// its next sibling's separator). Reading it never misses a child that
+    /// does hold a matching key, so a caller can prune every child outside the
+    /// returned range without descending, and at most over-reads the edges.
+    ///
+    /// The lower edge is the child covering `lower` ([`route`](Self::route)).
+    /// The upper edge is the last child whose separator is strictly below
+    /// `upper`, since only such a child can hold a key `< upper`. An empty
+    /// range (`upper <= lower`) yields an empty child range.
+    pub fn children_spanning(
+        &self,
+        lower: &[u8],
+        upper: &[u8],
+    ) -> Result<core::ops::Range<usize>, DialogSearchTreeError> {
+        if self.is_empty() || upper <= lower {
+            return Ok(0..0);
+        }
+
+        let start = self.route(lower)?;
+        // Children with separator strictly below `upper`. `children_at_or_below`
+        // counts those `<= upper`; a child whose separator equals `upper`
+        // holds only keys `>= upper`, which the half-open range excludes, so
+        // drop it. The count is already the exclusive end index.
+        let below_upper = self.children_at_or_below(upper)?;
+        let end = if self.separator(below_upper.saturating_sub(1))? == upper {
+            below_upper.saturating_sub(1)
+        } else {
+            below_upper
         };
-        Ok(below.saturating_sub(1))
+
+        // `start` is the covering child of `lower`, always a valid index; the
+        // end can never fall before it once the range is non-empty.
+        Ok(start..end.max(start + 1))
+    }
+
+    /// A rough estimate of how many entries in this node's subtrees fall in
+    /// the half-open key range `[lower, upper)`, read from this node alone.
+    ///
+    /// Sums the [`Scale`] of every child the range touches
+    /// ([`children_spanning`](Self::children_spanning)). Advisory only, and an
+    /// upper bound in two ways at once: each child scale is itself an upper
+    /// bound (see [`Scale`]), and the edge children may contribute their whole
+    /// subtree when the range only clips part of it. This is exactly the input
+    /// a planner wants to decide whether to scan a range or probe it, without
+    /// descending: one node read yields the estimate for the whole range.
+    pub fn range_scale(&self, lower: &[u8], upper: &[u8]) -> Result<Scale, DialogSearchTreeError> {
+        let children = self.children_spanning(lower, upper)?;
+        let mut scales = Vec::with_capacity(children.len());
+        for at in children {
+            scales.push(self.scale_at(at)?);
+        }
+        Ok(Scale::total(scales))
     }
 
     /// Total number of buffered ops across every link's buffer, read from the
@@ -288,20 +356,74 @@ where
     /// winners.
     pub fn op_at(&self, at: usize) -> Result<NoveltyOp<Value>, DialogSearchTreeError> {
         self.checked_count()?;
+        // The value table is aligned with the assert entries in entry order:
+        // this entry's slot is the number of asserts before it.
+        let slot = self.polarity[..at.min(self.polarity.len())]
+            .iter()
+            .filter(|&&p| p == 1)
+            .count();
+        self.op_with_slot(at, slot)
+    }
+
+    /// The op at entry `at` given its value-table `slot` (the number of
+    /// asserts before it), for readers that track the slot while streaming
+    /// the buffer instead of re-scanning the polarity column per op.
+    ///
+    /// The caller must have validated the buffer (every streaming read goes
+    /// through [`keys`](Self::keys), whose [`checked_count`](Self::checked_count)
+    /// pins the polarity and value tables), so a wrong slot can at worst
+    /// surface as an out-of-range error here, never a silent misread of a
+    /// well-formed buffer.
+    pub(crate) fn op_with_slot(
+        &self,
+        at: usize,
+        slot: usize,
+    ) -> Result<NoveltyOp<Value>, DialogSearchTreeError> {
         match self.polarity.get(at) {
             None => Err(malformed("Novelty entry out of range")),
             Some(0) => Ok(NoveltyOp::Retract),
-            _ => {
-                // The value table is aligned with the assert entries in entry
-                // order: this entry's slot is the number of asserts before it.
-                let slot = self.polarity[..at].iter().filter(|&&p| p == 1).count();
+            Some(1) => {
                 let value = self
                     .values
                     .get(slot)
                     .ok_or_else(|| malformed("Novelty value out of range"))?;
                 Ok(NoveltyOp::Assert(into_owned::<Value>(value)?))
             }
+            Some(_) => Err(malformed("Novelty polarity is neither assert nor retract")),
         }
+    }
+
+    /// The winning op for `key` in this buffer, or `None` when the key is not
+    /// buffered here: the archived counterpart of
+    /// [`NoveltyBuffer::resolve`](crate::NoveltyBuffer::resolve).
+    ///
+    /// One streaming pass: keys arrive in sorted order, so the walk stops at
+    /// the first key past the probe; within a key the last op wins (equal keys
+    /// are contiguous, newest last). The value-table slot is tracked as the
+    /// polarity column is walked, so resolving costs no per-op re-scan, and
+    /// only the winner's value is decoded.
+    pub fn resolve<Key: self::Key>(
+        &self,
+        key: &[u8],
+    ) -> Result<Option<NoveltyOp<Value>>, DialogSearchTreeError> {
+        let mut keys = self.keys::<Key>()?;
+        let mut winner: Option<(usize, usize)> = None;
+        let mut asserts = 0usize;
+        while let Some((at, candidate)) = keys.next_key()? {
+            let slot = asserts;
+            // `keys()` validated every polarity byte as 0 or 1.
+            if self.polarity.get(at).copied() == Some(1) {
+                asserts += 1;
+            }
+            match candidate.cmp(key) {
+                Ordering::Less => {}
+                Ordering::Equal => winner = Some((at, slot)),
+                Ordering::Greater => break,
+            }
+        }
+        winner
+            .map(|(at, slot)| self.op_with_slot(at, slot))
+            .transpose()
     }
 
     /// Decodes the whole buffer to owned entries, in entry order.
@@ -392,6 +514,29 @@ where
         StreamingLeaf::new(&schema, &columns, count)
     }
 
+    /// Visit this segment's entries in order, handing each key and value to
+    /// `visit`.
+    ///
+    /// Streams the keys and pairs each with its index-aligned value rather
+    /// than materializing the leaf, so a caller that already holds the node
+    /// can read its entries without a second walk of the tree to reach the
+    /// same rows.
+    pub fn for_each_entry<Key, Visit>(&self, mut visit: Visit) -> Result<(), DialogSearchTreeError>
+    where
+        Key: self::Key,
+        Visit: FnMut(&[u8], &Value::Archived) -> Result<(), DialogSearchTreeError>,
+    {
+        let mut keys = self.keys::<Key>()?;
+        while let Some((at, key)) = keys.next_key()? {
+            let value = self
+                .values
+                .get(at)
+                .ok_or_else(|| malformed("Segment value is out of range for its key"))?;
+            visit(key, value)?;
+        }
+        Ok(())
+    }
+
     /// The first (minimum) key of this segment, decoded to its bytes: one
     /// streaming step, no whole-leaf materialization.
     pub fn first_key<Key: self::Key>(&self) -> Result<Vec<u8>, DialogSearchTreeError> {
@@ -446,8 +591,8 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use crate::{
-        Buffer, ColumnData, Entry, Link, MIXED_LAYOUT, Manifest, NoveltyBuffer, NoveltyEntry,
-        NoveltyOp, PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment, Scale,
+        ColumnData, Entry, Link, MIXED_LAYOUT, Manifest, NoveltyBuffer, NoveltyEntry, NoveltyOp,
+        PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment, Scale,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -470,16 +615,21 @@ mod tests {
             })
             .collect();
         let body = PersistentNodeBody::segment_from_entries(entries, Manifest::default())?;
-        Ok(PersistentNode::new(Buffer::from(body.as_bytes()?)))
+        Ok(PersistentNode::try_from(&body)?)
     }
 
     fn index_node(separators: &[&[u8]]) -> Result<TestNode> {
+        index_node_with_scales(separators, &vec![Scale::EMPTY; separators.len()])
+    }
+
+    fn index_node_with_scales(separators: &[&[u8]], scales: &[Scale]) -> Result<TestNode> {
         let links: Vec<Link> = separators
             .iter()
-            .map(|separator| Link {
+            .zip(scales)
+            .map(|(separator, scale)| Link {
                 separator: separator.to_vec(),
                 node: Blake3Hash::hash(separator),
-                scale: Scale::EMPTY,
+                scale: *scale,
             })
             .collect();
         let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::index_from_links::<[u8; 8]>(
@@ -487,7 +637,7 @@ mod tests {
             Vec::new(),
             Manifest::default(),
         )?;
-        Ok(PersistentNode::new(Buffer::from(body.as_bytes()?)))
+        Ok(PersistentNode::try_from(&body)?)
     }
 
     /// A serialized segment decodes back to exactly the entries it encoded:
@@ -545,6 +695,139 @@ mod tests {
         Ok(())
     }
 
+    /// `children_spanning` returns exactly the children whose separator span
+    /// intersects a query range, so a caller can prune the rest without
+    /// descending. The children in this node are:
+    ///   0: [   , car)   1: [car, carpet)   2: [carpet, cat)   3: [cat, +inf)
+    #[dialog_common::test]
+    async fn it_spans_the_children_a_range_touches() -> Result<()> {
+        let separators: Vec<&[u8]> = vec![b"", b"car", b"carpet", b"cat"];
+        let node = index_node(&separators)?;
+        let index = node.as_index()?;
+
+        // A range inside one child's span touches only that child.
+        assert_eq!(index.children_spanning(b"card", b"care")?, 1..2);
+
+        // A range straddling a separator touches both children.
+        assert_eq!(index.children_spanning(b"card", b"caz")?, 1..4);
+
+        // A range below every non-empty separator lands in the leftmost child.
+        assert_eq!(index.children_spanning(b"aardvark", b"ant")?, 0..1);
+
+        // A range above every separator touches only the last child.
+        assert_eq!(index.children_spanning(b"dog", b"emu")?, 3..4);
+
+        // The full key space touches every child.
+        assert_eq!(index.children_spanning(b"", b"\xff")?, 0..4);
+
+        // An empty or inverted range touches nothing.
+        assert_eq!(index.children_spanning(b"car", b"car")?, 0..0);
+        assert_eq!(index.children_spanning(b"cat", b"car")?, 0..0);
+        Ok(())
+    }
+
+    /// A separator exactly equal to the exclusive upper bound must not pull in
+    /// the child it opens: that child holds only keys `>= upper`, which the
+    /// half-open range excludes.
+    #[dialog_common::test]
+    async fn it_excludes_a_child_opened_by_the_exclusive_bound() -> Result<()> {
+        let separators: Vec<&[u8]> = vec![b"", b"m", b"t"];
+        let node = index_node(&separators)?; // 0:[,m) 1:[m,t) 2:[t,+inf)
+        let index = node.as_index()?;
+
+        // upper == "m": child 1 opens at "m" and holds nothing below it.
+        assert_eq!(index.children_spanning(b"a", b"m")?, 0..1);
+        // upper == "t": child 2 opens at "t"; excluded.
+        assert_eq!(index.children_spanning(b"a", b"t")?, 0..2);
+        // Just past "t" pulls the last child back in.
+        assert_eq!(index.children_spanning(b"a", b"t\x00")?, 0..3);
+        Ok(())
+    }
+
+    /// `range_scale` sums the scales of exactly the touched children, giving a
+    /// range cardinality estimate from a single node read.
+    #[dialog_common::test]
+    async fn it_estimates_range_cardinality_from_one_node() -> Result<()> {
+        let separators: Vec<&[u8]> = vec![b"", b"car", b"carpet", b"cat"];
+        // Child subtree sizes, exact in the exact region so the sums are
+        // predictable: 10, 20, 5, 40.
+        let scales = [Scale::of(10), Scale::of(20), Scale::of(5), Scale::of(40)];
+        let node = index_node_with_scales(&separators, &scales)?;
+        let index = node.as_index()?;
+
+        // One child: ~20.
+        assert_eq!(index.range_scale(b"card", b"care")?.estimate(), 20);
+
+        // Children 1..4: 20 + 5 + 40 = 65, then rounded up by the scale
+        // encoding, so at least 65 and within a step above.
+        let est = index.range_scale(b"card", b"caz")?.estimate();
+        assert!(
+            (65..=73).contains(&est),
+            "range scale was {est}, expected ~65"
+        );
+
+        // Whole space: 10 + 20 + 5 + 40 = 75.
+        let all = index.range_scale(b"", b"\xff")?.estimate();
+        assert!((75..=85).contains(&all), "full range scale was {all}");
+
+        // Empty range: zero.
+        assert_eq!(index.range_scale(b"car", b"car")?.estimate(), 0);
+        Ok(())
+    }
+
+    /// Soundness: `children_spanning` must never exclude a child that could
+    /// hold a key in the range. The invariant that guarantees a caller never
+    /// misses data is that for every child index `i`, if that child's span
+    /// intersects `[lo, hi)` then `i` is in `children_spanning(lo, hi)`. Here
+    /// we assert the contrapositive directly against `route`: every key that
+    /// routes into the range's interior lands inside the spanned children.
+    #[dialog_common::test]
+    async fn it_never_excludes_a_child_that_could_match() -> Result<()> {
+        let separators: Vec<&[u8]> = vec![b"", b"d", b"h", b"m", b"s", b"w"];
+        let node = index_node(&separators)?;
+        let index = node.as_index()?;
+
+        // Probe a spread of range endpoints, including ones that coincide with
+        // separators and ones that fall between them.
+        let points: &[&[u8]] = &[
+            b"a", b"c", b"d", b"da", b"g", b"h", b"k", b"m", b"ma", b"r", b"s", b"v", b"w", b"z",
+        ];
+
+        for (i, lo) in points.iter().enumerate() {
+            for hi in &points[i..] {
+                let span = index.children_spanning(lo, hi)?;
+
+                // Every key at or above lo and below hi must route into the
+                // span. Route(lo) is the lower witness; the child just below
+                // route(hi-ish) is the upper witness. Check both endpoints and
+                // a scattering of interior separators.
+                if lo < hi {
+                    let low_child = index.route(lo)?;
+                    assert!(
+                        span.contains(&low_child),
+                        "lo={lo:?} routes to child {low_child}, not in {span:?}"
+                    );
+
+                    // Any separator strictly inside [lo, hi) names a child that
+                    // holds keys in range; it must be spanned.
+                    for at in 0..index.len() {
+                        let sep = index.separator(at)?;
+                        if sep.as_slice() >= *lo && sep.as_slice() < *hi {
+                            assert!(
+                                span.contains(&at),
+                                "separator {sep:?} (child {at}) is in [{lo:?},{hi:?}) \
+                                 but child not spanned by {span:?}"
+                            );
+                        }
+                    }
+                } else {
+                    assert!(span.is_empty(), "empty range must span nothing");
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Malformed offset tables are rejected with errors at access, never a
     /// panic: nodes arrive from untrusted peers.
     #[dialog_common::test]
@@ -559,7 +842,7 @@ mod tests {
             scales: vec![Scale::of(1), Scale::of(1)],
             novelty: Vec::new(),
         });
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
         assert!(node.as_index()?.separator(1).is_err());
         assert!(node.as_index()?.route(b"b").is_err());
 
@@ -573,7 +856,7 @@ mod tests {
             scales: vec![Scale::of(1)],
             novelty: Vec::new(),
         });
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
         assert!(node.as_index()?.separator(0).is_err());
         Ok(())
     }
@@ -592,7 +875,7 @@ mod tests {
             scales: vec![Scale::of(1)],
             novelty: Vec::new(),
         });
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
 
         assert!(node.as_index()?.scale_at(0).is_ok());
         assert!(
@@ -619,7 +902,7 @@ mod tests {
             }],
             values: vec![vec![1], vec![2]],
         });
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
         let segment = node.as_segment()?;
         // The streaming decoder constructs lazily, so its error surfaces on
         // the first key read; the materializing paths error outright. Each
@@ -722,9 +1005,7 @@ mod tests {
             panic!("expected a segment body");
         };
         segment.count = 1;
-        let node = TestNode::new(Buffer::from(
-            PersistentNodeBody::Segment(segment).as_bytes()?,
-        ));
+        let node = TestNode::try_from(&PersistentNodeBody::Segment(segment))?;
         let segment = node.as_segment()?;
         assert!(segment.keys::<[u8; 8]>().is_err());
         assert!(segment.first_key::<[u8; 8]>().is_err());
@@ -744,7 +1025,7 @@ mod tests {
             }],
             values: vec![],
         });
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
         let segment = node.as_segment()?;
         assert!(segment.keys::<[u8; 8]>().is_err());
         assert!(segment.first_key::<[u8; 8]>().is_err());
@@ -838,7 +1119,7 @@ mod tests {
             })
             .collect();
         let body = PersistentNodeBody::segment_from_entries(entries, manifest)?;
-        let node = TestNode::new(Buffer::from(body.as_bytes()?));
+        let node = TestNode::try_from(&body)?;
         assert_eq!(node.manifest()?, manifest);
         Ok(())
     }
@@ -871,7 +1152,7 @@ mod tests {
             .collect();
         let body: PersistentNodeBody<Vec<u8>> =
             PersistentNodeBody::index_from_links::<[u8; 8]>(links, novelty, Manifest::default())?;
-        Ok(PersistentNode::new(Buffer::from(body.as_bytes()?)))
+        Ok(PersistentNode::try_from(&body)?)
     }
 
     /// The novelty region round-trips through the columnar coded form exactly:
@@ -1072,8 +1353,7 @@ mod tests {
             >(
                 links, novelty.clone(), Manifest::default()
             )?;
-            let node: PersistentNode<TaggedKey, Vec<u8>> =
-                PersistentNode::new(Buffer::from(body.as_bytes()?));
+            let node: PersistentNode<TaggedKey, Vec<u8>> = PersistentNode::try_from(&body)?;
             assert_eq!(node.as_index()?.all_novelty::<TaggedKey>()?, novelty);
         }
         Ok(())
@@ -1104,7 +1384,7 @@ mod tests {
             );
             index.novelty = novelty;
             let body: PersistentNodeBody<Vec<u8>> = PersistentNodeBody::Index(index);
-            Ok(TestNode::new(Buffer::from(body.as_bytes()?)))
+            Ok(TestNode::try_from(&body)?)
         };
         let buffer = |child: u32| {
             NoveltyBuffer::from_entries::<[u8; 8]>(child, vec![assert_op("aa", vec![1])])

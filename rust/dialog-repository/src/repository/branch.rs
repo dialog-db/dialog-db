@@ -8,6 +8,8 @@ use dialog_query::concept::query::PlanCache;
 
 use crate::{NetworkedIndex, RemoteSite, RepositoryArchiveExt as _};
 use dialog_artifacts::DialogArtifactsError;
+use dialog_artifacts::Entity;
+use dialog_artifacts::history::Origin;
 use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
 };
@@ -21,6 +23,7 @@ use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_query::query::Application;
 use dialog_search_tree::{Buffer, Cache};
+use std::sync::{Arc, Mutex};
 
 mod blob;
 pub use blob::*;
@@ -30,6 +33,9 @@ pub use claims::*;
 
 mod commit;
 pub use commit::*;
+
+mod delegation;
+pub use delegation::*;
 
 mod export;
 pub use export::*;
@@ -81,10 +87,21 @@ pub use transaction::*;
 mod upstream;
 pub use upstream::*;
 
-#[cfg(all(test, feature = "integration-tests"))]
+// Either feature: `integration-tests` runs these natively, and
+// `web-integration-tests` runs the same tests as wasm subprocesses. The
+// `dialog_common::test` macro emits a variant per mode, so gating the
+// module on the native feature alone compiled it out of the cross-target
+// run before the macro was ever reached.
+#[cfg(all(
+    test,
+    any(feature = "integration-tests", feature = "web-integration-tests")
+))]
 mod integration_tests;
 
-#[cfg(all(test, feature = "integration-tests"))]
+#[cfg(all(
+    test,
+    any(feature = "integration-tests", feature = "web-integration-tests")
+))]
 mod read_amplification;
 
 /// Type alias for the search tree index.
@@ -147,6 +164,30 @@ pub struct Branch {
     /// verification that otherwise run on every ancestry step (skip
     /// extension, context walks, causality).
     record_cache: dialog_search_tree::Cache<Version, RevisionRecord>,
+    /// Carries the live buffered spine between this branch's commits (keyed
+    /// by the tree root it was persisted as, so any out-of-band head change
+    /// safely misses), sparing every commit the root-frame decode and
+    /// sealed-buffer bulk copies of a fresh open. Shared across clones like
+    /// the caches.
+    spine: dialog_artifacts::SpineSlot,
+    /// Memo of the commit identity derived for this branch. The branch
+    /// entity and origin are pure functions of (subject, name, profile,
+    /// issuer), but deriving them costs blake3 hashes, a base58 render,
+    /// and a URI parse — previously paid on every commit. Keyed by the
+    /// (profile, issuer) pair so a branch handle driven under a different
+    /// authority re-derives rather than serving a stale identity.
+    identity_cache: Arc<Mutex<Option<CommitIdentity>>>,
+}
+
+/// A memoized commit identity: the (profile, issuer) inputs it was derived
+/// from, and the derived branch entity and origin. See
+/// [`Branch::commit_identity`].
+#[derive(Debug)]
+struct CommitIdentity {
+    profile: Did,
+    issuer: Did,
+    entity: Entity,
+    origin: Origin,
 }
 
 impl Branch {
@@ -281,6 +322,11 @@ impl Branch {
         self.node_cache.clone()
     }
 
+    /// The live-spine slot this branch's commits reuse.
+    pub(crate) fn spine(&self) -> &dialog_artifacts::SpineSlot {
+        &self.spine
+    }
+
     /// A shared handle to this branch's spilled-value block cache, handed to
     /// each select so spilled reads stay warm across queries.
     pub(crate) fn spill_cache(&self) -> SpillCache {
@@ -316,5 +362,31 @@ impl Branch {
     /// A shared handle to this branch's verified-record memo.
     pub(crate) fn records(&self) -> dialog_search_tree::Cache<Version, RevisionRecord> {
         self.record_cache.clone()
+    }
+
+    /// The branch entity and version-control origin this branch commits
+    /// under, for the given (profile, issuer) pair — memoized, since the
+    /// derivation (blake3 + base58 + URI parse) is a pure function of its
+    /// inputs and the pair is stable for the lifetime of a session.
+    pub(crate) fn commit_identity(&self, profile: &Did, issuer: &Did) -> (Entity, Origin) {
+        let mut memo = self
+            .identity_cache
+            .lock()
+            .expect("commit identity memo poisoned");
+        if let Some(identity) = memo.as_ref()
+            && identity.profile == *profile
+            && identity.issuer == *issuer
+        {
+            return (identity.entity.clone(), identity.origin);
+        }
+        let entity = crate::branch_of(self.of(), profile, self.name());
+        let origin = crate::origin_of(&entity, issuer);
+        *memo = Some(CommitIdentity {
+            profile: profile.clone(),
+            issuer: issuer.clone(),
+            entity: entity.clone(),
+            origin,
+        });
+        (entity, origin)
     }
 }

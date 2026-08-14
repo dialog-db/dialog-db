@@ -164,7 +164,11 @@ pub use node::*;
 mod storage;
 pub use storage::*;
 
+mod traversal;
+pub use traversal::*;
+
 mod tree;
+mod validate;
 pub use tree::*;
 
 mod hitchhiker;

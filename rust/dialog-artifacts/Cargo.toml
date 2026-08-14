@@ -39,6 +39,7 @@ leb128 = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
 rand_chacha = { workspace = true }
+memchr = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true }
 serde-big-array = { workspace = true }

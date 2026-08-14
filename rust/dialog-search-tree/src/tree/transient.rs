@@ -248,10 +248,9 @@ where
                 // empty separator there.
                 let separator = D::reseparate(entry.key.as_ref(), &[]);
                 TransientNode::Index(TransientIndex {
-                    children: vec![Node::Transient(TransientNode::Segment(TransientSegment {
-                        entries: vec![entry],
-                        separator,
-                    }))],
+                    children: vec![Node::Transient(TransientNode::Segment(
+                        TransientSegment::new(vec![entry], separator),
+                    ))],
                     novelty: Novelty::new(),
                 })
             }
@@ -292,6 +291,113 @@ where
             None => TransientRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
         };
         Ok(self)
+    }
+
+    /// Whether this tree is empty and unedited — the bulk-load
+    /// precondition for [`plant`](Self::plant).
+    pub(crate) fn is_unplanted(&self) -> bool {
+        matches!(&self.root, TransientRoot::Unloaded(hash) if hash == NULL_BLAKE3_HASH)
+    }
+
+    /// Plants a whole batch into an EMPTY tree with one bottom-up build —
+    /// the bulk-load fast path. The ops are resolved last-wins per key
+    /// (the stable sort keeps a batch's temporal order within a key), the
+    /// surviving asserts become the sorted entry list, and the canonical
+    /// tree is built directly: [`regroup_entries`] for the leaf level,
+    /// then the same per-level grouping loop `seal_root` runs — instead of
+    /// one canonical edit per op, which is where a large batch into a
+    /// fresh store spends essentially all of its time.
+    ///
+    /// History independence makes this exact: the canonical form is a
+    /// pure function of the surviving fact set, so the bottom-up build
+    /// and the per-op replay produce the same bytes (converge_check's
+    /// single-commit arm pins exactly this equality against the per-txn
+    /// arms). A batch whose surviving set is empty leaves the tree empty.
+    pub(crate) async fn plant<Backend>(
+        mut self,
+        mut ops: Vec<NoveltyEntry<Value>>,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+    {
+        debug_assert!(self.is_unplanted(), "plant requires an empty tree");
+        ops.sort_by(|a, b| a.key.cmp(&b.key));
+
+        // Keep only each key's last op; a surviving retract on an empty
+        // tree is a no-op and drops out.
+        let mut entries: Vec<Entry<Key, Value>> = Vec::with_capacity(ops.len());
+        let mut push = |op: NoveltyEntry<Value>| -> Result<(), DialogSearchTreeError> {
+            if let NoveltyOp::Assert(value) = op.op {
+                entries.push(Entry {
+                    key: Key::try_from_bytes(&op.key)?,
+                    value,
+                });
+            }
+            Ok(())
+        };
+        let mut pending: Option<NoveltyEntry<Value>> = None;
+        for op in ops {
+            match &mut pending {
+                Some(previous) if previous.key == op.key => *previous = op,
+                Some(previous) => push(std::mem::replace(previous, op))?,
+                None => pending = Some(op),
+            }
+        }
+        if let Some(last) = pending {
+            push(last)?;
+        }
+        if entries.is_empty() {
+            return Ok(self);
+        }
+
+        let manifest = self.manifest;
+        let accessor = Accessor::new(self.cache.clone(), storage.clone());
+        let pieces = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
+        self.root = match seal_root::<Key, Value, D, _>(pieces, 0, &manifest, &accessor).await? {
+            Some(node) => TransientRoot::Loaded(node),
+            None => TransientRoot::Unloaded(NULL_BLAKE3_HASH.clone()),
+        };
+        Ok(self)
+    }
+
+    /// The separator lists of every level below the root, top-down, for the
+    /// canonical-form validator: level `d` holds, in order, the separator of
+    /// every node at depth `d + 1`. A fully in-memory tree only (as
+    /// [`plant`](Self::plant) leaves it); a [`Node::Persistent`] child errors
+    /// rather than silently comparing an unloaded subtree.
+    pub(crate) fn level_separators(&self) -> Result<Vec<Vec<Vec<u8>>>, DialogSearchTreeError> {
+        let root = match &self.root {
+            TransientRoot::Unloaded(_) => return Ok(Vec::new()),
+            TransientRoot::Loaded(node) => node,
+        };
+        let mut levels = Vec::new();
+        let mut current: Vec<&TransientNode<Key, Value>> = vec![root];
+        loop {
+            let mut next: Vec<&TransientNode<Key, Value>> = Vec::new();
+            let mut separators: Vec<Vec<u8>> = Vec::new();
+            for node in &current {
+                let TransientNode::Index(index) = node else {
+                    continue;
+                };
+                for child in &index.children {
+                    let Node::Transient(child) = child else {
+                        return Err(DialogSearchTreeError::Node(
+                            "level_separators requires a fully in-memory tree".into(),
+                        ));
+                    };
+                    separators.push(child.separator()?.to_vec());
+                    next.push(child);
+                }
+            }
+            if separators.is_empty() {
+                break;
+            }
+            levels.push(separators);
+            current = next;
+        }
+        Ok(levels)
     }
 
     /// Retrieves the value associated with `key` from the in-flight transient
@@ -342,8 +448,11 @@ where
                     }
                 }
                 TransientNode::Segment(segment) => {
-                    return match segment.entries.binary_search_by(|entry| entry.key.cmp(key)) {
-                        Ok(at) => Ok(Some(segment.entries[at].value.clone())),
+                    return match segment
+                        .entries()
+                        .binary_search_by(|entry| entry.key.cmp(key))
+                    {
+                        Ok(at) => Ok(Some(segment.entries()[at].value.clone())),
                         Err(_) => Ok(None),
                     };
                 }
@@ -909,60 +1018,80 @@ where
         } else {
             match (&self, follow(&mut root, &path)?) {
                 (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
-                    match segment.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                    match segment
+                        .entries()
+                        .binary_search_by(|e| e.key.cmp(&entry.key))
+                    {
                         // A value update with a changed payload weight moves
                         // pacing decisions just like a membership change.
                         Ok(at) => {
-                            segment.entries[at].value.payload_weight()
+                            segment.entries()[at].value.payload_weight()
                                 != entry.value.payload_weight()
                         }
                         Err(_) => true,
                     }
                 }
-                (Edit::Delete(key), TransientNode::Segment(segment)) => {
-                    segment.entries.binary_search_by(|e| e.key.cmp(key)).is_ok()
-                }
+                (Edit::Delete(key), TransientNode::Segment(segment)) => segment
+                    .entries()
+                    .binary_search_by(|e| e.key.cmp(key))
+                    .is_ok(),
                 _ => true,
             }
         };
-        let piece_origins = if changes_membership {
-            merge_forced_run::<Key, Value, Backend>(&mut root, &mut path, accessor, &manifest)
+        let mut piece_origins = if changes_membership {
+            let verdict = forced_run_quiet::<Key, Value, Backend, D>(
+                &mut root, &path, &self, accessor, &manifest,
+            )
+            .await?;
+            if let RunVerdict::SurgicalMin { separator } = verdict {
+                // A verified surgical min-insert: the run's post-edit plan
+                // reproduces every stored boundary and the piece's forced
+                // separator re-derives at the same length, so no election
+                // input changes at any level. Apply in place, swap the
+                // separator (the exact bytes a merged regroup's seal would
+                // store), and re-home the parent's buffered ops across the
+                // moved boundary — then the tree is byte-for-byte what the
+                // full merge-and-regroup path would have produced.
+                let TransientNode::Segment(leaf) = follow(&mut root, &path)? else {
+                    return Err(DialogSearchTreeError::Node(
+                        "Path did not reach a segment".into(),
+                    ));
+                };
+                apply_to_segment(leaf, self);
+                leaf.separator = separator;
+                reroute_moved_seam::<Key, Value>(&mut root, &path)?;
+                return Ok(Some(root));
+            }
+            if matches!(verdict, RunVerdict::Quiet) {
+                None
+            } else {
+                merge_forced_run::<Key, Value, Backend>(
+                    &mut root,
+                    &mut path,
+                    &mut [],
+                    accessor,
+                    &manifest,
+                )
                 .await?
+            }
         } else {
             None
         };
         let widened = piece_origins.is_some();
 
-        // The same widening, per INDEX level: a force-split index frame's
-        // pieces are separate stored nodes, and this level's regroup window
-        // is one node's children — so an edit descending through a piece
-        // must merge the frame's pieces first, or elections would re-derive
-        // anchors over a fragment and orders would diverge. A seam between
-        // siblings is a forced one exactly when its separator's seam rank
-        // fails the level threshold that grouped them (derived, no stored
-        // mark); ordinary paths see two rank probes per level and merge
-        // nothing.
-        let (index_widened, index_origins) = if changes_membership && manifest.frame_ceiling() > 0 {
-            merge_forced_index_runs::<Key, Value, D, Backend>(
-                &mut root, &mut path, accessor, &manifest,
-            )
-            .await?
-        } else {
-            (false, Vec::new())
-        };
-
         // The frame ceiling's fast-path gate: a membership-changing edit
         // that leaves its segment over the ceiling must reach the regroup,
         // which force-splits the frame — the in-place fast path would let
-        // the segment grow past the hard bound. The weight sum is paid only
-        // when a ceiling is armed and membership changes; an upsert of an
-        // existing key never gets here (weights are key-derived).
+        // the segment grow past the hard bound. The gate reads the segment's
+        // cached total weight (exact, maintained incrementally by the
+        // in-place edit methods), so a batch of edits into one leaf pays the
+        // O(entries) sum once instead of on every membership change.
         let over_ceiling = if !changes_membership || manifest.frame_ceiling() == 0 {
             false
         } else {
             match follow(&mut root, &path)? {
                 TransientNode::Segment(segment) => {
-                    let weight: usize = segment.entries.iter().map(Entry::weight).sum();
+                    let weight = segment.total_weight();
                     let weight = match &self {
                         Edit::Upsert(entry) => weight + entry.weight(),
                         Edit::Delete(_) => weight,
@@ -982,7 +1111,7 @@ where
         // yet must still fuse rightward, which the local check cannot see.
         let is_boundary_delete = match (&self, follow(&mut root, &path)?) {
             (Edit::Delete(_), TransientNode::Segment(segment)) => segment
-                .entries
+                .entries()
                 .last()
                 .map(|e| &e.key == key)
                 .unwrap_or(false),
@@ -1028,14 +1157,14 @@ where
                 // Cheapest test first: only a key sorting past the segment's
                 // last entry can be an orphan append, so the coin hashes are
                 // paid only on true appends.
-                match segment.entries.last() {
+                match segment.entries().last() {
                     Some(last) if entry.key > last.key => {
                         if manifest.max_segment == 0 {
                             D::rank(last.key.as_ref(), &manifest) > BOTTOM_RANK
                                 && D::rank(entry.key.as_ref(), &manifest) <= BOTTOM_RANK
                         } else if D::vetoes(last.key.as_ref(), entry.key.as_ref(), &manifest) {
                             let bank = trailing_stretch_weight::<Key, Value, D>(
-                                &segment.entries,
+                                segment.entries(),
                                 &manifest,
                             );
                             !D::leaf_cut(entry.key.as_ref(), bank + entry.weight(), &manifest)
@@ -1064,9 +1193,9 @@ where
         } else {
             match (&self, follow(&mut root, &path)?) {
                 (Edit::Delete(key), TransientNode::Segment(segment)) => {
-                    match segment.entries.binary_search_by(|e| e.key.cmp(key)) {
-                        Ok(at) if at + 1 < segment.entries.len() => {
-                            let entries = &segment.entries;
+                    match segment.entries().binary_search_by(|e| e.key.cmp(key)) {
+                        Ok(at) if at + 1 < segment.entries().len() => {
+                            let entries = segment.entries();
                             let beside_stretch = (at > 0
                                 && D::vetoes(
                                     entries[at - 1].key.as_ref(),
@@ -1093,6 +1222,43 @@ where
                         _ => false,
                     }
                 }
+                // A value UPDATE of the segment's terminal boundary entry can
+                // defund its cut just like a stretch-member delete: the coin
+                // charges the entry's payload weight, and payload weight
+                // moves with content (collapsed claims, causes, versions).
+                // Without this arm the stale boundary survives — the local
+                // re-shape has no right neighbor to fuse into, which is
+                // exactly the history-divergence converge_check caught (a
+                // stored leaf whose terminal coin no longer funds its cut).
+                (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
+                    let entries = segment.entries();
+                    match entries.last() {
+                        Some(last)
+                            if last.key == entry.key
+                                && last.value.payload_weight() != entry.value.payload_weight() =>
+                        {
+                            // The bank the terminal coin sees: the summed
+                            // weight of the vetoed stretch immediately
+                            // before the terminal entry (weights of every
+                            // left partner of a vetoed seam), mirroring the
+                            // regroup's walk.
+                            let mut bank = 0usize;
+                            let mut at = entries.len() - 1;
+                            while at > 0
+                                && D::vetoes(
+                                    entries[at - 1].key.as_ref(),
+                                    entries[at].key.as_ref(),
+                                    &manifest,
+                                )
+                            {
+                                at -= 1;
+                                bank += entries[at].weight();
+                            }
+                            !D::leaf_cut(entry.key.as_ref(), bank + entry.weight(), &manifest)
+                        }
+                        _ => false,
+                    }
+                }
                 _ => false,
             }
         };
@@ -1105,7 +1271,10 @@ where
         // evaluated below, once the right neighbor's minimum is reachable.
         let min_move = match (&self, follow(&mut root, &path)?) {
             (Edit::Upsert(entry), TransientNode::Segment(segment)) => {
-                match segment.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                match segment
+                    .entries()
+                    .binary_search_by(|e| e.key.cmp(&entry.key))
+                {
                     Err(0) => Some((
                         segment.separator.clone(),
                         D::reseparate(entry.key.as_ref(), &segment.separator),
@@ -1114,10 +1283,10 @@ where
                 }
             }
             (Edit::Delete(key), TransientNode::Segment(segment)) => {
-                match segment.entries.binary_search_by(|e| e.key.cmp(key)) {
-                    Ok(0) if segment.entries.len() > 1 => Some((
+                match segment.entries().binary_search_by(|e| e.key.cmp(key)) {
+                    Ok(0) if segment.entries().len() > 1 => Some((
                         segment.separator.clone(),
-                        D::reseparate(segment.entries[1].key.as_ref(), &segment.separator),
+                        D::reseparate(segment.entries()[1].key.as_ref(), &segment.separator),
                     )),
                     _ => None,
                 }
@@ -1161,6 +1330,18 @@ where
         // Anything not provably canonical falls through to the re-shaping
         // paths. A widened window always re-shapes: the merge left the
         // stretch as one oversized segment that only the regroup re-splits.
+        //
+        // The forced-INDEX widening is deliberately NOT part of this gate:
+        // it is decided after the fast path, because a fast-path edit
+        // cannot need it. Index-level plans — seam ranks, link weights,
+        // frame elections — are pure functions of child SEPARATORS, and
+        // every gate here together proves the edit changes no separator
+        // and no membership anywhere (an in-place leaf edit with the
+        // minimum either untouched or re-deriving to identical bytes).
+        // Unchanged separators mean every level's stored partition is
+        // already the one a merged re-election would re-derive, so merging
+        // the frame's pieces would rebuild byte-identical nodes for
+        // nothing — which the widen census measured at once per op.
         if !is_boundary_delete
             && !is_orphan_append
             && !dissolves_terminal_cut
@@ -1168,7 +1349,6 @@ where
             && !raises_left_cut
             && !moves_seam_under_ceiling
             && !widened
-            && !index_widened
             && !over_ceiling
         {
             let TransientNode::Segment(segment) = follow(&mut root, &path)? else {
@@ -1176,14 +1356,26 @@ where
                     "Path did not reach a segment".into(),
                 ));
             };
-            if fast_path_keeps_canonical::<Key, Value, D>(&segment.entries, &self, &manifest) {
-                apply_to_segment(&mut segment.entries, self);
+            if fast_path_keeps_canonical::<Key, Value, D>(segment.entries(), &self, &manifest) {
+                apply_to_segment(segment, self);
                 // The seam at the segment's left edge moves with its first
-                // key. Re-derive the separator from the new minimum against
-                // the old separator as the floor; the rule is idempotent
-                // when the minimum did not change.
-                if let Some(first) = segment.entries.first() {
-                    segment.separator = D::reseparate(first.key.as_ref(), &segment.separator);
+                // key: only a min-move re-derives the separator. Re-deriving
+                // unconditionally was NOT the no-op its idempotence argument
+                // assumed — a force-split piece stores the long forced form
+                // (left neighbor's key plus 0x00 padding), which is not a
+                // prefix of the minimum, so `reseparate` collapsed it to
+                // the short natural prefix and silently stripped the
+                // self-identifying mark. The orphaned piece then never
+                // rejoined its run, and whether its boundary existed at all
+                // depended on edit history (the converge_check divergence).
+                // A min-move can never see a forced floor here: it changes
+                // membership, and membership changes into a forced piece
+                // are widened before the fast path is reachable.
+                if min_move.is_some()
+                    && let Some(first) = segment.entries().first()
+                {
+                    let separator = D::reseparate(first.key.as_ref(), &segment.separator);
+                    segment.separator = separator;
                 }
                 // A moved separator moves a link boundary in the deepest
                 // ancestor where this leaf is not on the leftmost edge, and
@@ -1199,6 +1391,32 @@ where
             }
         }
 
+        // The same widening as the leaf backstop, per INDEX level: a
+        // force-split index frame's pieces are separate stored nodes, and
+        // this level's regroup window is one node's children — so an edit
+        // descending through a piece must merge the frame's pieces first,
+        // or elections would re-derive anchors over a fragment and orders
+        // would diverge. A seam between siblings is a forced one exactly
+        // when its separator's seam rank fails the level threshold that
+        // grouped them (derived, no stored mark); ordinary paths see two
+        // rank probes per level and merge nothing. Runs only when the edit
+        // fell through the fast path above: an in-place edit changes no
+        // separator, so no index-level plan can move and the merge would
+        // be an identity rebuild.
+        let (index_widened, mut index_origins) =
+            if changes_membership && manifest.frame_ceiling() > 0 {
+                merge_forced_index_runs::<Key, Value, D, Backend>(
+                    &mut root,
+                    &mut path,
+                    &mut [],
+                    accessor,
+                    &manifest,
+                )
+                .await?
+            } else {
+                (false, Vec::new())
+            };
+
         let neighbor_path = if is_boundary_delete || is_orphan_append || dissolves_terminal_cut {
             lift_right_neighbor_spine(&mut root, &path, accessor).await?
         } else {
@@ -1212,23 +1430,32 @@ where
         // index frames alike — so the fusion regroups against complete
         // membership. For any non-cluster neighbor the scan reads one
         // separator length and joins nothing.
-        let neighbor_path = match neighbor_path {
+        let mut neighbor_path = match neighbor_path {
             Some(mut neighbor_path) if manifest.max_segment > 0 => {
-                merge_forced_run::<Key, Value, Backend>(
+                let merged_leaf = merge_forced_run::<Key, Value, Backend>(
                     &mut root,
                     &mut neighbor_path,
+                    &mut [&mut path],
                     accessor,
                     &manifest,
                 )
-                .await?;
+                .await?
+                .is_some();
+                let mut merged_index = false;
                 if manifest.frame_ceiling() > 0 {
-                    merge_forced_index_runs::<Key, Value, D, Backend>(
+                    merged_index = merge_forced_index_runs::<Key, Value, D, Backend>(
                         &mut root,
                         &mut neighbor_path,
+                        &mut [&mut path],
                         accessor,
                         &manifest,
                     )
-                    .await?;
+                    .await?
+                    .0;
+                }
+                if merged_leaf || merged_index {
+                    piece_origins = None;
+                    index_origins.clear();
                 }
                 Some(neighbor_path)
             }
@@ -1236,19 +1463,15 @@ where
         };
 
         // The right-LCA: the deepest level where the main and right-neighbor
-        // paths diverge (for a boundary delete).
-        let lca_depth = match &neighbor_path {
-            Some(neighbor_path) => Some(
-                path.iter()
-                    .zip(neighbor_path.iter())
-                    .position(|(a, b)| a != b)
-                    .ok_or_else(|| {
-                        DialogSearchTreeError::Node(
-                            "Boundary delete had no diverging neighbor path".into(),
-                        )
-                    })?,
-            ),
-            None => None,
+        // paths diverge (for a boundary delete). `None` with a neighbor
+        // present means a widening merged the two paths into the same nodes
+        // all the way down (the run swallowed the edited leaf); the fusion
+        // the neighbor existed for has then already happened structurally,
+        // and the edit falls back to the plain re-shape below.
+        let lca_of = |path: &[usize], neighbor: &Option<Vec<usize>>| {
+            neighbor
+                .as_ref()
+                .and_then(|neighbor| path.iter().zip(neighbor.iter()).position(|(a, b)| a != b))
         };
 
         // A single-entry boundary delete removes the whole segment, joining
@@ -1259,14 +1482,14 @@ where
             || match &neighbor_path {
                 Some(neighbor_path) => {
                     let floor = match follow(&mut root, &path)? {
-                        TransientNode::Segment(segment) if segment.entries.len() == 1 => {
+                        TransientNode::Segment(segment) if segment.entries().len() == 1 => {
                             Some(segment.separator.clone())
                         }
                         _ => None,
                     };
                     match floor {
                         Some(floor) => match follow(&mut root, neighbor_path)? {
-                            TransientNode::Segment(neighbor) => match neighbor.entries.first() {
+                            TransientNode::Segment(neighbor) => match neighbor.entries().first() {
                                 Some(first) => seam_cut_dissolves::<D>(
                                     &floor,
                                     &D::reseparate(first.key.as_ref(), &floor),
@@ -1295,40 +1518,52 @@ where
                     // level, so any of them that is a force-split piece
                     // must first rejoin its run — leaf runs and index
                     // frames alike — or the fold regroups against
-                    // fragments. Forced seams between the left spine and
-                    // the main path were already dissolved by the main
-                    // path's own widening, so these scans stop before
-                    // touching path-tracked nodes.
+                    // fragments. These merges splice ancestors the MAIN
+                    // (and neighbor) paths share with the left spine —
+                    // merging pieces left of them shifts their child
+                    // indices, and a run can even absorb their own nodes —
+                    // so both ride along as co-paths and are remapped
+                    // through every splice.
                     if manifest.max_segment > 0 {
-                        merge_forced_run::<Key, Value, Backend>(
+                        let mut co_paths: Vec<&mut Vec<usize>> = Vec::new();
+                        co_paths.push(&mut path);
+                        if let Some(neighbor) = neighbor_path.as_mut() {
+                            co_paths.push(neighbor);
+                        }
+                        let merged_leaf = merge_forced_run::<Key, Value, Backend>(
                             &mut root,
                             &mut left_path,
+                            &mut co_paths,
                             accessor,
                             &manifest,
                         )
-                        .await?;
+                        .await?
+                        .is_some();
+                        let mut merged_index = false;
                         if manifest.frame_ceiling() > 0 {
-                            merge_forced_index_runs::<Key, Value, D, Backend>(
+                            merged_index = merge_forced_index_runs::<Key, Value, D, Backend>(
                                 &mut root,
                                 &mut left_path,
+                                &mut co_paths,
                                 accessor,
                                 &manifest,
                             )
-                            .await?;
+                            .await?
+                            .0;
+                        }
+                        if merged_leaf || merged_index {
+                            piece_origins = None;
+                            index_origins.clear();
                         }
                     }
-                    let depth = path
-                        .iter()
-                        .zip(left_path.iter())
-                        .position(|(a, b)| a != b)
-                        .ok_or_else(|| {
-                            DialogSearchTreeError::Node(
-                                "Left fusion had no diverging neighbor path".into(),
-                            )
-                        })?;
-                    match lca_depth {
-                        Some(lca) if depth > lca => None,
-                        _ => Some(depth),
+                    // `None` means the widenings merged the left spine and
+                    // the main path into the same nodes all the way down:
+                    // the leftward fusion has already happened structurally
+                    // and the regroup below re-derives the joined region.
+                    let depth = path.iter().zip(left_path.iter()).position(|(a, b)| a != b);
+                    match (depth, lca_of(&path, &neighbor_path)) {
+                        (Some(depth), Some(lca)) if depth > lca => None,
+                        (depth, _) => depth,
                     }
                 }
                 None => None,
@@ -1336,6 +1571,10 @@ where
         } else {
             None
         };
+
+        // The left widenings can remap both paths, so the LCA gating the
+        // fused re-shape below must be re-derived from their final values.
+        let lca_depth = lca_of(&path, &neighbor_path);
 
         // Phase two: synchronous re-shape. The whole touched region is transient, so
         // the re-shape needs no further loads and runs without any borrow spanning
@@ -1357,7 +1596,7 @@ where
                                 "Path did not reach a segment".into(),
                             ));
                         };
-                        apply_to_segment(&mut segment.entries, edit);
+                        apply_to_segment(segment, edit);
                         None
                     }
                 };
@@ -1381,6 +1620,7 @@ where
                 &manifest,
                 piece_origins.as_deref().unwrap_or(&[]),
                 &index_origins,
+                widened || index_widened,
             )?,
         };
         seal_root::<Key, Value, D, _>(replacement, height, &manifest, accessor).await
@@ -1528,6 +1768,7 @@ where
 async fn merge_forced_index_runs<Key, Value, D, Backend>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
+    co_paths: &mut [&mut Vec<usize>],
     accessor: &Accessor<Backend>,
     manifest: &Manifest,
 ) -> Result<(bool, Vec<(usize, Vec<IndexPieceOrigin>)>), DialogSearchTreeError>
@@ -1604,6 +1845,7 @@ where
         let mut merged_children: Vec<Node<Key, Value>> = Vec::new();
         let mut carried: Vec<NoveltyEntry<Value>> = Vec::new();
         let mut origins: Vec<IndexPieceOrigin> = Vec::new();
+        let mut member_starts: Vec<usize> = Vec::new();
         let mut lead = 0usize;
         for (offset, member) in members.into_iter().enumerate() {
             let TransientNode::Index(mut piece) = member.into_transient()? else {
@@ -1613,6 +1855,7 @@ where
             };
             let piece_novelty = piece.novelty.take_all::<Key>()?;
             let start = merged_children.len();
+            member_starts.push(start);
             // A piece with a stored link and no buffered ops of its own can be
             // passed through if the regroup reproduces its exact child range:
             // draining a quiet piece takes nothing, so its stored bytes still
@@ -1652,6 +1895,12 @@ where
         }
         path[d - 1] = lo;
         path[d] += lead;
+        // Any other live path routed through the same parent recorded its
+        // index against the pre-splice child list; remap it through the
+        // merge, including into the merged node when the run absorbed it.
+        for co_path in co_paths.iter_mut() {
+            remap_through_merge(co_path, &parent_path, lo, hi, &member_starts);
+        }
         merged_any = true;
         // `reshape_path` regroups the merged node's children when it is the
         // recursion's current `node` — reached after consuming the `d` path
@@ -1663,6 +1912,656 @@ where
         }
     }
     Ok((merged_any, origins_by_remaining))
+}
+
+/// The forced-run check's verdict.
+enum RunVerdict {
+    /// The run's post-edit plan is byte-identical to the stored partition:
+    /// skip the widening, the ordinary edit machinery handles the piece.
+    Quiet,
+    /// Not provably quiet: widen as before.
+    Widen,
+    /// A verified surgical min-insert: the run's election reproduces every
+    /// stored boundary with the new minimum applied, and the edited
+    /// piece's forced separator re-derives to `separator` — the SAME
+    /// LENGTH as the stored one. Forced-long separators are never index
+    /// anchors (`index_frame_cut_positions` excludes over-bound seams) and
+    /// a link's weight reads only its separator's length, so a
+    /// length-preserving rewrite changes no index-level election input at
+    /// any ancestor — the edit may apply in place with the separator
+    /// swapped and the parent's buffered ops re-homed, and every level
+    /// above stays exactly as a full merge-and-regroup would leave it.
+    SurgicalMin {
+        /// The re-derived forced separator for the edited piece.
+        separator: Vec<u8>,
+    },
+}
+
+/// Whether a membership edit into a forced-run piece provably leaves the
+/// run's stored partition byte-identical, so the backstop widening can be
+/// skipped and the ordinary edit machinery applied to the edited piece
+/// alone.
+///
+/// The check re-evaluates the regroup's complete decision pipeline
+/// ([`cut_plan`](crate::node::transient::cut_plan)) over the run's
+/// post-edit key sequence — streamed read-only, without lifting any piece
+/// into the tree — and demands the predicted cuts land exactly on the
+/// current piece boundaries, each carrying the forced mark it carries
+/// today. On top of that exact-outcome test the edit must be strictly
+/// interior to its piece (no new minimum, no boundary or terminal-entry
+/// change, so none of the seam-rewriting gates downstream can fire), and
+/// a delete must not sit beside a vetoed seam (the terminal-cut fusion
+/// gates key off those). Any doubt returns `false`, which widens as
+/// before.
+///
+/// Buffered novelty on the parent does not block the skip: the widening
+/// itself elects anchors over STORED keys only — `merge_forced_run`
+/// re-routes buffered ops by link boundary without ever feeding them to
+/// the election — so when the plan check proves the boundaries
+/// unchanged, that re-route is an identity and the buffers may stay
+/// exactly where they are.
+///
+/// The point is cost: a passing check trades the merge's full
+/// rebuild-and-re-encode of every piece in the run — plus the new blocks
+/// that rebuild ships to every replica — for piece decodes and memoized
+/// key hashes, leaving the untouched pieces byte-identical in the store.
+async fn forced_run_quiet<Key, Value, Backend, D>(
+    root: &mut TransientNode<Key, Value>,
+    path: &[usize],
+    edit: &Edit<Key, Value>,
+    accessor: &Accessor<Backend>,
+    manifest: &Manifest,
+) -> Result<RunVerdict, DialogSearchTreeError>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+    D: Distribution,
+{
+    if path.is_empty() || manifest.max_segment == 0 {
+        return Ok(RunVerdict::Widen);
+    }
+    let at = path[path.len() - 1];
+    let parent_path = &path[..path.len() - 1];
+    let bound = manifest.max_separator as usize;
+
+    // Run detection mirroring `merge_forced_run`: the maximal stretch of
+    // children joined by forced (over-bound) separators around the edited
+    // child.
+    let (lo, hi) = {
+        let children = &follow(root, parent_path)?.as_index()?.children;
+        let mut lo = at;
+        while lo > 0 && children[lo].separator()?.len() > bound {
+            lo -= 1;
+        }
+        let mut hi = at;
+        while hi + 1 < children.len() && children[hi + 1].separator()?.len() > bound {
+            hi += 1;
+        }
+        (lo, hi)
+    };
+    if lo == hi {
+        return Ok(RunVerdict::Widen);
+    }
+
+    // The edit must be strictly interior to its piece: a new minimum, a
+    // first/last-entry change, or an append would engage the boundary
+    // machinery (min-move separator rewrites, boundary-delete fusion,
+    // terminal-cut checks), which re-decides seams without the election.
+    //
+    // ONE boundary shape gets a verified escape hatch instead of an
+    // instant reject: an insert of a new minimum into a non-first piece
+    // (`Err(0)`, the dominant reject on the SE replay at 83%). Its plan is
+    // evaluated by the same compressed election — the simulation handles
+    // any position — and on a full boundary match the piece's forced
+    // separator is re-derived; if the new form has the SAME LENGTH as the
+    // stored one, the edit is a `SurgicalMin`: forced-long separators are
+    // never index anchors and link weights read only separator length, so
+    // nothing above the parent's link bytes changes, exactly as a full
+    // merge-and-regroup would leave it (which rebuilds the piece with the
+    // same entries and this same separator, reusing everything else).
+    let mut min_insert = false;
+    {
+        let TransientNode::Segment(leaf) = follow(root, path)? else {
+            return Ok(RunVerdict::Widen);
+        };
+        let entries = leaf.entries();
+        // Whether this boundary case must reject: a new minimum, a
+        // first/last-entry change, or an append engages the boundary
+        // machinery, which re-decides seams without the election.
+        let reject = match edit {
+            Edit::Upsert(entry) => match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                Ok(0) => true,
+                Ok(i) if i + 1 >= entries.len() => true,
+                Ok(_) => false,
+                Err(0) => {
+                    min_insert = true;
+                    false
+                }
+                Err(i) if i >= entries.len() => true,
+                Err(_) => false,
+            },
+            Edit::Delete(key) => match entries.binary_search_by(|e| e.key.cmp(key)) {
+                Ok(0) => true,
+                Ok(i) if i + 1 >= entries.len() => true,
+                Ok(i)
+                    if D::vetoes(
+                        entries[i - 1].key.as_ref(),
+                        entries[i].key.as_ref(),
+                        manifest,
+                    ) || D::vetoes(
+                        entries[i].key.as_ref(),
+                        entries[i + 1].key.as_ref(),
+                        manifest,
+                    ) =>
+                {
+                    true
+                }
+                Ok(_) => false,
+                Err(_) => true,
+            },
+        };
+        if reject {
+            return Ok(RunVerdict::Widen);
+        }
+    }
+    if min_insert && at == lo {
+        // The run's first piece carries a NATURAL (short) separator whose
+        // rewrite is rank-relevant: no surgical escape.
+        return Ok(RunVerdict::Widen);
+    }
+
+    // The compressed evaluation: verify the post-edit plan at piece
+    // granularity over memoized summaries, streaming no untouched piece.
+    // `None` (regime not met) falls back to the full entry stream for
+    // interior edits, and widens for the min-insert shape (the stream
+    // cannot license a surgical apply). In debug builds every compressed
+    // interior verdict is pinned against the full stream's.
+    let compressed = compressed_run_quiet::<Key, Value, Backend, D>(
+        root, path, lo, hi, edit, accessor, manifest,
+    )
+    .await?;
+
+    if min_insert {
+        #[cfg(debug_assertions)]
+        if let Some(verdict) = compressed {
+            let full = streamed_run_quiet::<Key, Value, Backend, D>(
+                root, path, lo, hi, edit, accessor, manifest,
+            )
+            .await?;
+            debug_assert_eq!(
+                verdict, full,
+                "the compressed min-insert verdict must match the full streamed plan check"
+            );
+        }
+        // A new minimum often flips its boundary seam's veto status (it
+        // shares a longer prefix with the left neighbor than the old first
+        // key did), putting the run outside the compressed regimes — the
+        // measured dominant case. The full stream handles any regime and
+        // gives the identical plan-and-marks guarantee, so it licenses the
+        // surgical apply whenever the compressed evaluation cannot.
+        let verdict = match compressed {
+            Some(verdict) => verdict,
+            None => {
+                streamed_run_quiet::<Key, Value, Backend, D>(
+                    root, path, lo, hi, edit, accessor, manifest,
+                )
+                .await?
+            }
+        };
+        if !verdict {
+            return Ok(RunVerdict::Widen);
+        }
+        let Edit::Upsert(entry) = edit else {
+            return Ok(RunVerdict::Widen);
+        };
+        // The boundary's re-derived forced separator: previous piece's
+        // last key (its summary is in hand after the compressed pass)
+        // against the new minimum, exactly as the regroup's seal would
+        // derive it. Only a LENGTH-preserving rewrite is surgical.
+        let (previous_last, stored_len) = {
+            let children = &follow(root, parent_path)?.as_index()?.children;
+            let previous_last = match &children[at - 1] {
+                Node::Transient(TransientNode::Segment(segment)) => segment
+                    .entries()
+                    .last()
+                    .map(|entry| entry.key.as_ref().to_vec()),
+                Node::Persistent(link) => {
+                    crate::distribution::summary::memoized(&link.node, manifest)
+                        .map(|summary| summary.last_key.clone())
+                }
+                Node::Transient(_) => None,
+            };
+            (previous_last, children[at].separator()?.len())
+        };
+        let Some(previous_last) = previous_last else {
+            return Ok(RunVerdict::Widen);
+        };
+        let separator =
+            crate::distribution::cap::frame_separator(&previous_last, entry.key.as_ref(), manifest);
+        return Ok(match separator {
+            Some(separator) if separator.len() == stored_len => {
+                RunVerdict::SurgicalMin { separator }
+            }
+            _ => RunVerdict::Widen,
+        });
+    }
+
+    if let Some(verdict) = compressed {
+        #[cfg(debug_assertions)]
+        {
+            let full = streamed_run_quiet::<Key, Value, Backend, D>(
+                root, path, lo, hi, edit, accessor, manifest,
+            )
+            .await?;
+            debug_assert_eq!(
+                verdict, full,
+                "the compressed quiet verdict must match the full streamed plan check"
+            );
+        }
+        return Ok(if verdict {
+            RunVerdict::Quiet
+        } else {
+            RunVerdict::Widen
+        });
+    }
+
+    Ok(
+        if streamed_run_quiet::<Key, Value, Backend, D>(
+            root, path, lo, hi, edit, accessor, manifest,
+        )
+        .await?
+        {
+            RunVerdict::Quiet
+        } else {
+            RunVerdict::Widen
+        },
+    )
+}
+
+/// The full entry-streamed forced-run plan check: streams every piece's
+/// keys and weights, simulates the edit, re-runs `cut_plan` and demands
+/// the exact stored partition. The authoritative fallback (and debug
+/// oracle) for `compressed_run_quiet`.
+#[allow(clippy::too_many_arguments)]
+async fn streamed_run_quiet<Key, Value, Backend, D>(
+    root: &mut TransientNode<Key, Value>,
+    path: &[usize],
+    lo: usize,
+    hi: usize,
+    edit: &Edit<Key, Value>,
+    accessor: &Accessor<Backend>,
+    manifest: &Manifest,
+) -> Result<bool, DialogSearchTreeError>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+    D: Distribution,
+{
+    let at = path[path.len() - 1];
+    let parent_path = &path[..path.len() - 1];
+    let run_at = at - lo;
+
+    // Per-piece sources for the read-only stream: transient siblings give
+    // up their keys and weights immediately, persistent ones contribute
+    // their link.
+    enum PieceSource<Key> {
+        Fetch(Link),
+        Ready(Vec<Key>, Vec<usize>),
+    }
+    let sources: Vec<PieceSource<Key>> = {
+        let children = &follow(root, parent_path)?.as_index()?.children;
+        let mut sources = Vec::with_capacity(hi - lo + 1);
+        for child in children.iter().take(hi + 1).skip(lo) {
+            sources.push(match child {
+                Node::Persistent(link) => PieceSource::Fetch(link.clone()),
+                Node::Transient(TransientNode::Segment(segment)) => PieceSource::Ready(
+                    segment.entries().iter().map(|e| e.key.clone()).collect(),
+                    segment.entries().iter().map(Entry::weight).collect(),
+                ),
+                Node::Transient(_) => return Ok(false),
+            });
+        }
+        sources
+    };
+
+    // Stream the run's keys and weights in key order, remembering each
+    // piece's length so the current partition can be compared against the
+    // recomputed plan.
+    let mut keys: Vec<Key> = Vec::new();
+    let mut weights: Vec<usize> = Vec::new();
+    let mut piece_lens: Vec<usize> = Vec::with_capacity(sources.len());
+    for source in sources {
+        match source {
+            PieceSource::Ready(piece_keys, piece_weights) => {
+                piece_lens.push(piece_keys.len());
+                keys.extend(piece_keys);
+                weights.extend(piece_weights);
+            }
+            PieceSource::Fetch(link) => {
+                let persistent = accessor.get_node(&link.node).await?;
+                let TransientNode::Segment(segment) =
+                    TransientNode::<Key, Value>::open(&persistent, link.separator.clone())?
+                else {
+                    return Ok(false);
+                };
+                let entries = segment.entries();
+                piece_lens.push(entries.len());
+                keys.extend(entries.iter().map(|e| e.key.clone()));
+                weights.extend(entries.iter().map(Entry::weight));
+            }
+        }
+    }
+
+    // Simulate the edit on the streamed sequence. The edit always lands in
+    // the descent piece (`run_at`) — routing put it there — so that
+    // piece's length adjusts directly.
+    match edit {
+        Edit::Upsert(entry) => match keys.binary_search(&entry.key) {
+            Ok(i) => weights[i] = entry.weight(),
+            Err(i) => {
+                piece_lens[run_at] += 1;
+                keys.insert(i, entry.key.clone());
+                weights.insert(i, entry.weight());
+            }
+        },
+        Edit::Delete(key) => {
+            let Ok(i) = keys.binary_search(key) else {
+                return Ok(false);
+            };
+            piece_lens[run_at] -= 1;
+            keys.remove(i);
+            weights.remove(i);
+        }
+    }
+
+    // Re-run the regroup's decision pipeline and demand the exact current
+    // partition: every predicted cut on a current boundary, every current
+    // boundary predicted, and every boundary still carrying its forced
+    // mark (a coin cut landing on a boundary would flip the stored
+    // separator to its natural form — different bytes, so widen).
+    let key_refs: Vec<&Key> = keys.iter().collect();
+    let (cut_after, forced_start) =
+        crate::node::transient::cut_plan::<Key, D>(&key_refs, &weights, manifest);
+    let count = keys.len();
+    let mut boundary = vec![false; count];
+    let mut acc = 0usize;
+    for len in &piece_lens[..piece_lens.len() - 1] {
+        acc += len;
+        if acc == 0 || acc > count {
+            return Ok(false);
+        }
+        boundary[acc - 1] = true;
+    }
+    for j in 0..count.saturating_sub(1) {
+        if cut_after[j] != boundary[j] {
+            return Ok(false);
+        }
+        if boundary[j] && !forced_start[j + 1] {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The compressed forced-run plan check: verifies the post-edit plan at
+/// piece granularity over memoized `PieceSummary` data
+/// (`distribution::summary`), streaming no untouched piece.
+///
+/// Exact within two regimes, selected by the boundary seams' veto status:
+///
+/// - **Stretch** (every boundary vetoed): with every piece fully vetoed
+///   inside, the window is one maximal stretch — no coin verdicts, no
+///   ceiling candidates — and the plan reduces to the stretch backstop's
+///   election at `max_segment`.
+/// - **Ceiling** (every boundary accepted): banks reset at every
+///   boundary, so coin verdicts are piece-local and carried by the
+///   summaries (`interior_coin_cut` must be clear, and each boundary's
+///   own verdict — `leaf_cut(last key, trailing bank + last weight)` —
+///   must be no-cut); interior vetoed stretches must stay under
+///   `max_segment` (the summary bounds them), and the plan reduces to the
+///   frame ceiling's election over the window's single frame.
+///
+/// Both elections are evaluated by `cap::election_matches_boundaries` at
+/// piece granularity. The edited piece's post-edit summary is built live
+/// from the open leaf with the edit applied (its edge keys are unchanged
+/// by the strict-interior guard, so the boundary seams stand).
+///
+/// Returns `Some(verdict)` — an EXACT quiet/widen answer — or `None` when
+/// the run falls outside both regimes (mixed boundaries, a non-candidate
+/// boundary, an over-weight interior stretch, a transient index sibling),
+/// in which case the full entry stream decides.
+#[allow(clippy::too_many_arguments)]
+async fn compressed_run_quiet<Key, Value, Backend, D>(
+    root: &mut TransientNode<Key, Value>,
+    path: &[usize],
+    lo: usize,
+    hi: usize,
+    edit: &Edit<Key, Value>,
+    accessor: &Accessor<Backend>,
+    manifest: &Manifest,
+) -> Result<Option<bool>, DialogSearchTreeError>
+where
+    Key: self::Key + ConditionalSync + 'static,
+    Value: self::Value + ConditionalSync + 'static,
+    Value::Archived: for<'a> CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
+        + ConditionalSync,
+    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+        + ConditionalSync,
+    D: Distribution,
+{
+    use crate::distribution::summary::{self, PieceSummary};
+    use crate::distribution::{anchor_hash, cap};
+    use std::sync::Arc;
+
+    let at = path[path.len() - 1];
+    let parent_path = &path[..path.len() - 1];
+
+    // Pass 1 (sync, under the tree borrow): per piece, either a ready
+    // summary — transient segments and the edited piece, summarized in
+    // place — or the stored link to resolve against the memo. The edited
+    // piece gets its POST-EDIT summary, built from the open leaf with the
+    // edit applied, mirroring the full check's simulation.
+    enum Pending {
+        Ready(Arc<PieceSummary>),
+        Fetch(Link),
+    }
+    let mut pieces: Vec<Pending> = Vec::with_capacity(hi - lo + 1);
+    {
+        let children = &follow(root, parent_path)?.as_index()?.children;
+        for (index, child) in children.iter().enumerate().take(hi + 1).skip(lo) {
+            if index == at {
+                let Node::Transient(TransientNode::Segment(leaf)) = child else {
+                    return Ok(None);
+                };
+                let entries = leaf.entries();
+                let mut keys: Vec<&[u8]> = Vec::with_capacity(entries.len() + 1);
+                let mut weights: Vec<usize> = Vec::with_capacity(entries.len() + 1);
+                for entry in entries {
+                    keys.push(entry.key.as_ref());
+                    weights.push(entry.weight());
+                }
+                match edit {
+                    Edit::Upsert(entry) => {
+                        match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                            Ok(i) => weights[i] = entry.weight(),
+                            Err(i) => {
+                                keys.insert(i, entry.key.as_ref());
+                                weights.insert(i, entry.weight());
+                            }
+                        }
+                    }
+                    Edit::Delete(key) => match entries.binary_search_by(|e| e.key.cmp(key)) {
+                        Ok(i) => {
+                            keys.remove(i);
+                            weights.remove(i);
+                        }
+                        Err(_) => return Ok(None),
+                    },
+                }
+                pieces.push(Pending::Ready(Arc::new(PieceSummary::build::<D>(
+                    &keys, &weights, manifest,
+                ))));
+            } else {
+                match child {
+                    Node::Persistent(link) => match summary::memoized(&link.node, manifest) {
+                        Some(ready) => pieces.push(Pending::Ready(ready)),
+                        None => pieces.push(Pending::Fetch(link.clone())),
+                    },
+                    Node::Transient(TransientNode::Segment(segment)) => {
+                        let entries = segment.entries();
+                        let keys: Vec<&[u8]> =
+                            entries.iter().map(|entry| entry.key.as_ref()).collect();
+                        let weights: Vec<usize> = entries.iter().map(Entry::weight).collect();
+                        pieces.push(Pending::Ready(Arc::new(PieceSummary::build::<D>(
+                            &keys, &weights, manifest,
+                        ))));
+                    }
+                    Node::Transient(_) => return Ok(None),
+                }
+            }
+        }
+    }
+
+    // Pass 2 (async): resolve stored pieces through the memo, streaming a
+    // piece only on its first touch per content change.
+    let mut summaries: Vec<Arc<PieceSummary>> = Vec::with_capacity(pieces.len());
+    for pending in pieces {
+        summaries.push(match pending {
+            Pending::Ready(summary) => summary,
+            Pending::Fetch(link) => {
+                let persistent = accessor.get_node(&link.node).await?;
+                let TransientNode::Segment(segment) =
+                    TransientNode::<Key, Value>::open(&persistent, link.separator.clone())?
+                else {
+                    return Ok(None);
+                };
+                let entries = segment.entries();
+                let keys: Vec<&[u8]> = entries.iter().map(|entry| entry.key.as_ref()).collect();
+                let weights: Vec<usize> = entries.iter().map(Entry::weight).collect();
+                summary::memoize(
+                    &link.node,
+                    manifest,
+                    PieceSummary::build::<D>(&keys, &weights, manifest),
+                )
+            }
+        });
+    }
+
+    // Regime selection by the boundary seams' veto status: all vetoed is
+    // the stretch regime, all accepted the ceiling regime, and a mix
+    // falls back to the full stream.
+    if summaries.iter().any(|summary| summary.count == 0) {
+        return Ok(None);
+    }
+    let mut vetoed_boundaries = 0usize;
+    for pair in summaries.windows(2) {
+        if D::vetoes(
+            pair[0].last_key.as_slice(),
+            pair[1].first_key.as_slice(),
+            manifest,
+        ) {
+            vetoed_boundaries += 1;
+        }
+    }
+
+    let (threshold, boundaries) = if vetoed_boundaries == summaries.len() - 1 {
+        // Stretch regime: every piece fully vetoed inside, every boundary
+        // a forced candidate; the plan is the stretch election alone.
+        if summaries.iter().any(|summary| !summary.all_vetoed) {
+            return Ok(None);
+        }
+        let mut boundaries = Vec::with_capacity(summaries.len() - 1);
+        for pair in summaries.windows(2) {
+            let left = pair[0].last_key.as_slice();
+            let right = pair[1].first_key.as_slice();
+            if !cap::is_forced_candidate(left, right, manifest) {
+                return Ok(None);
+            }
+            boundaries.push((cap::shortest_separator_len(left, right), anchor_hash(right)));
+        }
+        let compressed: Vec<cap::CompressedPiece> = summaries
+            .iter()
+            .map(|summary| cap::CompressedPiece {
+                count: summary.count,
+                weight: summary.weight,
+                interior: summary.stretch_interior.clone(),
+            })
+            .collect();
+        return Ok(Some(cap::election_matches_boundaries(
+            &compressed,
+            &boundaries,
+            manifest.max_segment as usize,
+            manifest,
+        )));
+    } else if vetoed_boundaries == 0 {
+        // Ceiling regime: banks reset at every (accepted) boundary, so
+        // the summaries' piece-local coin verdicts are exact. A stored
+        // piece is whole, so any interior coin cut means the plan does
+        // not reproduce the stored partition — but only for verdicts the
+        // edit cannot have changed; the edited piece's summary is
+        // post-edit, so the claim holds uniformly. Interior vetoed
+        // stretches over `max_segment` could hide stretch-backstop cuts
+        // the summary cannot decide: fall back.
+        if manifest.frame_ceiling() == 0 {
+            return Ok(None);
+        }
+        if summaries
+            .iter()
+            .any(|summary| summary.max_stretch_weight > manifest.max_segment as usize)
+        {
+            return Ok(None);
+        }
+        if summaries.iter().any(|summary| summary.interior_coin_cut) {
+            return Ok(Some(false));
+        }
+        let mut boundaries = Vec::with_capacity(summaries.len() - 1);
+        for pair in summaries.windows(2) {
+            let left = pair[0].last_key.as_slice();
+            let right = pair[1].first_key.as_slice();
+            if !cap::is_frame_candidate(left, right, manifest) {
+                return Ok(None);
+            }
+            // The boundary seam's own coin verdict must be no-cut: a
+            // natural cut here would store the short separator, not the
+            // long forced form the stored partition carries.
+            if D::leaf_cut(left, pair[0].trailing_bank + pair[0].last_weight, manifest) {
+                return Ok(Some(false));
+            }
+            boundaries.push((cap::shortest_separator_len(left, right), anchor_hash(right)));
+        }
+        (manifest.frame_ceiling(), boundaries)
+    } else {
+        return Ok(None);
+    };
+
+    let compressed: Vec<cap::CompressedPiece> = summaries
+        .iter()
+        .map(|summary| cap::CompressedPiece {
+            count: summary.count,
+            weight: summary.weight,
+            interior: summary.frame_interior.clone(),
+        })
+        .collect();
+    Ok(Some(cap::election_matches_boundaries(
+        &compressed,
+        &boundaries,
+        threshold,
+        manifest,
+    )))
 }
 
 /// Widens an edit's window to the whole force-split run around the leaf at
@@ -1695,6 +2594,7 @@ where
 async fn merge_forced_run<Key, Value, Backend>(
     root: &mut TransientNode<Key, Value>,
     path: &mut [usize],
+    co_paths: &mut [&mut Vec<usize>],
     accessor: &Accessor<Backend>,
     manifest: &Manifest,
 ) -> Result<Option<Vec<PieceOrigin>>, DialogSearchTreeError>
@@ -1769,24 +2669,24 @@ where
                 "Vetoed-stretch window member was not a leaf segment".into(),
             ));
         };
+        let (segment_entries, segment_separator) = segment.into_parts();
         if offset == 0 {
-            separator = segment.separator;
+            separator = segment_separator;
         }
         if let Some(link) = piece_links[offset].take() {
             origins.push(PieceOrigin {
                 start: entries.len(),
-                end: entries.len() + segment.entries.len(),
+                end: entries.len() + segment_entries.len(),
                 link,
             });
         }
-        entries.extend(segment.entries);
+        entries.extend(segment_entries);
     }
     parent.children.insert(
         lo,
-        Node::Transient(TransientNode::Segment(TransientSegment {
-            entries,
-            separator,
-        })),
+        Node::Transient(TransientNode::Segment(TransientSegment::new(
+            entries, separator,
+        ))),
     );
     if !pending.is_empty() {
         let bounds = link_bounds(&parent.children)?;
@@ -1794,7 +2694,55 @@ where
     }
     let leaf = path.len() - 1;
     path[leaf] = lo;
+    // Any other live path routed through the same parent recorded its leaf
+    // index against the pre-splice child list; remap it through the merge
+    // (no member starts: a path cannot descend below a leaf).
+    for co_path in co_paths {
+        remap_through_merge(co_path, &parent_path, lo, hi, &[]);
+    }
     Ok(Some(origins))
+}
+
+/// Remaps a recorded descent path through a forced-run merge that just
+/// spliced the children `lo..=hi` of the node at `parent_path` into ONE
+/// merged node inserted back at `lo`.
+///
+/// The widenings splice ancestors that OTHER live paths (the main edit
+/// path, the right-neighbor path) may share with the path being widened;
+/// without this remap those paths keep indices recorded against the
+/// pre-splice child list and the later re-shape descends into the wrong —
+/// or a nonexistent — child ("Re-shape path child index out of range" /
+/// "descended into a node that was not lifted").
+///
+/// A path that does not route through `parent_path` is untouched. One
+/// whose child index at that level sits right of the merged range shifts
+/// left by the removed count. One inside the range now descends through
+/// the merged node: `member_starts[k]` gives the number of children the
+/// merged node had accumulated before absorbing member `lo + k`, which is
+/// the offset the path's next-deeper index moves by (empty for a leaf
+/// merge, where there is no deeper index to shift).
+fn remap_through_merge(
+    path: &mut [usize],
+    parent_path: &[usize],
+    lo: usize,
+    hi: usize,
+    member_starts: &[usize],
+) {
+    let depth = parent_path.len();
+    if path.len() <= depth || &path[..depth] != parent_path {
+        return;
+    }
+    let at = path[depth];
+    if at > hi {
+        path[depth] = at - (hi - lo);
+    } else if at >= lo {
+        path[depth] = lo;
+        if let Some(&start) = member_starts.get(at - lo)
+            && depth + 1 < path.len()
+        {
+            path[depth + 1] += start;
+        }
+    }
 }
 
 /// Walks `root` down the recorded child indices in `path`, lifting the node at
@@ -2016,6 +2964,7 @@ fn reshape_path<Key, Value, D>(
     manifest: &Manifest,
     origins: &[PieceOrigin],
     index_origins: &[(usize, Vec<IndexPieceOrigin>)],
+    widened: bool,
 ) -> Result<Vec<Node<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key,
@@ -2038,17 +2987,20 @@ where
             // shift by the entry-count delta, earlier ones stand.
             let (landed, shift) = match &edit {
                 Edit::Upsert(entry) => {
-                    match segment.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+                    match segment
+                        .entries()
+                        .binary_search_by(|e| e.key.cmp(&entry.key))
+                    {
                         Ok(at) => (at, 0isize),
                         Err(at) => (at, 1),
                     }
                 }
-                Edit::Delete(key) => match segment.entries.binary_search_by(|e| e.key.cmp(key)) {
+                Edit::Delete(key) => match segment.entries().binary_search_by(|e| e.key.cmp(key)) {
                     Ok(at) => (at, -1isize),
                     Err(at) => (at, 0),
                 },
             };
-            apply_to_segment(&mut segment.entries, edit);
+            apply_to_segment(segment, edit);
             let adjusted: Vec<PieceOrigin> = origins
                 .iter()
                 .filter_map(|origin| {
@@ -2085,7 +3037,7 @@ where
             // paths, which have the neighbor's keys in memory.
             let floor = std::mem::take(&mut segment.separator);
             Ok(regroup_entries_reusing::<Key, Value, D>(
-                std::mem::take(&mut segment.entries),
+                segment.take_entries(),
                 floor,
                 manifest,
                 &adjusted,
@@ -2093,6 +3045,7 @@ where
         }
         Some((&at, rest)) => {
             let child = node.child_mut(at)?;
+            let child_separator = child.separator()?.to_vec();
             let replacement = reshape_path::<Key, Value, D>(
                 child,
                 rest,
@@ -2102,7 +3055,45 @@ where
                 manifest,
                 origins,
                 index_origins,
+                widened,
             )?;
+            // Identity fast path: the child re-cut to exactly one piece whose
+            // left-edge separator is unchanged. This node's separator SET is
+            // then identical, and every index-level decision — seam ranks,
+            // link weights, frame ceilings, anchor elections — reads only
+            // separators, so the splice-and-regroup below would reproduce
+            // this node verbatim (regrouping is deterministic and this node
+            // is itself the output of a prior regroup over the same
+            // separators). Skip it: put the piece back and keep every
+            // buffered link — and its sealed or cached encoding — exactly
+            // where it is, instead of decoding, re-routing, and re-encoding
+            // the whole buffer for a shape that cannot change. (Measured:
+            // per-edit `take_all` of en-route buffers was the dominant term
+            // of the at-scale commit cost under fat caps.)
+            //
+            // A widened edit is excluded outright: the forced-run merges
+            // fused stored pieces into one deliberately oversized window
+            // that ONLY the regroup re-splits, so on those paths the
+            // regroup must run even when the child re-cut to itself.
+            if !widened
+                && left_fuse != Some(0)
+                && replacement.len() == 1
+                && replacement[0]
+                    .separator()
+                    .map(|separator| separator == child_separator.as_slice())
+                    .unwrap_or(false)
+            {
+                let index = node.as_index_mut()?;
+                index.children[at] = replacement
+                    .into_iter()
+                    .next()
+                    .expect("the replacement has exactly one piece");
+                let kept = std::mem::replace(
+                    node,
+                    TransientNode::Segment(TransientSegment::new(Vec::new(), Vec::new())),
+                );
+                return Ok(vec![Node::Transient(kept)]);
+            }
             // Regrouping replaces `node` with a run of new nodes, so the ops
             // buffered here have nowhere to live unless they are carried over:
             // they are pending against this subtree, and the run covers exactly
@@ -2216,10 +3207,10 @@ where
             // node in an index that can. The wrapper keeps the same key range,
             // so routing is unchanged; its single link takes every op.
             other => {
-                let placeholder = Node::Transient(TransientNode::Segment(TransientSegment {
-                    entries: Vec::new(),
-                    separator: Vec::new(),
-                }));
+                let placeholder = Node::Transient(TransientNode::Segment(TransientSegment::new(
+                    Vec::new(),
+                    Vec::new(),
+                )));
                 let wrapped = std::mem::replace(other, placeholder);
                 let mut novelty = Novelty::new();
                 novelty.route::<Key>(&[], bucket)?;
@@ -2447,12 +3438,16 @@ where
             // nothing, so there is nothing to lift here.
             let floor = std::mem::take(&mut main.separator);
             if let Some(key) = key
-                && main.entries.last().map(|e| &e.key == key).unwrap_or(false)
+                && main
+                    .entries()
+                    .last()
+                    .map(|e| &e.key == key)
+                    .unwrap_or(false)
             {
-                main.entries.pop();
+                main.entries_mut().pop();
             }
-            let mut entries = main.entries;
-            entries.extend(neighbor.entries);
+            let mut entries = main.into_entries();
+            entries.extend(neighbor.into_entries());
             Ok((
                 regroup_entries::<Key, Value, D>(entries, floor, manifest),
                 Vec::new(),
@@ -2665,10 +3660,7 @@ where
     // Strip a non-canonical chain of single-child index nodes over indices. A
     // persistent single child is lifted first: its kind (index or segment)
     // decides whether the wrapper above it is canonical.
-    loop {
-        let TransientNode::Index(index) = &mut root else {
-            break;
-        };
+    while let TransientNode::Index(index) = &mut root {
         if index.children.len() != 1 {
             break;
         }
@@ -2825,14 +3817,14 @@ where
 {
     match node {
         TransientNode::Segment(segment) => {
-            let before = segment.entries.len();
-            segment.entries.retain(|entry| {
+            let before = segment.entries().len();
+            segment.entries_mut().retain(|entry| {
                 (!trim_start || &entry.key >= range.start())
                     && (!trim_end || &entry.key <= range.end())
             });
-            Ok(if segment.entries.is_empty() {
+            Ok(if segment.entries().is_empty() {
                 Trim::Empty
-            } else if segment.entries.len() == before {
+            } else if segment.entries().len() == before {
                 Trim::Unchanged
             } else {
                 Trim::Trimmed
@@ -3097,12 +4089,13 @@ where
     D: Distribution,
 {
     match (left, right) {
-        (TransientNode::Segment(mut left), TransientNode::Segment(right)) => {
+        (TransientNode::Segment(left), TransientNode::Segment(right)) => {
             // Leaves buffer nothing.
             let floor = left.separator.clone();
-            left.entries.extend(right.entries);
+            let mut entries = left.into_entries();
+            entries.extend(right.into_entries());
             Ok((
-                regroup_entries::<Key, Value, D>(left.entries, floor, manifest),
+                regroup_entries::<Key, Value, D>(entries, floor, manifest),
                 Vec::new(),
             ))
         }
@@ -3286,21 +4279,16 @@ where
     }
 }
 
-/// Applies one edit to a sorted segment in place.
-fn apply_to_segment<Key, Value>(entries: &mut Vec<Entry<Key, Value>>, edit: Edit<Key, Value>)
+/// Applies one edit to a sorted segment in place, through the segment's own
+/// edit methods so its cached total weight stays exact.
+fn apply_to_segment<Key, Value>(segment: &mut TransientSegment<Key, Value>, edit: Edit<Key, Value>)
 where
-    Key: Ord,
+    Key: self::Key,
+    Value: self::Value,
 {
     match edit {
-        Edit::Upsert(entry) => match entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
-            Ok(at) => entries[at].value = entry.value,
-            Err(at) => entries.insert(at, entry),
-        },
-        Edit::Delete(key) => {
-            if let Ok(at) = entries.binary_search_by(|e| e.key.cmp(&key)) {
-                entries.remove(at);
-            }
-        }
+        Edit::Upsert(entry) => segment.upsert(entry),
+        Edit::Delete(key) => segment.delete(&key),
     }
 }
 
@@ -3397,7 +4385,7 @@ fn collect_stream_plan<Key, Value>(
             }
         }
         TransientNode::Segment(segment) => {
-            for entry in &segment.entries {
+            for entry in segment.entries() {
                 if bounds.contains(&entry.key) {
                     plan.push(StreamStep::Entry(entry.clone()));
                 }
@@ -4686,9 +5674,10 @@ mod tests {
                 .retrieve(hash)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
-            let node: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::new(Buffer::from(bytes));
+            let node: PersistentNode<[u8; 4], Vec<u8>> =
+                PersistentNode::try_from(Buffer::from(bytes))?;
 
-            match node.body()? {
+            match node.body() {
                 ArchivedNodeBody::Segment(segment) => {
                     let first: [u8; 4] = segment.first_key::<[u8; 4]>()?.as_slice().try_into()?;
                     let last: [u8; 4] = segment.last_key::<[u8; 4]>()?.as_slice().try_into()?;
@@ -5626,9 +6615,10 @@ mod tests {
         let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
         let manifest = ceiling_manifest(2, 0);
 
-        // A small vetoed cluster (under the 512 stretch target, so the
-        // stretch backstop stays out of the picture) whose terminal seam
-        // coin is tails, found deterministically over cluster tags.
+        // A small vetoed cluster (under the 512 stretch target — three
+        // 34-byte keys at the calibrated per-entry weight, so the stretch
+        // backstop stays out of the picture) whose terminal seam coin is
+        // tails, found deterministically over cluster tags.
         let cluster = {
             let mut tag = b'a';
             loop {
@@ -5638,14 +6628,19 @@ mod tests {
                     bytes.extend(format!("{n:04}").into_bytes());
                     VarKey(bytes)
                 };
-                let keys: Vec<VarKey> = (0..5u32).map(make).collect();
+                let keys: Vec<VarKey> = (0..3u32).map(make).collect();
                 // The terminal coin's charge mirrors production: the vetoed
-                // stretch's bank plus the terminal entry's own full weight.
+                // stretch's bank plus the terminal entry's own full weight,
+                // both metered by `Entry::weight` (payload plus the
+                // calibrated encoding overhead on top of the key bytes).
                 let charge: usize = keys
                     .iter()
-                    .map(|key| distribution::cap::entry_weight(&key.0))
+                    .map(|key| {
+                        distribution::cap::entry_weight(&key.0)
+                            + crate::entry::ENTRY_ENCODING_OVERHEAD
+                    })
                     .sum();
-                let last = &keys[4];
+                let last = &keys[2];
                 if !<Geometric as Distribution>::leaf_cut(&last.0, charge, &manifest) {
                     break keys;
                 }
@@ -5679,6 +6674,106 @@ mod tests {
                 String::from_utf8_lossy(anchor)
             );
         }
+
+        Ok(())
+    }
+
+    /// A force-split frame's pieces are self-identified by their long
+    /// forced separators, and every edit path must preserve that mark. A
+    /// weight-neutral value update into a piece rides the in-place fast
+    /// path, which used to re-derive the piece's separator
+    /// unconditionally: the long forced form is not a prefix of the
+    /// piece's minimum, so `reseparate` collapsed it to the short natural
+    /// prefix and silently stripped the mark. The orphaned piece then
+    /// never rejoined its run, and canonical shapes came to depend on
+    /// edit history — the real-workload converge harness caught it as
+    /// same-facts-different-roots. Pinned at both layers: the stored
+    /// marks survive the update byte-for-byte, and the updated tree
+    /// matches the sequential build that carried the final value from
+    /// the start.
+    #[dialog_common::test]
+    async fn it_keeps_forced_marks_through_fast_path_updates() -> Result<()> {
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let manifest = ceiling_manifest(2, 0);
+
+        // An all-tails run over the ceiling: no natural cut anywhere, so
+        // the frame machinery must force-split it at marked anchors.
+        let sorted: Vec<VarKey> = tails_keys("e", 24, &manifest);
+        let tree = build_incremental(&sorted, manifest, &mut storage).await?;
+        let bound = manifest.max_separator as usize;
+        let marked: Vec<(usize, Vec<u8>)> = leaf_piece_heads(tree.root(), &storage)
+            .await?
+            .into_iter()
+            .filter(|(separator, _)| *separator > bound)
+            .collect();
+        assert!(
+            !marked.is_empty(),
+            "the all-tails run exceeds the ceiling and must be force-split"
+        );
+
+        // Update a key inside a marked piece with a same-weight value:
+        // eligible for the in-place fast path, which must leave every
+        // stored mark in place.
+        let head = &marked[0].1;
+        let at = sorted
+            .iter()
+            .position(|key| &key.0 == head)
+            .expect("the marked head is one of the built keys");
+        let target = sorted.get(at + 1).unwrap_or(&sorted[at]).clone();
+        let mut delta = Delta::zero();
+        let updated = tree
+            .edit_with_manifest(&storage)
+            .await?
+            .insert(target.clone(), b"rewritten".to_vec(), &storage)
+            .await?
+            .persist(&mut delta)?;
+        for (hash, buffer) in delta.flush() {
+            storage.store(buffer.as_ref().to_vec(), &hash).await?;
+        }
+
+        let after: Vec<(usize, Vec<u8>)> = leaf_piece_heads(updated.root(), &storage)
+            .await?
+            .into_iter()
+            .filter(|(separator, _)| *separator > bound)
+            .collect();
+        assert_eq!(
+            marked, after,
+            "a weight-neutral update stripped a forced mark"
+        );
+
+        // History-independence: a sequential build carrying the final
+        // value from the start lands on the same root.
+        let mut fresh_storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut fresh: Option<VarTree> = None;
+        let mut delta = Delta::zero();
+        for key in &sorted {
+            let transient = match &fresh {
+                None => {
+                    TransientTree::with_manifest(NULL_BLAKE3_HASH.clone(), Cache::new(), manifest)
+                }
+                Some(tree) => tree.edit_with_manifest(&fresh_storage).await?,
+            };
+            let value = if key == &target {
+                b"rewritten".to_vec()
+            } else {
+                key.0.clone()
+            };
+            let next = transient
+                .insert(key.clone(), value, &fresh_storage)
+                .await?
+                .persist(&mut delta)?;
+            for (hash, buffer) in delta.flush() {
+                fresh_storage.store(buffer.as_ref().to_vec(), &hash).await?;
+            }
+            delta = Delta::zero();
+            fresh = Some(next);
+        }
+        let fresh = fresh.expect("the sequential build is non-empty");
+        assert_eq!(
+            updated.root(),
+            fresh.root(),
+            "the update's history leaked into the canonical shape"
+        );
 
         Ok(())
     }
@@ -6127,7 +7222,7 @@ mod tests {
     /// of 15 near-duplicate keys sharing a 24-byte cluster prefix.
     fn semantic_cluster() -> Vec<VarKey> {
         let mut keys = Vec::new();
-        for sub in [b'A', b'B', b'C'] {
+        for sub in *b"ABC" {
             for n in 0..15u32 {
                 let mut bytes = vec![b'W'];
                 bytes.extend(vec![b'q'; 23]);
@@ -7242,8 +8337,8 @@ mod buffer_edit_interaction_tests {
                 .await?
                 .unwrap();
             let node: PersistentNode<[u8; 4], Vec<u8>> =
-                PersistentNode::new(crate::Buffer::from(bytes));
-            match node.body()? {
+                PersistentNode::try_from(crate::Buffer::from(bytes))?;
+            match node.body() {
                 ArchivedNodeBody::Index(index) => {
                     // Separators are lower bounds, so the second child's
                     // separator IS the boundary key that ends the first child.
@@ -7299,8 +8394,8 @@ mod buffer_edit_interaction_tests {
                 .await?
                 .unwrap();
             let node: PersistentNode<[u8; 4], Vec<u8>> =
-                PersistentNode::new(crate::Buffer::from(bytes));
-            match node.body()? {
+                PersistentNode::try_from(crate::Buffer::from(bytes))?;
+            match node.body() {
                 ArchivedNodeBody::Index(index) => {
                     // Separators are lower bounds, so the second child's
                     // separator IS the boundary key that ends the first child.
@@ -7978,8 +9073,9 @@ mod buffer_edit_interaction_tests {
             let bytes = dialog_storage::StorageBackend::get(storage.backend(), &hash)
                 .await?
                 .expect("node present");
-            let node: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::new(Buffer::from(bytes));
-            match node.body()? {
+            let node: PersistentNode<[u8; 4], Vec<u8>> =
+                PersistentNode::try_from(Buffer::from(bytes))?;
+            match node.body() {
                 ArchivedNodeBody::Index(index) => {
                     for at in 0..index.len() {
                         frontier.push(index.hash_at(at)?.clone());
@@ -8225,14 +9321,14 @@ mod buffer_edit_interaction_tests {
             .retrieve(hash)
             .await?
             .ok_or_else(|| anyhow::anyhow!("node {hash} missing from storage"))?;
-        Ok(PersistentNode::new(Buffer::from(bytes)))
+        Ok(PersistentNode::try_from(Buffer::from(bytes))?)
     }
 
     /// The buffered ops sealed into a stored node, owned.
     fn sealed_novelty(
         node: &PersistentNode<SpecKey, Vec<u8>>,
     ) -> Result<Vec<NoveltyEntry<Vec<u8>>>> {
-        Ok(match node.body()? {
+        Ok(match node.body() {
             ArchivedNodeBody::Index(index) => index.all_novelty::<SpecKey>()?,
             ArchivedNodeBody::Segment(_) => Vec::new(),
         })

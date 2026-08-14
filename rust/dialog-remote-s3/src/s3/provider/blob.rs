@@ -8,6 +8,7 @@
 
 use async_trait::async_trait;
 use base58::ToBase58;
+use dialog_capability::access::AuthorizeError;
 use dialog_capability::{ForkInvocation, Provider};
 use dialog_common::{Blake3Hash, ConditionalSend};
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
@@ -88,6 +89,11 @@ impl Provider<S3Invocation<Read>> for S3 {
                 input.capability.digest().as_bytes().to_base58(),
             ));
         }
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(BlobError::Authorization(AuthorizeError::UnavailableProof {
+                link: format!("blob read failed: {status}"),
+            }));
+        }
         if !status.is_success() {
             return Err(BlobError::Storage(format!("blob read failed: {status}")));
         }
@@ -122,7 +128,7 @@ impl S3BlobSource {
         let stream: ByteStream = Box::pin(response.bytes_stream().map(|chunk| {
             chunk
                 .map(|b| b.to_vec())
-                .map_err(|e| BlobError::Io(e.to_string()))
+                .map_err(|e| BlobError::Storage(e.to_string()))
         }));
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         let stream: ByteStream = Box::pin(futures_util::stream::once(async move {
@@ -130,7 +136,7 @@ impl S3BlobSource {
                 .bytes()
                 .await
                 .map(|b| b.to_vec())
-                .map_err(|e| BlobError::Io(e.to_string()))
+                .map_err(|e| BlobError::Storage(e.to_string()))
         }));
         Self { stream }
     }
@@ -184,6 +190,13 @@ impl BlobSink for S3BlobSink {
             .map_err(|e| BlobError::Storage(e.to_string()))?;
         if response.status().is_success() {
             Ok(hash)
+        } else if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            Err(BlobError::Authorization(AuthorizeError::UnavailableProof {
+                link: format!("blob import failed: {}", response.status()),
+            }))
         } else {
             Err(BlobError::Storage(format!(
                 "blob import failed: {}",

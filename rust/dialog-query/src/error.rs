@@ -760,20 +760,6 @@ impl From<OwnedInvalidIdentifier> for DialogArtifactsError {
     }
 }
 
-/// Error types that can occur during transaction operations
-#[derive(Debug, Error)]
-pub enum TransactionError {
-    /// The operation is invalid for the current transaction state.
-    #[error("Invalid operation: {reason}")]
-    InvalidOperation {
-        /// Description of why the operation is invalid.
-        reason: String,
-    },
-    /// An error from the underlying storage layer.
-    #[error("Storage error: {0}")]
-    Storage(#[from] DialogArtifactsError),
-}
-
 /// Why a premise cannot run yet under the current bindings: the
 /// `Err` case of the SIPS binding function
 /// [`Premise::feasible`](crate::Premise::feasible). Names which

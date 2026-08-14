@@ -56,6 +56,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::query::{Application, Output};
+use std::sync::Arc;
 
 use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
@@ -152,7 +153,7 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
             // uses is what guarantees identical behavior — fact reads,
             // tombstones, schema metadata, and deductive-rule
             // resolution all share one implementation.
-            let query_env = QueryEnv::new(vec![branch.clone()], overlay, tombstones, env);
+            let query_env = QueryEnv::new(vec![branch.clone()], overlay, Arc::new(tombstones), env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
@@ -166,10 +167,11 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
     use crate::schema;
     use crate::schema::DidExt as _;
     use dialog_artifacts::Entity;
+    use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::query::Output;
     use dialog_query::{Concept, Query, Term, the};
 

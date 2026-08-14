@@ -4,7 +4,7 @@
 //! memory (CAS cell) capabilities, enabling them to be translated into
 //! concrete S3 request descriptions.
 
-use super::{Precondition, S3Request};
+use super::{Precondition, RequestMethod, S3Request};
 use dialog_capability::{Capability, Policy};
 use dialog_common::Hasher;
 use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
@@ -40,6 +40,10 @@ impl From<&Capability<Resolve>> for S3Request {
     }
 }
 
+impl RequestMethod for Capability<Resolve> {
+    const METHOD: &'static str = "GET";
+}
+
 impl From<&Capability<Publish>> for S3Request {
     fn from(capability: &Capability<Publish>) -> Self {
         S3Request {
@@ -57,6 +61,10 @@ impl From<&Capability<Publish>> for S3Request {
     }
 }
 
+impl RequestMethod for Capability<Publish> {
+    const METHOD: &'static str = "PUT";
+}
+
 impl From<&Capability<PublishAttenuation>> for S3Request {
     fn from(capability: &Capability<PublishAttenuation>) -> Self {
         let publish = PublishAttenuation::of(capability);
@@ -65,14 +73,18 @@ impl From<&Capability<PublishAttenuation>> for S3Request {
             path: format!(
                 "{}/{}/{}",
                 capability.subject(),
-                &Space::of(capability).space,
-                &Cell::of(capability).cell
+                Space::of(capability).space,
+                Cell::of(capability).cell
             ),
             checksum: Some(publish.checksum.clone()),
             precondition: publish.when.as_ref().into(),
             ..S3Request::default()
         }
     }
+}
+
+impl RequestMethod for Capability<PublishAttenuation> {
+    const METHOD: &'static str = "PUT";
 }
 
 impl From<&Capability<Retract>> for S3Request {
@@ -89,4 +101,8 @@ impl From<&Capability<Retract>> for S3Request {
             ..S3Request::default()
         }
     }
+}
+
+impl RequestMethod for Capability<Retract> {
+    const METHOD: &'static str = "DELETE";
 }

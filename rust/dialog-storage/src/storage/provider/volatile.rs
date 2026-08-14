@@ -144,14 +144,6 @@ impl Resource<Location> for Volatile {
     }
 }
 
-/// Errors that can occur during volatile storage operations.
-#[derive(Debug, thiserror::Error)]
-pub enum VolatileError {
-    /// CAS condition failed.
-    #[error("CAS condition failed: {0}")]
-    Cas(String),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

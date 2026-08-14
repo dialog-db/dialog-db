@@ -120,7 +120,79 @@ where
     }
 }
 
+/// The HTTP method a value's [`S3Request`] translation will carry,
+/// available without materializing the request.
+///
+/// Building an [`S3Request`] can cost far more than reading its method:
+/// a `Put` translation checksums its entire payload. Callers that only
+/// need to know whether a request is a read, such as the permit cache
+/// deciding cacheability, consult this constant instead of building and
+/// discarding the request.
+///
+/// Every `From<&Capability<Fx>> for S3Request` impl has a matching
+/// `RequestMethod` impl beside it; the consistency tests in this module
+/// keep the two from drifting apart.
+pub trait RequestMethod {
+    /// The HTTP method [`IntoRequest::to_request`] would produce.
+    const METHOD: &'static str;
+}
+
 /// Get the current time as a UTC datetime.
 pub fn current_time() -> DateTime<Utc> {
     DateTime::<Utc>::from(dialog_common::time::now())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IntoRequest, RequestMethod};
+    use dialog_capability::{Subject, did};
+    use dialog_common::{Blake3Hash, Buffer};
+    use dialog_effects::archive::{Archive, Catalog, Get, Put};
+    use dialog_effects::blob::prelude::{ArchiveBlobExt, BlobExt};
+    use dialog_effects::memory::Version;
+    use dialog_effects::memory::prelude::{CellExt, MemoryExt, MemorySubjectExt, SpaceExt};
+
+    #[cfg(target_arch = "wasm32")]
+    use wasm_bindgen_test::wasm_bindgen_test_configure;
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    fn method_matches<T: IntoRequest + RequestMethod>(capability: &T) {
+        assert_eq!(
+            capability.to_request().method,
+            T::METHOD,
+            "RequestMethod::METHOD must match the materialized request"
+        );
+    }
+
+    fn subject() -> Subject {
+        Subject::from(did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"))
+    }
+
+    #[dialog_common::test]
+    fn it_reports_the_method_the_archive_translations_produce() {
+        let digest = Blake3Hash::hash(b"content");
+        let catalog = || {
+            subject()
+                .attenuate(Archive)
+                .attenuate(Catalog::new("index"))
+        };
+        method_matches(&catalog().invoke(Get::new(digest)));
+        method_matches(&catalog().invoke(Put::new(Buffer::from(vec![1, 2, 3]))));
+    }
+
+    #[dialog_common::test]
+    fn it_reports_the_method_the_blob_translations_produce() {
+        let digest = Blake3Hash::hash(b"content");
+        method_matches(&subject().attenuate(Archive).blob().read(digest.clone()));
+        method_matches(&subject().attenuate(Archive).blob().import(digest, 3));
+    }
+
+    #[dialog_common::test]
+    fn it_reports_the_method_the_memory_translations_produce() {
+        let cell = || subject().memory().space("space").cell("cell");
+        method_matches(&cell().resolve());
+        method_matches(&cell().publish(vec![1, 2, 3], None));
+        method_matches(&cell().retract(Version::from("v1".to_string())));
+    }
 }

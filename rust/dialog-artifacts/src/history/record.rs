@@ -49,11 +49,26 @@ impl Record {
     /// key carries the claim's value through that decision (see
     /// [`history_key`]), so it must be the tree's own.
     pub fn into_entry(self, version: &Version, manifest: &Manifest) -> (Key, State<Datum>) {
+        let key = self.key(version, manifest);
+        (key, self.into_datum(version))
+    }
+
+    /// The [`history_key`] this record is stored at, computed without
+    /// consuming (or cloning) the record: the commit path needs the key both
+    /// to fold same-key records and to write the fold, and cloning a whole
+    /// claim per instruction just to learn its key was pure overhead.
+    pub fn key(&self, version: &Version, manifest: &Manifest) -> Key {
+        let claim = self.claim();
+        history_key(version, &claim.of, &claim.the, &claim.is, manifest)
+    }
+
+    /// The stored payload half of [`into_entry`](Self::into_entry), for a
+    /// caller that already holds the record's key.
+    pub fn into_datum(self, version: &Version) -> State<Datum> {
         let retraction = !self.is_assertion();
         let claim = match self {
             Record::Assert(claim) | Record::Retract(claim) => claim,
         };
-        let key = history_key(version, &claim.of, &claim.the, &claim.is, manifest);
         let datum = Datum {
             cause: None,
             blob: None,
@@ -62,7 +77,7 @@ impl Record {
             supersedes: claim.cause.versions().to_vec(),
             retraction,
         };
-        (key, State::Added(datum))
+        State::Added(datum)
     }
 
     /// The compact coverage entry mirroring this record, when it covers

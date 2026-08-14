@@ -33,7 +33,7 @@ use dialog_remote_ucan_s3::UcanSite;
 /// - `Site for Network`, `SiteAddress for NetworkAddress`,
 ///   `Authorize<Env> for NetworkFork<Fx>`, and
 ///   `Provider<ForkInvocation<Network, Fx>> for Network`.
-#[derive(Debug, Clone, Copy, Default, Site)]
+#[derive(Debug, Clone, Default, Site)]
 pub struct Network {
     s3: S3,
     ucan: UcanSite,

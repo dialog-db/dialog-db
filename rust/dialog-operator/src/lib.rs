@@ -15,11 +15,7 @@
 //! credentials, profiles, operator builders, and network dispatch that
 //! together form the operational layer above the core artifact store.
 
-mod authority;
-pub use authority::*;
-
-mod profile;
-pub use profile::*;
+pub use dialog_identity::*;
 
 mod operator;
 pub use operator::*;

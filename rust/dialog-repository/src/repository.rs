@@ -9,9 +9,12 @@
 use dialog_capability::{Capability, Did, Subject};
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::space::SpaceSubjectExt;
-use dialog_operator::access::Access as ProfileAccess;
-use dialog_operator::{Profile, SpaceHandle};
+use dialog_identity::access::Access as ProfileAccess;
+use dialog_identity::{Profile, SpaceHandle};
 use dialog_varsig::Principal;
+
+mod access;
+pub use access::*;
 
 mod archive;
 pub use archive::*;
@@ -36,6 +39,9 @@ pub use open::*;
 
 mod remote;
 pub use remote::*;
+
+mod snapshot;
+pub use snapshot::*;
 
 // `Revision` and `TreeReference` moved to `dialog-capability` (the
 // light crate that owns `Did`) so engine-free clients can name them
@@ -194,9 +200,10 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::helpers::{test_operator_with_profile, test_repo, unique_name};
+    use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_operator::helpers::{test_operator_with_profile, unique_name};
     use dialog_remote_s3::Address as S3Address;
     use futures_util::StreamExt;
     use futures_util::stream;
@@ -458,6 +465,7 @@ mod tests {
         let results: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -515,6 +523,7 @@ mod tests {
         let results: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().of("user:alice".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -537,6 +546,7 @@ mod tests {
         let results: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -572,6 +582,7 @@ mod tests {
         let before: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -589,6 +600,7 @@ mod tests {
         let after: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -603,8 +615,8 @@ mod tests {
     mod delegation_tests {
 
         use super::*;
-        use crate::helpers::{test_operator_with_profile, unique_name};
         use dialog_effects::memory as fx_memory;
+        use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 
         #[dialog_common::test]
         async fn it_delegates_repo_to_profile_and_claims() -> Result<()> {
@@ -749,7 +761,8 @@ mod tests {
 
     mod query_engine {
 
-        use crate::helpers::{test_operator_with_profile, test_repo};
+        use crate::helpers::test_repo;
+        use dialog_operator::helpers::test_operator_with_profile;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term};
 
@@ -1038,7 +1051,8 @@ mod tests {
     mod query_session {
 
         use super::query_engine::{Employee, employee};
-        use crate::helpers::{test_operator_with_profile, test_repo};
+        use crate::helpers::test_repo;
+        use dialog_operator::helpers::test_operator_with_profile;
         use dialog_query::query::Output;
         use dialog_query::{Concept, Entity, Query, Term, the};
 
@@ -1946,7 +1960,7 @@ mod tests {
             use dialog_artifacts::selector::Constrained;
             use dialog_artifacts::{
                 ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey,
-                Update as _, Value, default_sort_key,
+                Update as _, Value,
             };
             use dialog_capability::Provider;
             use futures_util::StreamExt as _;
@@ -2041,7 +2055,10 @@ mod tests {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>, DialogArtifactsError>>()?;
-                Ok(items.iter().map(default_sort_key).collect())
+                Ok(items
+                    .iter()
+                    .map(|view| view.sort_key())
+                    .collect::<Result<Vec<_>, _>>()?)
             }
 
             let scan_modes: &[(&str, ArtifactSelector<Constrained>)] = &[
@@ -2087,7 +2104,7 @@ mod tests {
     mod profile_as_repository {
 
         use super::*;
-        use crate::helpers::test_operator_with_profile;
+        use dialog_operator::helpers::test_operator_with_profile;
         use dialog_query::{Entity, the};
 
         #[dialog_common::test]
@@ -2142,6 +2159,7 @@ mod tests {
             let results: Vec<_> = r_branch
                 .claims()
                 .select(ArtifactSelector::new().the("user/name".parse()?))
+                .to_owned()
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()
@@ -2191,6 +2209,7 @@ mod tests {
             let results: Vec<_> = named_branch
                 .claims()
                 .select(ArtifactSelector::new().the("item/tag".parse()?))
+                .to_owned()
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()
