@@ -77,6 +77,9 @@ pub use state::*;
 mod blob_index;
 pub use blob_index::*;
 
+mod collection;
+pub use collection::*;
+
 mod spill;
 pub use spill::*;
 
@@ -91,6 +94,7 @@ mod buffered;
 pub use buffered::*;
 
 pub mod merge;
+pub mod position;
 pub mod tree;
 
 mod uri;

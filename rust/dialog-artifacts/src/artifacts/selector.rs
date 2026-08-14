@@ -4,7 +4,9 @@
 
 use std::marker::PhantomData;
 
-use crate::{Attribute, Entity, Value};
+use std::str::FromStr as _;
+
+use crate::{Attribute, Entity, Name, NameShape, Symbol, Value};
 
 #[cfg(doc)]
 use crate::ArtifactStore;
@@ -66,6 +68,25 @@ where
     /// attribute key stores the full (64-byte-capped) name raw, so
     /// this bound is an exact key range.
     attribute_prefix: Option<String>,
+    /// Filter on the name half of the attribute: selected
+    /// [`Artifact`]s' attributes must have this exact name after the
+    /// `/` delimiter, in any domain. A name alone does not describe a
+    /// contiguous key range, so it is a per-entry filter; combined
+    /// with [`ArtifactSelector::with_domain`] the builder tightens it
+    /// to an exact attribute.
+    attribute_name: Option<Name>,
+    /// Constraint on the shape of the attribute's name half:
+    /// selected [`Artifact`]s' attributes must be named by a symbol
+    /// (dictionary entries) or by a position (ordered members).
+    /// The shapes' first-byte classes are contiguous and disjoint
+    /// (`A`–`Z` below `a`–`z`), so combined with a whole-domain
+    /// [`ArtifactSelector::with_domain`] prefix this narrows the
+    /// scan to the matching half of the domain's key range; on any
+    /// other selector shape it is a per-entry filter. The
+    /// classification is coarse (first byte only, matching the
+    /// range bytes); strict [`Name`] vocabulary enforcement is the
+    /// consumer's re-check.
+    name_shape: Option<NameShape>,
     /// Prefix bound on the value: selected [`Artifact`]s' values must
     /// be strings beginning with this string. The M3 value-in-key
     /// format stores the value order-preservingly in the VAE index, so
@@ -104,6 +125,8 @@ impl ArtifactSelector<Unconstrained> {
             value: None,
             entity_prefix: None,
             attribute_prefix: None,
+            attribute_name: None,
+            name_shape: None,
             value_prefix: None,
             value_lower: None,
             value_upper: None,
@@ -141,6 +164,16 @@ where
         self.attribute_prefix.as_deref()
     }
 
+    /// The filter on the name half of attributes, if any
+    pub fn attribute_name(&self) -> Option<&Name> {
+        self.attribute_name.as_ref()
+    }
+
+    /// The constraint on the shape of attributes' name halves, if any
+    pub fn name_shape(&self) -> Option<NameShape> {
+        self.name_shape
+    }
+
     /// The prefix bound on values, if any
     pub fn value_prefix(&self) -> Option<&str> {
         self.value_prefix.as_deref()
@@ -164,6 +197,8 @@ where
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -179,6 +214,8 @@ where
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -194,11 +231,68 @@ where
             value: Some(value),
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
             state_type: PhantomData,
         }
+    }
+
+    /// Constrain selected [`Artifact`]s to attributes under `domain`
+    /// — every attribute of the form `domain/<name>`. Attributes sort
+    /// by their raw bytes, so a domain is a contiguous key range (one
+    /// prefix scan) and the entries arrive ordered by name: symbol
+    /// names lexicographically, fractional positions in list order
+    /// (see [`crate::position`]).
+    pub fn with_domain(self, domain: &Symbol) -> ArtifactSelector<Constrained> {
+        let selector = self.the_starting_with(format!("{domain}/"));
+        // A name recorded before the domain arrived can now be
+        // tightened to an exact attribute.
+        match selector.attribute_name.clone() {
+            Some(name) => selector.with_name(name),
+            None => selector,
+        }
+    }
+
+    /// Filter selected [`Artifact`]s to attributes whose name half —
+    /// the part after the `/` delimiter — is exactly `name`, in any
+    /// domain. A name alone does not describe a contiguous key range,
+    /// so it does not constrain the selector; combine it with another
+    /// constraint (an entity, or [`ArtifactSelector::with_domain`],
+    /// which tightens the pair to an exact attribute).
+    pub fn with_name(mut self, name: impl Into<Name>) -> ArtifactSelector<State> {
+        let name = name.into();
+        if self.attribute.is_none()
+            && let Some(domain) = self
+                .attribute_prefix
+                .as_deref()
+                .and_then(|prefix| prefix.strip_suffix('/'))
+            && let Ok(domain) = Symbol::from_str(domain)
+            && let Ok(composed) = Attribute::compose(&domain, name.clone())
+        {
+            // The domain plus an exact name is an exact attribute — a
+            // point lookup rather than a domain-wide scan. (A joint
+            // form that overbrims the attribute budget cannot name any
+            // stored attribute; the filter below then matches nothing,
+            // which is the correct empty result.)
+            self.attribute = Some(composed);
+        }
+        self.attribute_name = Some(name);
+        self
+    }
+
+    /// Constrain selected [`Artifact`]s to attributes whose name half
+    /// has the given shape: symbol-named dictionary entries or
+    /// position-named ordered members. With a whole-domain prefix
+    /// (see [`ArtifactSelector::with_domain`]) the scan narrows to
+    /// the matching contiguous half of the domain's range; otherwise
+    /// this is a per-entry filter, and like a bare name it does not
+    /// by itself constrain the selector.
+    pub fn with_name_shape(mut self, shape: NameShape) -> ArtifactSelector<State> {
+        self.name_shape = Some(shape);
+        self
     }
 
     /// Constrain selected [`Artifact`]s to attributes whose name begins
@@ -212,6 +306,8 @@ where
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: Some(prefix.into()),
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -230,6 +326,8 @@ where
             value: self.value,
             entity_prefix: Some(prefix.into()),
             attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -254,6 +352,8 @@ where
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
             value_prefix: Some(prefix.into()),
             value_lower: self.value_lower,
             value_upper: self.value_upper,
@@ -311,6 +411,8 @@ where
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
             value_prefix: self.value_prefix,
             value_lower: Some(bound),
             value_upper: self.value_upper,
@@ -325,6 +427,8 @@ where
             value: self.value,
             entity_prefix: self.entity_prefix,
             attribute_prefix: self.attribute_prefix,
+            attribute_name: self.attribute_name,
+            name_shape: self.name_shape,
             value_prefix: self.value_prefix,
             value_lower: self.value_lower,
             value_upper: Some(bound),

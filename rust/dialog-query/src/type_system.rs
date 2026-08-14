@@ -322,18 +322,23 @@ impl Display for ConceptRef {
     }
 }
 
+pub use crate::artifact::NameShape;
+
 /// A value-level constraint layered onto a primitive membership
 /// set. The meet of two refinements is their conjunction (both
 /// constraints), the join their weakest common implication — see
 /// [`Refinement::meet`] and [`Refinement::join`].
 ///
-/// Three constraints exist: a lexical prefix over the TEXTUAL kinds,
-/// a conformance set over Entity, and an interval over the
-/// COMPARABLE kinds proved by the comparison predicates.
+/// Four constraints exist: a lexical prefix over the TEXTUAL kinds,
+/// a conformance set over Entity — the value must satisfy a
+/// concept-typed field's target concepts — an interval over the
+/// COMPARABLE kinds proved by the comparison predicates, and a name
+/// shape over Symbol — the attribute's name half must be a symbol
+/// or a position.
 ///
-/// Invariant: never empty (no prefix, no conformance, and no
-/// interval is no refinement; the constructors collapse it to an
-/// unrefined type).
+/// Invariant: never empty (no prefix, no conformance, no interval,
+/// and no name shape is no refinement; the constructors collapse it
+/// to an unrefined type).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Refinement {
     /// Lexical prefix every admitted value must begin with.
@@ -355,6 +360,11 @@ pub struct Refinement {
     /// not reproduce), while this feeds the scan-range pushdown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval: Option<Box<Interval>>,
+    /// Shape every admitted attribute's name half must have. Unlike
+    /// conformance this is row-checkable: the shape is decided by
+    /// the attribute string alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_shape: Option<NameShape>,
 }
 
 /// An interval over a single COMPARABLE value type, proved by
@@ -515,26 +525,35 @@ impl Refinement {
     fn prefix(prefix: String) -> Refinement {
         Refinement {
             prefix: Some(prefix),
-            conforms: BTreeSet::new(),
-            interval: None,
+            ..Refinement::default()
         }
     }
 
     /// An interval-only refinement.
     fn interval(interval: Interval) -> Refinement {
         Refinement {
-            prefix: None,
-            conforms: BTreeSet::new(),
             // Boxed: the interval's bounds would otherwise dominate the
             // size of every `Type` (and every error carrying one).
             interval: Some(Box::new(interval)),
+            ..Refinement::default()
+        }
+    }
+
+    /// A name-shape-only refinement.
+    fn name_shape(shape: NameShape) -> Refinement {
+        Refinement {
+            name_shape: Some(shape),
+            ..Refinement::default()
         }
     }
 
     /// True when the refinement constrains nothing — the shape the
     /// constructors collapse to an unrefined type.
     fn is_empty(&self) -> bool {
-        self.prefix.is_none() && self.conforms.is_empty() && self.interval.is_none()
+        self.prefix.is_none()
+            && self.conforms.is_empty()
+            && self.interval.is_none()
+            && self.name_shape.is_none()
     }
 
     /// Meet: the conjunction of both constraints. Two prefixes are
@@ -543,7 +562,9 @@ impl Refinement {
     /// sets union — the value must satisfy both sides' concepts;
     /// same-typed intervals intersect, and differently-typed ones
     /// conservatively drop (the interval is advisory — see the field
-    /// doc — so a weaker meet is sound).
+    /// doc — so a weaker meet is sound); name shapes must agree (an
+    /// attribute name is a symbol or a position, never both, so
+    /// conflicting shapes admit nothing).
     fn meet(&self, other: &Refinement) -> Option<Refinement> {
         let prefix = match (&self.prefix, &other.prefix) {
             (Some(a), Some(b)) => {
@@ -564,17 +585,23 @@ impl Refinement {
             (Some(interval), None) | (None, Some(interval)) => Some(interval.clone()),
             (None, None) => None,
         };
+        let name_shape = match (self.name_shape, other.name_shape) {
+            (Some(a), Some(b)) if a != b => return None,
+            (a, b) => a.or(b),
+        };
         Some(Refinement {
             prefix,
             conforms,
             interval,
+            name_shape,
         })
     }
 
     /// Join: the weakest constraint both sides imply — the longest
-    /// common prefix (a side without one implies none) and the
-    /// intersection of the conformance sets. `None` when nothing
-    /// remains (the join carries no refinement).
+    /// common prefix (a side without one implies none), the
+    /// intersection of the conformance sets, and the name shape only
+    /// when both sides pin the same one. `None` when nothing remains
+    /// (the join carries no refinement).
     fn join(&self, other: &Refinement) -> Option<Refinement> {
         let prefix = match (&self.prefix, &other.prefix) {
             (Some(a), Some(b)) => {
@@ -601,10 +628,14 @@ impl Refinement {
             (Some(a), Some(b)) => a.join(b).map(Box::new),
             _ => None,
         };
+        let name_shape = self
+            .name_shape
+            .filter(|shape| other.name_shape == Some(*shape));
         let joined = Refinement {
             prefix,
             conforms,
             interval,
+            name_shape,
         };
         if joined.is_empty() {
             None
@@ -627,21 +658,45 @@ impl Refinement {
             (Some(_), None) => false,
             (None, _) => true,
         };
-        prefix_implied && interval_implied && self.conforms.is_subset(&other.conforms)
+        let shape_implied = match (self.name_shape, other.name_shape) {
+            (Some(a), Some(b)) => a == b,
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        prefix_implied
+            && interval_implied
+            && shape_implied
+            && self.conforms.is_subset(&other.conforms)
     }
 
-    /// True when the value satisfies the row-locally checkable half
-    /// of the refinement: the lexical prefix. Values without a
-    /// lexical form satisfy no prefix. Conformance is deliberately
-    /// not checked here — see the field doc; its enforcement is the
-    /// desugared premises' job.
+    /// True when the value satisfies the row-locally checkable
+    /// halves of the refinement: the lexical prefix and the name
+    /// shape. Values without a lexical form satisfy no prefix; only
+    /// an attribute value has a name half, and one whose halves do
+    /// not parse under the strict domain/name vocabulary (a legacy
+    /// shape like `person/display_name`) satisfies no shape rather
+    /// than misclassify. Conformance is deliberately not checked
+    /// here — see the field doc; its enforcement is the desugared
+    /// premises' job.
     pub fn admits(&self, value: &Value) -> bool {
-        match &self.prefix {
-            Some(prefix) => {
-                lexical_form(value).is_some_and(|form| form.starts_with(prefix.as_str()))
-            }
-            None => true,
+        if let Some(prefix) = &self.prefix
+            && !lexical_form(value).is_some_and(|form| form.starts_with(prefix.as_str()))
+        {
+            return false;
         }
+        if let Some(shape) = self.name_shape {
+            let Value::Symbol(attribute) = value else {
+                return false;
+            };
+            let shaped = attribute.split().is_ok_and(|(_, name)| match shape {
+                NameShape::Symbol => name.symbol().is_some(),
+                NameShape::Position => name.position().is_some(),
+            });
+            if !shaped {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -650,6 +705,17 @@ impl Display for Refinement {
         let mut separate = false;
         if let Some(prefix) = &self.prefix {
             write!(f, "starts-with {prefix:?}")?;
+            separate = true;
+        }
+        if let Some(shape) = self.name_shape {
+            if separate {
+                write!(f, " & ")?;
+            }
+            let shape = match shape {
+                NameShape::Symbol => "symbol",
+                NameShape::Position => "position",
+            };
+            write!(f, "named-by {shape}")?;
             separate = true;
         }
         for concept in &self.conforms {
@@ -826,6 +892,30 @@ impl Type {
             Type::Primitive(_) => Refinement::default(),
         };
         refinement.conforms.insert(concept);
+        Some(Type::Refined(membership, refinement))
+    }
+
+    /// Constrain this type's values to attributes whose name half
+    /// has the given shape — symbols for a dictionary's entries,
+    /// positions for an ordered relation's members.
+    ///
+    /// The membership narrows to Symbol, the only kind with a name
+    /// half (the `Nothing` bit, if present, rides along — an
+    /// optional field stays optional). Returns `None` when no
+    /// attribute could inhabit the type — an empty meet, either
+    /// because the membership excludes Symbol or because an
+    /// existing refinement already pins the other shape.
+    pub fn with_name_shape(self, shape: NameShape) -> Option<Type> {
+        let membership = self
+            .primitive_part()
+            .intersect(Primitive::from(ValueType::Symbol).union(Primitive::NOTHING))?;
+        if membership.required().is_empty() {
+            return None;
+        }
+        let refinement = match &self {
+            Type::Refined(_, existing) => existing.meet(&Refinement::name_shape(shape))?,
+            Type::Primitive(_) => Refinement::name_shape(shape),
+        };
         Some(Type::Refined(membership, refinement))
     }
 
@@ -1444,6 +1534,148 @@ mod tests {
         assert!(
             !old_wire.contains("conforms"),
             "an empty conformance set stays off the wire"
+        );
+        let read: Type = serde_json::from_str(&old_wire).unwrap();
+        assert_eq!(read, old);
+    }
+
+    /// `with_name_shape` narrows membership to Symbol (keeping the
+    /// `Nothing` bit for optional fields) and rejects memberships
+    /// with no symbol in them.
+    #[dialog_common::test]
+    fn with_name_shape_narrows_to_symbol() {
+        let refined = Type::from(Primitive::ALL)
+            .with_name_shape(NameShape::Position)
+            .expect("Symbol is a member");
+        assert_eq!(
+            refined.primitive_part().as_singleton(),
+            Some(ValueType::Symbol)
+        );
+
+        let optional = Type::from(ValueType::Symbol)
+            .optional()
+            .with_name_shape(NameShape::Symbol)
+            .expect("optional symbol remains inhabited");
+        assert!(
+            optional.primitive_part().contains_nothing(),
+            "the Nothing bit rides along"
+        );
+
+        assert!(
+            Type::from(Primitive::NUMERIC)
+                .with_name_shape(NameShape::Symbol)
+                .is_none(),
+            "no numeric value has a name half"
+        );
+    }
+
+    /// An attribute name is a symbol or a position, never both: the
+    /// meet of conflicting shapes is empty, a one-sided shape rides
+    /// along, and the join keeps the shape only when both sides pin
+    /// the same one.
+    #[dialog_common::test]
+    fn name_shape_meet_requires_agreement_join_requires_both() {
+        let entries = Type::from(ValueType::Symbol)
+            .with_name_shape(NameShape::Symbol)
+            .unwrap();
+        let members = Type::from(ValueType::Symbol)
+            .with_name_shape(NameShape::Position)
+            .unwrap();
+
+        assert!(
+            entries.intersect(&members).is_none(),
+            "conflicting shapes admit nothing"
+        );
+        assert_eq!(entries.intersect(&entries), Some(entries.clone()));
+
+        let domain = Type::from(ValueType::Symbol)
+            .with_prefix("todo.list/")
+            .unwrap();
+        let met = domain
+            .intersect(&members)
+            .expect("one-sided shape rides along");
+        let refinement = met.refinement().unwrap();
+        assert_eq!(refinement.prefix.as_deref(), Some("todo.list/"));
+        assert_eq!(refinement.name_shape, Some(NameShape::Position));
+
+        assert!(
+            entries.union(&members).refinement().is_none(),
+            "disagreeing shapes imply nothing in common"
+        );
+        assert_eq!(entries.union(&entries), entries);
+    }
+
+    /// Inclusion: pinning a shape is more constrained, and the two
+    /// pinned shapes are unordered against each other.
+    #[dialog_common::test]
+    fn name_shape_includes_is_constraint_ordered() {
+        let any_name = Type::from(ValueType::Symbol);
+        let entries = any_name.clone().with_name_shape(NameShape::Symbol).unwrap();
+        let members = any_name
+            .clone()
+            .with_name_shape(NameShape::Position)
+            .unwrap();
+
+        assert!(any_name.includes(&members), "unrefined over-approximates");
+        assert!(!members.includes(&any_name));
+        assert!(!members.includes(&entries) && !entries.includes(&members));
+
+        let domain_members = members.clone().with_prefix("todo.list/").unwrap();
+        assert!(
+            members.includes(&domain_members) && !domain_members.includes(&members),
+            "both halves participate in the ordering"
+        );
+    }
+
+    /// The name-shape half of `admits` is row-checkable: it
+    /// classifies by the attribute's name half alone, and declines
+    /// a legacy name that parses as neither shape rather than
+    /// misclassify.
+    #[dialog_common::test]
+    fn name_shape_admits_classifies_attribute_names() {
+        let entries = Type::from(ValueType::Symbol)
+            .with_name_shape(NameShape::Symbol)
+            .unwrap();
+        let members = Type::from(ValueType::Symbol)
+            .with_name_shape(NameShape::Position)
+            .unwrap();
+
+        let entry = Value::Symbol("todo.list/title".parse().expect("valid attribute"));
+        let member = Value::Symbol("todo.list/N".parse().expect("valid attribute"));
+        let legacy = Value::Symbol("person/display_name".parse().expect("valid attribute"));
+
+        assert!(entries.admits(&entry) && !entries.admits(&member));
+        assert!(members.admits(&member) && !members.admits(&entry));
+        assert!(
+            !entries.admits(&legacy) && !members.admits(&legacy),
+            "a name outside the strict vocabulary satisfies no shape"
+        );
+        assert!(
+            !members.admits(&Value::String("todo.list/N".into())),
+            "only attribute values have name halves"
+        );
+    }
+
+    /// Name shapes survive serde, and a shape-free refinement's
+    /// wire form is unchanged, so older peers' payloads still read.
+    #[dialog_common::test]
+    fn name_shape_serde_round_trip_and_wire_compat() {
+        let t = Type::from(ValueType::Symbol)
+            .with_prefix("todo.list/")
+            .unwrap()
+            .with_name_shape(NameShape::Position)
+            .unwrap();
+        let j = serde_json::to_string(&t).unwrap();
+        let back: Type = serde_json::from_str(&j).unwrap();
+        assert_eq!(t, back);
+
+        let old = Type::from(ValueType::Symbol)
+            .with_prefix("todo.list/")
+            .unwrap();
+        let old_wire = serde_json::to_string(&old).unwrap();
+        assert!(
+            !old_wire.contains("name_shape"),
+            "an absent shape stays off the wire"
         );
         let read: Type = serde_json::from_str(&old_wire).unwrap();
         assert_eq!(read, old);

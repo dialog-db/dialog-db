@@ -11,7 +11,7 @@ use std::{
 
 use ::serde::{Deserialize, Serialize};
 
-use crate::{ATTRIBUTE_LENGTH, DialogArtifactsError};
+use crate::{ATTRIBUTE_LENGTH, DialogArtifactsError, Name, Symbol};
 
 /// An [`Attribute`] is the predicate part of a semantic triple. [`Attribute`]s
 /// in this crate may be a maximum of 64 bytes, and must be formated as
@@ -32,6 +32,44 @@ impl Attribute {
     /// The attribute's raw `namespace/predicate` string.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The domain half of this attribute: everything before the first
+    /// `/`. Always present — construction requires the delimiter.
+    pub fn domain(&self) -> &str {
+        self.0
+            .split_once('/')
+            .map(|(domain, _)| domain)
+            .unwrap_or(&self.0)
+    }
+
+    /// The name half of this attribute: everything after the first
+    /// `/`. Always present — construction requires the delimiter.
+    pub fn name(&self) -> &str {
+        self.0.split_once('/').map(|(_, name)| name).unwrap_or("")
+    }
+
+    /// Split this attribute into its typed halves: the domain as a
+    /// [`Symbol`] and the name as a [`Name`] (a [`Symbol`] when it
+    /// starts lowercase, a fractional position when it starts with an
+    /// uppercase major).
+    ///
+    /// Fallible: attribute construction validates only the coarse
+    /// shape (`domain/name`, length, no NUL), so attributes exist
+    /// whose halves do not conform to the stricter [`Symbol`] /
+    /// [`Name`] vocabulary — those return an error here rather than
+    /// misclassify.
+    pub fn split(&self) -> Result<(Symbol, Name), DialogArtifactsError> {
+        let domain = Symbol::try_from(self.domain().to_owned())?;
+        let name = Name::try_from(self.name())?;
+        Ok((domain, name))
+    }
+
+    /// Compose an attribute from its typed halves. The halves are
+    /// individually valid by construction; this checks only the joint
+    /// budget (`domain + '/' + name` must fit [`ATTRIBUTE_LENGTH`]).
+    pub fn compose(domain: &Symbol, name: impl Into<Name>) -> Result<Self, DialogArtifactsError> {
+        Attribute::try_from(format!("{domain}/{}", name.into()))
     }
 }
 
@@ -118,5 +156,42 @@ mod tests {
         assert!(Attribute::from_str("a/b\u{0}c").is_err());
         assert!(Attribute::from_str("a\u{0}/bc").is_err());
         assert!(Attribute::from_str("a/bc").is_ok());
+    }
+
+    /// The lazy accessors split at the first delimiter.
+    #[dialog_common::test]
+    fn it_exposes_domain_and_name_halves() {
+        let attribute = Attribute::from_str("todo.item/title").unwrap();
+        assert_eq!(attribute.domain(), "todo.item");
+        assert_eq!(attribute.name(), "title");
+    }
+
+    /// `split` classifies the name half by its first byte, and
+    /// `compose` rebuilds the same attribute from the typed halves.
+    #[dialog_common::test]
+    fn it_splits_and_composes_typed_halves() {
+        use crate::position::{Bias, insert};
+
+        let attribute = Attribute::from_str("todo.item/title").unwrap();
+        let (domain, name) = attribute.split().unwrap();
+        assert_eq!(domain.as_str(), "todo.item");
+        assert_eq!(name.symbol().map(|s| s.as_str()), Some("title"));
+        assert_eq!(Attribute::compose(&domain, name).unwrap(), attribute);
+
+        let position = insert(&Bias::derive(b"member"), ..).unwrap();
+        let ordered = Attribute::compose(&domain, position.clone()).unwrap();
+        assert_eq!(ordered.domain(), "todo.item");
+        let (_, name) = ordered.split().unwrap();
+        assert_eq!(name.position(), Some(&position));
+    }
+
+    /// Attributes with halves outside the strict vocabulary (legacy
+    /// shapes) still construct, but decline to split.
+    #[dialog_common::test]
+    fn it_declines_to_split_nonconforming_attributes() {
+        let legacy = Attribute::from_str("person/display_name").unwrap();
+        assert!(legacy.split().is_err());
+        let numeric = Attribute::from_str("person/1st").unwrap();
+        assert!(numeric.split().is_err());
     }
 }

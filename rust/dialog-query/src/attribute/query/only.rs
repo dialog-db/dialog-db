@@ -261,7 +261,7 @@ impl AttributeQueryOnly {
                                         Some(winner)
                                             if (value_constraint.is_none()
                                                 || value_constraint.as_ref() == Some(&winner.is))
-                                                && selector.admits(&winner.is) =>
+                                                && selector.admits(&winner) =>
                                         {
                                             let mut extension = base.clone();
                                             selector.merge(&mut extension, &winner)?;
@@ -283,7 +283,7 @@ impl AttributeQueryOnly {
                             Some(winner)
                                 if (value_constraint.is_none()
                                     || value_constraint.as_ref() == Some(&winner.is))
-                                    && selector.admits(&winner.is) =>
+                                    && selector.admits(&winner) =>
                             {
                                 let mut extension = base.clone();
                                 selector.merge(&mut extension, &winner)?;
