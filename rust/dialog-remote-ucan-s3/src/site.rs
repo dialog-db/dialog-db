@@ -13,7 +13,7 @@ use dialog_capability::{
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Rejection;
 use dialog_effects::authority::{self, OperatorExt};
-use dialog_remote_s3::{Permit, S3Error};
+use dialog_remote_s3::{Permit, S3Error, http_client};
 
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 
@@ -64,7 +64,7 @@ impl UcanAuthorization {
             .to_bytes()
             .map_err(|e| S3Error::Serialization(e.to_string()))?;
 
-        let response = reqwest::Client::new()
+        let response = http_client()
             .post(&address.endpoint)
             .header("Content-Type", "application/cbor")
             .body(body)
