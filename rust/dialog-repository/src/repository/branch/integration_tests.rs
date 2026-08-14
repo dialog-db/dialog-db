@@ -281,6 +281,204 @@ async fn it_ships_blobs_on_push_and_hydrates_on_read(s3: S3Address) -> Result<()
     Ok(())
 }
 
+/// A blob retraction replicates on pull: the tombstoned index entry travels
+/// with the tree nodes, so a replica that pulls it stops referencing the
+/// blob (`size` answers `None`) and a replica that never hydrated the bytes
+/// can no longer fetch them from the remote. Bytes already held locally are
+/// untouched: retraction removes the reference, not the content, so a
+/// replica that hydrated before the retraction still reads its local copy.
+// Native only, feature-gated: same reasoning as
+// `it_ships_blobs_on_push_and_hydrates_on_read` above.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_replicates_a_blob_retraction_on_pull(s3: S3Address) -> Result<()> {
+    // --- Site A: write a blob, push. ---
+    let storage_a = Storage::temp();
+    let profile_a = Profile::open(unique_name("blob-retract-a"))
+        .perform(&storage_a)
+        .await?;
+    let operator_a = profile_a
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_a)
+        .await?;
+
+    let repo_a = profile_a
+        .repository(unique_name("blob-retract"))
+        .create()
+        .perform(&operator_a)
+        .await?;
+
+    let site_a = s3_site_address(&s3);
+    profile_a
+        .credential()
+        .site(&site_a)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_a)
+        .await?;
+
+    let origin_a = repo_a
+        .remote("origin")
+        .create(site_a)
+        .perform(&operator_a)
+        .await?;
+    let branch_a = repo_a.branch("main").open().perform(&operator_a).await?;
+    let remote_branch_a = origin_a.branch("main").open().perform(&operator_a).await?;
+    branch_a
+        .set_upstream(remote_branch_a)
+        .perform(&operator_a)
+        .await?;
+
+    let payload: Vec<u8> = (0..50_000u32).map(|i| (i % 199) as u8).collect();
+    let chunks: Vec<Result<Vec<u8>, BlobError>> =
+        payload.chunks(8192).map(|c| Ok(c.to_vec())).collect();
+    let blob = Blob::import(stream::iter(chunks))
+        .write((&branch_a).into())
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // --- Site B: pull and hydrate the bytes while still referenced. ---
+    let storage_b = Storage::temp();
+    let profile_b = Profile::open(unique_name("blob-retract-b"))
+        .perform(&storage_b)
+        .await?;
+    let operator_b = profile_b
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_b)
+        .await?;
+    let repo_b = profile_b
+        .repository(unique_name("blob-retract-b-repo"))
+        .open()
+        .perform(&operator_b)
+        .await?;
+    let site_b = s3_site_address(&s3);
+    profile_b
+        .credential()
+        .site(&site_b)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_b)
+        .await?;
+    let origin_b = repo_b
+        .remote("origin")
+        .create(site_b)
+        .subject(repo_a.did())
+        .perform(&operator_b)
+        .await?;
+    let branch_b = repo_b.branch("main").open().perform(&operator_b).await?;
+    let remote_branch_b = origin_b.branch("main").open().perform(&operator_b).await?;
+    branch_b
+        .set_upstream(remote_branch_b)
+        .perform(&operator_b)
+        .await?;
+
+    branch_b.pull().perform(&operator_b).await?;
+    let mut reader = Blob::from(blob.clone())
+        .read((&branch_b).into())
+        .perform(&operator_b)
+        .await?;
+    let mut out = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        out.extend(chunk);
+    }
+    assert_eq!(out, payload, "site B hydrates the bytes before retraction");
+
+    // --- Site A retracts the blob and pushes the retraction. ---
+    Blob::from(blob.clone())
+        .retract((&branch_a).into())
+        .perform(&operator_a)
+        .await?;
+    assert!(branch_a.push().perform(&operator_a).await?.is_some());
+
+    // --- Site B pulls the retraction: the reference is gone, the hydrated
+    // bytes are not. ---
+    branch_b.pull().perform(&operator_b).await?;
+    assert_eq!(
+        Blob::from(blob.clone())
+            .size((&branch_b).into())
+            .perform(&operator_b)
+            .await?,
+        None,
+        "a pulled retraction removes the index reference"
+    );
+    let mut reader = Blob::from(blob.clone())
+        .read((&branch_b).into())
+        .perform(&operator_b)
+        .await?;
+    let mut out = Vec::new();
+    while let Some(chunk) = reader.next().await? {
+        out.extend(chunk);
+    }
+    assert_eq!(
+        out, payload,
+        "locally hydrated bytes survive the retraction"
+    );
+
+    // --- Site C: fresh replica, pulls after the retraction; it can neither
+    // see the reference nor hydrate the bytes. ---
+    let storage_c = Storage::temp();
+    let profile_c = Profile::open(unique_name("blob-retract-c"))
+        .perform(&storage_c)
+        .await?;
+    let operator_c = profile_c
+        .derive(b"test")
+        .allow(Subject::any())
+        .network(Network::default())
+        .build(storage_c)
+        .await?;
+    let repo_c = profile_c
+        .repository(unique_name("blob-retract-c-repo"))
+        .open()
+        .perform(&operator_c)
+        .await?;
+    let site_c = s3_site_address(&s3);
+    profile_c
+        .credential()
+        .site(&site_c)
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator_c)
+        .await?;
+    let origin_c = repo_c
+        .remote("origin")
+        .create(site_c)
+        .subject(repo_a.did())
+        .perform(&operator_c)
+        .await?;
+    let branch_c = repo_c.branch("main").open().perform(&operator_c).await?;
+    let remote_branch_c = origin_c.branch("main").open().perform(&operator_c).await?;
+    branch_c
+        .set_upstream(remote_branch_c)
+        .perform(&operator_c)
+        .await?;
+
+    branch_c.pull().perform(&operator_c).await?;
+    assert_eq!(
+        Blob::from(blob.clone())
+            .size((&branch_c).into())
+            .perform(&operator_c)
+            .await?,
+        None,
+        "a fresh replica pulls no reference to the retracted blob"
+    );
+    let refused = Blob::from(blob)
+        .read((&branch_c).into())
+        .perform(&operator_c)
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(crate::CommitError::Blob(BlobError::NotFound(_)))
+        ),
+        "an unreferenced blob cannot hydrate: {:?}",
+        refused.as_ref().err()
+    );
+
+    Ok(())
+}
+
 /// Push ships a spilling scalar value's block to the remote before publishing.
 ///
 /// A value larger than the tree's inline threshold does not travel in the key
