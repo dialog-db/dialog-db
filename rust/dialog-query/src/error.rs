@@ -20,6 +20,16 @@ pub use thiserror::Error;
 /// validation, planning, and syntax parsing.
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum TypeError {
+    /// An inductive-rule definition carries both an `assert!` and a
+    /// `retract!` head; exactly one is required.
+    #[error("An inductive rule must have exactly one of `assert!` / `retract!`, not both")]
+    ConflictingHead,
+
+    /// An inductive-rule definition carries neither an `assert!` nor a
+    /// `retract!` head.
+    #[error("An inductive rule must have an `assert!` or `retract!` head")]
+    MissingHead,
+
     /// A binding has the wrong type.
     #[error("Expected binding \"{binding}\" with {expected} type, instead got {actual}")]
     TypeMismatch {

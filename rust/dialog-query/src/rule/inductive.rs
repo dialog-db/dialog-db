@@ -17,6 +17,7 @@
 /// Serializable inductive-rule descriptor.
 pub mod descriptor;
 
+use crate::artifact::Entity;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
 use crate::negation::Negation;
@@ -30,6 +31,20 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
+/// What a firing does with the head's bound facts: assert them into
+/// the next state, or retract them from it. `Retract` is the
+/// consumption polarity — dequeue, mailbox-ack, cascade cleanup — and
+/// requires every head field bound, exactly like `Assert`, to identify
+/// the cells it dissociates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Polarity {
+    /// The head's facts are asserted when the body matches.
+    #[default]
+    Assert,
+    /// The head's facts are retracted when the body matches.
+    Retract,
+}
+
 /// An inductive rule that has passed analysis. Assertion-shaped
 /// sibling of [`DeductiveRule`](crate::rule::DeductiveRule); holds the
 /// analysis and plans per scope.
@@ -38,33 +53,61 @@ pub struct InductiveRule {
     /// The narrowed premises, inferred types, and dependency graph
     /// produced by analysis.
     analysis: AnalyzedRule,
+    /// Whether a firing asserts or retracts the head's facts.
+    polarity: Polarity,
 }
 
 impl Compile for InductiveRule {
     const KIND: RuleKind = RuleKind::Inductive;
 
     fn from_analysis(analysis: AnalyzedRule) -> Self {
-        InductiveRule { analysis }
+        InductiveRule {
+            analysis,
+            polarity: Polarity::Assert,
+        }
     }
 
     fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self {
         InductiveRule {
             analysis: AnalyzedRule::in_progress(conclusion, premises),
+            polarity: Polarity::Assert,
         }
     }
 }
 
 impl InductiveRule {
     /// Analyze a rule from a head concept and body premises into a
-    /// verified, plannable rule. Runs the shared analysis pipeline; the
-    /// only difference from
+    /// verified, plannable rule with an asserting head. Runs the shared
+    /// analysis pipeline; the only difference from
     /// [`DeductiveRule::new`](crate::rule::DeductiveRule::new) is what
     /// the evaluator does at runtime.
     pub fn new(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Result<Self, TypeError> {
         <Self as Compile>::compile(conclusion, premises)
     }
 
-    /// The concept this rule asserts when its body matches.
+    /// Analyze a rule whose firing *retracts* the head's bound facts —
+    /// the `retract!` notation. Same analysis pipeline and
+    /// fully-bound-head requirement as [`new`](Self::new).
+    pub fn retracting(
+        conclusion: ConceptDescriptor,
+        premises: Vec<Premise>,
+    ) -> Result<Self, TypeError> {
+        Ok(Self::new(conclusion, premises)?.with_polarity(Polarity::Retract))
+    }
+
+    /// This rule with the given head polarity.
+    pub fn with_polarity(mut self, polarity: Polarity) -> Self {
+        self.polarity = polarity;
+        self
+    }
+
+    /// Whether a firing asserts or retracts the head's facts.
+    pub fn polarity(&self) -> Polarity {
+        self.polarity
+    }
+
+    /// The concept this rule asserts (or retracts) when its body
+    /// matches.
     pub fn conclusion(&self) -> &ConceptDescriptor {
         &self.analysis.conclusion
     }
@@ -95,7 +138,56 @@ impl InductiveRule {
         self.conclusion().apply(parameters)
     }
 
-    /// Round-trip this rule back to its serializable form.
+    /// Canonical dag-cbor encoding of this rule's descriptor, if the
+    /// body is expressible in formal notation. Mirrors
+    /// [`DeductiveRule::try_encode`](crate::rule::DeductiveRule::try_encode):
+    /// rules built directly from raw [`AttributeQuery`](crate::AttributeQuery)
+    /// premises encode to nothing, because `Proposition`'s
+    /// formal-notation `Serialize` rejects attribute propositions.
+    pub fn try_encode(&self) -> Option<Vec<u8>> {
+        serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
+    }
+
+    /// This rule's content-addressed identity, if it has a canonical
+    /// encoding: `rule:<base58(blake3(dag-cbor(descriptor)))>`. The
+    /// `assert!` head field is part of the encoding, so an inductive
+    /// rule never collides with the deductive rule of the same body.
+    pub fn try_this(&self) -> Option<Entity> {
+        use base58::ToBase58;
+        let hash = blake3::hash(&self.try_encode()?);
+        let encoded = hash.as_bytes().as_ref().to_base58();
+        format!("rule:{encoded}").parse().ok()
+    }
+
+    /// Canonical dag-cbor encoding, panicking if the rule has no
+    /// encodable body. Use on the storage path where the rule is known
+    /// to be storable (concept/formula bodies); prefer
+    /// [`try_encode`](Self::try_encode) otherwise.
+    pub fn encode(&self) -> Vec<u8> {
+        self.try_encode()
+            .expect("rule body must encode in formal notation")
+    }
+
+    /// Content-addressed identity, panicking if the rule has no
+    /// encodable body. Use on the storage path; prefer
+    /// [`try_this`](Self::try_this) otherwise.
+    pub fn this(&self) -> Entity {
+        self.try_this()
+            .expect("storable rule must have a content-addressed identity")
+    }
+
+    /// Rebuild a rule from its canonical dag-cbor [`encode`](Self::encode)
+    /// bytes. `Err` carries a human-readable reason — either the cbor
+    /// decode failed or the decoded descriptor didn't compile.
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let descriptor: InductiveRuleDescriptor = serde_ipld_dagcbor::from_slice(bytes)
+            .map_err(|e| format!("dag-cbor decode failed: {e}"))?;
+        descriptor.compile().map_err(|e| e.to_string())
+    }
+
+    /// Round-trip this rule back to its serializable form. The head
+    /// lands in the `assert!` or `retract!` field per this rule's
+    /// polarity.
     pub fn descriptor(&self) -> InductiveRuleDescriptor {
         let mut when = Vec::new();
         let mut unless = Vec::new();
@@ -107,9 +199,14 @@ impl InductiveRule {
             }
         }
 
+        let (assert, retract) = match self.polarity {
+            Polarity::Assert => (Some(self.conclusion().clone()), None),
+            Polarity::Retract => (None, Some(self.conclusion().clone())),
+        };
         InductiveRuleDescriptor {
             description: None,
-            assert: self.conclusion().clone(),
+            assert,
+            retract,
             when,
             unless,
         }

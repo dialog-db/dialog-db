@@ -11,16 +11,17 @@ use super::InductiveRule;
 /// for serialization.
 ///
 /// Mirrors [`DeductiveRuleDescriptor`](crate::rule::DeductiveRuleDescriptor)
-/// modulo the head field name: deductive rules use `assert` (the
-/// head is *derived* on query, no commit); inductive rules use
-/// `assert!` (the head is *asserted* into the branch when the body
-/// matches, mirroring the tonk-yaml `!` convention for
-/// mutation-producing operations).
+/// modulo the head field: deductive rules use `assert` (the head is
+/// *derived* on query, no commit); inductive rules use `assert!` or
+/// `retract!` (the head is *asserted into* or *retracted from* the
+/// branch when the body matches, mirroring the tonk-yaml `!`
+/// convention for mutation-producing operations). Exactly one of the
+/// two head fields must be present.
 ///
 /// ```json
 /// {
 ///   "description": "...",
-///   "assert!": { "with": { ... } },
+///   "assert!": { "with": { ... } },   // or "retract!": { ... }
 ///   "when":    [ { "assert": ..., "where": ... }, ... ],
 ///   "unless":  [ { "assert": ..., "where": ... }, ... ]
 /// }
@@ -31,11 +32,16 @@ pub struct InductiveRuleDescriptor {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// The head: a concept the rule asserts when its body is
-    /// satisfied. Serialized as `assert!` to mark the
-    /// transaction-time commit semantics.
-    #[serde(rename = "assert!")]
-    pub assert: ConceptDescriptor,
+    /// An asserting head: a concept the rule asserts when its body is
+    /// satisfied.
+    #[serde(rename = "assert!", default, skip_serializing_if = "Option::is_none")]
+    pub assert: Option<ConceptDescriptor>,
+
+    /// A retracting head: a concept whose bound facts the rule
+    /// retracts when its body is satisfied — the consumption polarity
+    /// (dequeue, mailbox-ack, cascade cleanup).
+    #[serde(rename = "retract!", default, skip_serializing_if = "Option::is_none")]
+    pub retract: Option<ConceptDescriptor>,
 
     /// Conjunction of positive premises. All must be satisfied for
     /// the rule to fire.
@@ -49,7 +55,8 @@ pub struct InductiveRuleDescriptor {
 
 impl InductiveRuleDescriptor {
     /// Compile this definition into an [`InductiveRule`] ready for
-    /// evaluation.
+    /// evaluation. Fails unless exactly one of `assert!` / `retract!`
+    /// is present.
     pub fn compile(self) -> Result<InductiveRule, TypeError> {
         let mut premises: Vec<Premise> = self.when.into_iter().map(Premise::Assert).collect();
 
@@ -57,7 +64,12 @@ impl InductiveRuleDescriptor {
             premises.push(Premise::Unless(Negation::not(proposition)));
         }
 
-        InductiveRule::new(self.assert, premises)
+        match (self.assert, self.retract) {
+            (Some(conclusion), None) => InductiveRule::new(conclusion, premises),
+            (None, Some(conclusion)) => InductiveRule::retracting(conclusion, premises),
+            (Some(_), Some(_)) => Err(TypeError::ConflictingHead),
+            (None, None) => Err(TypeError::MissingHead),
+        }
     }
 }
 
@@ -106,7 +118,9 @@ mod tests {
             def.description.as_deref(),
             Some("Increment a counter on increment command")
         );
-        assert_eq!(def.assert.with().iter().count(), 1);
+        let head = def.assert.as_ref().expect("assert! head present");
+        assert_eq!(head.with().iter().count(), 1);
+        assert!(def.retract.is_none());
         assert_eq!(def.when.len(), 2);
         assert!(def.unless.is_empty());
     }
@@ -198,6 +212,84 @@ mod tests {
 
         let reparsed: InductiveRuleDescriptor = serde_json::from_value(reserialized).unwrap();
         assert_eq!(reparsed.unless.len(), 1);
+    }
+
+    #[dialog_common::test]
+    fn it_round_trips_a_retracting_rule() {
+        use crate::rule::inductive::Polarity;
+
+        // The mailbox-consumption shape: retract the message an ack
+        // targets. The head lands under `retract!` and survives the
+        // round trip with its polarity.
+        let json = json!({
+            "description": "Consume an acked message",
+            "retract!": {
+                "with": {
+                    "body": { "the": "mailbox.message/body", "as": "Text" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "message": { "the": "cmd.ack/message", "as": "Entity" }
+                        }
+                    },
+                    "where": {
+                        "message": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "body": { "the": "mailbox.message/body", "as": "Text" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "body": { "?": { "name": "body" } }
+                    }
+                }
+            ]
+        });
+
+        let rule: InductiveRule = serde_json::from_value(json).unwrap();
+        assert_eq!(rule.polarity(), Polarity::Retract);
+
+        let serialized = serde_json::to_value(&rule).unwrap();
+        assert!(serialized["retract!"]["with"].is_object());
+        assert!(serialized.get("assert!").is_none());
+
+        let reparsed: InductiveRule = serde_json::from_value(serialized).unwrap();
+        assert_eq!(reparsed.polarity(), Polarity::Retract);
+        // Canonical dag-cbor equality: same content address ⇒ same
+        // rule. (Full struct equality is too strict — the analysis'
+        // narrowing diagnostics capture HashMap iteration order.)
+        assert_eq!(reparsed.encode(), rule.encode());
+        assert_eq!(reparsed.this(), rule.this());
+    }
+
+    #[dialog_common::test]
+    fn it_rejects_a_rule_with_both_heads_or_neither() {
+        let both = json!({
+            "assert!": { "with": { "n": { "the": "test/n", "as": "Text" } } },
+            "retract!": { "with": { "n": { "the": "test/n", "as": "Text" } } },
+            "when": [{
+                "assert": { "with": { "n": { "the": "test/n", "as": "Text" } } },
+                "where": { "this": { "?": { "name": "this" } }, "n": { "?": { "name": "n" } } }
+            }]
+        });
+        let result: Result<InductiveRule, _> = serde_json::from_value(both);
+        assert!(result.is_err(), "both heads must be rejected");
+
+        let neither = json!({
+            "when": [{
+                "assert": { "with": { "n": { "the": "test/n", "as": "Text" } } },
+                "where": { "this": { "?": { "name": "this" } }, "n": { "?": { "name": "n" } } }
+            }]
+        });
+        let result: Result<InductiveRule, _> = serde_json::from_value(neither);
+        assert!(result.is_err(), "a missing head must be rejected");
     }
 
     #[dialog_common::test]

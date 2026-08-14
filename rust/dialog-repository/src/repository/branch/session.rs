@@ -450,7 +450,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    /// Read a `db.rule/*` selector against a single branch's committed
+    /// Read a `dialog.rule/*` selector against a single branch's committed
     /// tree only (NOT the overlay) and collect the matching artifacts.
     /// The durable layer's reads must be tree-only so the head-keyed
     /// discovery cache stays correct — overlay rules are handled
@@ -477,7 +477,7 @@ where
     }
 
     /// The durable rules concluding `concept` on `branch`: the committed
-    /// `db.rule/*` rules, read from the tree and cached by branch head
+    /// `dialog.rule/*` rules, read from the tree and cached by branch head
     /// (re-scanned only when the head moves), with hydrated bodies
     /// cached by content-addressed rule entity.
     async fn durable_rules(
@@ -508,7 +508,7 @@ where
         };
 
         // Hydration: reuse cached bodies (content-addressed, never stale),
-        // fetch + compile the rest from each rule's `db.rule/source`.
+        // fetch + compile the rest from each rule's `dialog.rule/source`.
         let mut rules = Vec::with_capacity(rule_entities.len());
         for rule_entity in rule_entities {
             if let Some(body) = cache.body(&rule_entity) {
@@ -543,8 +543,8 @@ where
         + 'static,
 {
     /// Resolve a concept's deductive rules by unioning across layers:
-    /// each branch is a durable layer (committed `db.rule/*`, head-cached),
-    /// the overlay is a transient layer (uncommitted `db.rule/*`, fresh).
+    /// each branch is a durable layer (committed `dialog.rule/*`, head-cached),
+    /// the overlay is a transient layer (uncommitted `dialog.rule/*`, fresh).
     /// The implicit per-descriptor rule is assembled once on top.
     ///
     /// The resolved rule set is checked against the program analysis
@@ -737,22 +737,6 @@ mod rule_tests {
         d.compile().expect("rule compiles")
     }
 
-    /// The `db.rule/*` facts that store `rule`: a `conclusion` index
-    /// pointing at the concept it concludes, and the `source` body.
-    /// Asserting these makes the durable/transient layer resolve it.
-    fn rule_statements(
-        rule: &DeductiveRule,
-    ) -> (impl Statement + 'static, impl Statement + 'static) {
-        let rule_entity = rule.this();
-        let conclusion = rule.conclusion().this();
-        (
-            the!("db.rule/conclusion")
-                .of(rule_entity.clone())
-                .is(conclusion),
-            the!("db.rule/source").of(rule_entity).is(rule.encode()),
-        )
-    }
-
     /// Query `employee` and return the derived entities.
     async fn query_employees<Env>(branch: &Branch, operator: &Env) -> anyhow::Result<Vec<Entity>>
     where
@@ -790,7 +774,6 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let alice: Entity = "id:alice".parse()?;
-        let (conc, src) = rule_statements(&employee_from_person());
         branch
             .transaction()
             .assert(
@@ -798,8 +781,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(conc)
-            .assert(src)
+            .assert(employee_from_person())
             .commit()
             .perform(&operator)
             .await?;
@@ -851,15 +833,13 @@ mod rule_tests {
         let dept: Entity = "id:dept-a".parse()?;
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
-        let (conc, src) = rule_statements(&rule);
         branch
             .transaction()
             .assert(the!("org/dept").of(alice.clone()).is(dept.clone()))
             .assert(the!("org/salary").of(alice.clone()).is(3u32))
             .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))
             .assert(the!("org/salary").of(bob.clone()).is(4u32))
-            .assert(conc)
-            .assert(src)
+            .assert(&rule)
             .commit()
             .perform(&operator)
             .await?;
@@ -931,14 +911,12 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         // Rule lives only in the overlay (uncommitted) — must still resolve.
-        let (conc, src) = rule_statements(&employee_from_person());
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("name".into(), Term::var("name"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(conc)
-            .with(src)
+            .with(employee_from_person())
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -978,14 +956,12 @@ mod rule_tests {
         assert!(query_employees(&branch, &operator).await?.is_empty());
 
         // Now add the rule via the overlay (head unchanged) — must resolve.
-        let (conc, src) = rule_statements(&employee_from_person());
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("name".into(), Term::var("name"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(conc)
-            .with(src)
+            .with(employee_from_person())
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -1022,14 +998,12 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         // Query WITH the overlay rule — resolves.
-        let (conc, src) = rule_statements(&employee_from_person());
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("name".into(), Term::var("name"));
         let with_overlay: Vec<ConceptConclusion> = branch
             .query()
-            .with(conc)
-            .with(src)
+            .with(employee_from_person())
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -1075,11 +1049,9 @@ mod rule_tests {
         assert!(query_employees(&branch, &operator).await?.is_empty());
 
         // Commit the rule on the SAME handle → its head advances.
-        let (conc, src) = rule_statements(&employee_from_person());
         branch
             .transaction()
-            .assert(conc)
-            .assert(src)
+            .assert(employee_from_person())
             .commit()
             .perform(&operator)
             .await?;
@@ -1113,8 +1085,6 @@ mod rule_tests {
             "distinct bodies ⇒ distinct identities"
         );
 
-        let (c1, s1) = rule_statements(&r1);
-        let (c2, s2) = rule_statements(&r2);
         branch
             .transaction()
             .assert(
@@ -1127,10 +1097,8 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(c1)
-            .assert(s1)
-            .assert(c2)
-            .assert(s2)
+            .assert(&r1)
+            .assert(&r2)
             .commit()
             .perform(&operator)
             .await?;
@@ -1161,7 +1129,6 @@ mod rule_tests {
         let bob: Entity = "id:bob".parse()?;
         // Commit rule #1 (person) + a person fact + a contractor fact.
         let r1 = rule_with_person_attr("org/person-name");
-        let (c1, s1) = rule_statements(&r1);
         branch
             .transaction()
             .assert(
@@ -1174,8 +1141,7 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(c1)
-            .assert(s1)
+            .assert(&r1)
             .commit()
             .perform(&operator)
             .await?;
@@ -1183,14 +1149,12 @@ mod rule_tests {
 
         // Rule #2 (contractor) only in the overlay.
         let r2 = rule_with_person_attr("org/contractor-name");
-        let (c2, s2) = rule_statements(&r2);
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
         terms.insert("name".into(), Term::var("name"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
-            .with(c2)
-            .with(s2)
+            .with(&r2)
             .select(ConceptQuery {
                 predicate: employee_descriptor(),
                 terms,
@@ -1237,14 +1201,12 @@ mod rule_tests {
         assert!(query_employees(&handle_a, &operator).await?.is_empty());
 
         // Handle B (independent handle) commits the rule → branch head -> H1.
-        let (conc, src) = rule_statements(&employee_from_person());
         repo.branch("main")
             .open()
             .perform(&operator)
             .await?
             .transaction()
-            .assert(conc)
-            .assert(src)
+            .assert(employee_from_person())
             .commit()
             .perform(&operator)
             .await?;
@@ -1277,7 +1239,6 @@ mod rule_tests {
         // `main` holds a person + the person rule.
         let alice: Entity = "id:alice".parse()?;
         let r_person = rule_with_person_attr("org/person-name");
-        let (cp, sp) = rule_statements(&r_person);
         repo.branch("main")
             .open()
             .perform(&operator)
@@ -1288,8 +1249,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(cp)
-            .assert(sp)
+            .assert(&r_person)
             .commit()
             .perform(&operator)
             .await?;
@@ -1297,7 +1257,6 @@ mod rule_tests {
         // A second branch holds a contractor + the contractor rule.
         let bob: Entity = "id:bob".parse()?;
         let r_contractor = rule_with_person_attr("org/contractor-name");
-        let (cc, sc) = rule_statements(&r_contractor);
         repo.branch("other")
             .open()
             .perform(&operator)
@@ -1308,8 +1267,7 @@ mod rule_tests {
                     .of(bob.clone())
                     .is("Bob".to_string()),
             )
-            .assert(cc)
-            .assert(sc)
+            .assert(&r_contractor)
             .commit()
             .perform(&operator)
             .await?;
@@ -1342,7 +1300,7 @@ mod rule_tests {
 
     // A committed rule that is later RETRACTED must stop resolving: the
     // retract moves the head, so the discovery cache re-scans and finds
-    // the rule's `db.rule/*` facts gone. The inverse of the
+    // the rule's `dialog.rule/*` facts gone. The inverse of the
     // head-move-adds case.
 
     #[dialog_common::test]
@@ -1353,7 +1311,6 @@ mod rule_tests {
 
         let alice: Entity = "id:alice".parse()?;
         let rule = employee_from_person();
-        let (conc, src) = rule_statements(&rule);
         branch
             .transaction()
             .assert(
@@ -1361,8 +1318,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(conc)
-            .assert(src)
+            .assert(&rule)
             .commit()
             .perform(&operator)
             .await?;
@@ -1371,11 +1327,9 @@ mod rule_tests {
         assert!(query_employees(&branch, &operator).await?.contains(&alice));
 
         // Retract the rule's facts on the same handle → head advances.
-        let (conc, src) = rule_statements(&rule);
         branch
             .transaction()
-            .retract(conc)
-            .retract(src)
+            .retract(&rule)
             .commit()
             .perform(&operator)
             .await?;
@@ -1403,7 +1357,6 @@ mod rule_tests {
         // v1 reads org/person-name; commit it + a matching person fact.
         let alice: Entity = "id:alice".parse()?;
         let v1 = rule_with_person_attr("org/person-name");
-        let (c1, s1) = rule_statements(&v1);
         branch
             .transaction()
             .assert(
@@ -1411,8 +1364,7 @@ mod rule_tests {
                     .of(alice.clone())
                     .is("Alice".to_string()),
             )
-            .assert(c1)
-            .assert(s1)
+            .assert(&v1)
             .commit()
             .perform(&operator)
             .await?;
@@ -1426,7 +1378,6 @@ mod rule_tests {
         let carol: Entity = "id:carol".parse()?;
         let v2 = rule_with_person_attr("org/agent-name");
         assert_ne!(v1.this(), v2.this());
-        let (c2, s2) = rule_statements(&v2);
         branch
             .transaction()
             .assert(
@@ -1434,8 +1385,7 @@ mod rule_tests {
                     .of(carol.clone())
                     .is("Carol".to_string()),
             )
-            .assert(c2)
-            .assert(s2)
+            .assert(&v2)
             .commit()
             .perform(&operator)
             .await?;

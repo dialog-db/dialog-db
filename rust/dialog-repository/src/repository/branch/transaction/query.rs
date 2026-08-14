@@ -586,7 +586,7 @@ mod tests {
         Ok(())
     }
 
-    /// A rule whose `db.rule/*` facts are pending in the transaction
+    /// A rule whose `dialog.rule/*` facts are pending in the transaction
     /// resolves as a transient overlay rule: the uncommitted view
     /// derives through it without the rule (or the data) ever being
     /// committed.
@@ -618,19 +618,11 @@ mod tests {
         let employee = rule.conclusion().clone();
 
         let alice: Entity = "id:alice".parse()?;
-        let tx = branch
-            .transaction()
-            .assert(
-                the!("db.rule/conclusion")
-                    .of(rule.this())
-                    .is(employee.this()),
-            )
-            .assert(the!("db.rule/source").of(rule.this()).is(rule.encode()))
-            .assert(
-                the!("org/person-name")
-                    .of(alice.clone())
-                    .is("Alice".to_string()),
-            );
+        let tx = branch.transaction().assert(&rule).assert(
+            the!("org/person-name")
+                .of(alice.clone())
+                .is("Alice".to_string()),
+        );
 
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
@@ -694,12 +686,7 @@ mod tests {
         let bob: Entity = "id:bob".parse()?;
         let tx = branch
             .transaction()
-            .assert(
-                the!("db.rule/conclusion")
-                    .of(rule.this())
-                    .is(dept_total.this()),
-            )
-            .assert(the!("db.rule/source").of(rule.this()).is(rule.encode()))
+            .assert(&rule)
             .assert(the!("org/dept").of(alice.clone()).is(dept.clone()))
             .assert(the!("org/salary").of(alice.clone()).is(3u32))
             .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))

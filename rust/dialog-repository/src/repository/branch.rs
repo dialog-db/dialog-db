@@ -116,6 +116,15 @@ pub struct Branch {
     reference: BranchReference,
     revision: Cell<Revision>,
     upstream: Cell<Upstreams>,
+    /// The induction watermark: the last revision through which
+    /// inductive rules evaluated on this replica. A transaction commit
+    /// catches up over `(watermark, head]` before processing its own
+    /// delta, so a head advance that bypassed induction — a pull, a
+    /// raw [`Branch::commit`], a crash between publish and induce —
+    /// is picked up at the next inducing instant. Replica-local;
+    /// `None` (never induced) adopts the current head *without*
+    /// retroactive firing.
+    induction: Cell<Revision>,
     /// Shared node cache for tree reads. Created once per opened branch and
     /// carried (as a shared handle) into every `Select`'s tree, so blocks read
     /// by one query stay warm for the next instead of being re-fetched from
@@ -128,7 +137,7 @@ pub struct Branch {
     spill_cache: SpillCache,
     /// Shared deductive-rule cache (discovery by head + hydrated bodies).
     /// Like `node_cache`, created once per opened branch and carried into
-    /// every query's durable rule resolution, so the `db.rule/*` scan is
+    /// every query's durable rule resolution, so the `dialog.rule/*` scan is
     /// paid once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
     /// Transient session overlay: ephemeral facts folded into every
@@ -334,6 +343,10 @@ impl Branch {
     }
 
     /// A shared handle to this branch's deductive-rule cache.
+    pub(crate) fn induction_cell(&self) -> &Cell<Revision> {
+        &self.induction
+    }
+
     pub(crate) fn rule_cache(&self) -> SharedRuleCache {
         self.rule_cache.clone()
     }

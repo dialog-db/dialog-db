@@ -33,10 +33,14 @@ impl OpenBranch {
         let upstream = self.branch.upstream();
         upstream.resolve().perform(env).await?;
 
+        let induction = self.branch.induction();
+        induction.resolve().perform(env).await?;
+
         Ok(Branch {
             reference: self.branch,
             revision,
             upstream,
+            induction,
             node_cache: dialog_search_tree::Cache::new(),
             spill_cache: spill_cache(),
             rule_cache: Arc::new(RuleCache::new()),

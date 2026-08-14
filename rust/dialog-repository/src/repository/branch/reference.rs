@@ -56,6 +56,15 @@ impl BranchReference {
         self.cell("upstream")
     }
 
+    /// The cell holding this branch's induction watermark: the last
+    /// [`Revision`] through which inductive rules have evaluated.
+    /// Replica-local (it lives in the local store and never
+    /// replicates): each replica catches its rules up over
+    /// `(watermark, head]` as its own head advances.
+    pub fn induction(&self) -> Cell<Revision> {
+        self.cell("induction")
+    }
+
     /// Create a typed cell within this branch's space.
     pub fn cell<T>(&self, cell_name: impl Into<String>) -> Cell<T> {
         self.0.clone().cell(cell_name).into()
