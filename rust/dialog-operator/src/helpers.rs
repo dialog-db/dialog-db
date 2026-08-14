@@ -21,14 +21,22 @@ use rand_chacha::ChaCha8Rng;
 /// other's credentials in it.
 pub fn unique_name(prefix: &str) -> String {
     use dialog_common::time;
-    use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let ts = time::now()
         .duration_since(time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let pid = process::id();
+    // `process::id()` panics on wasm32-unknown (unsupported os call);
+    // a browser test runs one module per process anyway, so the
+    // timestamp + counter already disambiguate there.
+    #[cfg(not(target_arch = "wasm32"))]
+    let pid = {
+        use std::process;
+        process::id()
+    };
+    #[cfg(target_arch = "wasm32")]
+    let pid = 0u32;
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}-{ts}-{pid}-{seq}")
 }
