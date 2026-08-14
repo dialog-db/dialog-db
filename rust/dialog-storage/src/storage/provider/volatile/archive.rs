@@ -1,17 +1,11 @@
 //! Archive capability provider for volatile storage.
 
-use super::{ArchiveKey, Volatile, VolatileError};
+use super::{ArchiveKey, Volatile};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_effects::archive::prelude::{GetExt, ImportExt, PutExt};
 use dialog_effects::archive::{ArchiveError, Get, Import, Put};
-
-impl From<VolatileError> for ArchiveError {
-    fn from(e: VolatileError) -> Self {
-        ArchiveError::Storage(e.to_string())
-    }
-}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

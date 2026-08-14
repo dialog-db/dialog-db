@@ -291,8 +291,10 @@ where
         }
     }
 
-    /// Pins the format [`Manifest`] this session writes under, instead of
-    /// reading it from the tree's root on first load.
+    /// Pins the format [`Manifest`] this session writes under while the
+    /// tree is empty. A non-empty root's stored manifest still takes
+    /// precedence on first load: until adopt-on-edit exists, edits must
+    /// run under the format the nodes already carry.
     ///
     /// The manifest normally travels IN the tree (every node carries it),
     /// which leaves one gap: an EMPTY tree has no node to carry it, so a
@@ -617,9 +619,11 @@ where
                 self.cache.clone(),
                 self.manifest.unwrap_or_default(),
             ),
-            None => {
-                TransientTree::<Key, Value, D>::new(NULL_BLAKE3_HASH.clone(), self.cache.clone())
-            }
+            None => TransientTree::<Key, Value, D>::with_manifest(
+                NULL_BLAKE3_HASH.clone(),
+                self.cache.clone(),
+                self.manifest.unwrap_or_default(),
+            ),
         };
         let edit = replay_ops(edit, deferred, storage).await?;
         self.root = match edit.into_root() {
@@ -3428,6 +3432,60 @@ mod tests {
             canonical.root(),
             expected.root(),
             "canonicalize must replay and stamp under the tree's own manifest"
+        );
+        Ok(())
+    }
+
+    /// A session pinned to a non-default manifest must shape writes under
+    /// that manifest even when the tree is empty: the delete-to-empty and
+    /// refill lifecycle must produce the same root as a canonical build of
+    /// the surviving facts under the pinned format.
+    #[dialog_common::test]
+    async fn it_shapes_an_emptied_tree_under_the_pinned_manifest() -> Result<()> {
+        let custom = Manifest {
+            fanout_n: 2,
+            ..Manifest::default()
+        };
+        let mut storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+
+        // Fill a pinned session from empty, drain it back to empty, then
+        // refill: every write into the empty tree must shape under the pin.
+        let mut tree = HitchhikerTree::<[u8; 4], Vec<u8>>::empty().with_manifest(custom);
+        for k in 0..30u32 {
+            tree = tree
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        for k in 0..30u32 {
+            tree = tree.delete(k.to_be_bytes(), &storage).await?;
+        }
+        for k in 100..150u32 {
+            tree = tree
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let refilled = tree.canonicalize(&storage, &mut delta).await?;
+        flush(&mut delta, &mut storage).await?;
+
+        let mut oracle = TransientTree::<[u8; 4], Vec<u8>>::with_manifest(
+            NULL_BLAKE3_HASH.clone(),
+            Cache::new(),
+            custom,
+        );
+        for k in 100..150u32 {
+            oracle = oracle
+                .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
+                .await?;
+        }
+        let mut delta = Delta::zero();
+        let expected = oracle.persist(&mut delta)?;
+        flush(&mut delta, &mut storage).await?;
+
+        assert_eq!(
+            refilled.root(),
+            expected.root(),
+            "an empty pinned session must shape its writes under the pinned manifest"
         );
         Ok(())
     }

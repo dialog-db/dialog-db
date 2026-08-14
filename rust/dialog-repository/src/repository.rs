@@ -37,6 +37,9 @@ pub use open::*;
 mod remote;
 pub use remote::*;
 
+mod snapshot;
+pub use snapshot::*;
+
 // `Revision` and `TreeReference` moved to `dialog-capability` (the
 // light crate that owns `Did`) so engine-free clients can name them
 // without linking `dialog-query` or the storage/transport stack.
