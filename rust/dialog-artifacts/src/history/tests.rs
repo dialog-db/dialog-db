@@ -1134,6 +1134,126 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
     Ok(())
 }
 
+/// Reconcile overlap, case B: two replicas concurrently assert the
+/// IDENTICAL value under different versions, then exchange full-state
+/// differentials (the empty-sync-base pull shape). The tree is
+/// policy-agnostic here — the value type owns the merge
+/// (`Value::prevails_over`/`Value::fuse` on `State<Datum>`) — and the
+/// datum's policy is a canonical union: whichever direction integrates
+/// first, the contested slot must end up carrying BOTH claim versions
+/// in `absorb_versions` canonical form, and the two replicas must land
+/// on byte-identical roots. An overwrite would pass mere convergence
+/// checks (both sides agree on the winner) while orphaning the loser's
+/// claim — this pins the union itself.
+#[dialog_common::test]
+async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> {
+    use dialog_search_tree::{ContentAddressedStorage, Delta, TreeDifference};
+    use dialog_storage::{CborEncoder, Storage, StorageBackend as _};
+    use futures_util::{StreamExt as _, stream};
+
+    use crate::tree::TreeStorageBridge;
+
+    let mut store = Storage {
+        encoder: CborEncoder,
+        backend: MemoryStorageBackend::default(),
+    };
+
+    let entity = Entity::new()?;
+    let the: Attribute = "task/label".parse()?;
+    let urgent = Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::String("urgent".into()),
+        cause: None,
+    };
+
+    let bob = Version::new(Origin::from([1u8; 32]), Edition::new(0));
+    let mallory = Version::new(Origin::from([2u8; 32]), Edition::new(1));
+
+    // Both replicas write into one content-addressed store: blocks are
+    // keyed by hash, so sharing a backend changes nothing about what
+    // either tree can see and spares the test a block-transfer step.
+    let mut replicas = Vec::new();
+    for version in [bob, mallory] {
+        let mut tree = ArtifactTree::empty();
+        let mut delta = Delta::zero();
+        tree.apply_versioned(
+            &mut store,
+            &mut delta,
+            Some(version),
+            stream::iter(vec![Instruction::Assert(urgent.clone())]),
+        )
+        .await?;
+        for (digest, buffer) in delta.flush() {
+            store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+        }
+        replicas.push(tree);
+    }
+    let mut b = replicas.pop().expect("two replicas were built");
+    let mut a = replicas.pop().expect("two replicas were built");
+
+    let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let empty = ArtifactTree::empty();
+
+    // Each side's full state as a change stream, the shape a pull ships
+    // when the sync base is empty: bare adds, no removes, so the
+    // receiver's copy contests the incoming one instead of being
+    // deleted out from under it.
+    let mut shipped = Vec::new();
+    for tree in [&a, &b] {
+        let difference = TreeDifference::compute(&empty, tree, &storage, &storage).await?;
+        let changes = difference
+            .changes()
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        shipped.push(changes);
+    }
+    let from_b = shipped.pop().expect("two differentials were computed");
+    let from_a = shipped.pop().expect("two differentials were computed");
+
+    let mut delta = Delta::zero();
+    a = a
+        .edit()
+        .integrate(stream::iter(from_b.into_iter().map(Ok)), &storage)
+        .await?
+        .persist(&mut delta)?;
+    b = b
+        .edit()
+        .integrate(stream::iter(from_a.into_iter().map(Ok)), &storage)
+        .await?
+        .persist(&mut delta)?;
+    for (digest, buffer) in delta.flush() {
+        store.set(*digest.as_bytes(), buffer.into_vec()).await?;
+    }
+
+    assert_eq!(
+        a.root(),
+        b.root(),
+        "opposite integration directions must land on byte-identical roots"
+    );
+
+    let data = a.select_data(store.clone(), &entity, &the).await?;
+    assert_eq!(data.len(), 1, "one value, one standing entry");
+    let mut versions: Vec<Version> = data[0].versions().copied().collect();
+    versions.sort();
+    assert_eq!(
+        versions,
+        vec![bob, mallory],
+        "the contested slot unions both claim versions instead of \
+         orphaning the loser's"
+    );
+    assert_eq!(
+        data[0].version,
+        Some(bob),
+        "canonical form: the smallest version is primary, the rest \
+         collapsed"
+    );
+    assert_eq!(data[0].collapsed, vec![mallory]);
+    Ok(())
+}
+
 /// A replacement over a cardinality-many anomaly — several values standing
 /// at one (entity, attribute), one of them already the replacement's value
 /// — supersedes exactly the different-valued claims: they are removed and

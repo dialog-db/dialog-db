@@ -158,7 +158,9 @@ impl ProveDelegation<'_> {
             let mut admitted_direct = None;
 
             while let Some(item) = candidates.next().await {
-                let fact = item.map_err(|error| malformed("candidate fact undecodable", error))?;
+                let fact = item
+                    .and_then(|view| view.to_owned())
+                    .map_err(|error| malformed("candidate fact undecodable", error))?;
                 let Some(candidate) = self.candidate(branch, &store, fact.of, &subject).await?
                 else {
                     continue;
@@ -252,8 +254,9 @@ impl ProveDelegation<'_> {
         let mut not_before = None;
         let mut expiration = None;
         while let Some(item) = facts.next().await {
-            let fact: Artifact =
-                item.map_err(|error| malformed("candidate fact undecodable", error))?;
+            let fact: Artifact = item
+                .and_then(|view| view.to_owned())
+                .map_err(|error| malformed("candidate fact undecodable", error))?;
             match (fact.the.as_str(), fact.is) {
                 (DELEGATION_ISSUER, Value::String(did)) => issuer = Some(did),
                 (DELEGATION_SUBJECT, Value::String(did)) => candidate_subject = Some(did),

@@ -226,12 +226,13 @@ impl<S: Clone> Operator<S> {
         Some(proof)
     }
 
-    /// Record a resolved chain for this key at the current epoch.
-    fn record(&self, key: (Did, Did, String), proof: &UcanProof) {
-        let Some(branch) = self.delegations.get() else {
-            return;
-        };
-        let epoch = branch.revision().map(|revision| revision.version());
+    /// Record a resolved chain for this key at `epoch` — the branch head
+    /// captured BEFORE the walk that resolved it. Stamping the head at
+    /// record time instead would let a retract that lands mid-walk cache
+    /// the just-retracted chain under the post-retract head, serving it
+    /// until the next head movement; stamped with the pre-walk head, such
+    /// an entry simply never matches a live epoch again.
+    fn record(&self, key: (Did, Did, String), epoch: Option<Version>, proof: &UcanProof) {
         let mut cache = self.chains.lock();
         if cache.epoch != epoch {
             cache.chains.clear();
@@ -260,6 +261,13 @@ impl<S: Clone> Operator<S> {
         {
             return Ok(proof);
         }
+        // Captured before the walk: the facts the walk reads are at most
+        // this fresh, so the record must not claim a later head.
+        let epoch = self
+            .delegations
+            .get()
+            .and_then(|branch| branch.revision())
+            .map(|revision| revision.version());
 
         let proof = if claim.principal == self.did() {
             self.prove_as_operator(&claim).await?
@@ -268,7 +276,7 @@ impl<S: Clone> Operator<S> {
         };
 
         if let Some(key) = key {
-            self.record(key, &proof);
+            self.record(key, epoch, &proof);
         }
         Ok(proof)
     }
@@ -547,6 +555,97 @@ mod tests {
             expiration: Some(now + 7200),
         };
         assert!(operator.resolve(widened).await.is_err());
+        Ok(())
+    }
+
+    /// The cache key deliberately excludes parameters, so the hit-time
+    /// re-verification is all that stands between a cached chain and a
+    /// policy bypass: a chain resolved for parameters the policy covers
+    /// must not answer a claim whose parameters it refuses.
+    #[dialog_common::test]
+    async fn it_rejects_a_hit_whose_parameters_the_policy_refuses() -> Result<()> {
+        use dialog_ucan_core::delegation::policy::predicate::Predicate;
+        use dialog_ucan_core::delegation::policy::selector::filter::Filter;
+        use dialog_ucan_core::delegation::policy::selector::select::Select;
+        use ipld_core::ipld::Ipld;
+
+        let (operator, _profile) = operator("cache-policy").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+
+        let constrained = DelegationBuilder::new()
+            .issuer(space.clone())
+            .audience(&holder)
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".to_string()])
+            .policy(vec![Predicate::Equal(
+                Select::new(vec![Filter::Field("space".to_string())]),
+                Ipld::String("alpha".to_string()),
+            )])
+            .try_build()
+            .await
+            .unwrap();
+        Subject::from(operator.profile_did())
+            .attenuate(Access)
+            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+                DelegationChain::new(constrained),
+            )))
+            .perform(&operator)
+            .await
+            .unwrap();
+
+        let with_space = |value: &str| {
+            let mut scope = storage_scope(&space);
+            scope.parameters = Parameters(
+                [("space".to_string(), Ipld::String(value.to_string()))]
+                    .into_iter()
+                    .collect(),
+            );
+            Prove::<Ucan>::new(holder.did(), scope)
+        };
+
+        operator
+            .resolve(with_space("alpha"))
+            .await
+            .expect("covered parameters prove");
+        assert_eq!(operator.cached_chains(), 1, "the chain is cached");
+        assert!(
+            operator.resolve(with_space("beta")).await.is_err(),
+            "a hit must be re-verified against this claim's parameters"
+        );
+        Ok(())
+    }
+
+    /// A record is stamped with the head captured BEFORE the walk: an
+    /// entry recorded under a stale epoch must never serve once the head
+    /// has moved (the retract-mid-walk race, sequential form).
+    #[dialog_common::test]
+    async fn it_refuses_entries_recorded_under_a_stale_epoch() -> Result<()> {
+        let (operator, _profile) = operator("cache-stale-record").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        // The epoch a hypothetical walk would have started under.
+        let stale = operator
+            .delegations
+            .get()
+            .and_then(|branch| branch.revision())
+            .map(|revision| revision.version());
+        let proof = operator.resolve(claim(&holder, &space)).await?;
+
+        // The head moves (another retain lands, as a mid-walk retract or
+        // retain would); a record stamped with the pre-move epoch must
+        // not serve afterwards.
+        let other = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &other, &holder, None).await;
+        let key =
+            Operator::<VolatileSpace>::cache_key(&claim(&holder, &space)).expect("cacheable claim");
+        operator.record(key.clone(), stale, &proof);
+        assert!(
+            operator.cached(&key, &claim(&holder, &space)).is_none(),
+            "a stale-stamped record must miss under the moved head"
+        );
         Ok(())
     }
 

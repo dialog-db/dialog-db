@@ -29,6 +29,13 @@ use thiserror::Error;
 pub trait Scope {
     /// The subject (resource) this scope applies to.
     fn subject(&self) -> &Did;
+
+    /// The command being requested, as ability path segments.
+    ///
+    /// Two scopes that differ only in their parameters share a command,
+    /// so this names the access independently of the arguments any one
+    /// invocation carries.
+    fn command(&self) -> &[String];
 }
 
 /// Derive an access scope from an invocable capability.
@@ -335,6 +342,18 @@ impl<P: Protocol> Prove<P> {
     pub fn during(mut self, duration: TimeRange) -> Self {
         self.duration = duration;
         self
+    }
+}
+
+/// Written by hand because a derive would demand `P: Clone`, and the
+/// protocol marker is never a value.
+impl<P: Protocol> Clone for Prove<P> {
+    fn clone(&self) -> Self {
+        Self {
+            principal: self.principal.clone(),
+            access: self.access.clone(),
+            duration: self.duration,
+        }
     }
 }
 

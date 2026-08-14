@@ -182,8 +182,7 @@ where
             .as_ref()
             .map(|base| base.edition.successor())
             .unwrap_or(Edition::GENESIS);
-        let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
-        let origin = crate::origin_of(&branch_entity, &issuer);
+        let (branch_entity, origin) = branch.commit_identity(&profile, &issuer);
         let version = Version::new(origin, edition);
 
         // Walk forward from the current revision's tree root, or from
@@ -193,7 +192,13 @@ where
             .map(|rev| *rev.tree.hash())
             .unwrap_or(EMPTY_TREE_HASH);
 
-        let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
+        // Read through the branch's shared node cache: the commit's
+        // supersession scans and history reads then hit blocks earlier
+        // commits and queries already fetched (and blocks the persist below
+        // seeds), instead of re-fetching everything into a cache that dies
+        // with this commit.
+        let mut tree =
+            Index::from_hash_with_cache(NodeHash::from(base_tree_hash), branch.node_cache());
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
         // cardinality-one supersession, retraction — and, because the
@@ -219,7 +224,8 @@ where
         // for callers that want the history-independent form (see
         // `Commit::canonicalize`).
         let mut delta = Delta::zero();
-        let batch = dialog_artifacts::BufferedBatch::apply(
+        let batch = dialog_artifacts::BufferedBatch::apply_reusing(
+            branch.spine(),
             &tree,
             &mut store,
             Some(version),
@@ -439,6 +445,7 @@ mod tests {
         let results: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("person/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .filter_map(|r| async { r.ok() })
@@ -469,7 +476,12 @@ mod tests {
 
         // Select should find the artifact
         let selector = ArtifactSelector::new().the("user/name".parse()?);
-        let stream = branch.claims().select(selector).perform(&operator).await?;
+        let stream = branch
+            .claims()
+            .select(selector)
+            .to_owned()
+            .perform(&operator)
+            .await?;
         tokio::pin!(stream);
 
         let results: Vec<_> = stream.filter_map(|r| async { r.ok() }).collect().await;
@@ -554,6 +566,7 @@ mod tests {
         let results: Vec<_> = fresh
             .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -899,6 +912,7 @@ mod history_tests {
                     .the("post/title".parse()?)
                     .of("post:1".parse()?),
             )
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()

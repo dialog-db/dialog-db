@@ -645,9 +645,13 @@ where
                 // clone, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
-                let query_env: QueryEnv<'a, Env> =
-                    QueryEnv::new(vec![self.branch.clone()], overlay, tombstones, env)
-                        .with_demand(self.demand.clone());
+                let query_env: QueryEnv<'a, Env> = QueryEnv::new(
+                    vec![self.branch.clone()],
+                    overlay,
+                    Arc::new(tombstones),
+                    env,
+                )
+                .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 if rules.recursion().is_some() {
                     // Fixpoint continuation: deletions retract via DRed,
@@ -754,9 +758,13 @@ where
             let tombstones = tombstones_from(&overlay);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let mut query_env: QueryEnv<'a, Env> =
-                QueryEnv::new(vec![self.branch.clone()], overlay, tombstones, env)
-                    .with_demand(demand.clone());
+            let mut query_env: QueryEnv<'a, Env> = QueryEnv::new(
+                vec![self.branch.clone()],
+                overlay,
+                Arc::new(tombstones),
+                env,
+            )
+            .with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
             // across polls: a recompute rebuilds into the retained
             // table so a later additions-only poll can extend it.
@@ -802,13 +810,17 @@ where
             let tombstones = tombstones_from(&overlay);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a, Env> =
-                QueryEnv::new(vec![self.branch.clone()], overlay, tombstones, env)
-                    .with_demand(self.demand.clone())
-                    .with_fixpoint(
-                        concept.this(),
-                        Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
-                    );
+            let query_env: QueryEnv<'a, Env> = QueryEnv::new(
+                vec![self.branch.clone()],
+                overlay,
+                Arc::new(tombstones),
+                env,
+            )
+            .with_demand(self.demand.clone())
+            .with_fixpoint(
+                concept.this(),
+                Continuation::new(self.fixpoint.clone()).with_changes(additions, deletions),
+            );
             self.query.clone().perform(&query_env).try_vec().await
         })
     }
@@ -1172,6 +1184,83 @@ mod tests {
         assert_eq!(
             staged, expected,
             "a transaction's view folds the session overlay under its pending changes"
+        );
+        Ok(())
+    }
+
+    /// Spilled (blob-backed) values must merge across overlay and
+    /// branch backings exactly like inline ones: the overlay derives
+    /// its sort keys under the default manifest while the scan reads
+    /// stored bytes, and this is where a divergence would silently
+    /// resurrect or duplicate a fact. A staged re-assert of a
+    /// committed spilled fact yields the row once (merge fingerprint
+    /// agreement), and an overlay retract suppresses the committed
+    /// row (tombstone key agreement).
+    #[dialog_common::test]
+    async fn it_merges_spilled_values_across_overlay_and_branch() -> anyhow::Result<()> {
+        use dialog_query::query::Output as _;
+
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let spilled = "z".repeat(dialog_search_tree::Manifest::default().inline_n as usize + 1);
+        branch
+            .transaction()
+            .assert(the!("person/name").of(alice.clone()).is(spilled.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let committed = names(
+            &branch
+                .select(names_query())
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        );
+        assert_eq!(
+            committed,
+            vec![(alice.clone(), spilled.clone())],
+            "the committed spilled fact reads back"
+        );
+
+        // Dedup across backings: the same spilled fact staged in a
+        // transaction and committed in the tree merges to one row.
+        let transaction = branch
+            .transaction()
+            .assert(the!("person/name").of(alice.clone()).is(spilled.clone()));
+        let staged = names(
+            &transaction
+                .query()
+                .select(names_query())
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        );
+        assert_eq!(
+            staged,
+            vec![(alice.clone(), spilled.clone())],
+            "a staged duplicate of a committed spilled fact must not double the row"
+        );
+
+        // Tombstone across backings: an overlay retract must suppress
+        // the committed spilled row.
+        branch
+            .overlay()
+            .retract(the!("person/name").of(alice.clone()).is(spilled.clone()));
+        let hidden = names(
+            &branch
+                .select(names_query())
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        );
+        assert_eq!(
+            hidden,
+            Vec::<(Entity, String)>::new(),
+            "an overlay tombstone must suppress the committed spilled fact"
         );
         Ok(())
     }

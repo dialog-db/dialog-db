@@ -113,7 +113,7 @@ impl<P: Protocol> CertificateStore<P> for IndexedDb {
                 let js_key = JsValue::from_str(&key);
                 store
                     .transact(|object_store| async move {
-                        object_store.delete(&js_key).await.map_err(|e| {
+                        object_store.delete(js_key).await.map_err(|e| {
                             AuthorizeError::Unavailable {
                                 detail: format!("delete: {e:?}"),
                             }

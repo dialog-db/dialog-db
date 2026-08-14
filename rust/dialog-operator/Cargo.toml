@@ -50,6 +50,7 @@ dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+ipld-core = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 dirs = { workspace = true }

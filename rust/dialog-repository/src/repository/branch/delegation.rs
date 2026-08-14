@@ -455,7 +455,7 @@ mod tests {
         let entity = entities[0].clone();
 
         // The slim facts stand on the envelope's entity.
-        let facts: Vec<Artifact> = branch
+        let facts: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().of(entity.clone()))
             .perform(&operator)
@@ -463,6 +463,7 @@ mod tests {
             .collect::<Vec<_>>()
             .await
             .into_iter()
+            .map(|item| item.and_then(|view| view.to_owned()))
             .collect::<Result<Vec<_>, _>>()?;
         let get = |attribute: &str| {
             facts
@@ -516,7 +517,7 @@ mod tests {
             .retain(chain)
             .perform(&operator)
             .await?;
-        let facts: Vec<Artifact> = branch
+        let facts: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().of(entities[0].clone()))
             .perform(&operator)
@@ -524,6 +525,7 @@ mod tests {
             .collect::<Vec<_>>()
             .await
             .into_iter()
+            .map(|item| item.and_then(|view| view.to_owned()))
             .collect::<Result<Vec<_>, _>>()?;
         let subject = facts
             .iter()
@@ -584,7 +586,7 @@ mod tests {
         assert_eq!(retracted, entities);
 
         // Facts gone, index reference gone...
-        let facts: Vec<Artifact> = branch
+        let facts: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().of(entity.clone()))
             .perform(&operator)
@@ -592,6 +594,7 @@ mod tests {
             .collect::<Vec<_>>()
             .await
             .into_iter()
+            .map(|item| item.and_then(|view| view.to_owned()))
             .collect::<Result<Vec<_>, _>>()?;
         assert!(facts.is_empty(), "retract removes the facts: {facts:?}");
         assert_eq!(

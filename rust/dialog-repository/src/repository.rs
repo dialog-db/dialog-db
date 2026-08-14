@@ -465,6 +465,7 @@ mod tests {
         let results: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -522,6 +523,7 @@ mod tests {
         let results: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().of("user:alice".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -544,6 +546,7 @@ mod tests {
         let results: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -579,6 +582,7 @@ mod tests {
         let before: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -596,6 +600,7 @@ mod tests {
         let after: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .collect::<Vec<_>>()
@@ -1955,7 +1960,7 @@ mod tests {
             use dialog_artifacts::selector::Constrained;
             use dialog_artifacts::{
                 ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey,
-                Update as _, Value, default_sort_key,
+                Update as _, Value,
             };
             use dialog_capability::Provider;
             use futures_util::StreamExt as _;
@@ -2050,7 +2055,10 @@ mod tests {
                     .await
                     .into_iter()
                     .collect::<Result<Vec<_>, DialogArtifactsError>>()?;
-                Ok(items.iter().map(default_sort_key).collect())
+                Ok(items
+                    .iter()
+                    .map(|view| view.sort_key())
+                    .collect::<Result<Vec<_>, _>>()?)
             }
 
             let scan_modes: &[(&str, ArtifactSelector<Constrained>)] = &[
@@ -2151,6 +2159,7 @@ mod tests {
             let results: Vec<_> = r_branch
                 .claims()
                 .select(ArtifactSelector::new().the("user/name".parse()?))
+                .to_owned()
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()
@@ -2200,6 +2209,7 @@ mod tests {
             let results: Vec<_> = named_branch
                 .claims()
                 .select(ArtifactSelector::new().the("item/tag".parse()?))
+                .to_owned()
                 .perform(&operator)
                 .await?
                 .collect::<Vec<_>>()

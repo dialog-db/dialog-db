@@ -67,6 +67,7 @@ pub trait SpaceProvider:
     + Provider<credential::Save<Credential>>
     + Provider<credential::Load<Secret>>
     + Provider<credential::Save<Secret>>
+    + Provider<credential::Retract<Secret>>
     + ConditionalSend
     + ConditionalSync
     + Clone
@@ -85,6 +86,7 @@ impl<T> SpaceProvider for T where
         + Provider<credential::Save<Credential>>
         + Provider<credential::Load<Secret>>
         + Provider<credential::Save<Secret>>
+        + Provider<credential::Retract<Secret>>
         + ConditionalSend
         + ConditionalSync
         + Clone
@@ -108,7 +110,8 @@ pub struct Space<A, M, C, D, B> {
         credential::Load<Credential>,
         credential::Save<Credential>,
         credential::Load<Secret>,
-        credential::Save<Secret>
+        credential::Save<Secret>,
+        credential::Retract<Secret>
     )]
     pub credential: C,
 

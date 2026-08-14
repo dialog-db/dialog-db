@@ -489,10 +489,12 @@ mod tests {
     /// Migration over the FILESYSTEM certificate store: the layout native
     /// users actually hold. Exercises the fs `export` walk and `forget`
     /// deletion end to end.
-    // Native only, feature-gated: `Storage::temp()` needs a real temp
-    // directory; under `web-integration-tests` the test macro emits a
-    // native wrapper that would find nothing to run behind a target gate.
-    #[cfg(not(feature = "web-integration-tests"))]
+    // Native only: `Storage::temp()` needs a real temp directory and does
+    // not exist on wasm. Both gates are needed here (unlike the tests in
+    // the feature-gated integration module): the target gate keeps the
+    // test out of plain wasm builds, and the feature gate keeps the
+    // macro's native wrapper from launching a test the wasm side lacks.
+    #[cfg(all(not(target_arch = "wasm32"), not(feature = "web-integration-tests")))]
     #[dialog_common::test]
     async fn it_migrates_the_filesystem_store() -> Result<()> {
         let storage = Storage::temp();

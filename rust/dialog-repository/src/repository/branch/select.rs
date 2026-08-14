@@ -1,7 +1,7 @@
 use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{Artifact, ArtifactSelector, DialogArtifactsError};
+use dialog_artifacts::{Artifact, ArtifactSelector, ArtifactView, DialogArtifactsError};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -43,17 +43,36 @@ impl<'a> Select<'a> {
     }
 }
 
+impl<'a> Select<'a> {
+    /// Materialize every row: the select's streams yield owned
+    /// [`Artifact`]s instead of borrowed-access [`ArtifactView`]s.
+    ///
+    /// `select(..).to_owned().perform(..)` is the drop-in spelling for
+    /// consumers of the pre-view API; prefer reading fields off the views
+    /// where the rows never leave the caller's scope.
+    // to_owned takes `self` because the select statement is a builder the
+    // terminal perform/execute consumes; there is no `&self` version to
+    // convert from.
+    #[allow(clippy::wrong_self_convention)]
+    pub fn to_owned(self) -> SelectOwned<'a> {
+        SelectOwned(self)
+    }
+}
+
 impl Select<'_> {
     /// Execute the select, using fallback to remote if the branch has
     /// a remote upstream.
     ///
-    /// The per-item error type remains [`DialogArtifactsError`] because
-    /// stream items surface artifact-decoding errors that the caller may
-    /// want to inspect directly.
+    /// Rows stream as borrowed-access [`ArtifactView`]s; chain
+    /// [`to_owned`](Self::to_owned) before this call for owned
+    /// [`Artifact`]s. The per-item error type remains
+    /// [`DialogArtifactsError`] because stream items surface
+    /// artifact-decoding errors that the caller may want to inspect
+    /// directly.
     pub async fn perform<Env>(
         self,
         env: &Env,
-    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogSearchTreeError>
+    ) -> Result<impl Stream<Item = Result<ArtifactView, DialogArtifactsError>>, DialogSearchTreeError>
     where
         Env: Provider<Get>
             + Provider<Put>
@@ -93,7 +112,7 @@ impl Select<'_> {
         self,
         store: S,
     ) -> Result<
-        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
+        impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's,
         DialogSearchTreeError,
     >
     where
@@ -142,5 +161,117 @@ impl Select<'_> {
         // scans agree on key order — that adjacency invariant is what
         // the cardinality-one sliding window relies on.
         Ok(tree.scan(store, self.branch.spill_cache(), self.selector))
+    }
+
+    /// [`execute`](Self::execute) materializing every row from the scan's
+    /// own key parse — the fast path behind [`SelectOwned`], which by
+    /// definition materializes everything and would otherwise pay a second
+    /// key walk per row through the view's `to_owned`.
+    async fn execute_owned<'s, S>(
+        self,
+        store: S,
+    ) -> Result<
+        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
+        DialogSearchTreeError,
+    >
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync
+            + 's,
+    {
+        // The same eager root probe as `execute`; see the comment there.
+        let tree_hash = self.tree_hash();
+        let node_cache = self.branch.node_cache();
+        if tree_hash != EMPTY_TREE_HASH {
+            node_cache
+                .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
+                    store
+                        .get(hash.as_bytes())
+                        .await
+                        .map(|maybe| maybe.map(Buffer::from))
+                })
+                .await?
+                .ok_or_else(|| {
+                    DialogSearchTreeError::Node(format!(
+                        "Blob not found in storage: {}",
+                        tree_hash.to_base58(),
+                    ))
+                })?;
+        }
+
+        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache);
+        Ok(tree.scan_owned(store, self.branch.spill_cache(), self.selector))
+    }
+}
+
+/// A [`Select`] whose streams materialize every row into an owned
+/// [`Artifact`] — the explicit opt-in produced by [`Select::to_owned`].
+///
+/// The query pipeline itself traffics in borrowed-access views
+/// (`ArtifactStream` yields [`ArtifactView`]s; the k-way merge and the
+/// `Changes` overlay operate on them, and the engine materializes only the
+/// rows its filters admit). This form is for CONSUMERS that want every row
+/// owned — a collect-everything read, an export — where materializing from
+/// the scan's own key parse beats a per-row view + `to_owned` round trip.
+pub struct SelectOwned<'a>(Select<'a>);
+
+impl SelectOwned<'_> {
+    /// The catalog (archive index) scoped to this branch's subject.
+    pub fn catalog(&self) -> Capability<Catalog> {
+        self.0.catalog()
+    }
+
+    /// [`Select::perform`], with every row materialized from the scan's
+    /// own key parse (see [`Select::execute_owned`]).
+    pub async fn perform<Env>(
+        self,
+        env: &Env,
+    ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogSearchTreeError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        // The same remote fallback as `Select::perform`; see the comment
+        // there.
+        let upstreams = self.0.branch.upstreams();
+        let remote = match upstreams.remote_name() {
+            Some(name) => self
+                .0
+                .branch
+                .subject()
+                .remote(name.to_string())
+                .load()
+                .perform(env)
+                .await
+                .ok(),
+            None => None,
+        };
+
+        let store = NetworkedIndex::new(env, self.catalog(), remote);
+        self.execute(store).await
+    }
+
+    /// [`Select::execute`], with every row materialized from the scan's
+    /// own key parse (see [`Select::execute_owned`]).
+    pub async fn execute<'s, S>(
+        self,
+        store: S,
+    ) -> Result<
+        impl Stream<Item = Result<Artifact, DialogArtifactsError>> + 's,
+        DialogSearchTreeError,
+    >
+    where
+        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + Clone
+            + ConditionalSync
+            + 's,
+    {
+        self.0.execute_owned(store).await
     }
 }
