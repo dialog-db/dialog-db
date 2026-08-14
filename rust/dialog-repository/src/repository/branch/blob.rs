@@ -55,6 +55,10 @@
 //! // write: stream chunks in, get the blob's entity back (recorded in the
 //! // index so `push` replicates it)
 //! let entity = Blob::import(chunks).write(branch.into()).perform(env).await?;
+//!
+//! // retract: drop the index reference (the removal replicates like any
+//! // commit); the bytes stay in the blob store
+//! Blob::from(entity).retract(branch.into()).perform(env).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -153,6 +157,14 @@ impl Blob {
             entity: self.entity,
         }
     }
+
+    /// Retract the blob from `archive`'s index, without touching its bytes.
+    pub fn retract<'a>(self, archive: BlobArchive<'a>) -> RetractBlob<'a> {
+        RetractBlob {
+            archive,
+            entity: self.entity,
+        }
+    }
 }
 
 /// A write builder from [`Blob::import`]; bind it to a target with
@@ -186,7 +198,7 @@ fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
 /// local, and the index nodes hydrate lazily. Fall back to the remote archive
 /// on a local miss (caching what lands), as `commit` does. With no remote
 /// upstream this degrades to a plain local index.
-async fn index_store<'e, Env>(branch: &Branch, env: &'e Env) -> NetworkedIndex<'e, Env>
+pub(crate) async fn index_store<'e, Env>(branch: &Branch, env: &'e Env) -> NetworkedIndex<'e, Env>
 where
     Env: Provider<Resolve> + ConditionalSync + 'static,
 {
@@ -312,7 +324,7 @@ impl ReadBlob<'_> {
             .load()
             .perform(env)
             .await
-            .map_err(|e| CommitError::Blob(BlobError::ExecutionError(e.to_string())))?;
+            .map_err(|e| CommitError::Blob(BlobError::Storage(e.to_string())))?;
         let address = remote.address();
 
         // Full-blob read from the remote, forked to its site.
@@ -401,126 +413,226 @@ where
         }
         let hash = sink.finish().await?;
 
-        // 2. Record the blob in the index. Mirror `commit`: checkpoint the head
-        //    so the publish below CAS's against it, walk from the current tree
-        //    root (or the empty tree), put the record, flush the new nodes, then
-        //    publish the advanced revision.
-        let head = branch.revision.checkpoint();
-        let base_revision = branch.revision();
-
-        // Same remote-fallback selection as `commit`: the first remote among
-        // ALL tracked upstreams, not only a remote default — a branch whose
-        // default upstream is local but which tracks a remote must still be
-        // able to hydrate blocks it holds by reference.
-        let upstreams = branch.upstreams();
-        let remote = match upstreams.remote_name() {
-            Some(name) => branch
-                .subject()
-                .remote(name.to_string())
-                .load()
-                .perform(env)
-                .await
-                .ok(),
-            None => None,
-        };
-        let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
-
-        let base_tree_hash = base_revision
-            .as_ref()
-            .map(|rev| *rev.tree.hash())
-            .unwrap_or(EMPTY_TREE_HASH);
-        let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
-
-        let mut delta = Delta::zero();
+        // 2. Record the blob in the index and advance the head.
         let index_hash: dialog_storage::Blake3Hash = *hash.as_bytes();
-        tree.put_blob(&mut store, &mut delta, &index_hash, BlobRecord::new(size))
-            .await?;
-
-        // A blob write advances the branch like any commit, so its revision
-        // gets the full version-control treatment: a DAG edge and skip table
-        // in a signed revision record, and an issuer-signed head — otherwise
-        // the published head would fail pull-side verification and leave a
-        // hole in the ancestry walk.
-        let authority = Identify.perform(env).await?;
-        let issuer = authority.did();
-        let profile = authority.profile().clone();
-
-        let parent = base_revision.as_ref().map(Revision::version);
-        let skips = match &parent {
-            Some(parent) => {
-                let history = TreeHistory::from_root_with_cache(
-                    &base_tree_hash,
-                    store.clone(),
-                    branch.node_cache(),
-                )
-                .with_record_cache(branch.records());
-                extend_skips(&history, parent).await?
-            }
-            None => Vec::new(),
-        };
-        let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
-        let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
-        let mut revision = match base_revision {
-            Some(base) => base.advance(TreeReference::default(), branch_entity.clone(), issuer),
-            None => Revision::new(TreeReference::default(), branch_entity.clone(), issuer),
-        };
-        let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
-        record.signature = Attest::new(record.payload()?).perform(env).await?;
-        // The record's key carries its value through the tree's own
-        // inline-vs-spill threshold, so read it off the tree rather than
-        // assuming the default.
-        let manifest = tree.format_manifest(store.clone(), &delta).await?;
-        tree.record(&mut store, &mut delta, record.entries(&manifest)?)
-            .await?;
-
-        // Persist the tree's pending nodes before referencing the root in a
-        // revision; a revision must only point at durable blocks.
-        branch
-            .archive()
-            .index()
-            .import(delta.flush().map(|(_, buffer)| buffer))
-            .perform(env)
-            .await
-            .map_err(DialogArtifactsError::from)?;
-
-        // The new head's causal context: the parent's plus this write's
-        // own version, exactly as `Commit` derives it — a blob write
-        // advances the head like any commit and publishes its watermark
-        // the same way.
-        let contexts = branch.contexts();
-        let minted = revision.version();
-        let context = {
-            let mut context = match (&parent, base_context) {
-                (None, _) => Context::new(),
-                (Some(_), Some(context)) => context,
-                (Some(parent), None) => match contexts.cached(parent).await {
-                    Some(context) => context,
-                    None => {
-                        let history = TreeHistory::from_root_with_cache(
-                            &base_tree_hash,
-                            store.clone(),
-                            branch.node_cache(),
-                        )
-                        .with_record_cache(branch.records());
-                        context_of(parent, &history).await?
-                    }
-                },
-            };
-            context.record(minted);
-            context
-        };
-
-        revision.tree = TreeReference::from(*tree.root().as_bytes());
-        revision.context = Some(context.clone());
-        revision.signature = Attest::new(revision.payload()).perform(env).await?;
-
-        head.publish(revision, env).await?;
-
-        // Advance the branch memo so later pulls through this handle
-        // answer the context from memory.
-        contexts.insert(minted, context);
+        advance_blob_index(
+            branch,
+            env,
+            BlobIndexEdit::Put {
+                hash: index_hash,
+                record: BlobRecord::new(size),
+            },
+        )
+        .await?;
 
         Ok(Entity::from_blob(&index_hash)?)
+    }
+}
+
+/// The single blob-index edit [`advance_blob_index`] applies while minting a
+/// revision.
+enum BlobIndexEdit {
+    /// Record a blob reference (see [`WriteBlob`]).
+    Put {
+        hash: dialog_storage::Blake3Hash,
+        record: BlobRecord,
+    },
+    /// Tombstone a blob reference (see [`RetractBlob`]).
+    Retract { hash: dialog_storage::Blake3Hash },
+}
+
+/// Apply one blob-index edit as a new revision. Mirrors `commit`: checkpoint
+/// the head so the publish CAS's against it, walk from the current tree root
+/// (or the empty tree), apply the edit, flush the new nodes, then publish the
+/// advanced revision with the full version-control treatment (signed record,
+/// skip table, causal context).
+async fn advance_blob_index<Env>(
+    branch: &Branch,
+    env: &Env,
+    edit: BlobIndexEdit,
+) -> Result<(), CommitError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Import>
+        + Provider<Resolve>
+        + Provider<Publish>
+        + Provider<Identify>
+        + Provider<Attest>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    let head = branch.revision.checkpoint();
+    let base_revision = branch.revision();
+
+    // Same remote-fallback selection as `commit`: the first remote among
+    // ALL tracked upstreams, not only a remote default — a branch whose
+    // default upstream is local but which tracks a remote must still be
+    // able to hydrate blocks it holds by reference.
+    let upstreams = branch.upstreams();
+    let remote = match upstreams.remote_name() {
+        Some(name) => branch
+            .subject()
+            .remote(name.to_string())
+            .load()
+            .perform(env)
+            .await
+            .ok(),
+        None => None,
+    };
+    let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
+
+    let base_tree_hash = base_revision
+        .as_ref()
+        .map(|rev| *rev.tree.hash())
+        .unwrap_or(EMPTY_TREE_HASH);
+    let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
+
+    let mut delta = Delta::zero();
+    match &edit {
+        BlobIndexEdit::Put { hash, record } => {
+            tree.put_blob(&mut store, &mut delta, hash, *record).await?;
+        }
+        BlobIndexEdit::Retract { hash } => {
+            tree.retract_blob(&mut store, &mut delta, hash).await?;
+        }
+    }
+
+    // A blob-index edit advances the branch like any commit, so its
+    // revision gets the full version-control treatment: a DAG edge and
+    // skip table in a signed revision record, and an issuer-signed head —
+    // otherwise the published head would fail pull-side verification and
+    // leave a hole in the ancestry walk.
+    let authority = Identify.perform(env).await?;
+    let issuer = authority.did();
+    let profile = authority.profile().clone();
+
+    let parent = base_revision.as_ref().map(Revision::version);
+    let skips = match &parent {
+        Some(parent) => {
+            let history = TreeHistory::from_root_with_cache(
+                &base_tree_hash,
+                store.clone(),
+                branch.node_cache(),
+            )
+            .with_record_cache(branch.records());
+            extend_skips(&history, parent).await?
+        }
+        None => Vec::new(),
+    };
+    let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
+    let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
+    let mut revision = match base_revision {
+        Some(base) => base.advance(TreeReference::default(), branch_entity.clone(), issuer),
+        None => Revision::new(TreeReference::default(), branch_entity.clone(), issuer),
+    };
+    let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
+    record.signature = Attest::new(record.payload()?).perform(env).await?;
+    // The record's key carries its value through the tree's own
+    // inline-vs-spill threshold, so read it off the tree rather than
+    // assuming the default.
+    let manifest = tree.format_manifest(store.clone(), &delta).await?;
+    tree.record(&mut store, &mut delta, record.entries(&manifest)?)
+        .await?;
+
+    // Persist the tree's pending nodes before referencing the root in a
+    // revision; a revision must only point at durable blocks.
+    branch
+        .archive()
+        .index()
+        .import(delta.flush().map(|(_, buffer)| buffer))
+        .perform(env)
+        .await
+        .map_err(DialogArtifactsError::from)?;
+
+    // The new head's causal context: the parent's plus this write's
+    // own version, exactly as `Commit` derives it — a blob write
+    // advances the head like any commit and publishes its watermark
+    // the same way.
+    let contexts = branch.contexts();
+    let minted = revision.version();
+    let context = {
+        let mut context = match (&parent, base_context) {
+            (None, _) => Context::new(),
+            (Some(_), Some(context)) => context,
+            (Some(parent), None) => match contexts.cached(parent).await {
+                Some(context) => context,
+                None => {
+                    let history = TreeHistory::from_root_with_cache(
+                        &base_tree_hash,
+                        store.clone(),
+                        branch.node_cache(),
+                    )
+                    .with_record_cache(branch.records());
+                    context_of(parent, &history).await?
+                }
+            },
+        };
+        context.record(minted);
+        context
+    };
+
+    revision.tree = TreeReference::from(*tree.root().as_bytes());
+    revision.context = Some(context.clone());
+    revision.signature = Attest::new(revision.payload()).perform(env).await?;
+
+    head.publish(revision, env).await?;
+
+    // Advance the branch memo so later pulls through this handle
+    // answer the context from memory.
+    contexts.insert(minted, context);
+
+    Ok(())
+}
+
+/// Retract a blob's index reference as one new revision. Created by
+/// [`Blob::retract`].
+///
+/// Removes the blob from the index only: the bytes stay in the blob store,
+/// so a replica that already holds them can still read them locally.
+/// Reclaiming bytes no index references is a separate, local concern. The
+/// removal travels with the tree like any commit, so replicas that pull it
+/// stop referencing the blob and can no longer hydrate it from a remote.
+pub struct RetractBlob<'a> {
+    archive: BlobArchive<'a>,
+    entity: Entity,
+}
+
+impl RetractBlob<'_> {
+    /// Execute the retraction.
+    ///
+    /// Idempotent at the branch level: when the index does not reference the
+    /// blob (never written, or already retracted), this is a no-op that mints
+    /// no revision.
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Publish>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let branch = self.archive.branch;
+        let hash = blob_hash(&self.entity)?;
+        if index_size(branch, &hash, env).await?.is_none() {
+            return Ok(());
+        }
+        advance_blob_index(
+            branch,
+            env,
+            BlobIndexEdit::Retract {
+                hash: *hash.as_bytes(),
+            },
+        )
+        .await
     }
 }
 
@@ -532,12 +644,12 @@ mod tests {
 
     use super::Blob;
     use crate::RepositoryExt as _;
-    use crate::helpers::unique_name;
     use anyhow::Result;
     use dialog_capability::Subject;
     use dialog_effects::blob::{BlobError, BlobReader, ByteRange};
     use dialog_network::Network;
-    use dialog_operator::Profile;
+    use dialog_operator::helpers::unique_name;
+    use dialog_operator::{DeriveOperator as _, Profile};
     use dialog_storage::provider::storage::Storage;
     use futures_util::stream;
 
@@ -605,6 +717,79 @@ mod tests {
             .perform(&operator)
             .await?;
         assert_eq!(drain(reader).await, payload[10..19]);
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_retracts_a_blob_from_the_index_but_not_the_store() -> Result<()> {
+        let storage = Storage::volatile();
+        let profile = Profile::open(unique_name("blob-retract"))
+            .perform(&storage)
+            .await?;
+        let operator = profile
+            .derive(b"test")
+            .allow(Subject::any())
+            .network(Network::default())
+            .build(storage)
+            .await?;
+        let repo = profile
+            .repository(unique_name("repo"))
+            .open()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let payload: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let chunks: Vec<Result<Vec<u8>, BlobError>> =
+            payload.chunks(4096).map(|c| Ok(c.to_vec())).collect();
+        let entity = Blob::import(stream::iter(chunks))
+            .write((&branch).into())
+            .perform(&operator)
+            .await?;
+
+        Blob::from(entity.clone())
+            .retract((&branch).into())
+            .perform(&operator)
+            .await?;
+
+        // The index no longer references the blob...
+        assert_eq!(
+            Blob::from(entity.clone())
+                .size((&branch).into())
+                .perform(&operator)
+                .await?,
+            None
+        );
+
+        // ...but the bytes were not touched: a local read still serves them.
+        let reader = Blob::from(entity.clone())
+            .read((&branch).into())
+            .perform(&operator)
+            .await?;
+        assert_eq!(drain(reader).await, payload);
+
+        // Retracting again is a no-op, not an error.
+        Blob::from(entity.clone())
+            .retract((&branch).into())
+            .perform(&operator)
+            .await?;
+
+        // Re-importing the same bytes re-references the blob.
+        let chunks: Vec<Result<Vec<u8>, BlobError>> =
+            payload.chunks(4096).map(|c| Ok(c.to_vec())).collect();
+        let again = Blob::import(stream::iter(chunks))
+            .write((&branch).into())
+            .perform(&operator)
+            .await?;
+        assert_eq!(again, entity);
+        assert_eq!(
+            Blob::from(entity)
+                .size((&branch).into())
+                .perform(&operator)
+                .await?,
+            Some(payload.len() as u64)
+        );
 
         Ok(())
     }

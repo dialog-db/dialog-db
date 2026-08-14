@@ -8,7 +8,6 @@ use rkyv::{
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
-use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use crate::{
@@ -78,8 +77,161 @@ pub struct TransientIndex<Key, Value> {
 enum LinkNovelty<Value> {
     /// The stored encoding, exactly as persisted, untouched since open.
     Sealed(NoveltyBuffer<Value>),
-    /// Decoded ops, sorted by key with the newest op for a key last.
-    Open(Vec<NoveltyEntry<Value>>),
+    /// Decoded ops as two sorted runs. `run` holds the settled majority;
+    /// `tail` holds recent arrivals, capped at [`NOVELTY_TAIL_LIMIT`] and
+    /// merged into `run` when full (and by any consumer that needs one flat
+    /// sorted list). Both runs are sorted by key with the newest op for a
+    /// key last, and every `tail` op is newer than every `run` op FOR THE
+    /// SAME KEY (arrivals only ever land in the tail), so the stable merge
+    /// that keeps `run` entries first on ties reproduces exactly the order
+    /// a single always-sorted buffer would hold.
+    ///
+    /// The split exists because enqueue inserts ops ONE AT A TIME (the
+    /// per-op cascade timing is deliberate — batching moved where flushes
+    /// fire and measured slower): insertion into one flat sorted vec walked
+    /// and shifted the whole accumulated buffer per op, O(n^2) per bulk
+    /// batch and the dominant cost of a bulk commit. Inserting into the
+    /// bounded tail is O(tail); point and range readers binary-search both
+    /// runs.
+    Open {
+        /// The settled ops, sorted by key, oldest ops first within a key.
+        run: Vec<NoveltyEntry<Value>>,
+        /// Recent arrivals, sorted by key, chronological within a key,
+        /// every one newer than any `run` op for its key.
+        tail: Vec<NoveltyEntry<Value>>,
+    },
+    /// Decoded ops WITH their current encoding alongside, the state a
+    /// non-consuming persist leaves an open link in: the next persist
+    /// re-embeds `buffer` verbatim (like a sealed link), while the next
+    /// mutation takes `entries` directly and drops the stale encoding (like
+    /// an open link) — so a link that ops keep landing in never re-decodes
+    /// its accumulated buffer, it only re-encodes it at each persist.
+    Cached {
+        /// The decoded ops, identical in content to `buffer`.
+        entries: Vec<NoveltyEntry<Value>>,
+        /// The encoding the last persist embedded.
+        buffer: NoveltyBuffer<Value>,
+    },
+}
+
+/// The size the tail run of an open link may grow to before it is merged
+/// into the main run. Bounds the linear share of every per-op insert and of
+/// every reader's tail probe; the merge amortizes to O(total / limit) full
+/// passes over the buffer.
+const NOVELTY_TAIL_LIMIT: usize = 128;
+
+/// Stably merges two sorted runs into one flat sorted list, keeping `run`
+/// entries before `tail` entries for equal keys — `tail` ops are newer, and
+/// the newest op for a key must sort last.
+fn merge_runs<Value>(
+    run: Vec<NoveltyEntry<Value>>,
+    tail: Vec<NoveltyEntry<Value>>,
+) -> Vec<NoveltyEntry<Value>> {
+    if tail.is_empty() {
+        return run;
+    }
+    if run.is_empty() {
+        return tail;
+    }
+    let mut merged = Vec::with_capacity(run.len() + tail.len());
+    let mut left = run.into_iter().peekable();
+    let mut right = tail.into_iter().peekable();
+    loop {
+        match (left.peek(), right.peek()) {
+            (Some(a), Some(b)) => {
+                if a.key <= b.key {
+                    merged.push(left.next().expect("peeked"));
+                } else {
+                    merged.push(right.next().expect("peeked"));
+                }
+            }
+            (Some(_), None) => merged.push(left.next().expect("peeked")),
+            (None, Some(_)) => merged.push(right.next().expect("peeked")),
+            (None, None) => break,
+        }
+    }
+    merged
+}
+
+/// Appends the winning op per key within `[start, end]` across two sorted
+/// runs, in ascending key order. The winner for a key is its last tail op
+/// when the tail holds the key at all (tail ops are newer than run ops for
+/// the same key), and its last run op otherwise. Both runs are sorted, so
+/// the in-range span of each is contiguous and sought by binary search; a
+/// flat single-run buffer passes an empty tail.
+fn winners_in_runs<Value>(
+    run: &[NoveltyEntry<Value>],
+    tail: &[NoveltyEntry<Value>],
+    start: Bound<&[u8]>,
+    end: Bound<&[u8]>,
+    out: &mut Vec<NoveltyEntry<Value>>,
+) where
+    Value: self::Value,
+{
+    let seek = |entries: &[NoveltyEntry<Value>]| match start {
+        Bound::Included(bound) => entries.partition_point(|entry| entry.key.as_slice() < bound),
+        Bound::Excluded(bound) => entries.partition_point(|entry| entry.key.as_slice() <= bound),
+        Bound::Unbounded => 0,
+    };
+    let past_end = |key: &[u8]| match end {
+        Bound::Included(bound) => key > bound,
+        Bound::Excluded(bound) => key >= bound,
+        Bound::Unbounded => false,
+    };
+    let mut r = seek(run);
+    let mut t = seek(tail);
+    while r < run.len() || t < tail.len() {
+        let key = match (run.get(r), tail.get(t)) {
+            (Some(a), Some(b)) => {
+                if a.key <= b.key {
+                    a.key.as_slice()
+                } else {
+                    b.key.as_slice()
+                }
+            }
+            (Some(a), None) => a.key.as_slice(),
+            (None, Some(b)) => b.key.as_slice(),
+            (None, None) => unreachable!("the loop condition holds a head"),
+        };
+        if past_end(key) {
+            break;
+        }
+        // Walk both heads past this key's contiguous span; the last tail
+        // entry seen wins over the last run entry (assigned after it).
+        let mut winner = None;
+        while let Some(entry) = run.get(r) {
+            if entry.key.as_slice() != key {
+                break;
+            }
+            winner = Some(entry);
+            r += 1;
+        }
+        while let Some(entry) = tail.get(t) {
+            if entry.key.as_slice() != key {
+                break;
+            }
+            winner = Some(entry);
+            t += 1;
+        }
+        out.push(winner.expect("some head held the key").clone());
+    }
+}
+
+/// The winning buffered op for `key` across an open link's two runs: the
+/// newest op for the key, which lives at the end of the key's contiguous
+/// span in the tail when the tail holds the key at all (tail ops are newer
+/// than run ops for the same key), and at the end of its span in the run
+/// otherwise.
+fn resolve_runs<'a, Value>(
+    run: &'a [NoveltyEntry<Value>],
+    tail: &'a [NoveltyEntry<Value>],
+    key: &[u8],
+) -> Option<&'a NoveltyOp<Value>> {
+    let last_for_key = |entries: &'a [NoveltyEntry<Value>]| {
+        let past = entries.partition_point(|entry| entry.key.as_slice() <= key);
+        (past > 0 && entries[past - 1].key.as_slice() == key).then(|| &entries[past - 1].op)
+    };
+    last_for_key(tail).or_else(|| last_for_key(run))
 }
 
 impl<Value> LinkNovelty<Value>
@@ -90,35 +242,105 @@ where
     fn len(&self) -> usize {
         match self {
             LinkNovelty::Sealed(buffer) => buffer.count as usize,
-            LinkNovelty::Open(entries) => entries.len(),
+            LinkNovelty::Open { run, tail } => run.len() + tail.len(),
+            LinkNovelty::Cached { entries, .. } => entries.len(),
         }
     }
 
-    /// Lifts this link to its decoded entries for mutation, decoding a sealed
-    /// buffer. The sealed encoding is discarded: from here on this link's
-    /// buffer is re-encoded at persist, which is exactly the invalidation the
-    /// cache needs.
+    /// An empty open link.
+    fn empty() -> Self {
+        LinkNovelty::Open {
+            run: Vec::new(),
+            tail: Vec::new(),
+        }
+    }
+
+    /// Merges an open link's tail into its run, so `run` is the one flat
+    /// sorted op list and `tail` is empty. A no-op for every other state
+    /// (sealed and cached entries are already flat and sorted).
+    fn consolidate(&mut self) {
+        if let LinkNovelty::Open { run, tail } = self
+            && !tail.is_empty()
+        {
+            let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
+            *run = merged;
+        }
+    }
+
+    /// Lifts this link to ONE flat sorted list of decoded entries for
+    /// order-dependent mutation, decoding a sealed buffer and merging an
+    /// open link's tail. The encoding (sealed or cached) is discarded: from
+    /// here on this link's buffer is re-encoded at persist, which is exactly
+    /// the invalidation the cache needs.
     fn lift<K>(&mut self) -> Result<&mut Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
     where
         K: self::Key,
     {
-        if let LinkNovelty::Sealed(buffer) = self {
-            *self = LinkNovelty::Open(buffer.entries::<K>()?);
+        match self {
+            LinkNovelty::Sealed(buffer) => {
+                *self = LinkNovelty::Open {
+                    run: buffer.entries::<K>()?,
+                    tail: Vec::new(),
+                };
+            }
+            LinkNovelty::Cached { entries, .. } => {
+                *self = LinkNovelty::Open {
+                    run: std::mem::take(entries),
+                    tail: Vec::new(),
+                };
+            }
+            LinkNovelty::Open { .. } => self.consolidate(),
         }
         match self {
-            LinkNovelty::Open(entries) => Ok(entries),
-            LinkNovelty::Sealed(_) => unreachable!("sealed buffer was lifted above"),
+            LinkNovelty::Open { run, .. } => Ok(run),
+            _ => unreachable!("the buffer was lifted above"),
         }
     }
 
-    /// Takes this link's ops, leaving it empty.
+    /// Inserts one arriving op, preserving every reader's invariants without
+    /// touching the settled run: the op binary-inserts into the bounded
+    /// sorted tail (after any equal keys, so chronological order within a
+    /// key holds), and a full tail merges into the run first. This is the
+    /// enqueue path's insertion — O(tail limit) per op instead of a re-sort
+    /// of the whole accumulated buffer.
+    fn insert<K>(&mut self, entry: NoveltyEntry<Value>) -> Result<(), DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        match self {
+            LinkNovelty::Sealed(buffer) => {
+                *self = LinkNovelty::Open {
+                    run: buffer.entries::<K>()?,
+                    tail: vec![entry],
+                };
+            }
+            LinkNovelty::Cached { entries, .. } => {
+                *self = LinkNovelty::Open {
+                    run: std::mem::take(entries),
+                    tail: vec![entry],
+                };
+            }
+            LinkNovelty::Open { run, tail } => {
+                if tail.len() >= NOVELTY_TAIL_LIMIT {
+                    let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
+                    *run = merged;
+                }
+                let at = tail.partition_point(|held| held.key <= entry.key);
+                tail.insert(at, entry);
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes this link's ops as one flat sorted list, leaving it empty.
     fn take<K>(&mut self) -> Result<Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
     where
         K: self::Key,
     {
-        match std::mem::replace(self, LinkNovelty::Open(Vec::new())) {
+        match std::mem::replace(self, LinkNovelty::empty()) {
             LinkNovelty::Sealed(buffer) => buffer.entries::<K>(),
-            LinkNovelty::Open(entries) => Ok(entries),
+            LinkNovelty::Open { run, tail } => Ok(merge_runs(run, tail)),
+            LinkNovelty::Cached { entries, .. } => Ok(entries),
         }
     }
 
@@ -130,7 +352,8 @@ where
     {
         match self {
             LinkNovelty::Sealed(buffer) => Ok(buffer.resolve::<K>(key)?.is_some()),
-            LinkNovelty::Open(entries) => Ok(resolve_pending(entries, key).is_some()),
+            LinkNovelty::Open { run, tail } => Ok(resolve_runs(run, tail, key).is_some()),
+            LinkNovelty::Cached { entries, .. } => Ok(resolve_pending(entries, key).is_some()),
         }
     }
 }
@@ -156,6 +379,27 @@ pub struct Novelty<Value> {
     /// Total buffered ops across every link, so capacity triggers read a
     /// number instead of scanning.
     total: usize,
+    /// Total buffered WEIGHT across every link (key bytes + value payload
+    /// weight per op, the same metering the frame ceiling uses), for the
+    /// byte-capped flush trigger. `None` until first asked for (a spine
+    /// opened from stored buffers computes it lazily by streaming the
+    /// sealed columns); once computed, every mutator keeps it exact.
+    weight: Option<usize>,
+}
+
+/// The weight one buffered op contributes toward the buffer byte cap: its
+/// key bytes plus its value's payload weight (a retract carries no value
+/// and is charged like [`State::Removed`]'s footprint).
+fn novelty_entry_weight<Value>(entry: &NoveltyEntry<Value>) -> usize
+where
+    Value: self::Value,
+{
+    entry.key.len()
+        + crate::entry::ENTRY_ENCODING_OVERHEAD
+        + match &entry.op {
+            NoveltyOp::Assert(value) => value.payload_weight(),
+            NoveltyOp::Retract => 16,
+        }
 }
 
 impl<Value> Default for Novelty<Value> {
@@ -170,6 +414,7 @@ impl<Value> Novelty<Value> {
         Self {
             links: Vec::new(),
             total: 0,
+            weight: Some(0),
         }
     }
 
@@ -223,8 +468,7 @@ where
     /// buffers as needed.
     fn link_mut(&mut self, at: usize) -> &mut LinkNovelty<Value> {
         if self.links.len() <= at {
-            self.links
-                .resize_with(at + 1, || LinkNovelty::Open(Vec::new()));
+            self.links.resize_with(at + 1, LinkNovelty::empty);
         }
         &mut self.links[at]
     }
@@ -232,9 +476,11 @@ where
     /// Routes `incoming` ops into their link buffers by the children's
     /// bounds (see [`link_bounds`]): one binary search per op, the same
     /// lower-bound rule stored routing uses, with a key below every bound
-    /// clamping into link 0. Only the touched links are lifted and re-sorted;
-    /// the stable sort keeps existing ops before incoming ones for equal
-    /// keys, so the newest op for a key stays last.
+    /// clamping into link 0. Each op inserts into its link's bounded sorted
+    /// tail in arrival order (see [`LinkNovelty::insert`]), so for equal
+    /// keys existing ops stay before incoming ones and the newest op for a
+    /// key stays last — the same order the old whole-buffer stable re-sort
+    /// produced, without its O(buffer) cost per op.
     pub(crate) fn route<K>(
         &mut self,
         bounds: &[&[u8]],
@@ -246,16 +492,13 @@ where
         if incoming.is_empty() {
             return Ok(());
         }
-        let mut buckets: BTreeMap<usize, Vec<NoveltyEntry<Value>>> = BTreeMap::new();
         for entry in incoming {
             let at = bounds.partition_point(|separator| *separator <= entry.key.as_slice());
-            buckets.entry(at).or_default().push(entry);
-        }
-        for (at, bucket) in buckets {
-            self.total += bucket.len();
-            let entries = self.link_mut(at).lift::<K>()?;
-            entries.extend(bucket);
-            entries.sort_by(|left, right| left.key.cmp(&right.key));
+            self.total += 1;
+            if let Some(weight) = self.weight.as_mut() {
+                *weight += novelty_entry_weight(&entry);
+            }
+            self.link_mut(at).insert::<K>(entry)?;
         }
         Ok(())
     }
@@ -274,8 +517,69 @@ where
         match self.links.get(at) {
             None => Ok(None),
             Some(LinkNovelty::Sealed(buffer)) => buffer.resolve::<K>(key),
-            Some(LinkNovelty::Open(entries)) => Ok(resolve_pending(entries, key).cloned()),
+            Some(LinkNovelty::Open { run, tail }) => Ok(resolve_runs(run, tail, key).cloned()),
+            Some(LinkNovelty::Cached { entries, .. }) => Ok(resolve_pending(entries, key).cloned()),
         }
+    }
+
+    /// Total buffered weight across every link (the byte-cap trigger's
+    /// quantity), computed lazily on first ask — a spine opened from stored
+    /// buffers streams their sealed columns once — and kept exact by every
+    /// mutator afterwards.
+    pub(crate) fn weight<K>(&mut self) -> Result<usize, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        if let Some(weight) = self.weight {
+            return Ok(weight);
+        }
+        let mut weight = 0usize;
+        for link in &self.links {
+            weight += match link {
+                LinkNovelty::Sealed(buffer) => buffer.weight::<K>()?,
+                LinkNovelty::Open { run, tail } => run
+                    .iter()
+                    .chain(tail.iter())
+                    .map(novelty_entry_weight)
+                    .sum(),
+                LinkNovelty::Cached { entries, .. } => {
+                    entries.iter().map(novelty_entry_weight).sum()
+                }
+            };
+        }
+        self.weight = Some(weight);
+        Ok(weight)
+    }
+
+    /// Per-link `(link, weight, ops)` for every non-empty link buffer, the
+    /// quantities a selective flush orders its shedding by. A sealed link
+    /// streams its encoded columns; nothing is lifted.
+    pub(crate) fn link_measures<K>(
+        &self,
+    ) -> Result<Vec<(usize, usize, usize)>, DialogSearchTreeError>
+    where
+        K: self::Key,
+    {
+        let mut measures = Vec::new();
+        for (at, link) in self.links.iter().enumerate() {
+            let ops = link.len();
+            if ops == 0 {
+                continue;
+            }
+            let weight = match link {
+                LinkNovelty::Sealed(buffer) => buffer.weight::<K>()?,
+                LinkNovelty::Open { run, tail } => run
+                    .iter()
+                    .chain(tail.iter())
+                    .map(novelty_entry_weight)
+                    .sum(),
+                LinkNovelty::Cached { entries, .. } => {
+                    entries.iter().map(novelty_entry_weight).sum()
+                }
+            };
+            measures.push((at, weight, ops));
+        }
+        Ok(measures)
     }
 
     /// Takes link `at`'s ops, leaving that buffer empty: what a flush hands
@@ -293,6 +597,9 @@ where
             Some(link) => {
                 let taken = link.take::<K>()?;
                 self.total -= taken.len();
+                if let Some(weight) = self.weight.as_mut() {
+                    *weight -= taken.iter().map(novelty_entry_weight).sum::<usize>();
+                }
                 Ok(taken)
             }
         }
@@ -312,6 +619,7 @@ where
         }
         self.links.clear();
         self.total = 0;
+        self.weight = Some(0);
         Ok(out)
     }
 
@@ -341,15 +649,26 @@ where
         };
         let present = match link {
             LinkNovelty::Sealed(buffer) => buffer.resolve::<K>(key)?.is_some(),
-            LinkNovelty::Open(entries) => resolve_pending(entries, key).is_some(),
+            LinkNovelty::Open { run, tail } => resolve_runs(run, tail, key).is_some(),
+            LinkNovelty::Cached { entries, .. } => resolve_pending(entries, key).is_some(),
         };
         if !present {
             return Ok(());
         }
         let entries = link.lift::<K>()?;
         let before = entries.len();
-        entries.retain(|entry| entry.key.as_slice() != key);
+        let mut removed_weight = 0usize;
+        entries.retain(|entry| {
+            let keep = entry.key.as_slice() != key;
+            if !keep {
+                removed_weight += novelty_entry_weight(entry);
+            }
+            keep
+        });
         self.total -= before - entries.len();
+        if let Some(weight) = self.weight.as_mut() {
+            *weight -= removed_weight;
+        }
         Ok(())
     }
 
@@ -377,10 +696,20 @@ where
             return Ok(());
         }
 
+        // The first/last probes and the partition splits below need each
+        // touched link as one flat sorted list; folding a pending tail in
+        // here is once-per-boundary-move, off every hot path.
+        for touched in [at - 1, at] {
+            if let Some(link) = self.links.get_mut(touched) {
+                link.consolidate();
+            }
+        }
+
         // A risen bound: the leading ops of link `at` fall below it now.
         let strays_below = match self.links.get(at) {
             None => false,
-            Some(LinkNovelty::Open(entries)) => entries
+            Some(LinkNovelty::Open { run, .. })
+            | Some(LinkNovelty::Cached { entries: run, .. }) => run
                 .first()
                 .is_some_and(|entry| entry.key.as_slice() < bound),
             Some(LinkNovelty::Sealed(buffer)) => match buffer.keys::<K>()?.next_key()? {
@@ -404,7 +733,8 @@ where
         // A dropped bound: the trailing ops of link `at - 1` reach it now.
         let strays_above = match self.links.get(at - 1) {
             None => false,
-            Some(LinkNovelty::Open(entries)) => entries
+            Some(LinkNovelty::Open { run, .. })
+            | Some(LinkNovelty::Cached { entries: run, .. }) => run
                 .last()
                 .is_some_and(|entry| entry.key.as_slice() >= bound),
             Some(LinkNovelty::Sealed(buffer)) => {
@@ -445,40 +775,26 @@ where
     {
         for link in &self.links {
             match link {
-                LinkNovelty::Open(entries) => {
-                    // Buffers are sorted by key, so the in-range ops are a
-                    // contiguous run: seek to its start rather than walking
-                    // the whole buffer.
-                    let from = match start {
-                        Bound::Included(bound) => {
-                            entries.partition_point(|entry| entry.key.as_slice() < bound)
-                        }
-                        Bound::Excluded(bound) => {
-                            entries.partition_point(|entry| entry.key.as_slice() <= bound)
-                        }
-                        Bound::Unbounded => 0,
-                    };
-                    let mut at = from;
-                    while at < entries.len() {
-                        match end {
-                            Bound::Included(bound) if entries[at].key.as_slice() > bound => break,
-                            Bound::Excluded(bound) if entries[at].key.as_slice() >= bound => break,
-                            _ => {}
-                        }
-                        let mut last = at;
-                        while last + 1 < entries.len() && entries[last + 1].key == entries[at].key {
-                            last += 1;
-                        }
-                        out.push(entries[last].clone());
-                        at = last + 1;
-                    }
+                LinkNovelty::Open { run, tail } => {
+                    winners_in_runs(run, tail, start, end, out);
+                }
+                LinkNovelty::Cached { entries, .. } => {
+                    winners_in_runs(entries, &[], start, end, out);
                 }
                 LinkNovelty::Sealed(buffer) => {
                     let mut keys = buffer.keys::<K>()?;
-                    // The pending winner: the last-seen index for the current
-                    // key, flushed when the key changes or the scan ends.
-                    let mut winner: Option<(usize, Vec<u8>)> = None;
+                    // The pending winner: the last-seen (index, value slot)
+                    // for the current key, flushed when the key changes or
+                    // the scan ends. The slot is tracked as the polarity
+                    // column is walked (`keys()` validated it), so decoding
+                    // a winner costs no per-op polarity re-scan.
+                    let mut winner: Option<(usize, usize, Vec<u8>)> = None;
+                    let mut asserts = 0usize;
                     while let Some((at, key)) = keys.next_key()? {
+                        let slot = asserts;
+                        if buffer.polarity.get(at).copied() == Some(1) {
+                            asserts += 1;
+                        }
                         let after_start = match start {
                             Bound::Included(bound) => key >= bound,
                             Bound::Excluded(bound) => key > bound,
@@ -496,22 +812,25 @@ where
                             break;
                         }
                         match &mut winner {
-                            Some((winning, current)) if current.as_slice() == key => *winning = at,
+                            Some((winning, winning_slot, current)) if current.as_slice() == key => {
+                                *winning = at;
+                                *winning_slot = slot;
+                            }
                             _ => {
-                                if let Some((winning, current)) = winner.take() {
+                                if let Some((winning, winning_slot, current)) = winner.take() {
                                     out.push(NoveltyEntry {
                                         key: current,
-                                        op: buffer.op_at(winning)?,
+                                        op: buffer.op_with_slot(winning, winning_slot)?,
                                     });
                                 }
-                                winner = Some((at, key.to_vec()));
+                                winner = Some((at, slot, key.to_vec()));
                             }
                         }
                     }
-                    if let Some((winning, current)) = winner {
+                    if let Some((winning, winning_slot, current)) = winner {
                         out.push(NoveltyEntry {
                             key: current,
-                            op: buffer.op_at(winning)?,
+                            op: buffer.op_with_slot(winning, winning_slot)?,
                         });
                     }
                 }
@@ -547,13 +866,17 @@ where
                 ));
             }
             let buffer = match link {
-                LinkNovelty::Open(entries) => {
+                LinkNovelty::Open { run, tail } => {
+                    let entries = merge_runs(run, tail);
                     if entries.is_empty() {
                         continue;
                     }
                     NoveltyBuffer::from_entries::<K>(at as u32, entries)?
                 }
-                LinkNovelty::Sealed(mut sealed) => {
+                LinkNovelty::Cached {
+                    buffer: mut sealed, ..
+                }
+                | LinkNovelty::Sealed(mut sealed) => {
                     sealed.child = at as u32;
                     // The cache's whole contract: the sealed bytes must be
                     // exactly what a fresh encode of the same ops produces.
@@ -574,6 +897,107 @@ where
                         );
                     }
                     sealed
+                }
+            };
+            #[cfg(debug_assertions)]
+            debug_assert_grouped::<K, Value>(&buffer, at, links)?;
+            buffers.push(buffer);
+        }
+        Ok(buffers)
+    }
+
+    /// The stored per-link buffers for a NON-consuming persist, leaving the
+    /// set intact so the live spine survives the persist and keeps taking
+    /// writes.
+    ///
+    /// The borrowed twin of [`into_buffers`](Self::into_buffers), with one
+    /// addition: an open link is encoded once and then held as
+    /// [`LinkNovelty::Cached`] — the decoded ops stay live for the next
+    /// append (no re-decode of the accumulated buffer) while the encoding
+    /// is re-embedded verbatim by any persist that arrives before the next
+    /// mutation. Encoding is a pure function of the op list, so a cached
+    /// buffer is bit-identical to what a fresh open of the persisted node
+    /// would carry.
+    pub(crate) fn persist_buffers<K>(
+        &mut self,
+        links: &[Link],
+    ) -> Result<Vec<NoveltyBuffer<Value>>, DialogSearchTreeError>
+    where
+        K: self::Key,
+        Value: for<'a> Serialize<
+            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+        >,
+    {
+        let mut buffers = Vec::new();
+        for (at, link) in self.links.iter_mut().enumerate() {
+            if at >= links.len() {
+                if link.len() == 0 {
+                    continue;
+                }
+                return Err(DialogSearchTreeError::Node(
+                    "Novelty was buffered beyond the node's links".into(),
+                ));
+            }
+            let buffer = match link {
+                LinkNovelty::Open { run, tail } => {
+                    // Encoding needs the one flat sorted list; fold the tail
+                    // in first (once per persist, not per op).
+                    if !tail.is_empty() {
+                        let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
+                        *run = merged;
+                    }
+                    if run.is_empty() {
+                        continue;
+                    }
+                    let buffer = NoveltyBuffer::from_entries_ref::<K>(at as u32, run)?;
+                    let emitted = buffer.clone();
+                    *link = LinkNovelty::Cached {
+                        entries: std::mem::take(run),
+                        buffer,
+                    };
+                    emitted
+                }
+                LinkNovelty::Cached { entries, buffer } => {
+                    // `entries` backs the debug-only identity check below;
+                    // release builds embed the cached encoding without it.
+                    #[cfg(not(debug_assertions))]
+                    let _ = entries;
+                    // Siblings may have shifted this buffer's child index;
+                    // restamp the retained copy too so it stays in sync with
+                    // what was just persisted.
+                    buffer.child = at as u32;
+                    #[cfg(debug_assertions)]
+                    {
+                        let fresh = NoveltyBuffer::from_entries_ref::<K>(buffer.child, entries)?;
+                        let cached_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(buffer)
+                            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+                        let fresh_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fresh)
+                            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+                        debug_assert_eq!(
+                            cached_bytes.as_slice(),
+                            fresh_bytes.as_slice(),
+                            "a cached buffer must persist byte-identical to a fresh encode"
+                        );
+                    }
+                    buffer.clone()
+                }
+                LinkNovelty::Sealed(sealed) => {
+                    sealed.child = at as u32;
+                    #[cfg(debug_assertions)]
+                    {
+                        let fresh =
+                            NoveltyBuffer::from_entries::<K>(sealed.child, sealed.entries::<K>()?)?;
+                        let sealed_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(sealed)
+                            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+                        let fresh_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&fresh)
+                            .map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))?;
+                        debug_assert_eq!(
+                            sealed_bytes.as_slice(),
+                            fresh_bytes.as_slice(),
+                            "a sealed buffer must persist byte-identical to a fresh encode"
+                        );
+                    }
+                    sealed.clone()
                 }
             };
             #[cfg(debug_assertions)]
@@ -617,11 +1041,15 @@ where
             let sealed: NoveltyBuffer<Value> = rkyv::deserialize::<_, rkyv::rancor::Error>(buffer)
                 .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
             if links.len() <= child {
-                links.resize_with(child + 1, || LinkNovelty::Open(Vec::new()));
+                links.resize_with(child + 1, LinkNovelty::empty);
             }
             links[child] = LinkNovelty::Sealed(sealed);
         }
-        Ok(Self { links, total })
+        Ok(Self {
+            links,
+            total,
+            weight: None,
+        })
     }
 }
 
@@ -684,13 +1112,117 @@ pub(crate) fn link_bounds<Key, Value>(
 /// A leaf segment holding live key-value entries.
 #[derive(Debug)]
 pub struct TransientSegment<Key, Value> {
-    /// The key-value entries stored in this segment.
-    pub entries: Vec<Entry<Key, Value>>,
+    /// The key-value entries stored in this segment. Private so every
+    /// mutation flows through a method that keeps the cached total weight
+    /// exact; readers borrow through [`TransientSegment::entries`].
+    entries: Vec<Entry<Key, Value>>,
     /// The separator at this segment's left edge: the shortest byte string
     /// above everything left of the seam and at or below this segment's
     /// first key. Empty for the tree's global leftmost segment. This is the
     /// ground truth every index level above derives its separators from.
     pub separator: Vec<u8>,
+    /// Cached sum of the entries' weights ([`Entry::weight`]), `None` until
+    /// first queried or after a wholesale mutation invalidated it. The edit
+    /// path's frame-ceiling gate reads this once per edit; without the cache
+    /// it re-summed the whole leaf on every membership-changing edit, which
+    /// made batch commits quadratic in leaf size. The cached value must be
+    /// exact whenever it is `Some`: an under-report would let a segment
+    /// exceed the frame ceiling and change tree shape.
+    weight: Option<usize>,
+}
+
+impl<Key, Value> TransientSegment<Key, Value> {
+    /// Builds a segment from its entries and left-edge separator.
+    pub fn new(entries: Vec<Entry<Key, Value>>, separator: Vec<u8>) -> Self {
+        Self {
+            entries,
+            separator,
+            weight: None,
+        }
+    }
+
+    /// The key-value entries stored in this segment.
+    pub fn entries(&self) -> &[Entry<Key, Value>] {
+        &self.entries
+    }
+
+    /// Mutable access to the entries for wholesale edits (trims, pops).
+    /// Invalidates the cached total weight; the targeted edit methods
+    /// ([`upsert`](Self::upsert), [`delete`](Self::delete)) maintain it
+    /// incrementally instead and should be preferred on hot paths.
+    pub fn entries_mut(&mut self) -> &mut Vec<Entry<Key, Value>> {
+        self.weight = None;
+        &mut self.entries
+    }
+
+    /// Consumes the segment, returning its entries.
+    pub fn into_entries(self) -> Vec<Entry<Key, Value>> {
+        self.entries
+    }
+
+    /// Consumes the segment, returning its entries and separator.
+    pub fn into_parts(self) -> (Vec<Entry<Key, Value>>, Vec<u8>) {
+        (self.entries, self.separator)
+    }
+
+    /// Takes the entries out of the segment, leaving it empty.
+    pub fn take_entries(&mut self) -> Vec<Entry<Key, Value>> {
+        self.weight = None;
+        std::mem::take(&mut self.entries)
+    }
+}
+
+impl<Key, Value> TransientSegment<Key, Value>
+where
+    Key: self::Key,
+    Value: self::Value,
+{
+    /// The exact sum of the entries' weights ([`Entry::weight`]): the number
+    /// the frame-ceiling gate compares against `Manifest::frame_ceiling`.
+    /// Computed once per segment and maintained incrementally by
+    /// [`upsert`](Self::upsert) and [`delete`](Self::delete), so repeated
+    /// edits into the same leaf pay O(1) here instead of O(entries).
+    pub fn total_weight(&mut self) -> usize {
+        match self.weight {
+            Some(weight) => weight,
+            None => {
+                let weight = self.entries.iter().map(Entry::weight).sum();
+                self.weight = Some(weight);
+                weight
+            }
+        }
+    }
+
+    /// Inserts or replaces the entry for `entry.key`, keeping the cached
+    /// total weight exact: a replacement adjusts by the weight delta, an
+    /// insert adds the entry's weight.
+    pub fn upsert(&mut self, entry: Entry<Key, Value>) {
+        match self.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
+            Ok(at) => {
+                if let Some(weight) = self.weight.as_mut() {
+                    *weight = *weight + entry.weight() - self.entries[at].weight();
+                }
+                self.entries[at].value = entry.value;
+            }
+            Err(at) => {
+                if let Some(weight) = self.weight.as_mut() {
+                    *weight += entry.weight();
+                }
+                self.entries.insert(at, entry);
+            }
+        }
+    }
+
+    /// Removes the entry for `key` (a missing key is a no-op), keeping the
+    /// cached total weight exact.
+    pub fn delete(&mut self, key: &Key) {
+        if let Ok(at) = self.entries.binary_search_by(|e| e.key.cmp(key)) {
+            if let Some(weight) = self.weight.as_mut() {
+                *weight -= self.entries[at].weight();
+            }
+            self.entries.remove(at);
+        }
+    }
 }
 
 impl<Key, Value> TransientNode<Key, Value> {
@@ -846,7 +1378,7 @@ where
         node: &PersistentNode<Key, Value>,
         separator: Vec<u8>,
     ) -> Result<Self, DialogSearchTreeError> {
-        match node.body()? {
+        match node.body() {
             ArchivedNodeBody::Index(_) => {
                 Ok(TransientNode::Index(TransientNode::open_index(node)?))
             }
@@ -859,10 +1391,9 @@ where
                         value: into_owned(segment.value_at(at)?)?,
                     });
                 }
-                Ok(TransientNode::Segment(TransientSegment {
-                    entries,
-                    separator,
-                }))
+                Ok(TransientNode::Segment(TransientSegment::new(
+                    entries, separator,
+                )))
             }
         }
     }
@@ -921,7 +1452,76 @@ where
             }
         };
 
-        let node = PersistentNode::new(Buffer::from(body.as_bytes()?));
+        let node = PersistentNode::try_from(&body)?;
+        crate::distribution::audit::node(node.buffer().as_ref().len());
+        if let Some(kind) = audit_kind {
+            dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
+        }
+        delta.add(node.hash().clone(), node.buffer().clone());
+        Ok(node)
+    }
+
+    /// Serializes this transient node into a [`PersistentNode`] WITHOUT
+    /// consuming it, so the live spine survives the persist and the next
+    /// write appends to it instead of re-opening the frame from bytes.
+    ///
+    /// Semantically identical to [`persist`](Self::persist) — same codec,
+    /// same bytes, same hash — with two retention rules: transient CHILDREN
+    /// are persisted and collapsed back to [`Node::Persistent`] links
+    /// (children are touched only by amortized cascades, so keeping them
+    /// live would re-encode untouched frames on every subsequent persist),
+    /// and open novelty buffers are re-sealed in place with the encoding
+    /// they just produced (see [`Novelty::persist_buffers`]), so only links a
+    /// later write touches pay a fresh encode next time.
+    pub fn persist_mut(
+        &mut self,
+        delta: &mut Delta<Blake3Hash, Buffer>,
+        manifest: &Manifest,
+    ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
+        let audit_kind = if dialog_storage::dup_audit::enabled() {
+            Some(match &self {
+                TransientNode::Segment(_) => "segment",
+                TransientNode::Index(index) if index.novelty.is_empty() => "index-quiet",
+                TransientNode::Index(_) => "index-buffered",
+            })
+        } else {
+            None
+        };
+        let body = match self {
+            TransientNode::Segment(segment) => {
+                PersistentNodeBody::segment_from_entries(segment.entries().to_vec(), *manifest)?
+            }
+            TransientNode::Index(TransientIndex { children, novelty }) => {
+                // Collapse any live (cascade-touched) child back to its
+                // persisted link; an untouched persistent child passes
+                // through with no re-encode, exactly as in `persist`.
+                for child in children.iter_mut() {
+                    if matches!(child, Node::Transient(_)) {
+                        let lifted = std::mem::replace(
+                            child,
+                            Node::Transient(TransientNode::Segment(TransientSegment::new(
+                                Vec::new(),
+                                Vec::new(),
+                            ))),
+                        );
+                        *child = Node::Persistent(lifted.into_link(delta, manifest)?);
+                    }
+                }
+                let links = children
+                    .iter()
+                    .map(|child| match child {
+                        Node::Persistent(link) => Ok(link.clone()),
+                        Node::Transient(_) => Err(DialogSearchTreeError::Node(
+                            "A transient child survived link collapse".into(),
+                        )),
+                    })
+                    .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
+                let buffers = novelty.persist_buffers::<Key>(&links)?;
+                PersistentNodeBody::index_from_buffers(links, buffers, *manifest)?
+            }
+        };
+
+        let node = PersistentNode::try_from(&body)?;
         crate::distribution::audit::node(node.buffer().as_ref().len());
         if let Some(kind) = audit_kind {
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
@@ -1188,55 +1788,36 @@ where
     regroup_entries_reusing::<Key, Value, D>(entries, floor, manifest, &[])
 }
 
-/// [`regroup_entries`] with piece provenance: any group that exactly
-/// reproduces an untouched origin piece — same entry range, same derived
-/// separator — is emitted as its original persistent link instead of a
-/// fresh transient segment. See [`PieceOrigin`].
-pub(crate) fn regroup_entries_reusing<Key, Value, D>(
-    entries: Vec<Entry<Key, Value>>,
-    floor: Vec<u8>,
+/// The regroup's complete cut-decision pipeline over a key sequence: the
+/// pair-aware coin pass (veto, bank), the vetoed-stretch
+/// backstop, and the frame ceiling, in that order. Returns
+/// `(cut_after, forced_start)`: `cut_after[i]` cuts after key `i`, and
+/// `forced_start[i]` marks key `i` as opening a group whose stored
+/// separator takes the long forced form.
+///
+/// Factored out of [`regroup_entries_reusing`] so the edit path's
+/// forced-run quiet check evaluates EXACTLY the decisions the regroup
+/// would make — the two must never drift, or the check would skip
+/// widenings whose outcome differs from its prediction. `weights` must be
+/// per-entry [`Entry::weight`] values when `manifest.max_segment` is
+/// non-zero, and may be empty otherwise (the entry-counted coin reads no
+/// weights).
+pub(crate) fn cut_plan<Key, D>(
+    keys: &[&Key],
+    weights: &[usize],
     manifest: &Manifest,
-    origins: &[PieceOrigin],
-) -> Vec<Node<Key, Value>>
+) -> (Vec<bool>, Vec<bool>)
 where
     Key: self::Key,
-    Value: self::Value,
     D: Distribution,
 {
-    let mut groups: Vec<Node<Key, Value>> = vec![];
-    let mut pending: Vec<Entry<Key, Value>> = vec![];
-    // The last key of the previously sealed group; None while sealing the
-    // first group, whose separator comes from the floor instead.
-    let mut previous_last: Option<Key> = None;
-
-    // Pair-aware cuts, decided before the entries move: the coin proposes a
-    // boundary after an entry, and the veto rejects the proposal when the
-    // seam to the successor cannot be told apart within the separator
-    // bound. Both partner keys are needed, so the decisions are computed
-    // over the borrowed list first. The veto verdicts are kept: they
-    // delimit the stretches the backstop below scans.
-    //
-    // The weight bank rides the same walk: a vetoed seam banks its left
-    // key's weight (no cut is possible there), and every ACCEPTED seam
-    // spends the bank into its cut decision and resets it — reset on every
-    // accepted seam, cut or no cut, so the bank is "weight since the last
-    // accepted seam" (a structural property of the key sequence) and never
-    // "weight since the last cut" (which would cascade decisions off coin
-    // outcomes and break convergence). See `Distribution::leaf_cut`.
-    let count = entries.len();
-    // Every pacing decision below meters entries by their full weight (key
-    // bytes plus the value's payload weight), computed once per window.
-    let weights: Vec<usize> = if manifest.max_segment == 0 {
-        Vec::new()
-    } else {
-        entries.iter().map(Entry::weight).collect()
-    };
+    let count = keys.len();
     let mut vetoed = vec![false; count.saturating_sub(1)];
     let mut cut_after = vec![false; count];
     let mut bank = 0usize;
     for at in 0..count.saturating_sub(1) {
-        let key = entries[at].key.as_ref();
-        vetoed[at] = D::vetoes(key, entries[at + 1].key.as_ref(), manifest);
+        let key = keys[at].as_ref();
+        vetoed[at] = D::vetoes(key, keys[at + 1].as_ref(), manifest);
         if vetoed[at] {
             // The coin is skipped entirely for vetoed seams: the veto
             // overrides whatever it would say, and the weight moves into
@@ -1284,8 +1865,8 @@ where
             }
             // The stretch covers keys `start..=at` (the last vetoed seam
             // joins keys `at - 1` and `at`).
-            let keys: Vec<&Key> = entries[start..=at].iter().map(|entry| &entry.key).collect();
-            for cut in cap::forced_cut_positions(&keys, &weights[start..=at], manifest) {
+            for cut in cap::forced_cut_positions(&keys[start..=at], &weights[start..=at], manifest)
+            {
                 cut_after[start + cut - 1] = true;
                 forced_start[start + cut] = true;
             }
@@ -1306,12 +1887,13 @@ where
                 continue;
             }
             if end > start {
-                let keys: Vec<&Key> = entries[start..=end]
-                    .iter()
-                    .map(|entry| &entry.key)
-                    .collect();
                 let seams = &vetoed[start..end];
-                for cut in cap::frame_cut_positions(&keys, &weights[start..=end], seams, manifest) {
+                for cut in cap::frame_cut_positions(
+                    &keys[start..=end],
+                    &weights[start..=end],
+                    seams,
+                    manifest,
+                ) {
                     cut_after[start + cut - 1] = true;
                     forced_start[start + cut] = true;
                 }
@@ -1320,11 +1902,67 @@ where
         }
     }
 
+    (cut_after, forced_start)
+}
+
+/// [`regroup_entries`] with piece provenance: any group that exactly
+/// reproduces an untouched origin piece — same entry range, same derived
+/// separator — is emitted as its original persistent link instead of a
+/// fresh transient segment. See [`PieceOrigin`].
+pub(crate) fn regroup_entries_reusing<Key, Value, D>(
+    entries: Vec<Entry<Key, Value>>,
+    floor: Vec<u8>,
+    manifest: &Manifest,
+    origins: &[PieceOrigin],
+) -> Vec<Node<Key, Value>>
+where
+    Key: self::Key,
+    Value: self::Value,
+    D: Distribution,
+{
+    let mut groups: Vec<Node<Key, Value>> = vec![];
+    let mut pending: Vec<Entry<Key, Value>> = vec![];
+    // The last key of the previously sealed group; None while sealing the
+    // first group, whose separator comes from the floor instead.
+    let mut previous_last: Option<Key> = None;
+
+    // Pair-aware cuts, decided before the entries move: the coin proposes a
+    // boundary after an entry, and the veto rejects the proposal when the
+    // seam to the successor cannot be told apart within the separator
+    // bound. Both partner keys are needed, so the decisions are computed
+    // over the borrowed list first. The veto verdicts are kept: they
+    // delimit the stretches the backstop below scans.
+    //
+    // The weight bank rides the same walk: a vetoed seam banks its left
+    // key's weight (no cut is possible there), and every ACCEPTED seam
+    // spends the bank into its cut decision and resets it — reset on every
+    // accepted seam, cut or no cut, so the bank is "weight since the last
+    // accepted seam" (a structural property of the key sequence) and never
+    // "weight since the last cut" (which would cascade decisions off coin
+    // outcomes and break convergence). See `Distribution::leaf_cut`.
+    let count = entries.len();
+    // Every pacing decision below meters entries by their full weight (key
+    // bytes plus the value's payload weight), computed once per window.
+    let weights: Vec<usize> = if manifest.max_segment == 0 {
+        Vec::new()
+    } else {
+        entries.iter().map(Entry::weight).collect()
+    };
+    let key_refs: Vec<&Key> = entries.iter().map(|entry| &entry.key).collect();
+    let (cut_after, forced_start) = cut_plan::<Key, D>(&key_refs, &weights, manifest);
+
     let origin_for = |start: usize, end: usize| -> Option<&Link> {
         origins
             .iter()
             .find(|origin| origin.start == start && origin.end == end)
             .map(|origin| &origin.link)
+    };
+    // The per-entry weights are already in hand, so each sealed group's
+    // exact total rides into the segment's weight cache: a freshly
+    // regrouped leaf then answers the edit path's frame-ceiling gate
+    // without re-summing its entries.
+    let group_weight = |start: usize, end: usize| -> Option<usize> {
+        (manifest.max_segment > 0).then(|| weights[start..end].iter().sum())
     };
     let mut group_start = 0usize;
     for (at, entry) in entries.into_iter().enumerate() {
@@ -1338,6 +1976,7 @@ where
                 forced_start[group_start],
                 manifest,
                 origin_for(group_start, at + 1),
+                group_weight(group_start, at + 1),
             );
             group_start = at + 1;
         }
@@ -1352,6 +1991,7 @@ where
             forced_start[group_start],
             manifest,
             origin_for(group_start, count),
+            group_weight(group_start, count),
         );
     }
 
@@ -1363,6 +2003,10 @@ where
 /// long forced form when the group starts at a backstop anchor, and the
 /// canonical shortest-distinguishing prefix against the previous group's
 /// last key everywhere else.
+///
+/// `weight`, when given, must be the exact sum of the group's entry weights
+/// (the caller sums the same per-entry weights its cut decisions read); it
+/// seeds the sealed segment's weight cache.
 #[allow(clippy::too_many_arguments)]
 fn seal<Key, Value, D>(
     pending: &mut Vec<Entry<Key, Value>>,
@@ -1372,6 +2016,7 @@ fn seal<Key, Value, D>(
     forced: bool,
     manifest: &Manifest,
     origin: Option<&Link>,
+    weight: Option<usize>,
 ) where
     Key: self::Key,
     Value: self::Value,
@@ -1389,6 +2034,16 @@ fn seal<Key, Value, D>(
         .key
         .clone();
     let separator = match previous_last.as_ref() {
+        // A window-start floor that is itself a forced mark (longer than
+        // the separator bound) is preserved verbatim: it is a valid
+        // separator for any minimum the window can hold (routing keeps
+        // `min >= floor`), and re-deriving through `reseparate` would
+        // collapse it to the short natural prefix — stripping the
+        // self-identifying mark that lets an edit rejoin the force-split
+        // run. Reachable when a non-membership edit (a value update)
+        // re-shapes a forced piece locally, which the widening does not
+        // intercept.
+        None if floor.len() > manifest.max_separator as usize => floor.to_vec(),
         None => D::reseparate(first.as_ref(), floor),
         Some(previous) if forced => {
             cap::forced_seam_separator(previous.as_ref(), first.as_ref(), manifest)
@@ -1406,7 +2061,22 @@ fn seal<Key, Value, D>(
         groups.push(Node::Persistent(link.clone()));
         return;
     }
-    groups.push(TransientNode::Segment(TransientSegment { entries, separator }).into());
+    #[cfg(test)]
+    if let Some(weight) = weight {
+        debug_assert_eq!(
+            weight,
+            entries.iter().map(Entry::weight).sum::<usize>(),
+            "a sealed group's cached weight must equal the sum of its entry weights"
+        );
+    }
+    groups.push(
+        TransientNode::Segment(TransientSegment {
+            entries,
+            separator,
+            weight,
+        })
+        .into(),
+    );
 }
 
 #[cfg(test)]
@@ -1554,5 +2224,289 @@ mod tests {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod novelty_model_tests {
+    #![allow(unexpected_cfgs)]
+
+    use std::collections::BTreeMap;
+
+    use super::{LinkNovelty, NOVELTY_TAIL_LIMIT, Novelty};
+    use crate::{NoveltyEntry, NoveltyOp};
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    type Val = Vec<u8>;
+
+    /// A reference model of one link's buffer: the chronological op log per
+    /// key. Everything the two-run structure must answer derives from it.
+    #[derive(Default)]
+    struct Model {
+        by_key: BTreeMap<Vec<u8>, Vec<NoveltyOp<Val>>>,
+        total: usize,
+    }
+
+    impl Model {
+        fn push(&mut self, key: Vec<u8>, op: NoveltyOp<Val>) {
+            self.by_key.entry(key).or_default().push(op);
+            self.total += 1;
+        }
+
+        fn newest(&self, key: &[u8]) -> Option<&NoveltyOp<Val>> {
+            self.by_key.get(key).and_then(|ops| ops.last())
+        }
+
+        /// The flat sorted op list the buffer must produce: ascending keys,
+        /// chronological order within a key (newest last).
+        fn flat(&self) -> Vec<NoveltyEntry<Val>> {
+            self.by_key
+                .iter()
+                .flat_map(|(key, ops)| {
+                    ops.iter().map(|op| NoveltyEntry {
+                        key: key.clone(),
+                        op: op.clone(),
+                    })
+                })
+                .collect()
+        }
+
+        /// The winner per key within `[start, end]`, ascending.
+        fn winners(&self, start: &[u8], end: &[u8]) -> Vec<NoveltyEntry<Val>> {
+            self.by_key
+                .range(start.to_vec()..=end.to_vec())
+                .map(|(key, ops)| NoveltyEntry {
+                    key: key.clone(),
+                    op: ops.last().expect("non-empty log").clone(),
+                })
+                .collect()
+        }
+    }
+
+    fn xorshift(state: &mut u64) -> u32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        (*state >> 32) as u32
+    }
+
+    /// Single-op routing (the enqueue hot path) against the model, sweeping
+    /// seeds and op counts sized to cross the tail limit repeatedly, with a
+    /// small key pool so equal-key chains span run/tail boundaries.
+    #[dialog_common::test]
+    async fn it_matches_the_model_through_single_op_routing() {
+        for seed in 0..8u64 {
+            let mut rng = 0x9E3779B97F4A7C15u64 ^ seed;
+            let mut novelty: Novelty<Val> = Novelty::new();
+            let mut model = Model::default();
+
+            let ops = NOVELTY_TAIL_LIMIT * 3 + 17;
+            let pool = 24u32;
+            for at in 0..ops {
+                let key = (xorshift(&mut rng) % pool).to_be_bytes().to_vec();
+                let op = if xorshift(&mut rng).is_multiple_of(4) {
+                    NoveltyOp::Retract
+                } else {
+                    NoveltyOp::Assert(vec![at as u8, seed as u8])
+                };
+                model.push(key.clone(), op.clone());
+                novelty
+                    .route::<[u8; 4]>(&[], vec![NoveltyEntry { key, op }])
+                    .expect("route");
+
+                // Point-resolve a rotating probe against the model mid-run,
+                // so run/tail splits are checked at every phase, not only
+                // after the final consolidation.
+                if at.is_multiple_of(7) {
+                    let probe = (xorshift(&mut rng) % pool).to_be_bytes();
+                    assert_eq!(
+                        novelty.resolve::<[u8; 4]>(0, &probe).expect("resolve"),
+                        model.newest(&probe).cloned(),
+                        "seed {seed}, op {at}: resolve disagrees with the model"
+                    );
+                }
+            }
+
+            assert_eq!(novelty.len(), model.total, "seed {seed}: op count");
+            assert_eq!(novelty.peak(), model.total, "seed {seed}: single-link peak");
+
+            // Range winners while the tail is (very likely) non-empty.
+            for _ in 0..8 {
+                let mut lo = (xorshift(&mut rng) % pool).to_be_bytes().to_vec();
+                let mut hi = (xorshift(&mut rng) % pool).to_be_bytes().to_vec();
+                if lo > hi {
+                    std::mem::swap(&mut lo, &mut hi);
+                }
+                let mut got = Vec::new();
+                novelty
+                    .collect_winners_in_range::<[u8; 4]>(
+                        std::ops::Bound::Included(lo.as_slice()),
+                        std::ops::Bound::Included(hi.as_slice()),
+                        &mut got,
+                    )
+                    .expect("winners");
+                assert_eq!(
+                    got,
+                    model.winners(&lo, &hi),
+                    "seed {seed}: range winners [{lo:?}, {hi:?}] disagree"
+                );
+            }
+
+            // The drained flat list is the stored order: ascending keys,
+            // newest op for a key last. `NoveltyBuffer::from_entries` is a
+            // pure function of this list, so equality here IS sealed-bytes
+            // equality with a buffer built any other way.
+            assert_eq!(
+                novelty.take_all::<[u8; 4]>().expect("take_all"),
+                model.flat(),
+                "seed {seed}: flat drain order"
+            );
+            assert!(novelty.is_empty());
+        }
+    }
+
+    /// Multi-link routing partitions by the same lower-bound rule stored
+    /// routing uses, and each link's buffer independently matches the model.
+    #[dialog_common::test]
+    async fn it_routes_links_like_the_model_partition() {
+        let bounds: Vec<Vec<u8>> = vec![8u32.to_be_bytes().to_vec(), 16u32.to_be_bytes().to_vec()];
+        for seed in 0..4u64 {
+            let mut rng = 0xD1B54A32D192ED03u64 ^ seed;
+            let mut novelty: Novelty<Val> = Novelty::new();
+            let mut models: Vec<Model> = (0..3).map(|_| Model::default()).collect();
+
+            for at in 0..(NOVELTY_TAIL_LIMIT * 2 + 5) {
+                let key = (xorshift(&mut rng) % 24).to_be_bytes().to_vec();
+                let op = NoveltyOp::Assert(vec![at as u8]);
+                let slot = bounds
+                    .iter()
+                    .take_while(|bound| bound.as_slice() <= key.as_slice())
+                    .count();
+                models[slot].push(key.clone(), op.clone());
+                let borrowed: Vec<&[u8]> = bounds.iter().map(Vec::as_slice).collect();
+                novelty
+                    .route::<[u8; 4]>(&borrowed, vec![NoveltyEntry { key, op }])
+                    .expect("route");
+            }
+
+            let expected_peak = models.iter().map(|model| model.total).max().unwrap_or(0);
+            assert_eq!(novelty.peak(), expected_peak, "seed {seed}: peak");
+            for (slot, model) in models.iter().enumerate() {
+                assert_eq!(
+                    novelty.take_link::<[u8; 4]>(slot).expect("take_link"),
+                    model.flat(),
+                    "seed {seed}: link {slot} drain"
+                );
+            }
+            assert!(novelty.is_empty(), "seed {seed}: all links drained");
+        }
+    }
+
+    /// The tail-limit boundary exactly: inserting precisely at, below, and
+    /// above the limit keeps every reader consistent (the consolidation
+    /// fires between the limit-th and limit+1-th insert).
+    #[dialog_common::test]
+    async fn it_consolidates_exactly_at_the_tail_limit() {
+        for extra in [0usize, 1, 2] {
+            let mut novelty: Novelty<Val> = Novelty::new();
+            let mut model = Model::default();
+            // One shared key so every entry is one equal-key chain — the
+            // hardest shape for "newest last" across a consolidation.
+            let key = 7u32.to_be_bytes().to_vec();
+            for at in 0..(NOVELTY_TAIL_LIMIT + extra) {
+                let op = NoveltyOp::Assert(vec![at as u8, (at >> 8) as u8]);
+                model.push(key.clone(), op.clone());
+                novelty
+                    .route::<[u8; 4]>(
+                        &[],
+                        vec![NoveltyEntry {
+                            key: key.clone(),
+                            op,
+                        }],
+                    )
+                    .expect("route");
+                assert_eq!(
+                    novelty.resolve::<[u8; 4]>(0, &key).expect("resolve"),
+                    model.newest(&key).cloned(),
+                    "extra {extra}, op {at}: newest op must win across the limit"
+                );
+            }
+            assert_eq!(
+                novelty.take_all::<[u8; 4]>().expect("take_all"),
+                model.flat(),
+                "extra {extra}: chronological order within the key must survive"
+            );
+        }
+    }
+
+    /// `remove_key` drops every op for the key from BOTH runs and keeps the
+    /// accounting exact, without disturbing other keys.
+    #[dialog_common::test]
+    async fn it_removes_keys_across_both_runs() {
+        let mut novelty: Novelty<Val> = Novelty::new();
+        let mut model = Model::default();
+        // Interleave two keys so, after the limit crossing, the victim key
+        // holds ops in the run AND the tail.
+        let victim = 3u32.to_be_bytes().to_vec();
+        let keeper = 5u32.to_be_bytes().to_vec();
+        for at in 0..(NOVELTY_TAIL_LIMIT + NOVELTY_TAIL_LIMIT / 2) {
+            let key = if at.is_multiple_of(2) {
+                &victim
+            } else {
+                &keeper
+            };
+            let op = NoveltyOp::Assert(vec![at as u8]);
+            model.push(key.clone(), op.clone());
+            novelty
+                .route::<[u8; 4]>(
+                    &[],
+                    vec![NoveltyEntry {
+                        key: key.clone(),
+                        op,
+                    }],
+                )
+                .expect("route");
+        }
+        novelty
+            .remove_key::<[u8; 4]>(0, &victim)
+            .expect("remove_key");
+        let dropped = model.by_key.remove(&victim).expect("victim present");
+        model.total -= dropped.len();
+
+        assert_eq!(novelty.len(), model.total, "count after removal");
+        assert_eq!(
+            novelty.resolve::<[u8; 4]>(0, &victim).expect("resolve"),
+            None,
+            "removed key must not resolve"
+        );
+        assert_eq!(
+            novelty.take_all::<[u8; 4]>().expect("take_all"),
+            model.flat(),
+            "surviving ops must be untouched and ordered"
+        );
+    }
+
+    /// An empty-tail consolidation and a consolidation of a lifted sealed
+    /// buffer are both no-ops that leave the flat order intact.
+    #[dialog_common::test]
+    async fn it_consolidates_idempotently() {
+        let mut link: LinkNovelty<Val> = LinkNovelty::empty();
+        for at in 0..5u8 {
+            link.insert::<[u8; 4]>(NoveltyEntry {
+                key: vec![at],
+                op: NoveltyOp::Assert(vec![at]),
+            })
+            .expect("insert");
+        }
+        link.consolidate();
+        link.consolidate();
+        let drained = link.take::<[u8; 4]>().expect("take");
+        assert_eq!(drained.len(), 5);
+        assert!(
+            drained.windows(2).all(|pair| pair[0].key <= pair[1].key),
+            "consolidation must leave sorted order"
+        );
     }
 }

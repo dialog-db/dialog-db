@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::rules::RuleCache;
 use crate::{Branch, BranchReference, Overlay, ResolveError};
@@ -48,6 +48,8 @@ impl OpenBranch {
             causality_cache: CausalityCache::new(),
             context_cache: ContextCache::new(),
             record_cache: dialog_search_tree::Cache::new(),
+            spine: dialog_artifacts::SpineSlot::new(),
+            identity_cache: Arc::new(Mutex::new(None)),
             overlay: Overlay::default(),
         })
     }

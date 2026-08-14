@@ -174,7 +174,7 @@ mod tests {
     use crate::query::Output;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
 
     mod person {
         use crate::Attribute;
@@ -322,6 +322,7 @@ mod tests {
         let results: Vec<_> = branch
             .claims()
             .select(ArtifactSelector::new().the("person/name".parse()?))
+            .to_owned()
             .perform(&operator)
             .await?
             .filter_map(|r| async { r.ok() })

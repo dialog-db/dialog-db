@@ -14,7 +14,7 @@ pub fn encode_keys_public<K: AsRef<[u8]>>(keys: &[K]) -> (Vec<u8>, Vec<u8>) {
 pub(crate) mod columnar;
 pub use columnar::{ArchivedColumnData, ColumnData, ColumnSlices, StreamingLeaf};
 
-mod transient;
+pub(crate) mod transient;
 pub use transient::*;
 
 use dialog_common::Blake3Hash;
@@ -116,7 +116,7 @@ where
             Node::Persistent(link) => Ok(link),
             Node::Transient(transient) => {
                 let separator = transient.separator()?.to_vec();
-                transient.persist(delta, manifest)?.to_link(separator)
+                Ok(transient.persist(delta, manifest)?.to_link(separator))
             }
         }
     }

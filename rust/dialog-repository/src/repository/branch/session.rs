@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Entity, Select,
-    SortKey, Statement,
+    Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
+    DialogArtifactsError, Entity, Select, SortKey, Statement,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -18,7 +18,7 @@ use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
-use futures_util::TryStreamExt as _;
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::Arc;
 
 use crate::layer::{filter_tombstones, merge_grouped, tombstones_from};
@@ -230,7 +230,7 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
 
             let overlay = layer.overlay(&operator);
-            let tombstones = tombstones_from(&overlay);
+            let tombstones = Arc::new(tombstones_from(&overlay));
 
             let branches = layer.branches.iter().map(|&branch| branch.clone()).collect();
             let query_env = QueryEnv::new(branches, overlay, tombstones, env);
@@ -262,7 +262,7 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// `sort_key`s of every retracted fact in `changes`. Each branch
     /// stream is filtered against these before the merge so retracts
     /// in the overlay suppress matching facts in the source.
-    tombstones: HashSet<SortKey>,
+    tombstones: Arc<HashSet<SortKey>>,
     /// When present, every selector this environment executes —
     /// fact scans and rule-discovery reads alike — records its
     /// demanded range here. Subscriptions use the recorded cover to
@@ -289,7 +289,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
     pub(crate) fn new(
         branches: Vec<Branch>,
         changes: Changes,
-        tombstones: HashSet<SortKey>,
+        tombstones: Arc<HashSet<SortKey>>,
         env: &'a Env,
     ) -> Self {
         Self {
@@ -420,8 +420,21 @@ where
             streams.push(filter_tombstones(raw, self.tombstones.clone()));
         }
 
-        // Overlay stream — Changes itself is a Provider<Select>.
-        streams.push(Provider::<Select<'a>>::execute(&self.changes, input).await?);
+        // Overlay stream — Changes itself is a Provider<Select>. The
+        // overlay always carries facts (session metadata at minimum), but
+        // MATCHES the typical fact selector rarely: a join's inner premise
+        // probes one entity per outer binding, and pushing an empty overlay
+        // stream anyway forced the k-way merge (and its per-row sort keys)
+        // on every one of those probes. Peek the overlay's materialized
+        // result and push it only when it has rows, so the single-source
+        // common case flows through `merge_grouped`'s passthrough arm.
+        let mut overlay = Provider::<Select<'a>>::execute(&self.changes, input).await?;
+        match futures_util::StreamExt::next(&mut overlay).await {
+            None => {}
+            Some(first) => {
+                streams.push(Box::pin(stream::iter(vec![first]).chain(overlay)));
+            }
+        }
 
         Ok(merge_grouped(streams))
     }
@@ -455,7 +468,10 @@ where
         if let Some(demand) = &self.demand {
             demand.record_rules(&selector);
         }
+        // Rule bodies are hydrated from the full artifact, so this read
+        // genuinely needs owned rows; it is head-cached, not per-query hot.
         select_from_branch(branch.clone(), self.env, selector)
+            .owned()
             .try_collect()
             .await
     }
@@ -682,7 +698,8 @@ mod rule_tests {
 
     use super::*;
     use crate::Branch;
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
+    use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
     use dialog_query::rule::DeductiveRuleDescriptor;
@@ -773,6 +790,80 @@ mod rule_tests {
 
         let employees = query_employees(&branch, &operator).await?;
         assert!(employees.contains(&alice), "committed rule must resolve");
+        Ok(())
+    }
+
+    /// A *reducing* rule stores, discovers, and hydrates through the
+    /// same `db.rule/*` rail: the committed rule's reduce block
+    /// survives the durable layer round trip, and queries evaluate
+    /// its fold over committed facts.
+    #[dialog_common::test]
+    async fn it_resolves_a_committed_reducing_rule() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // dept-total(this, total: sum(?salary)) grouped by department.
+        let rule = {
+            let json = serde_json::json!({
+                "deduce": { "with": {
+                    "total": { "the": "org/dept-total", "as": "UnsignedInteger" }
+                }},
+                "when": [{
+                    "assert": { "with": {
+                        "dept": { "the": "org/dept", "as": "Entity" },
+                        "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "employee" } },
+                        "dept": { "?": { "name": "this" } },
+                        "salary": { "?": { "name": "salary" } }
+                    }
+                }],
+                "reduce": {
+                    "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
+                }
+            });
+            let descriptor: DeductiveRuleDescriptor =
+                serde_json::from_value(json).expect("descriptor parses");
+            descriptor.compile().expect("reducing rule compiles")
+        };
+        let dept_total = rule.conclusion().clone();
+
+        let dept: Entity = "id:dept-a".parse()?;
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        branch
+            .transaction()
+            .assert(the!("org/dept").of(alice.clone()).is(dept.clone()))
+            .assert(the!("org/salary").of(alice.clone()).is(3u32))
+            .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))
+            .assert(the!("org/salary").of(bob.clone()).is(4u32))
+            .assert(&rule)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("dept"));
+        terms.insert("total".into(), Term::var("total"));
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery {
+                predicate: dept_total,
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "one folded row for the department");
+        assert_eq!(*rows[0].entity(), dept);
+        assert_eq!(
+            rows[0].get::<u64>("total")?,
+            7,
+            "the hydrated reduce block folded the committed salaries"
+        );
         Ok(())
     }
 

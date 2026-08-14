@@ -70,6 +70,7 @@ pub mod audit {
 mod hash_memo {
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::hash::{BuildHasherDefault, Hasher};
 
     use dialog_common::Blake3Hash;
 
@@ -78,9 +79,43 @@ mod hash_memo {
     /// cache's own footprint.
     const CAPACITY: usize = 1 << 17;
 
+    /// The memo's table hasher (FxHash): deterministic and a fraction of
+    /// SipHash's cost per byte, which matters because every shaping-path
+    /// hash pays one table lookup over the full key bytes — the lookups
+    /// were measured at a quarter of a large batch commit's instructions
+    /// under the default hasher. Collision quality is not load-bearing:
+    /// the map compares full keys on lookup, so a weak hash costs probes,
+    /// never correctness, and the memoized blake3 values (the only thing
+    /// shape decisions read) are unaffected.
+    #[derive(Default)]
+    struct FxHasher(u64);
+
+    impl Hasher for FxHasher {
+        fn write(&mut self, bytes: &[u8]) {
+            const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+            let mut chunks = bytes.chunks_exact(8);
+            for chunk in &mut chunks {
+                let word = u64::from_le_bytes(chunk.try_into().expect("8-byte chunk"));
+                self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(SEED);
+            }
+            let mut tail = 0u64;
+            for (at, byte) in chunks.remainder().iter().enumerate() {
+                tail |= u64::from(*byte) << (at * 8);
+            }
+            self.0 = (self.0.rotate_left(5) ^ tail).wrapping_mul(SEED);
+        }
+
+        fn finish(&self) -> u64 {
+            self.0
+        }
+    }
+
     thread_local! {
-        static MEMO: RefCell<HashMap<Vec<u8>, Blake3Hash>> =
-            RefCell::new(HashMap::with_capacity(1024));
+        static MEMO: RefCell<HashMap<Vec<u8>, Blake3Hash, BuildHasherDefault<FxHasher>>> =
+            RefCell::new(HashMap::with_capacity_and_hasher(
+                1024,
+                BuildHasherDefault::default(),
+            ));
     }
 
     /// The blake3 hash of `bytes`, memoized.
@@ -655,9 +690,27 @@ pub mod cap {
         cuts
     }
 
-    /// Longest common prefix length of two byte strings.
+    /// Longest common prefix length of two byte strings. Word-at-a-time:
+    /// the elections call this for every candidate seam on every regroup,
+    /// over keys that share long prefixes (an ordered key's neighbors agree
+    /// on most leading bytes), so the byte-wise scan was a measured
+    /// double-digit share of large batch commits.
     fn lcp(a: &[u8], b: &[u8]) -> usize {
-        a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
+        let shared = a.len().min(b.len());
+        let mut at = 0;
+        while at + 8 <= shared {
+            let left = u64::from_le_bytes(a[at..at + 8].try_into().expect("8-byte window"));
+            let right = u64::from_le_bytes(b[at..at + 8].try_into().expect("8-byte window"));
+            if left != right {
+                // Little-endian: the lowest differing byte is the first.
+                return at + ((left ^ right).trailing_zeros() / 8) as usize;
+            }
+            at += 8;
+        }
+        while at < shared && a[at] == b[at] {
+            at += 1;
+        }
+        at
     }
 
     /// Whether the seam between adjacent keys `left < right` may carry a
@@ -806,7 +859,7 @@ pub mod cap {
     /// The shortest distinguishing separator length of the seam between
     /// adjacent keys `left < right`: `min(lcp + 1, len(right))`, the
     /// semantic-distance metric of the hybrid selector.
-    fn shortest_separator_len(left: &[u8], right: &[u8]) -> usize {
+    pub(crate) fn shortest_separator_len(left: &[u8], right: &[u8]) -> usize {
         (lcp(left, right) + 1).min(right.len())
     }
 
@@ -872,8 +925,47 @@ pub mod cap {
     /// than `max_separator` exists for it (see [`frame_separator`]), so the
     /// forced seam stays self-identifying in stored form and rank 0 at
     /// index levels, exactly like a stretch anchor.
+    ///
+    /// Decided without materializing the padded separator: this runs for
+    /// every accepted seam of every frame election, and the allocation plus
+    /// `max_separator + 1` zeroed bytes per probe was a measured double-digit
+    /// share of large batch commits. The branches below reproduce
+    /// `frame_separator(..).is_some()` exactly (pinned by the test assert).
     pub fn is_frame_candidate(left: &[u8], right: &[u8], manifest: &Manifest) -> bool {
-        frame_separator(left, right, manifest).is_some()
+        let bound = manifest.max_separator as usize;
+        let candidate = if right.len() > bound {
+            // The right-prefix form always exists for an over-bound right.
+            true
+        } else {
+            // The padded form `left ++ 0x00..` (to `max(bound, left.len())
+            // + 1` bytes) qualifies iff it sorts at or below `right`:
+            // resolved by comparing against `right` with the padding kept
+            // virtual.
+            let head = left.len().min(right.len());
+            match left[..head].cmp(&right[..head]) {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Greater => false,
+                // `right` no longer than `left` with an equal head: the
+                // padded string extends `left`, so it sorts above `right`.
+                std::cmp::Ordering::Equal if right.len() <= left.len() => false,
+                // `left` is a proper prefix of `right`: the padding (all
+                // zeros) sorts at or below the right tail unless the tail
+                // is a zero run shorter than the padding.
+                std::cmp::Ordering::Equal => {
+                    let padding = bound.max(left.len()) + 1 - left.len();
+                    let tail = &right[left.len()..];
+                    let probe = padding.min(tail.len());
+                    tail[..probe].iter().any(|&byte| byte != 0) || padding <= tail.len()
+                }
+            }
+        };
+        #[cfg(test)]
+        debug_assert_eq!(
+            candidate,
+            frame_separator(left, right, manifest).is_some(),
+            "allocation-free frame candidacy must match the separator construction"
+        );
+        candidate
     }
 
     /// The stored separator for a frame anchor at the accepted seam between
@@ -966,6 +1058,161 @@ pub mod cap {
             AnchorSelector::from_manifest(manifest),
         )
     }
+
+    /// Whether candidate `a` beats candidate `b` in an election under
+    /// `selector`. Candidates are `(separator_len, right-key hash, entry
+    /// position)`; equal order resolves to the smaller position, matching
+    /// [`choose_cuts`]'s `min_by` over the ascending candidate scan (the
+    /// first minimum wins).
+    pub(crate) fn anchor_precedes(
+        selector: AnchorSelector,
+        a: (usize, &Blake3Hash, usize),
+        b: (usize, &Blake3Hash, usize),
+    ) -> bool {
+        let order = match selector {
+            AnchorSelector::Rendezvous => anchor_order(a.1).cmp(anchor_order(b.1)),
+            AnchorSelector::Hybrid => {
+                a.0.cmp(&b.0)
+                    .then_with(|| anchor_order(a.1).cmp(anchor_order(b.1)))
+            }
+        };
+        match order {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Greater => false,
+            std::cmp::Ordering::Equal => a.2 < b.2,
+        }
+    }
+
+    /// One run piece in compressed form for
+    /// [`election_matches_boundaries`]: its entry count and summed
+    /// entry weight, plus its best INTERIOR forced-anchor candidate under
+    /// the manifest's selector — `(separator_len, right-key hash, entry
+    /// offset of the right key within the piece)` — or `None` when no
+    /// interior seam qualifies.
+    pub(crate) struct CompressedPiece {
+        /// Number of entries in the piece.
+        pub count: usize,
+        /// Summed entry weight of the piece.
+        pub weight: usize,
+        /// Best interior candidate seam, if any.
+        pub interior: Option<(usize, Blake3Hash, usize)>,
+    }
+
+    /// Whether a backstop election over a whole forced run reproduces
+    /// exactly the current piece boundaries, evaluated over per-piece
+    /// summaries without materializing any entry. One evaluation serves
+    /// both backstops — the caller passes the stretch backstop's
+    /// `max_segment` or the frame ceiling as `threshold`, with each
+    /// piece's `interior` filtered to the matching candidate kind
+    /// ([`is_forced_candidate`] seams for the stretch,
+    /// [`is_frame_candidate`] seams for the ceiling), and must have
+    /// verified every boundary seam is itself a candidate of that kind.
+    /// `boundaries[i]` carries the anchor identity of the seam between
+    /// pieces `i` and `i + 1`: its shortest-separator length and its
+    /// right key's hash.
+    ///
+    /// The verification mirrors [`choose_cuts`]'s recursive bisection at
+    /// piece granularity, which is exact: as long as every elected cut is
+    /// a piece boundary, every recursion range is a whole-piece union, so
+    /// prefix weights at boundaries suffice and the best interior
+    /// candidate of a range is the minimum of its member pieces' interior
+    /// minima. It returns `false` the moment the full election would
+    /// deviate from the stored partition: an interior candidate winning a
+    /// range (a cut would land inside a piece), an over-threshold
+    /// multi-piece range with no candidate at all, or an under-threshold
+    /// range still spanning a stored boundary (a cut would dissolve). A
+    /// `false` is therefore an exact "the plan changed", not a
+    /// "don't know".
+    pub(crate) fn election_matches_boundaries(
+        pieces: &[CompressedPiece],
+        boundaries: &[(usize, Blake3Hash)],
+        threshold: usize,
+        manifest: &Manifest,
+    ) -> bool {
+        let cap = threshold;
+        if cap == 0 || pieces.len() < 2 || boundaries.len() + 1 != pieces.len() {
+            return false;
+        }
+        let mut prefix_weight = Vec::with_capacity(pieces.len() + 1);
+        let mut prefix_count = Vec::with_capacity(pieces.len() + 1);
+        prefix_weight.push(0usize);
+        prefix_count.push(0usize);
+        for piece in pieces {
+            prefix_weight.push(prefix_weight.last().expect("seeded") + piece.weight);
+            prefix_count.push(prefix_count.last().expect("seeded") + piece.count);
+        }
+        if prefix_weight[pieces.len()] <= cap {
+            // The full election would place no cuts at all, dissolving
+            // every stored boundary.
+            return false;
+        }
+        let selector = AnchorSelector::from_manifest(manifest);
+
+        // Recursive bisection over piece-index ranges `[plo, phi)`.
+        let mut stack = vec![(0usize, pieces.len())];
+        while let Some((plo, phi)) = stack.pop() {
+            if prefix_weight[phi] - prefix_weight[plo] <= cap {
+                if phi - plo > 1 {
+                    // The election stops here, but stored boundaries exist
+                    // inside the range: they would dissolve.
+                    return false;
+                }
+                continue;
+            }
+            // The range's best candidate: boundary seams strictly inside,
+            // and every member piece's best interior seam (interior
+            // positions are strictly inside their piece, so strictly
+            // inside the range). Interior positions can never equal a
+            // boundary position, so the winner's kind is unambiguous.
+            let mut best: Option<(usize, &Blake3Hash, usize)> = None;
+            let mut best_boundary: Option<usize> = None;
+            for boundary in plo..phi.saturating_sub(1) {
+                let (separator_len, hash) = &boundaries[boundary];
+                let candidate = (*separator_len, hash, prefix_count[boundary + 1]);
+                if best.is_none_or(|current| anchor_precedes(selector, candidate, current)) {
+                    best = Some(candidate);
+                    best_boundary = Some(boundary);
+                }
+            }
+            for piece in plo..phi {
+                if let Some((separator_len, hash, offset)) = &pieces[piece].interior {
+                    let candidate = (*separator_len, hash, prefix_count[piece] + offset);
+                    if best.is_none_or(|current| anchor_precedes(selector, candidate, current)) {
+                        best = Some(candidate);
+                        best_boundary = None;
+                    }
+                }
+            }
+            match (best, best_boundary) {
+                // Over threshold with no candidate: the full election
+                // leaves the range whole, which matches the stored state
+                // only if it is a single piece.
+                (None, _) => {
+                    if phi - plo > 1 {
+                        return false;
+                    }
+                }
+                // An interior candidate wins: the full election would cut
+                // inside a piece the stored partition keeps whole.
+                (Some(_), None) => return false,
+                // A boundary wins: exactly the stored cut. Recurse.
+                (Some(_), Some(boundary)) => {
+                    stack.push((plo, boundary + 1));
+                    stack.push((boundary + 1, phi));
+                }
+            }
+        }
+        true
+    }
+}
+
+pub(crate) mod summary;
+
+/// The memoized anchor hash of a key — the same hash the elections use
+/// for candidate ordering — exposed for the compressed quiet check, whose
+/// boundary anchors are built outside this module.
+pub(crate) fn anchor_hash(key: &[u8]) -> dialog_common::Blake3Hash {
+    hash_memo::hash(key)
 }
 
 /// Geometric distribution for computing node ranks.
@@ -1057,6 +1304,51 @@ mod tests {
         // prove it.
         bytes[8..].fill(0xFF);
         Blake3Hash::from(bytes)
+    }
+
+    /// The allocation-free frame candidacy decision must agree with the
+    /// separator construction it stands in for, over every ordered pair of
+    /// short strings on a zero-heavy alphabet (padding is all zeros, so
+    /// zero runs and prefix relations are exactly the corner cases) and
+    /// across bounds that put keys under, at, and over `max_separator`.
+    #[dialog_common::test]
+    async fn it_decides_frame_candidacy_exactly_like_the_separator() -> Result<()> {
+        let mut strings: Vec<Vec<u8>> = vec![Vec::new()];
+        let alphabet = [0x00u8, 0x01, 0xFF];
+        let mut frontier = vec![Vec::new()];
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for prefix in &frontier {
+                for byte in alphabet {
+                    let mut string = prefix.clone();
+                    string.push(byte);
+                    next.push(string);
+                }
+            }
+            strings.extend(next.iter().cloned());
+            frontier = next;
+        }
+
+        for max_separator in [1u32, 2, 3, 5] {
+            let manifest = Manifest {
+                max_separator,
+                ..Manifest::default()
+            };
+            for left in &strings {
+                for right in &strings {
+                    if left >= right {
+                        continue;
+                    }
+                    assert_eq!(
+                        cap::is_frame_candidate(left, right, &manifest),
+                        cap::frame_separator(left, right, &manifest).is_some(),
+                        "candidacy diverged for left={left:?} right={right:?} bound={max_separator}"
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// The threshold comparisons are exact, deterministic golden values: a

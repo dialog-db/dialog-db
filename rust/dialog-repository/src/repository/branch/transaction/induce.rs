@@ -44,7 +44,8 @@ use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::rule::inductive::Polarity;
 use dialog_query::{Any, Binding, Cardinality, Environment, InductiveRule, Match, Term};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt as _, TryStreamExt};
+use std::sync::Arc;
 
 use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
@@ -196,7 +197,7 @@ where
         let layered = QueryLayer::from(branch)
             .with(view_changes)
             .overlay(&operator);
-        let tombstones = tombstones_from(&layered);
+        let tombstones = Arc::new(tombstones_from(&layered));
         let view = QueryEnv::new(vec![branch.clone()], layered, tombstones, env);
 
         // Close the touched set over derivation: a base-fact write
@@ -837,6 +838,7 @@ where
         .await
         .map_err(|error| CommitError::Induction(format!("committed probe: {error}")))?;
     stream
+        .map(|item| item.and_then(|view| view.to_owned()))
         .try_collect()
         .await
         .map_err(|error| CommitError::Induction(format!("committed probe: {error}")))
@@ -860,6 +862,7 @@ where
         .await
         .map_err(|error| CommitError::Induction(format!("dispatch probe: {error}")))?;
     stream
+        .map(|item| item.and_then(|view| view.to_owned()))
         .try_collect()
         .await
         .map_err(|error| CommitError::Induction(format!("dispatch probe: {error}")))
@@ -1152,7 +1155,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite};
     use anyhow::Result;
@@ -1161,6 +1164,7 @@ mod tests {
     use dialog_common::ConditionalSync;
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::memory::Resolve;
+    use dialog_operator::helpers::test_operator_with_profile;
     use dialog_query::rule::statement::on_entities;
     use dialog_query::{ConceptDescriptor, InductiveRule};
     use futures_util::StreamExt as _;
@@ -1182,6 +1186,7 @@ mod tests {
         let artifacts: Vec<_> = stream.collect().await;
         Ok(artifacts
             .into_iter()
+            .map(|item| item.and_then(|view| view.to_owned()))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .map(|artifact| artifact.is)

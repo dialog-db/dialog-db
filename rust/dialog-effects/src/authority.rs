@@ -21,10 +21,6 @@ use thiserror::Error;
 /// Error type for authority operations.
 #[derive(Debug, Error)]
 pub enum AuthorityError {
-    /// Identity resolution failed.
-    #[error("Identity error: {0}")]
-    Identity(String),
-
     /// Signing a payload failed.
     #[error("Attestation error: {0}")]
     Attestation(String),

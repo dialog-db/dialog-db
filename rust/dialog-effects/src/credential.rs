@@ -10,7 +10,8 @@
 //!         │   └── Load<Credential> → Result<Credential, CredentialError>
 //!         └── Site { address: String }
 //!             ├── Save<Secret> → Result<(), CredentialError>
-//!             └── Load<Secret> → Result<Secret, CredentialError>
+//!             ├── Load<Secret> → Result<Secret, CredentialError>
+//!             └── Retract<Secret> → Result<(), CredentialError>
 //! ```
 
 pub mod prelude;
@@ -163,6 +164,37 @@ impl Effect for Load<Secret> {
     type Output = Result<Secret, CredentialError>;
 }
 
+/// Remove a stored value from storage.
+///
+/// Idempotent: retracting an address that holds nothing succeeds. Callers
+/// that need to distinguish "was present" from "was absent" should
+/// [`Load`] first.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct Retract<T> {
+    #[serde(skip)]
+    _marker: PhantomData<T>,
+}
+
+impl<T> Retract<T> {
+    /// Create a new retract effect.
+    pub fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Default for Retract<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Effect for Retract<Secret> {
+    type Of = Site;
+    type Output = Result<(), CredentialError>;
+}
+
 /// Errors that can occur during credential operations.
 #[derive(Debug, Error)]
 pub enum CredentialError {
@@ -185,9 +217,13 @@ impl From<StorageError> for CredentialError {
     }
 }
 
+/// A credential that could not be loaded is not an access decision: nothing
+/// was weighed and refused, the material needed to decide was unavailable.
 impl From<CredentialError> for AuthorizeError {
     fn from(e: CredentialError) -> Self {
-        Self::Denied(e.to_string())
+        Self::Unavailable {
+            detail: e.to_string(),
+        }
     }
 }
 

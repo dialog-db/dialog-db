@@ -11,7 +11,6 @@ pub use open::OpenProfile;
 pub use save::SaveDelegation;
 pub use space::SpaceHandle;
 
-use crate::operator::OperatorBuilder;
 use dialog_capability::{Capability, Provider, SiteId, Subject};
 use dialog_common::ConditionalSync;
 use dialog_credentials::{Credential, SignerCredential};
@@ -69,11 +68,6 @@ impl Profile {
     /// Get an access handle for claiming and delegating capabilities.
     pub fn access(&self) -> access::Access<'_> {
         access::Access::new(&self.credential)
-    }
-
-    /// Derive an operator from this profile with the given context seed.
-    pub fn derive(&self, context: impl Into<Vec<u8>>) -> OperatorBuilder {
-        OperatorBuilder::new(self, context.into())
     }
 
     /// Get a handle to a named repository space under this profile.
@@ -137,6 +131,16 @@ impl CredentialSite {
             _marker: PhantomData,
         }
     }
+
+    /// Remove a site credential from the credential store.
+    ///
+    /// Idempotent: retracting an address that holds nothing succeeds.
+    pub fn retract(self) -> RetractSiteCredential {
+        RetractSiteCredential {
+            did: self.did,
+            key: self.key,
+        }
+    }
 }
 
 /// Saves a site credential. Created via [`CredentialSite::save()`].
@@ -191,6 +195,27 @@ where
             .perform(env)
             .await?;
         secret.try_into().map_err(Into::into)
+    }
+}
+
+/// Removes a site credential. Created via [`CredentialSite::retract()`].
+pub struct RetractSiteCredential {
+    did: Did,
+    key: SiteId,
+}
+
+impl RetractSiteCredential {
+    /// Remove the credential from the store.
+    pub async fn perform<Env>(self, env: &Env) -> Result<(), CredentialError>
+    where
+        Env: Provider<credential::Retract<Secret>> + ConditionalSync,
+    {
+        self.did
+            .credential()
+            .site(&self.key)
+            .retract()
+            .perform(env)
+            .await
     }
 }
 
@@ -253,6 +278,40 @@ mod tests {
         let loaded = Profile::load("charlie").perform(&storage).await.unwrap();
 
         assert_eq!(created.did(), loaded.did());
+    }
+
+    #[dialog_common::test]
+    async fn it_saves_retracts_and_reloads_site_secret() {
+        let storage = Storage::volatile();
+        let profile = Profile::open("site-retract")
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        profile
+            .credential()
+            .site("example.com")
+            .save(Secret::from(vec![1u8, 2, 3]))
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        profile
+            .credential()
+            .site("example.com")
+            .retract()
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        let result = profile
+            .credential()
+            .site("example.com")
+            .load::<Secret>()
+            .perform(&storage)
+            .await;
+
+        assert!(matches!(result, Err(CredentialError::NotFound(_))));
     }
 
     #[dialog_common::test]

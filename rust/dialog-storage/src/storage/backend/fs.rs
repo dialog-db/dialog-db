@@ -42,7 +42,7 @@ where
         let root_dir = root_dir.as_ref().to_owned();
         tokio::fs::create_dir_all(&root_dir)
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
         Ok(Self {
             root_dir,
             key_type: PhantomData,
@@ -71,7 +71,7 @@ where
         Key: AsRef<[u8]>,
     {
         let path = std::str::from_utf8(key.as_ref())
-            .map_err(|e| DialogStorageError::StorageBackend(format!("Invalid address: {e}")))?;
+            .map_err(|e| DialogStorageError::Storage(format!("Invalid address: {e}")))?;
         Ok(self.root_dir.join(path))
     }
 
@@ -129,7 +129,7 @@ impl PidlockGuard {
         // so the historical retry loop is no longer needed. new_validated
         // also rejects unusable paths up front and creates the parent dir.
         let mut lock = Pidlock::new_validated(&path)
-            .map_err(|e| DialogStorageError::StorageBackend(format!("Invalid lock path: {e:?}")))?;
+            .map_err(|e| DialogStorageError::Storage(format!("Invalid lock path: {e:?}")))?;
 
         match lock.acquire() {
             Ok(()) => Ok(Self(lock)),
@@ -143,11 +143,11 @@ impl PidlockGuard {
                     .flatten()
                     .map(|pid| pid.to_string())
                     .unwrap_or_else(|| "<unknown>".into());
-                Err(DialogStorageError::StorageBackend(format!(
+                Err(DialogStorageError::Storage(format!(
                     "Concurrent write in progress (lock held by pid {holder})",
                 )))
             }
-            Err(e) => Err(DialogStorageError::StorageBackend(format!(
+            Err(e) => Err(DialogStorageError::Storage(format!(
                 "Failed to acquire lock: {e:?}"
             ))),
         }
@@ -173,7 +173,7 @@ where
     async fn set(&mut self, key: Self::Key, value: Self::Value) -> Result<(), Self::Error> {
         tokio::fs::write(self.make_encoded_path(&key)?, value)
             .await
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
         Ok(())
     }
 
@@ -186,7 +186,7 @@ where
         tokio::fs::read(path)
             .await
             .map(|value| Some(Value::from(value)))
-            .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))
+            .map_err(|error| DialogStorageError::Storage(format!("{error}")))
     }
 }
 
@@ -242,7 +242,7 @@ where
                 Ok(Some((Value::from(bytes), hash)))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(DialogStorageError::StorageBackend(format!("{e}"))),
+            Err(e) => Err(DialogStorageError::Storage(format!("{e}"))),
         }
     }
 
@@ -261,7 +261,7 @@ where
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|e| DialogStorageError::StorageBackend(format!("{e}")))?;
+                .map_err(|e| DialogStorageError::Storage(format!("{e}")))?;
         }
 
         let _lock = PidlockGuard::new(self.make_lock_path(address)?)?;
@@ -273,7 +273,7 @@ where
                 (Some(bytes), Some(hash))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
-            Err(e) => return Err(DialogStorageError::StorageBackend(format!("{e}"))),
+            Err(e) => return Err(DialogStorageError::Storage(format!("{e}"))),
         };
 
         // Perform the operation
@@ -289,7 +289,7 @@ where
 
                 // Check edition only if we need to write
                 if current_hash.as_ref() != edition {
-                    return Err(DialogStorageError::StorageBackend(
+                    return Err(DialogStorageError::Storage(
                         "CAS condition failed: edition mismatch".to_string(),
                     ));
                 }
@@ -298,12 +298,12 @@ where
                 let temp_path = self.make_temp_path(address, &new_hash)?;
                 tokio::fs::write(&temp_path, new_bytes)
                     .await
-                    .map_err(|e| DialogStorageError::StorageBackend(format!("{e}")))?;
+                    .map_err(|e| DialogStorageError::Storage(format!("{e}")))?;
 
                 // Atomic rename
                 tokio::fs::rename(&temp_path, &path)
                     .await
-                    .map_err(|e| DialogStorageError::StorageBackend(format!("{e}")))?;
+                    .map_err(|e| DialogStorageError::Storage(format!("{e}")))?;
 
                 Ok(Some(new_hash))
             }
@@ -315,7 +315,7 @@ where
 
                 // Check edition only if we need to delete
                 if current_hash.as_ref() != edition {
-                    return Err(DialogStorageError::StorageBackend(
+                    return Err(DialogStorageError::Storage(
                         "CAS condition failed: edition mismatch".to_string(),
                     ));
                 }
@@ -323,7 +323,7 @@ where
                 match tokio::fs::remove_file(&path).await {
                     Ok(()) => Ok(None),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                    Err(e) => Err(DialogStorageError::StorageBackend(format!("{e}"))),
+                    Err(e) => Err(DialogStorageError::Storage(format!("{e}"))),
                 }
             }
         }
@@ -360,7 +360,7 @@ where
             writes.push(async move {
                 tokio::fs::write(path, value)
                     .await
-                    .map_err(|error| DialogStorageError::StorageBackend(format!("{error}")))?;
+                    .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
                 Ok(()) as Result<_, Self::Error>
             });
         }

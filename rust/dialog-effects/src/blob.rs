@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive::Archive;
 pub use dialog_capability::{
-    Attenuate, Attenuation, DialogCapabilityAuthorizationError, DialogCapabilityPerformError,
-    Effect, Policy, StorageError, Subject, access::AuthorizeError,
+    Attenuate, Attenuation, DialogCapabilityPerformError, Effect, Policy, StorageError, Subject,
+    access::AuthorizeError,
 };
 
 /// Blob store domain under the archive. Adds the `/blob` ability segment.

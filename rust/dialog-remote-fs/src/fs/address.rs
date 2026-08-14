@@ -67,7 +67,9 @@ impl From<FsAddress> for SiteId {
 async fn open(address: &FsAddress) -> Result<FileSystem, AuthorizeError> {
     FileSystem::open(address.location())
         .await
-        .map_err(|e| AuthorizeError::Configuration(format!("opening directory: {e}")))
+        .map_err(|e| AuthorizeError::Unavailable {
+            detail: format!("opening directory: {e}"),
+        })
 }
 
 /// Verify the resolved directory is the space for the invocation's subject:
@@ -96,19 +98,20 @@ where
         .load()
         .perform(filesystem)
         .await
-        .map_err(|e| {
-            AuthorizeError::Configuration(format!(
+        .map_err(|e| AuthorizeError::Unavailable {
+            detail: format!(
                 "directory is not an initialized space (no readable credential/key/self): {e}"
-            ))
+            ),
         })?;
 
     // A subject the directory is not the space for IS a denial.
     let expected = capability.subject();
     let actual = credential.did();
     if &actual != expected {
-        return Err(AuthorizeError::Denied(format!(
-            "directory is the space for {actual}, not the invocation subject {expected}",
-        )));
+        return Err(AuthorizeError::InvalidAudience {
+            claimed: actual,
+            authorized: expected.clone(),
+        });
     }
     Ok(())
 }
@@ -130,10 +133,13 @@ where
     Capability<Fx>: Ability,
     Env: Provider<authority::Identify> + Provider<Prove<Ucan>> + ConditionalSync,
 {
-    let identity = authority::Identify
-        .perform(env)
-        .await
-        .map_err(|e| AuthorizeError::Configuration(e.to_string()))?;
+    let identity =
+        authority::Identify
+            .perform(env)
+            .await
+            .map_err(|e| AuthorizeError::Unavailable {
+                detail: e.to_string(),
+            })?;
     let profile = identity.profile().clone();
     let operator = identity.did();
 

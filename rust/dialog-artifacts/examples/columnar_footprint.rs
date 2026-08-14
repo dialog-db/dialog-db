@@ -64,8 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let size = bytes.len() as u64;
         let node: PersistentNode<Key, State<dialog_artifacts::Datum>> =
-            PersistentNode::new(Buffer::from(bytes));
-        match node.body()? {
+            PersistentNode::try_from(Buffer::from(bytes))?;
+        match node.body() {
             ArchivedNodeBody::Index(index) => {
                 index_nodes += 1;
                 index_bytes += size;

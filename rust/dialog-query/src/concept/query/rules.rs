@@ -122,6 +122,18 @@ impl ConceptRules {
         iter::once(&self.implicit).chain(self.installed.iter())
     }
 
+    /// The installed *reducing* rules — those carrying a `reduce`
+    /// clause. They are excluded from [`plan`](Self::plan)'s
+    /// disjunction: a fold reads the rule's whole body relation, so
+    /// evaluation computes each reducing rule's folded rows once and
+    /// joins caller bindings against them (the fixpoint-table shape),
+    /// instead of piping caller bindings into the body.
+    pub fn reducing(&self) -> impl Iterator<Item = &DeductiveRule> {
+        self.installed
+            .iter()
+            .filter(|rule| !rule.reduce().is_empty())
+    }
+
     /// Install every rule from `other` into this `ConceptRules`.
     ///
     /// Used when combining two rule sources (e.g. a primary registry and an
@@ -160,11 +172,18 @@ impl ConceptRules {
         // function of this concept's descriptor and cheap to plan. Only
         // *installed* rules — which have concept/formula bodies and thus
         // a `this()` — are memoized globally by `(rule, adornment)`.
+        // Reducing rules never join the disjunction: their folded
+        // rows are computed separately (see [`Self::reducing`]).
         let plan: Disjunction = iter::once(self.implicit.plan(&scope))
-            .chain(self.installed.iter().map(|rule| {
-                self.plan_cache
-                    .get_or_plan(rule, adornment, || rule.plan(&scope))
-            }))
+            .chain(
+                self.installed
+                    .iter()
+                    .filter(|rule| rule.reduce().is_empty())
+                    .map(|rule| {
+                        self.plan_cache
+                            .get_or_plan(rule, adornment, || rule.plan(&scope))
+                    }),
+            )
             .collect();
 
         let fork = Arc::new(plan);

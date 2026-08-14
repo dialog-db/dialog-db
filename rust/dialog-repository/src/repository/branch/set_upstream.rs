@@ -59,7 +59,8 @@ mod tests {
     use crate::{SetUpstreamError, Upstream};
     use anyhow::Result;
 
-    use crate::helpers::{test_operator_with_profile, test_repo};
+    use crate::helpers::test_repo;
+    use dialog_operator::helpers::test_operator_with_profile;
 
     #[dialog_common::test]
     async fn it_sets_local_upstream() -> Result<()> {

@@ -40,6 +40,65 @@ pub enum ShipmentRef {
 /// deduplicated). Push runs the node-level differential anyway to upload
 /// novel nodes; draining this from the same [`TreeDifference`] means the
 /// changed paths are read once instead of once per concern.
+/// Classify one tree entry: does it reference content that must ship
+/// alongside the tree nodes, and which kind?
+///
+/// The per-entry half of [`shipment_refs`], split out so a caller walking
+/// a tree directly can classify entries as it visits leaves rather than
+/// running a differential to reach the same answer. `None` means the entry
+/// references nothing shippable.
+///
+/// Retractions are deliberately not spilled-value references: a retraction
+/// writes a tombstone at the same key, it is never read through the spill
+/// store (readers check `State::Added` before fetching), and a replica can
+/// legitimately hold a tombstone for a block it never replicated -- so
+/// requiring the block would wedge that replica's push forever.
+pub fn shipment_ref(
+    key: &Key,
+    value: &State<Datum>,
+    removed: bool,
+) -> Result<Option<ShipmentRef>, DialogArtifactsError> {
+    match key.tag() {
+        BLOB_KEY_TAG => {
+            let hash = BlobKey(key.clone()).blob_hash();
+            // Decoding rejects a malformed record; a `None` decode is a
+            // retraction tombstone, a reference only when removed.
+            Ok(match (removed, BlobRecord::from_state(value)?) {
+                (false, Some(_)) => Some(ShipmentRef::Blob(BlobChange::Added(hash))),
+                (true, _) => Some(ShipmentRef::Blob(BlobChange::Removed(hash))),
+                (false, None) => None,
+            })
+        }
+        // Count each spilled value via the EAV ordering only: a value shared
+        // by the EAV/AEV/VAE orderings would otherwise surface three times.
+        ENTITY_KEY_TAG if !removed => {
+            if !matches!(value, State::Added(_)) {
+                return Ok(None);
+            }
+            let view = EntityKey(key);
+            let Some(hash) = view.value_spill_hash() else {
+                return Ok(None);
+            };
+            let reference: Blake3Hash = hash.try_into().map_err(|_| {
+                DialogArtifactsError::InvalidKey(
+                    "spilled value reference is not 32 bytes".to_string(),
+                )
+            })?;
+            Ok(Some(ShipmentRef::SpilledValue(reference)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Stream everything a push must ship from ONE walk of an already-computed
+/// tree differential: blob-index changes (`BLOB` tag) and newly-referenced
+/// spilled value blocks (EAV-tagged additions whose key carries a
+/// reference, deduplicated). Push runs the node-level differential anyway
+/// to upload novel nodes; draining this from the same [`TreeDifference`]
+/// means the changed paths are read once instead of once per concern.
+///
+/// Classification of each entry is [`shipment_ref`]; this adds the walk
+/// and the deduplication.
 pub fn shipment_refs<'a, Backend>(
     difference: &'a TreeDifference<'a, Key, State<Datum>, Backend>,
 ) -> impl Stream<Item = Result<ShipmentRef, DialogArtifactsError>> + 'a + ConditionalSend
@@ -56,48 +115,16 @@ where
                 Change::Add(entry) => (entry, false),
                 Change::Remove(entry) => (entry, true),
             };
-            let key = entry.key;
-            match key.tag() {
-                BLOB_KEY_TAG => {
-                    let hash = BlobKey(key).blob_hash();
-                    // Decoding rejects a malformed record; a `None` decode is
-                    // a retraction tombstone, a reference only when removed.
-                    match (removed, BlobRecord::from_state(&entry.value)?) {
-                        (false, Some(_)) => yield ShipmentRef::Blob(BlobChange::Added(hash)),
-                        (true, _) => yield ShipmentRef::Blob(BlobChange::Removed(hash)),
-                        (false, None) => {}
-                    }
-                }
-                // Count each spilled value once, via the EAV ordering only:
-                // a value shared by the EAV/AEV/VAE orderings surfaces once,
-                // and the `HashSet` dedups a block shared by many facts.
-                ENTITY_KEY_TAG if !removed => {
-                    // Only asserted facts need their block shipped. A
-                    // retraction writes a TOMBSTONE at the same spilled key:
-                    // it is never read through the spill store (readers check
-                    // `State::Added` before fetching), and a replica can
-                    // legitimately hold a tombstone for a block it never
-                    // replicated (pull ships tree nodes, not value blocks) —
-                    // requiring the block would wedge that replica's push
-                    // forever.
-                    if !matches!(entry.value, State::Added(_)) {
-                        continue;
-                    }
-                    let view = EntityKey(&key);
-                    let Some(hash) = view.value_spill_hash() else {
-                        continue;
-                    };
-                    let reference: Blake3Hash = hash.try_into().map_err(|_| {
-                        DialogArtifactsError::InvalidKey(
-                            "spilled value reference is not 32 bytes".to_string(),
-                        )
-                    })?;
-                    if seen.insert(reference) {
-                        yield ShipmentRef::SpilledValue(reference);
-                    }
-                }
-                _ => {}
+            let Some(reference) = shipment_ref(&entry.key, &entry.value, removed)? else {
+                continue;
+            };
+            // A block shared by many facts surfaces once.
+            if let ShipmentRef::SpilledValue(spilled) = &reference
+                && !seen.insert(*spilled)
+            {
+                continue;
             }
+            yield reference;
         }
     }
 }

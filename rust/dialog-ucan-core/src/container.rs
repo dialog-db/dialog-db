@@ -124,8 +124,16 @@ impl Container {
 
     /// Serialize the container to DAG-CBOR bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, ContainerError> {
+        self.clone().into_bytes()
+    }
+
+    /// Serialize the container to DAG-CBOR bytes, consuming it.
+    ///
+    /// Callers that build a container purely to encode it — every
+    /// chain's `to_bytes` — avoid copying every token this way.
+    pub fn into_bytes(self) -> Result<Vec<u8>, ContainerError> {
         // Build container: { "ctn-v1": [token_bytes...] }
-        let tokens: Vec<Ipld> = self.tokens.iter().cloned().map(Ipld::Bytes).collect();
+        let tokens: Vec<Ipld> = self.tokens.into_iter().map(Ipld::Bytes).collect();
         let mut container: BTreeMap<String, Ipld> = BTreeMap::new();
         container.insert(CONTAINER_VERSION.to_string(), Ipld::List(tokens));
 

@@ -297,7 +297,7 @@ mod tests {
     use crate::source::test::TestEnv;
     use crate::the;
     use crate::type_system::{Primitive, Type as Kind};
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
 
     /// Construct an optional `is` variable. The query derives its
     /// resolution from the `is` term, so typing the slot as optional

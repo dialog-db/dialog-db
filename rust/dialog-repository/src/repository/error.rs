@@ -1,6 +1,9 @@
 use crate::TreeReference;
 use dialog_artifacts::DialogArtifactsError;
+use dialog_capability::access::AuthorizeError;
+use dialog_common::Blake3Hash;
 use dialog_credentials::Ed25519SignerError;
+use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
 use dialog_effects::blob::BlobError;
@@ -10,99 +13,6 @@ use dialog_search_tree::DialogSearchTreeError;
 use dialog_storage::DialogStorageError;
 use std::io;
 use thiserror::Error;
-
-/// The umbrella error type for the repository API.
-///
-/// Each variant wraps a command-specific error type. Callers doing
-/// multiple operations (e.g. `push` then `pull`) can `?` both into a
-/// single `Result<_, RepositoryError>` without juggling per-command
-/// error types. Pattern match on variants or use `downcast` via
-/// [`source()`](std::error::Error::source) when specific handling is
-/// needed.
-#[derive(Error, Debug)]
-pub enum RepositoryError {
-    /// Open-repository command failed.
-    #[error(transparent)]
-    Open(#[from] OpenRepositoryError),
-
-    /// Load-repository command failed.
-    #[error(transparent)]
-    Load(#[from] LoadRepositoryError),
-
-    /// Create-repository command failed.
-    #[error(transparent)]
-    Create(#[from] CreateRepositoryError),
-
-    /// Load-branch command failed.
-    #[error(transparent)]
-    LoadBranch(#[from] LoadBranchError),
-
-    /// Commit command failed.
-    #[error(transparent)]
-    Commit(#[from] CommitError),
-
-    /// Set-upstream command failed.
-    #[error(transparent)]
-    SetUpstream(#[from] SetUpstreamError),
-
-    /// Fetch command failed.
-    #[error(transparent)]
-    Fetch(#[from] FetchError),
-
-    /// Push command failed.
-    #[error(transparent)]
-    Push(#[from] PushError),
-
-    /// Pull command failed.
-    #[error(transparent)]
-    Pull(#[from] PullError),
-
-    /// Load-remote command failed.
-    #[error(transparent)]
-    LoadRemote(#[from] LoadRemoteError),
-
-    /// Create-remote command failed.
-    #[error(transparent)]
-    CreateRemote(#[from] CreateRemoteError),
-
-    /// Open-remote-branch command failed.
-    #[error(transparent)]
-    OpenRemoteBranch(#[from] OpenRemoteBranchError),
-
-    /// Load-remote-branch command failed.
-    #[error(transparent)]
-    LoadRemoteBranch(#[from] LoadRemoteBranchError),
-
-    /// Fetch-remote-branch command failed.
-    #[error(transparent)]
-    FetchRemoteBranch(#[from] FetchRemoteBranchError),
-
-    /// Publish-remote-branch command failed.
-    #[error(transparent)]
-    PublishRemoteBranch(#[from] PublishRemoteBranchError),
-
-    /// Upload command (novel blocks to remote archive) failed.
-    #[error(transparent)]
-    Upload(#[from] UploadError),
-
-    /// Cell publish failed (outside a command context).
-    #[error(transparent)]
-    Publish(#[from] PublishError),
-
-    /// Cell resolve failed (outside a command context).
-    #[error(transparent)]
-    Resolve(#[from] ResolveError),
-
-    /// Select command failed to load its tree (the stream itself yields
-    /// `DialogArtifactsError` per-item, which is surfaced through the
-    /// stream).
-    #[error(transparent)]
-    Select(#[from] DialogSearchTreeError),
-
-    /// A verifier-only credential was used where a signer was required.
-    #[error(transparent)]
-    SignerRequired(#[from] SignerRequiredError),
-}
 
 /// Errors returned by the open remote branch command.
 #[derive(Error, Debug)]
@@ -480,9 +390,14 @@ pub enum ResolveError {
     #[error("Storage error: {0}")]
     Storage(String),
 
-    /// Authorization denied.
-    #[error("Authorization error: {0}")]
-    Authorization(String),
+    /// The request was not authorized.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
+
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
 
     /// IO failure.
     #[error("IO error: {0}")]
@@ -500,8 +415,8 @@ impl From<MemoryError> for ResolveError {
                 Self::VersionMismatch { expected, actual }
             }
             MemoryError::Storage(message) => Self::Storage(message),
-            MemoryError::Authorization(message) => Self::Authorization(message),
-            MemoryError::Io(error) => Self::Io(error),
+            MemoryError::Rejected(error) => Self::Rejected(error),
+            MemoryError::Authorization(error) => Self::Authorization(error),
         }
     }
 }
@@ -522,9 +437,14 @@ pub enum PublishError {
     #[error("Storage error: {0}")]
     Storage(String),
 
-    /// Authorization denied.
-    #[error("Authorization error: {0}")]
-    Authorization(String),
+    /// The request was not authorized.
+    #[error(transparent)]
+    Authorization(#[from] AuthorizeError),
+
+    /// The request was not carried out, for a reason that is not an
+    /// access decision.
+    #[error(transparent)]
+    Rejected(#[from] Rejection),
 
     /// IO failure.
     #[error("IO error: {0}")]
@@ -542,8 +462,8 @@ impl From<MemoryError> for PublishError {
                 Self::VersionMismatch { expected, actual }
             }
             MemoryError::Storage(message) => Self::Storage(message),
-            MemoryError::Authorization(message) => Self::Authorization(message),
-            MemoryError::Io(error) => Self::Io(error),
+            MemoryError::Rejected(error) => Self::Rejected(error),
+            MemoryError::Authorization(error) => Self::Authorization(error),
         }
     }
 }
@@ -557,9 +477,176 @@ pub enum UploadError {
 
     /// Failed to read a block from the local archive before uploading.
     #[error("Failed to read block from local archive: {0}")]
-    LocalRead(ArchiveError),
+    LocalRead(#[source] ArchiveError),
 
     /// Failed to write a block to the remote archive.
     #[error("Failed to write block to remote archive: {0}")]
-    RemoteWrite(ArchiveError),
+    RemoteWrite(#[source] ArchiveError),
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unused_async)]
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use dialog_capability::access::AuthorizeError;
+
+    use super::*;
+
+    fn revoked() -> AuthorizeError {
+        AuthorizeError::Revoked {
+            subject: dialog_capability::did!(
+                "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
+            ),
+        }
+    }
+
+    /// Confirm the reason is still reachable as a value, not as text.
+    ///
+    /// `#[error(transparent)]` delegates `source()` straight past the
+    /// variant, so the wrapper chain does not expose the
+    /// [`AuthorizeError`] as a source -- it is reachable by matching, and
+    /// that is the property worth pinning: previously each hop rendered
+    /// the reason with `to_string()`, so the only way to recover it was
+    /// to parse the message.
+    fn assert_revoked(rendered: &str) {
+        assert!(
+            rendered.contains("revoked"),
+            "the reason survives the wrappers, got {rendered}"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_memory_reasons_through_pull_and_push() {
+        let pull = PullError::FetchRemoteBranch(FetchRemoteBranchError::Resolve(
+            ResolveError::from(MemoryError::Authorization(revoked())),
+        ));
+        let push = PushError::PublishRemoteBranch(PublishRemoteBranchError::Publish(
+            PublishError::from(MemoryError::Authorization(revoked())),
+        ));
+
+        // Structural: the reason is a value at the end of the chain.
+        let PullError::FetchRemoteBranch(FetchRemoteBranchError::Resolve(
+            ResolveError::Authorization(reason),
+        )) = &pull
+        else {
+            panic!("expected an authorization reason, got {pull:?}");
+        };
+        assert!(matches!(reason, AuthorizeError::Revoked { .. }));
+
+        assert_revoked(&pull.to_string());
+        assert_revoked(&push.to_string());
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_archive_reasons_through_pull_and_push() {
+        let storage = DialogStorageError::from(ArchiveError::Authorization(revoked()));
+        let pull = PullError::Tree(DialogSearchTreeError::from(storage));
+        let push = PushError::Upload(UploadError::RemoteWrite(ArchiveError::Authorization(
+            revoked(),
+        )));
+
+        assert_revoked(&pull.to_string());
+        assert_revoked(&push.to_string());
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_blob_reasons_through_push() {
+        let push = PushError::Blob(BlobError::Authorization(revoked()));
+        let PushError::Blob(BlobError::Authorization(reason)) = &push else {
+            panic!("expected an authorization reason, got {push:?}");
+        };
+        assert!(matches!(reason, AuthorizeError::Revoked { .. }));
+        assert_revoked(&push.to_string());
+    }
+
+    #[dialog_common::test]
+    async fn it_preserves_artifact_reasons_through_push() {
+        let tree = DialogSearchTreeError::from(DialogStorageError::Authorization(revoked()));
+        let push = PushError::Artifact(DialogArtifactsError::from(tree));
+        let PushError::Artifact(DialogArtifactsError::Authorization(reason)) = &push else {
+            panic!("the conversion flattened the reason: {push:?}");
+        };
+        assert!(matches!(reason, AuthorizeError::Revoked { .. }));
+        assert_revoked(&push.to_string());
+    }
+}
+
+/// Errors from snapshot export and import.
+///
+/// The digest-mismatch variants are the point of this type. A snapshot may
+/// cross a trust boundary -- a source that fetched from a remote, or bytes
+/// read from a file -- so content that does not hash to the address it
+/// claims must be refused rather than stored. Both carry what was expected
+/// and what arrived, so a caller can say which content was corrupt.
+#[derive(Error, Debug)]
+pub enum SnapshotError {
+    /// A block's content did not hash to the digest it declared.
+    ///
+    /// Storing it anyway would not fail loudly: content-addressed bytes
+    /// simply land at a different address, unreferenced, and surface much
+    /// later as a missing node far from the cause.
+    #[error("Block content does not match its address: expected {expected}, got {actual}")]
+    BlockDigestMismatch {
+        /// The address the block declared.
+        expected: Blake3Hash,
+        /// The address its content actually hashes to.
+        actual: Blake3Hash,
+    },
+
+    /// A blob's content did not hash to the digest it declared.
+    ///
+    /// Detected at `finish`, once the last chunk has been written: a blob
+    /// arrives in pieces, so it cannot be checked on arrival the way a
+    /// block can.
+    #[error("Blob content does not match its address: expected {expected}, got {actual}")]
+    BlobDigestMismatch {
+        /// The address the blob declared.
+        expected: Blake3Hash,
+        /// The address its content actually hashes to.
+        actual: Blake3Hash,
+    },
+
+    /// The revision references a block this store does not hold.
+    ///
+    /// Only raised when the export was asked for a complete snapshot; a
+    /// sparse one records the gap and carries on.
+    #[error("Revision references block {digest}, which is not present")]
+    MissingBlock {
+        /// The address that could not be read.
+        digest: Blake3Hash,
+    },
+
+    /// A spilled-value key carried a malformed content reference.
+    #[error("Spilled-value reference is not 32 bytes: {0:?}")]
+    InvalidSpillReference(Vec<u8>),
+
+    /// The revision references a blob this store does not hold.
+    #[error("Revision references blob {digest}, which is not present")]
+    MissingBlob {
+        /// The address that could not be read.
+        digest: Blake3Hash,
+    },
+
+    /// Reading or writing an archive block failed.
+    #[error(transparent)]
+    Archive(#[from] ArchiveError),
+
+    /// Reading or writing a blob failed.
+    #[error(transparent)]
+    Blob(#[from] BlobError),
+
+    /// Walking the revision's tree failed.
+    #[error(transparent)]
+    Tree(#[from] DialogSearchTreeError),
+
+    /// Reading a referenced artifact failed.
+    #[error(transparent)]
+    Artifact(#[from] DialogArtifactsError),
+
+    /// Accessing the archive backend failed.
+    #[error(transparent)]
+    Storage(#[from] DialogStorageError),
 }

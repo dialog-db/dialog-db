@@ -265,7 +265,7 @@ fn bind_occurrence(matched: &mut Match, occurrence: &ConceptQuery, row: &Row) ->
 /// Project a rule's result match into a conclusion [`Row`]: one
 /// entry per conclusion operand bound to a present value; operands
 /// resolved to `Absent` (or never bound) are omitted.
-fn project(descriptor: &ConceptDescriptor, matched: &Match) -> Row {
+pub(crate) fn project(descriptor: &ConceptDescriptor, matched: &Match) -> Row {
     let mut row = Row::new();
     let operands = iter::once("this").chain(descriptor.with().keys());
     for operand in operands {
@@ -515,17 +515,24 @@ where
     let members = discover(root, analysis, env).await?;
 
     // Seed round: rules with no recursive occurrence evaluate fully
-    // top-down.
+    // top-down. A reducing seed rule folds its body first — the
+    // stratification check guarantees its concept premises all sit
+    // below the component, so the folded inputs are complete before
+    // the fixpoint begins. (A reducing rule *with* an in-component
+    // occurrence never reaches evaluation: that occurrence is an
+    // aggregating edge inside its own component, rejected by
+    // [`ProgramAnalysis::check`].)
     for member in members.values() {
         for split in &member.rules {
             if !split.occurrences.is_empty() {
                 continue;
             }
             let plan = split.rule.plan(&Environment::new());
-            let results: Vec<Match> = plan
-                .evaluate(Match::new().seed(), env)
-                .try_collect()
-                .await?;
+            let body = plan.evaluate(Match::new().seed(), env);
+            let results: Vec<Match> = match split.rule.reducer() {
+                Some(reducer) => reducer.fold(body).await?,
+                None => body.try_collect().await?,
+            };
             for matched in results {
                 table.insert(
                     &member.descriptor.this(),
@@ -723,6 +730,18 @@ where
 {
     let root_entity = root.this();
     let members = discover(root, analysis, env).await?;
+    // A reducing seed rule's folded rows are a function of its whole
+    // body relation: a new fact *replaces* the group's aggregate row
+    // rather than adding one, which additive seeding cannot model.
+    // Rebuild from scratch instead.
+    if members.values().any(|member| {
+        member
+            .rules
+            .iter()
+            .any(|split| !split.rule.reduce().is_empty())
+    }) {
+        return Ok(None);
+    }
     let subjects: BTreeSet<Entity> = additions.iter().map(|fact| fact.of.clone()).collect();
 
     for member in members.values() {
@@ -870,6 +889,17 @@ where
 {
     let root_entity = root.this();
     let members = discover(root, analysis, env).await?;
+    // A deletion shrinks a reducing seed rule's groups, replacing
+    // aggregate rows rather than removing them; DRed's per-row
+    // suspicion cannot model that. Rebuild from scratch instead.
+    if members.values().any(|member| {
+        member
+            .rules
+            .iter()
+            .any(|split| !split.rule.reduce().is_empty())
+    }) {
+        return Ok(None);
+    }
     let subjects: BTreeSet<Entity> = deletions.iter().map(|fact| fact.of.clone()).collect();
 
     // Suspects per member, keyed like the table.
@@ -1265,10 +1295,11 @@ mod tests {
     use super::*;
     use crate::attribute::query::AttributeQuery;
     use crate::attribute::{AttributeDescriptor, Cardinality, Type};
+    use crate::reduce::{Aggregator, ReduceSpec};
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     /// The `ancestor` concept: `this` plus one entity-valued
@@ -1448,6 +1479,242 @@ mod tests {
         assert_eq!(
             pairs, expected,
             "one row per distinct pair; the diamond's two paths to (d, a) collapse"
+        );
+        Ok(())
+    }
+
+    /// Aggregation over a recursive-but-lower-stratum concept: a
+    /// reducing rule counts each person's ancestors. The ancestor
+    /// fixpoint completes first, so the fold sees the full
+    /// transitive closure — including the deduplicated diamond pair
+    /// — not just the direct-parent facts.
+    #[dialog_common::test]
+    async fn it_counts_ancestors_over_the_completed_fixpoint() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // The diamond: d -> {b, c} -> a, so d's transitive closure
+        // is {b, c, a} while b and c each have only a.
+        let a = Entity::new()?;
+        let b = Entity::new()?;
+        let c = Entity::new()?;
+        let d = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("family/parent").of(d.clone()).is(b.clone()))
+            .assert(the!("family/parent").of(d.clone()).is(c.clone()))
+            .assert(the!("family/parent").of(b.clone()).is(a.clone()))
+            .assert(the!("family/parent").of(c.clone()).is(a.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let ancestor = ancestor_concept();
+        let count = ConceptDescriptor::try_from(vec![(
+            "total",
+            AttributeDescriptor::new(
+                the!("family/ancestors"),
+                "",
+                Cardinality::One,
+                Some(Type::UnsignedInt),
+            ),
+        )])
+        .unwrap();
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Entity>::var("this").into());
+        terms.insert("ancestor".to_string(), Term::<Any>::var("a"));
+        let mut reduce = BTreeMap::new();
+        reduce.insert(
+            "total".to_string(),
+            ReduceSpec {
+                apply: Aggregator::Count,
+                of: Term::var("a"),
+            },
+        );
+        let count_rule = DeductiveRule::with_reduce(
+            count.clone(),
+            vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: ancestor.clone(),
+            }))],
+            reduce,
+        )
+        .expect("the reducing rule compiles");
+
+        let mut registry = RuleRegistry::new();
+        for rule in ancestor_rules(&ancestor) {
+            registry.register(rule)?;
+        }
+        registry.register(count_rule)?;
+        assert!(
+            registry.validate()?.is_empty(),
+            "aggregation over the lower stratum is well-stratified"
+        );
+        assert!(registry.is_recursive(&ancestor.this())?);
+        assert!(!registry.is_recursive(&count.this())?);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("who"));
+        terms.insert("total".to_string(), Term::<Any>::var("total"));
+        let source = TestEnv::new(&branch, &operator, registry);
+        let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: count,
+        }))])
+        .plan(&Environment::new())
+        .expect("plans");
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        let mut counts = Vec::new();
+        for matched in &results {
+            counts.push((
+                matched.lookup(&Term::<Any>::var("who"))?.content()?,
+                matched.lookup(&Term::<Any>::var("total"))?.content()?,
+            ));
+        }
+        counts.sort_by_key(|pair| format!("{pair:?}"));
+        let mut expected = vec![
+            (Value::Entity(d.clone()), Value::UnsignedInt(3)),
+            (Value::Entity(b.clone()), Value::UnsignedInt(1)),
+            (Value::Entity(c.clone()), Value::UnsignedInt(1)),
+        ];
+        expected.sort_by_key(|pair| format!("{pair:?}"));
+        assert_eq!(
+            counts, expected,
+            "each count folds the completed closure, with the diamond pair deduplicated"
+        );
+        Ok(())
+    }
+
+    /// A reducing rule *inside* a recursive component is legal when
+    /// its own premises all sit below the component (no aggregating
+    /// edge lands in the cycle): it seeds the fixpoint with its
+    /// folded rows, and the recursive rule propagates them.
+    #[dialog_common::test]
+    async fn it_folds_reducing_seed_rules_in_the_fixpoint() -> anyhow::Result<()> {
+        let (operator, profile) = test_operator_with_profile().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // x stocks two items; y stocks none but franchises from x.
+        let x = Entity::new()?;
+        let y = Entity::new()?;
+        let item_a = Entity::new()?;
+        let item_b = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("shop/item").of(x.clone()).is(item_a.clone()))
+            .assert(the!("shop/item").of(x.clone()).is(item_b.clone()))
+            .assert(the!("shop/franchise").of(y.clone()).is(x.clone()))
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        let count = ConceptDescriptor::try_from(vec![(
+            "total",
+            AttributeDescriptor::new(
+                the!("shop/total"),
+                "",
+                Cardinality::One,
+                Some(Type::UnsignedInt),
+            ),
+        )])
+        .unwrap();
+
+        // Seed rule: count a shop's own items (a reducing rule with
+        // no concept premise, so no aggregating edge).
+        let mut reduce = BTreeMap::new();
+        reduce.insert(
+            "total".to_string(),
+            ReduceSpec {
+                apply: Aggregator::Count,
+                of: Term::var("item"),
+            },
+        );
+        let seed_rule = DeductiveRule::with_reduce(
+            count.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("shop/item")),
+                    Term::<Entity>::var("this"),
+                    Term::var("item"),
+                    Term::blank(),
+                    Some(Cardinality::Many),
+                )
+                .into(),
+            ],
+            reduce,
+        )
+        .expect("the reducing seed rule compiles");
+
+        // Step rule: a franchise inherits its parent's total,
+        // closing the recursive component.
+        let mut step_terms = Parameters::new();
+        step_terms.insert("this".to_string(), Term::<Any>::var("p"));
+        step_terms.insert("total".to_string(), Term::<Any>::var("total"));
+        let step_rule = DeductiveRule::new(
+            count.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("shop/franchise")),
+                    Term::<Entity>::var("this"),
+                    Term::var("p"),
+                    Term::blank(),
+                    Some(Cardinality::One),
+                )
+                .into(),
+                Premise::Assert(Proposition::Concept(ConceptQuery {
+                    terms: step_terms,
+                    predicate: count.clone(),
+                })),
+            ],
+        )
+        .expect("the step rule compiles");
+
+        let mut registry = RuleRegistry::new();
+        registry.register(seed_rule)?;
+        registry.register(step_rule)?;
+        assert!(
+            registry.validate()?.is_empty(),
+            "the reducing rule's edges leave the component: stratified"
+        );
+        assert!(registry.is_recursive(&count.this())?);
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("shop"));
+        terms.insert("total".to_string(), Term::<Any>::var("total"));
+        let source = TestEnv::new(&branch, &operator, registry);
+        let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: count,
+        }))])
+        .plan(&Environment::new())
+        .expect("plans");
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+
+        let mut totals = Vec::new();
+        for matched in &results {
+            totals.push((
+                matched.lookup(&Term::<Any>::var("shop"))?.content()?,
+                matched.lookup(&Term::<Any>::var("total"))?.content()?,
+            ));
+        }
+        totals.sort_by_key(|pair| format!("{pair:?}"));
+        let mut expected = vec![
+            (Value::Entity(x.clone()), Value::UnsignedInt(2)),
+            (Value::Entity(y.clone()), Value::UnsignedInt(2)),
+        ];
+        expected.sort_by_key(|pair| format!("{pair:?}"));
+        assert_eq!(
+            totals, expected,
+            "the seed round folded x's items and the fixpoint propagated the row to y"
         );
         Ok(())
     }
@@ -2192,7 +2459,7 @@ mod derived_edge_tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use dialog_repository::helpers::{test_operator_with_profile, test_repo};
+    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
     use futures_util::TryStreamExt;
 
     /// A derived edge concept: concluded by a rule over the raw

@@ -1,28 +1,35 @@
-//! Numeric range predicates: `<`, `<=`, `>`, `>=` as premises.
+//! Range predicates: `<`, `<=`, `>`, `>=` as premises.
 //!
-//! Four constraints over the NUMERIC kinds, sharing one comparison
-//! core. Like every scalar premise they *filter*: a row whose sides
-//! cannot be ordered — a non-numeric value, a mixed-type pair, a
-//! NaN — is a non-match, never an error and never a coercion. The
-//! same strict no-promotion semantics as formula arithmetic
-//! (`notes/formula-schemes.md`), with the same release valve: a
-//! *constant* side is a polymorphic literal that adapts losslessly
-//! to the data's type per row (`1` compares against floats as
-//! `1.0`; `1.5` against integer data is a non-match because no
-//! integer is `1.5`). Data is never adapted.
+//! Four constraints over the COMPARABLE kinds (numbers, strings,
+//! symbols, entities, bytes), sharing one comparison core. Like
+//! every scalar premise they *filter*: a row whose sides cannot be
+//! ordered — a non-comparable value, a mixed-type pair, a NaN — is
+//! a non-match, never an error and never a coercion. The same
+//! strict no-promotion semantics as formula arithmetic
+//! (`notes/formula-schemes.md`), with one release valve: a
+//! *constant* NUMERIC side is a polymorphic literal that adapts
+//! losslessly to the data's type per row (`1` compares against
+//! floats as `1.0`; `1.5` against integer data is a non-match
+//! because no integer is `1.5`). Data is never adapted, and
+//! non-numeric literals never adapt (a string literal orders only
+//! against string rows).
 //!
-//! Inference: both slots carry the NUMERIC bound, narrowing the
-//! variables on use. The slots are not yet *linked* (a comparison
-//! does not force its sides to one instantiation the way a formula
-//! scheme does); the planned per-atom interval refinements will
-//! ride these same predicates into scan-range pushdown.
+//! Non-numeric comparables order within one type by their
+//! ORDER-PRESERVING encoding — the same order the value index sorts
+//! by, so a pushed scan range and this residual filter can never
+//! disagree about a row.
+//!
+//! Inference: both slots carry the COMPARABLE bound, narrowing the
+//! variables on use. A constant side additionally proves an
+//! interval refinement on the other side, which rides inference
+//! into the scan-range pushdown.
 
 use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Display;
 use std::ops::Not;
 
-use crate::artifact::Value;
+use crate::artifact::{Value, encode_value_owned};
 use crate::error::EvaluationError;
 use crate::formula::number::Numeric;
 use crate::selection::Selection;
@@ -35,27 +42,39 @@ use crate::{Constraint, Negation, Premise, Proposition, try_stream};
 /// Cost for evaluating a comparison (single row lookup + ordering).
 const COMPARE_COST: usize = 1;
 
-/// Order two values for comparison, adapting literal sides.
+/// Order two values for comparison, adapting numeric literal sides.
 ///
-/// `None` is a non-match: a non-numeric value, a NaN, or a
-/// mixed-type pair neither side of which is a literal that adapts
-/// losslessly to the other's type.
+/// `None` is a non-match: a non-comparable value, a NaN, or a
+/// mixed-type pair neither side of which is a numeric literal that
+/// adapts losslessly to the other's type.
 fn ordering(
     of: &Value,
     of_is_literal: bool,
     with: &Value,
     with_is_literal: bool,
 ) -> Option<Ordering> {
-    let of = Numeric::try_from(of.clone()).ok()?;
-    let with = Numeric::try_from(with.clone()).ok()?;
-    if of.value_type() == with.value_type() {
-        return of.compare(with);
+    let of_type = of.data_type();
+    let with_type = with.data_type();
+    if Primitive::NUMERIC.contains(of_type) && Primitive::NUMERIC.contains(with_type) {
+        let of = Numeric::try_from(of.clone()).ok()?;
+        let with = Numeric::try_from(with.clone()).ok()?;
+        if of.value_type() == with.value_type() {
+            return of.compare(with);
+        }
+        if with_is_literal && let Some(adapted) = with.instantiate(of.value_type()) {
+            return of.compare(adapted);
+        }
+        if of_is_literal && let Some(adapted) = of.instantiate(with.value_type()) {
+            return adapted.compare(with);
+        }
+        return None;
     }
-    if with_is_literal && let Some(adapted) = with.instantiate(of.value_type()) {
-        return of.compare(adapted);
-    }
-    if of_is_literal && let Some(adapted) = of.instantiate(with.value_type()) {
-        return adapted.compare(with);
+    // Non-numeric comparables order within one type by their
+    // order-preserving encoding: exactly the byte order the value
+    // index sorts by, so a pushed range and this filter agree on
+    // every row by construction.
+    if of_type == with_type && Primitive::COMPARABLE.contains(of_type) {
+        return Some(encode_value_owned(of).cmp(&encode_value_owned(with)));
     }
     None
 }
@@ -63,7 +82,8 @@ fn ordering(
 macro_rules! define_comparison {
     (
         $(#[$doc:meta])*
-        $name:ident, $symbol:literal, [$($accepts:pat),+], $sugar:ident
+        $name:ident, $symbol:literal, [$($accepts:pat),+], $sugar:ident,
+        lower: $lower:literal, inclusive: $inclusive:literal
     ) => {
         $(#[$doc])*
         ///
@@ -84,14 +104,46 @@ macro_rules! define_comparison {
 
             /// Schema: both sides are *hard* requirements (the
             /// predicate consumes bound values; the planner orders
-            /// it after the premises binding them), bounded NUMERIC.
+            /// it after the premises binding them), bounded
+            /// COMPARABLE.
+            ///
+            /// A constant side additionally proves an interval bound
+            /// on the OTHER side, carried as a
+            /// [`Refinement`](crate::type_system::Refinement) — how
+            /// the bound travels through inference to the scan-range
+            /// pushdown. The interval records the literal's own type;
+            /// consumers must honor the per-row numeric literal
+            /// adaptation (see the pushdown's single-type gate).
             pub fn schema(&self) -> Schema {
+                let comparable = Kind::from(Primitive::COMPARABLE);
+                let (of_content, with_content) =
+                    match (self.of.as_constant(), self.with.as_constant()) {
+                        // `of REL bound`: the bound constrains `of` on
+                        // this relation's own side.
+                        (None, Some(bound)) => (
+                            comparable
+                                .clone()
+                                .with_interval(bound, $inclusive, $lower)
+                                .unwrap_or_else(|| comparable.clone()),
+                            comparable.clone(),
+                        ),
+                        // `bound REL with`: mirrored — the bound sits on
+                        // the opposite side of `with`.
+                        (Some(bound), None) => (
+                            comparable.clone(),
+                            comparable
+                                .clone()
+                                .with_interval(bound, $inclusive, !$lower)
+                                .unwrap_or_else(|| comparable.clone()),
+                        ),
+                        _ => (comparable.clone(), comparable.clone()),
+                    };
                 let mut schema = Schema::new();
                 schema.insert(
                     "of".to_string(),
                     Field {
                         description: "Left side of the comparison".to_string(),
-                        content_type: Some(Kind::from(Primitive::NUMERIC)),
+                        content_type: Some(of_content),
                         requirement: Requirement::required(),
                         cardinality: Cardinality::One,
                     },
@@ -100,7 +152,7 @@ macro_rules! define_comparison {
                     "with".to_string(),
                     Field {
                         description: "Right side of the comparison".to_string(),
-                        content_type: Some(Kind::from(Primitive::NUMERIC)),
+                        content_type: Some(with_content),
                         requirement: Requirement::required(),
                         cardinality: Cardinality::One,
                     },
@@ -195,22 +247,26 @@ macro_rules! define_comparison {
 
 define_comparison!(
     /// Range predicate: `of` is strictly less than `with`.
-    LessThan, "<", [Ordering::Less], less_than
+    LessThan, "<", [Ordering::Less], less_than,
+    lower: false, inclusive: false
 );
 
 define_comparison!(
     /// Range predicate: `of` is less than or equal to `with`.
-    AtMost, "<=", [Ordering::Less, Ordering::Equal], at_most
+    AtMost, "<=", [Ordering::Less, Ordering::Equal], at_most,
+    lower: false, inclusive: true
 );
 
 define_comparison!(
     /// Range predicate: `of` is strictly greater than `with`.
-    GreaterThan, ">", [Ordering::Greater], greater_than
+    GreaterThan, ">", [Ordering::Greater], greater_than,
+    lower: true, inclusive: false
 );
 
 define_comparison!(
     /// Range predicate: `of` is greater than or equal to `with`.
-    AtLeast, ">=", [Ordering::Greater, Ordering::Equal], at_least
+    AtLeast, ">=", [Ordering::Greater, Ordering::Equal], at_least,
+    lower: true, inclusive: true
 );
 
 #[cfg(test)]
@@ -219,6 +275,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::artifact::{ArtifactsAttribute, Type as ValueType, decode_value};
     use crate::rule::TypeEnv;
     use crate::selection::Match;
     use crate::types::Scalar;
@@ -299,6 +356,71 @@ mod tests {
         Ok(())
     }
 
+    /// Non-numeric comparables order within one type, Datomic-style:
+    /// strings, symbols, and bytes compare against same-typed
+    /// literals; a mixed pair is a non-match (no adaptation exists
+    /// between non-numeric types).
+    #[dialog_common::test]
+    async fn it_orders_non_numeric_comparables() -> Result<(), EvaluationError> {
+        assert_eq!(
+            count(below("m".to_string()), Value::String("alice".into())).await?,
+            1,
+            "strings order lexicographically"
+        );
+        assert_eq!(
+            count(below("m".to_string()), Value::String("zed".into())).await?,
+            0
+        );
+        assert_eq!(
+            count(below("m".to_string()), Value::String("m".into())).await?,
+            0,
+            "< is strict"
+        );
+
+        let at_least = AtLeast::new(Term::var("x"), Term::constant(vec![0x10u8]));
+        let mut row = Match::new();
+        row.bind(&Term::var("x"), Value::Bytes(vec![0x20]))?;
+        let results: Vec<Match> = at_least.evaluate(row.seed()).try_collect().await?;
+        assert_eq!(results.len(), 1, "bytes order bytewise");
+
+        // A string literal orders against no symbol row and vice
+        // versa: mixed non-numeric pairs never adapt.
+        let symbol = Value::Symbol("user/name".to_string().try_into().expect("valid"));
+        assert_eq!(count(below("zzz".to_string()), symbol.clone()).await?, 0);
+        let below_symbol = LessThan::new(
+            Term::var("x"),
+            Term::constant(ArtifactsAttribute::try_from("user/name".to_string()).expect("valid")),
+        );
+        let mut row = Match::new();
+        row.bind(&Term::var("x"), Value::String("aaa".into()))?;
+        let results: Vec<Match> = below_symbol.evaluate(row.seed()).try_collect().await?;
+        assert_eq!(results.len(), 0);
+        Ok(())
+    }
+
+    /// A string constant proves an interval, same as a numeric one.
+    #[dialog_common::test]
+    fn it_stamps_string_interval_refinements() -> anyhow::Result<()> {
+        let premises = vec![Term::<Any>::var("x").at_least(Term::constant("Q".to_string()))];
+        let env = TypeEnv::infer(&premises)?;
+        let interval = env
+            .get("x")
+            .expect("inferred")
+            .refinement()
+            .expect("refined")
+            .interval
+            .clone()
+            .expect("interval recorded");
+        assert_eq!(interval.value_type, ValueType::String);
+        let lower = interval.lower.expect("lower bound");
+        assert!(lower.inclusive);
+        assert_eq!(
+            decode_value(ValueType::String, &lower.encoded).map(|(value, _)| value),
+            Some(Value::String("Q".into())),
+        );
+        Ok(())
+    }
+
     /// Values outside NUMERIC, NaN, and Absent are non-matches.
     #[dialog_common::test]
     async fn it_filters_unorderable_rows() -> Result<(), EvaluationError> {
@@ -328,31 +450,121 @@ mod tests {
         assert!(results.is_err(), "unbound left side must error");
     }
 
-    /// Comparisons narrow both sides to NUMERIC rule-wide.
+    /// Comparisons narrow both sides to COMPARABLE rule-wide.
     #[dialog_common::test]
-    fn it_bounds_both_sides_numeric() -> anyhow::Result<()> {
+    fn it_bounds_both_sides_comparable() -> anyhow::Result<()> {
         let premises = vec![Term::<Any>::var("x").less_than(Term::<Any>::var("y"))];
         let env = TypeEnv::infer(&premises)?;
         for var in ["x", "y"] {
             assert_eq!(
                 env.get(var).expect("inferred").primitive_part(),
-                Primitive::NUMERIC,
+                Primitive::COMPARABLE,
                 "{var} is bounded by the comparison"
             );
         }
         Ok(())
     }
 
-    /// A side already known non-numeric is a compile-time conflict.
+    /// A constant side proves an interval on the variable side,
+    /// carried through inference as a refinement — the vehicle for
+    /// scan-range pushdown. The mirrored operand order flips the
+    /// bound onto the opposite side of the relation.
     #[dialog_common::test]
-    fn it_rejects_known_non_numeric_sides() {
+    fn it_stamps_interval_refinements_via_inference() -> anyhow::Result<()> {
+        // `x >= 5`: an inclusive lower bound on `x`.
+        let premises = vec![Term::<Any>::var("x").at_least(Term::constant(5u64))];
+        let env = TypeEnv::infer(&premises)?;
+        let interval = env
+            .get("x")
+            .expect("inferred")
+            .refinement()
+            .expect("refined")
+            .interval
+            .clone()
+            .expect("interval recorded");
+        assert_eq!(interval.value_type, ValueType::UnsignedInt);
+        let lower = interval.lower.expect("lower bound");
+        assert!(lower.inclusive, ">= is inclusive");
+        assert!(interval.upper.is_none());
+        assert_eq!(
+            decode_value(ValueType::UnsignedInt, &lower.encoded).map(|(value, _)| value),
+            Some(Value::UnsignedInt(5)),
+            "the bound round-trips through the order-preserving encoding"
+        );
+
+        // `5 < x` mirrors to an exclusive lower bound on `x`.
+        let premises = vec![Term::<Any>::constant(5u64).less_than(Term::<Any>::var("x"))];
+        let env = TypeEnv::infer(&premises)?;
+        let interval = env
+            .get("x")
+            .expect("inferred")
+            .refinement()
+            .expect("refined")
+            .interval
+            .clone()
+            .expect("interval recorded");
+        let lower = interval
+            .lower
+            .expect("the mirrored bound lands on the lower side");
+        assert!(!lower.inclusive, "a strict relation stays strict");
+        assert!(interval.upper.is_none());
+
+        // `x <= 9.5`: an inclusive upper bound recording the
+        // literal's own type.
+        let premises = vec![Term::<Any>::var("x").at_most(Term::constant(9.5f64))];
+        let env = TypeEnv::infer(&premises)?;
+        let interval = env
+            .get("x")
+            .expect("inferred")
+            .refinement()
+            .expect("refined")
+            .interval
+            .clone()
+            .expect("interval recorded");
+        assert_eq!(interval.value_type, ValueType::Float);
+        assert!(interval.lower.is_none());
+        assert!(interval.upper.expect("upper bound").inclusive);
+        Ok(())
+    }
+
+    /// Two variable sides prove no interval: the bound must be a
+    /// constant the schema can encode.
+    #[dialog_common::test]
+    fn it_stamps_no_interval_without_a_constant_side() -> anyhow::Result<()> {
+        let premises = vec![Term::<Any>::var("x").less_than(Term::<Any>::var("y"))];
+        let env = TypeEnv::infer(&premises)?;
+        for var in ["x", "y"] {
+            assert!(
+                env.get(var).expect("inferred").refinement().is_none(),
+                "{var} carries no interval from a variable-variable comparison"
+            );
+        }
+        Ok(())
+    }
+
+    /// A side already known non-comparable is a compile-time
+    /// conflict; a textual side is comparable and narrows cleanly.
+    #[dialog_common::test]
+    fn it_rejects_known_non_comparable_sides() -> anyhow::Result<()> {
         let premises = vec![
-            Term::<Any>::var("x").text(),
+            Term::<Any>::var("x").boolean(),
             Term::<Any>::var("x").less_than(Term::constant(5u64)),
         ];
         assert!(
             TypeEnv::infer(&premises).is_err(),
-            "String and NUMERIC have an empty meet"
+            "Boolean and COMPARABLE have an empty meet"
         );
+
+        let premises = vec![
+            Term::<Any>::var("x").text(),
+            Term::<Any>::var("x").less_than(Term::constant("Q".to_string())),
+        ];
+        let env = TypeEnv::infer(&premises)?;
+        assert_eq!(
+            env.get("x").expect("inferred").primitive_part(),
+            Primitive::from(ValueType::String),
+            "a string side is comparable, Datomic-style"
+        );
+        Ok(())
     }
 }

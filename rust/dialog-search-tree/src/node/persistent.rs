@@ -52,6 +52,41 @@ impl DecodedKeys {
     pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
         (0..self.len()).map(|index| self.get(index).expect("index in range"))
     }
+
+    /// Position of the first key at or above `probe` (the partition
+    /// point): where a range starting at `probe` enters this leaf. O(log n)
+    /// key comparisons against the linear walk a front-coded stream needs.
+    pub fn lower_bound(&self, probe: &[u8]) -> usize {
+        let mut low = 0usize;
+        let mut high = self.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.get(middle).expect("index in range") < probe {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        low
+    }
+
+    /// Position of the key equal to `probe`, or `None`. Keys are stored in
+    /// entry (sorted) order, so this is a binary search — O(log n) key
+    /// comparisons against the linear front-coded stream a fresh decode
+    /// requires.
+    pub fn binary_search(&self, probe: &[u8]) -> Option<usize> {
+        let mut low = 0usize;
+        let mut high = self.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            match self.get(middle).expect("index in range").cmp(probe) {
+                Ordering::Less => low = middle + 1,
+                Ordering::Greater => high = middle,
+                Ordering::Equal => return Some(middle),
+            }
+        }
+        None
+    }
 }
 
 /// A tree node in its serialized, content-addressed form.
@@ -60,6 +95,16 @@ impl DecodedKeys {
 /// a [`Buffer`] and is identified by its [`Blake3Hash`]. The structured
 /// contents are recovered as a zero-copy [`ArchivedNodeBody`] view via
 /// [`body`](PersistentNode::body).
+///
+/// Validity is a type invariant: a `PersistentNode` can only be constructed
+/// through one of two [`TryFrom`] conversions. [`TryFrom<Buffer>`] runs full
+/// archive validation on untrusted bytes (storage, cache, the network).
+/// [`TryFrom<&PersistentNodeBody<Value>>`] serializes a body this crate built,
+/// which is valid by construction and needs no revalidation. No unsafe
+/// constructor exists, and a [`PersistentNodeBody`] cannot itself be built from
+/// raw bytes, only from typed data. Either way the buffer is a valid archive of
+/// exactly `ArchivedNodeBody<Value>`, so [`body`](Self::body) is infallible and
+/// costs a pointer cast rather than a bytecheck pass per access.
 #[derive(Clone, Debug)]
 pub struct PersistentNode<Key, Value> {
     key: PhantomData<Key>,
@@ -76,15 +121,6 @@ where
         Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
     >,
 {
-    /// Creates a new node from a serialized buffer.
-    pub fn new(buffer: Buffer) -> Self {
-        Self {
-            buffer,
-            key: PhantomData,
-            value: PhantomData,
-        }
-    }
-
     /// Returns the content hash of this node.
     pub fn hash(&self) -> &Blake3Hash {
         self.buffer.blake3_hash()
@@ -101,12 +137,12 @@ where
     /// The separator is a seam property, not derivable from the node's own
     /// body (it depends on the left-adjacent subtree), so the caller threads
     /// it in from the context that knows the seam.
-    pub fn to_link(&self, separator: Vec<u8>) -> Result<Link, DialogSearchTreeError> {
-        Ok(Link {
+    pub fn to_link(&self, separator: Vec<u8>) -> Link {
+        Link {
             separator,
             node: self.buffer.blake3_hash().clone(),
-            scale: self.scale()?,
-        })
+            scale: self.scale(),
+        }
     }
 
     /// Rough size of the subtree this node roots, for query planning.
@@ -119,11 +155,11 @@ where
     /// Ops pending in an index's novelty are excluded: they have not yet
     /// reached the subtree they are destined for, so counting them here would
     /// double-count once they flush.
-    pub fn scale(&self) -> Result<Scale, DialogSearchTreeError> {
-        Ok(match self.body()? {
+    pub fn scale(&self) -> Scale {
+        match self.body() {
             ArchivedNodeBody::Index(index) => Scale::total(index.scales.iter().map(Scale::from)),
             ArchivedNodeBody::Segment(segment) => Scale::of(segment.count.to_native() as u64),
-        })
+        }
     }
 
     /// Returns the upper bound (last) key of this segment node, decoded to
@@ -132,16 +168,28 @@ where
     /// Index nodes carry no full keys (their table holds separators), so this
     /// returns `None` for an index; full bounds exist only in leaves.
     pub fn upper_bound(&self) -> Result<Option<Vec<u8>>, DialogSearchTreeError> {
-        match self.body()? {
+        match self.body() {
             ArchivedNodeBody::Index(_) => Ok(None),
             ArchivedNodeBody::Segment(segment) => segment.last_key::<Key>().map(Some),
         }
     }
 
     /// Accesses the deserialized body of this node.
-    pub fn body(&self) -> Result<&ArchivedNodeBody<Value>, DialogSearchTreeError> {
-        rkyv::access::<_, rkyv::rancor::Error>(self.buffer.as_ref())
-            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
+    ///
+    /// Infallible: validity is the type's construction invariant. The two
+    /// [`TryFrom`] conversions are the only ways to build a node, and neither
+    /// can admit an invalid archive, so no per-access validation runs.
+    pub fn body(&self) -> &ArchivedNodeBody<Value> {
+        // SAFETY: `buffer` is a valid archive of exactly
+        // `ArchivedNodeBody<Value>`. A node can only be built through one of
+        // two conversions: `TryFrom<Buffer>`, which proved validity by running
+        // the full bytecheck validation on untrusted bytes, or
+        // `TryFrom<&PersistentNodeBody<Value>>`, which serialized a typed body
+        // whose `rkyv::to_bytes` output is by construction a valid archive of
+        // that type. No unsafe constructor exists, and a `PersistentNodeBody`
+        // cannot itself be built from raw bytes, so `access_unchecked` is
+        // sound. Buffers are immutable and aligned.
+        unsafe { rkyv::access_unchecked::<ArchivedNodeBody<Value>>(self.buffer.as_ref()) }
     }
 
     /// Whether a scan over this leaf should reuse a memoized decode
@@ -175,7 +223,7 @@ where
     /// Decodes this segment's keys into the flat-arena form. Used both to
     /// populate the memo and, on a first (un-memoized) touch, transiently.
     fn materialize_keys(&self) -> Result<DecodedKeys, DialogSearchTreeError> {
-        match self.body()? {
+        match self.body() {
             ArchivedNodeBody::Segment(segment) => {
                 let mut keys = segment.keys::<Key>()?;
                 let mut arena = Vec::new();
@@ -199,7 +247,7 @@ where
     /// parameter, separator bound, value inline-vs-spill threshold) without a
     /// side channel: any node hash is a complete, self-describing tree root.
     pub fn manifest(&self) -> Result<Manifest, DialogSearchTreeError> {
-        let header = match self.body()? {
+        let header = match self.body() {
             ArchivedNodeBody::Index(index) => &index.header,
             ArchivedNodeBody::Segment(segment) => &segment.header,
         };
@@ -210,22 +258,72 @@ where
     /// Interprets this node as an index node, returning an error if it's a
     /// segment.
     pub fn as_index(&self) -> Result<&ArchivedIndex<Value>, DialogSearchTreeError> {
-        self.body().and_then(|body| match body {
+        match self.body() {
             ArchivedNodeBody::Index(index) => Ok(index),
             ArchivedNodeBody::Segment(_) => Err(DialogSearchTreeError::Access(
                 "Attempted to interpret a segment node as an index node".to_string(),
             )),
-        })
+        }
     }
 
     /// Interprets this node as a segment node, returning an error if it's an
     /// index.
     pub fn as_segment(&self) -> Result<&ArchivedSegment<Value>, DialogSearchTreeError> {
-        self.body().and_then(|body| match body {
+        match self.body() {
             ArchivedNodeBody::Segment(segment) => Ok(segment),
             ArchivedNodeBody::Index(_) => Err(DialogSearchTreeError::Access(
                 "Attempted to interpret a index node as an segment node".to_string(),
             )),
+        }
+    }
+}
+
+/// Builds a node from a buffer of untrusted bytes (storage, cache, the
+/// network), validating that it archives as `ArchivedNodeBody<Value>`. This
+/// is the only validation the node ever runs; it establishes the invariant
+/// that [`body`](PersistentNode::body) relies on for the node and all its
+/// clones.
+impl<Key, Value> TryFrom<Buffer> for PersistentNode<Key, Value>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    type Error = DialogSearchTreeError;
+
+    fn try_from(buffer: Buffer) -> Result<Self, Self::Error> {
+        rkyv::access::<ArchivedNodeBody<Value>, rkyv::rancor::Error>(buffer.as_ref())
+            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+        Ok(Self {
+            buffer,
+            key: PhantomData,
+            value: PhantomData,
+        })
+    }
+}
+
+/// Seals a node body this crate built into its persistent form. Validity is
+/// carried by the type: `rkyv::to_bytes` of a `PersistentNodeBody<Value>` is
+/// by construction a valid archive of `ArchivedNodeBody<Value>`, exactly what
+/// [`body`](PersistentNode::body) accesses unchecked, so no revalidation and no
+/// caller assertion are needed.
+impl<Key, Value> TryFrom<&PersistentNodeBody<Value>> for PersistentNode<Key, Value>
+where
+    Key: self::Key,
+    Value: self::Value
+        + for<'a> Serialize<
+            Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+        >,
+{
+    type Error = DialogSearchTreeError;
+
+    fn try_from(body: &PersistentNodeBody<Value>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            buffer: Buffer::from(body.as_bytes()?),
+            key: PhantomData,
+            value: PhantomData,
         })
     }
 }
@@ -310,6 +408,68 @@ where
         child: u32,
         entries: Vec<NoveltyEntry<Value>>,
     ) -> Result<Self, DialogSearchTreeError> {
+        let (count, layout, columns) = Self::key_columns::<Key>(&entries)?;
+
+        let mut polarity = Vec::with_capacity(entries.len());
+        let mut values = Vec::new();
+        for entry in entries {
+            match entry.op {
+                NoveltyOp::Assert(value) => {
+                    polarity.push(1);
+                    values.push(value);
+                }
+                NoveltyOp::Retract => polarity.push(0),
+            }
+        }
+
+        Ok(Self {
+            child,
+            count,
+            layout,
+            columns,
+            polarity,
+            values,
+        })
+    }
+
+    /// [`from_entries`](Self::from_entries) without consuming the op list:
+    /// the values are cloned into the buffer instead of moved. Exists for
+    /// the non-consuming persist, which must keep the decoded ops live for
+    /// later appends while embedding their encoding into the frame.
+    pub fn from_entries_ref<Key: self::Key>(
+        child: u32,
+        entries: &[NoveltyEntry<Value>],
+    ) -> Result<Self, DialogSearchTreeError> {
+        let (count, layout, columns) = Self::key_columns::<Key>(entries)?;
+
+        let mut polarity = Vec::with_capacity(entries.len());
+        let mut values = Vec::new();
+        for entry in entries {
+            match &entry.op {
+                NoveltyOp::Assert(value) => {
+                    polarity.push(1);
+                    values.push(value.clone());
+                }
+                NoveltyOp::Retract => polarity.push(0),
+            }
+        }
+
+        Ok(Self {
+            child,
+            count,
+            layout,
+            columns,
+            polarity,
+            values,
+        })
+    }
+
+    /// The key side of the buffer encoding, shared by the consuming and
+    /// borrowing constructors: layout classification plus the columnar
+    /// encode of every key.
+    fn key_columns<Key: self::Key>(
+        entries: &[NoveltyEntry<Value>],
+    ) -> Result<(u32, u8, Vec<ColumnData>), DialogSearchTreeError> {
         let count = entries.len() as u32;
         if entries.is_empty() {
             return Err(DialogSearchTreeError::Node(
@@ -356,26 +516,27 @@ where
             (MIXED_LAYOUT, vec![ColumnData::Arena { prefix, stream }])
         };
 
-        let mut polarity = Vec::with_capacity(entries.len());
-        let mut values = Vec::new();
-        for entry in entries {
-            match entry.op {
-                NoveltyOp::Assert(value) => {
-                    polarity.push(1);
-                    values.push(value);
-                }
-                NoveltyOp::Retract => polarity.push(0),
-            }
-        }
+        Ok((count, layout, columns))
+    }
 
-        Ok(Self {
-            child,
-            count,
-            layout,
-            columns,
-            polarity,
-            values,
-        })
+    /// The buffered weight this sealed buffer carries (key bytes plus value
+    /// payload weights, retracts charged at 16), for the byte-capped flush
+    /// trigger: computed by streaming the key columns, with no entry
+    /// materialization.
+    pub fn weight<Key: self::Key>(&self) -> Result<usize, DialogSearchTreeError> {
+        let mut weight = 0usize;
+        let mut keys = self.keys::<Key>()?;
+        while let Some((_, key)) = keys.next_key()? {
+            weight += key.len();
+        }
+        weight += self
+            .values
+            .iter()
+            .map(|value| value.payload_weight())
+            .sum::<usize>();
+        weight += 16 * self.polarity.iter().filter(|&&p| p == 0).count();
+        weight += crate::entry::ENTRY_ENCODING_OVERHEAD * self.count as usize;
+        Ok(weight)
     }
 
     /// The op count claimed by `count`, validated against the polarity and
@@ -426,13 +587,27 @@ where
     /// polarity column; an assert clones its value from the assert-aligned
     /// value table.
     pub fn op_at(&self, at: usize) -> Result<NoveltyOp<Value>, DialogSearchTreeError> {
+        let slot = self.polarity[..at.min(self.polarity.len())]
+            .iter()
+            .filter(|&&p| p == 1)
+            .count();
+        self.op_with_slot(at, slot)
+    }
+
+    /// The op at entry `at` given its value-table `slot` (the number of
+    /// asserts before it), for readers that track the slot while streaming
+    /// the buffer instead of re-scanning the polarity column per op.
+    pub(crate) fn op_with_slot(
+        &self,
+        at: usize,
+        slot: usize,
+    ) -> Result<NoveltyOp<Value>, DialogSearchTreeError> {
         match self.polarity.get(at) {
             None => Err(DialogSearchTreeError::Encoding(
                 "Novelty entry out of range".into(),
             )),
             Some(0) => Ok(NoveltyOp::Retract),
             Some(1) => {
-                let slot = self.polarity[..at].iter().filter(|&&p| p == 1).count();
                 let value = self.values.get(slot).ok_or_else(|| {
                     DialogSearchTreeError::Encoding("Novelty value out of range".into())
                 })?;
@@ -447,21 +622,30 @@ where
     /// The winning op for `key` in this buffer, or `None` when the key is not
     /// buffered here. The buffer is sorted by key with the newest op for a key
     /// last, so the scan keeps the last equal key and stops at the first
-    /// greater one; only the winner's value is decoded.
+    /// greater one; the winner's value-table slot is tracked as the polarity
+    /// column is walked, and only the winner's value is decoded.
     pub fn resolve<Key: self::Key>(
         &self,
         key: &[u8],
     ) -> Result<Option<NoveltyOp<Value>>, DialogSearchTreeError> {
         let mut keys = self.keys::<Key>()?;
-        let mut winner = None;
+        let mut winner: Option<(usize, usize)> = None;
+        let mut asserts = 0usize;
         while let Some((at, entry_key)) = keys.next_key()? {
+            let slot = asserts;
+            // `keys()` validated every polarity byte as 0 or 1.
+            if self.polarity.get(at).copied() == Some(1) {
+                asserts += 1;
+            }
             match entry_key.cmp(key) {
                 Ordering::Less => {}
-                Ordering::Equal => winner = Some(at),
+                Ordering::Equal => winner = Some((at, slot)),
                 Ordering::Greater => break,
             }
         }
-        winner.map(|at| self.op_at(at)).transpose()
+        winner
+            .map(|(at, slot)| self.op_with_slot(at, slot))
+            .transpose()
     }
 
     /// Decodes the whole buffer to owned entries, in entry order: the lift a
@@ -785,6 +969,18 @@ where
 }
 
 /// The body of a tree node, either an index or a leaf segment.
+///
+/// Load-bearing invariant: a `PersistentNodeBody` is only ever built from typed
+/// data (its constructors take entries, links, and buffers), never decoded from
+/// raw bytes. [`PersistentNode`]'s [`body`](PersistentNode::body) relies on this
+/// for the soundness of its unchecked archive access: because every body is a
+/// genuine typed value, `rkyv::to_bytes` of one is by construction a valid
+/// archive of `ArchivedNodeBody<Value>`, so the node sealed from it
+/// ([`TryFrom<&PersistentNodeBody<Value>>`](PersistentNode)) needs no
+/// revalidation. Do not add a constructor that builds a body from untrusted
+/// bytes; that would let a node be sealed around an unvalidated archive and make
+/// `body`'s `access_unchecked` unsound. Untrusted bytes must instead go through
+/// [`TryFrom<Buffer>`](PersistentNode), which validates.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedNodeBody)]
 pub enum PersistentNodeBody<Value> {

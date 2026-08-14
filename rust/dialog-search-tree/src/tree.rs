@@ -187,7 +187,16 @@ where
                 });
             }
             let segment = result.leaf.as_segment()?;
-            if let Some(at) = segment.find::<Key>(key.as_ref())? {
+            // A leaf probed once streams the front-coded keys (decode paid
+            // only as far as the probe); a leaf probed repeatedly — a hot key
+            // or a join landing on the same leaf per outer row — flips to the
+            // memoized flat decode and binary-searches it.
+            let at = if result.leaf.should_memoize_keys() {
+                result.leaf.memoized_keys()?.binary_search(key.as_ref())
+            } else {
+                segment.find::<Key>(key.as_ref())?
+            };
+            if let Some(at) = at {
                 into_owned(segment.value_at(at)?).map(Some)
             } else {
                 Ok(None)
@@ -234,6 +243,27 @@ where
         let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
 
         TreeWalker::new(self.root.clone()).stream(range, accessor)
+    }
+
+    /// [`stream_range`](Self::stream_range), yielding each entry's key as a
+    /// [`KeyHandle`](crate::KeyHandle) instead of the typed `Key`: warm
+    /// leaves' entries borrow the memoized decoded-keys arena with no
+    /// per-entry key copy. For consumers that work directly on the raw key
+    /// bytes (the artifact scan paths).
+    pub fn stream_range_handles<R, Backend>(
+        &self,
+        range: R,
+        storage: &ContentAddressedStorage<Backend>,
+    ) -> impl Stream<Item = Result<Entry<crate::KeyHandle, Value>, DialogSearchTreeError>>
+    + ConditionalSend
+    where
+        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
+            + ConditionalSync,
+        R: RangeBounds<Key> + ConditionalSend,
+    {
+        let accessor = Accessor::new(self.node_cache.clone(), storage.clone());
+
+        TreeWalker::<Key, Value>::new(self.root.clone()).stream_handles(range, accessor)
     }
 
     /// Returns a differential that produces changes to transform `self` into
@@ -499,7 +529,7 @@ mod tests {
 
         let accessor = Accessor::new(tree.node_cache(), storage.clone());
         let root = accessor.get_node::<[u8; 4], Vec<u8>>(tree.root()).await?;
-        let estimate = root.scale()?.estimate();
+        let estimate = root.scale().estimate();
 
         assert!(
             estimate >= COUNT as u64,
@@ -541,11 +571,11 @@ mod tests {
 
         let accessor = Accessor::new(tree.node_cache(), storage.clone());
         let root = accessor.get_node::<[u8; 4], Vec<u8>>(tree.root()).await?;
-        let flushed = root.scale()?;
+        let flushed = root.scale();
 
         // A canonical tree carries no novelty, so its scale is a pure function
         // of stored entries: re-reading it is stable.
-        assert_eq!(root.scale()?, flushed, "scale must be deterministic");
+        assert_eq!(root.scale(), flushed, "scale must be deterministic");
         assert!(!flushed.is_empty());
 
         Ok(())
