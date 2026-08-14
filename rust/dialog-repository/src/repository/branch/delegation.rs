@@ -74,6 +74,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Write as BlobWrite;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+use dialog_effects::blob::{Import as EnvelopeImport, Read as EnvelopeRead};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_ucan::{UcanCertificate, UcanDelegation};
 use futures_util::stream;
@@ -136,6 +137,81 @@ impl<'a> Delegations<'a> {
             branch: self.branch,
             chain,
         }
+    }
+
+    /// Hydrate every retained delegation's envelope into the local blob
+    /// store. Pull runs this after adopting an upstream: facts arrive with
+    /// the tree, but envelope bytes replicate lazily, and the
+    /// authorization walk deliberately reads only local state — sync is
+    /// what brings the state.
+    pub fn hydrate(self) -> HydrateDelegations<'a> {
+        HydrateDelegations {
+            branch: self.branch,
+        }
+    }
+}
+
+/// Hydrate retained delegation envelopes from the branch's remote.
+/// Created by [`Delegations::hydrate`].
+pub struct HydrateDelegations<'a> {
+    branch: &'a Branch,
+}
+
+impl HydrateDelegations<'_> {
+    /// Fetch every retained delegation's envelope that is not yet local,
+    /// returning how many envelopes are locally readable afterward. An
+    /// envelope the remote cannot serve is skipped: the prover treats it
+    /// as no candidate, and a later pull can complete it.
+    pub async fn perform<Env>(self, env: &Env) -> Result<usize, CommitError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<EnvelopeRead>
+            + Provider<EnvelopeImport>
+            + Provider<Fork<RemoteSite, Get>>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, EnvelopeRead>>
+            + ConditionalSync
+            + 'static,
+    {
+        use dialog_artifacts::ArtifactSelector;
+        use futures_util::StreamExt as _;
+
+        let branch = self.branch;
+        let store = index_store(branch, env).await;
+        let facts = crate::Select::new(
+            branch,
+            ArtifactSelector::new().the(
+                DELEGATION_AUDIENCE
+                    .parse()
+                    .expect("the audience attribute is valid"),
+            ),
+        )
+        .execute(store)
+        .await
+        .map_err(DialogArtifactsError::from)?;
+        futures_util::pin_mut!(facts);
+
+        let mut hydrated = 0;
+        while let Some(fact) = facts.next().await {
+            let Ok(artifact) = fact.and_then(|view| view.to_owned()) else {
+                continue;
+            };
+            // Local-first read with remote fallback: a hit caches the
+            // bytes locally, a miss (remote cannot serve it either) is
+            // skipped.
+            let Ok(mut reader) = crate::Blob::from(artifact.of)
+                .read(branch.into())
+                .perform(env)
+                .await
+            else {
+                continue;
+            };
+            while let Ok(Some(_)) = reader.next().await {}
+            hydrated += 1;
+        }
+        Ok(hydrated)
     }
 }
 
