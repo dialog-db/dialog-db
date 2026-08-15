@@ -400,21 +400,52 @@ where
     Self: LocalEnv + ConditionalSend,
 {
     async fn execute(&self, input: Capability<Retain<Ucan>>) -> Result<(), AuthorizeError> {
+        // How many times a lost head race is retried before the failure
+        // surfaces. One concurrent writer per attempt is already unlikely;
+        // three in a row is not a race, it is a stampede worth reporting.
+        const RETRY_LIMIT: usize = 3;
+
         let delegation = Retain::<Ucan>::of(&input).delegation.clone();
         let env = AccessEnv {
             operator: self.clone(),
         };
-        Box::pin(
-            self.delegations()?
-                .delegations()
-                .retain(delegation)
-                .perform(&env),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|error| AuthorizeError::Malformed {
-            detail: format!("failed to retain delegation: {error}"),
-        })
+        let branch = self.delegations()?;
+        let mut attempt = 0;
+        loop {
+            // The access branch is the profile repository's main branch,
+            // which other handles (content commits, pulls) advance
+            // concurrently — and this handle caches its head, so the
+            // retain's commit would CAS against a snapshot the handle can
+            // never advance on its own. Refresh first, and again after a
+            // lost race, the same refresh-and-retry contract
+            // documents for its callers.
+            branch
+                .refresh(&env)
+                .await
+                .map_err(|error| AuthorizeError::Unavailable {
+                    detail: format!("failed to refresh the access branch: {error}"),
+                })?;
+            match Box::pin(
+                branch
+                    .delegations()
+                    .retain(delegation.clone())
+                    .perform(&env),
+            )
+            .await
+            {
+                Ok(_) => return Ok(()),
+                Err(dialog_repository::CommitError::Publish(
+                    dialog_repository::PublishError::VersionMismatch { .. },
+                )) if attempt < RETRY_LIMIT => {
+                    attempt += 1;
+                }
+                Err(error) => {
+                    return Err(AuthorizeError::Malformed {
+                        detail: format!("failed to retain delegation: {error}"),
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -534,6 +565,65 @@ mod tests {
 
     fn claim(holder: &Ed25519Signer, space: &Ed25519Signer) -> Prove<Ucan> {
         Prove::<Ucan>::new(holder.did(), storage_scope(space))
+    }
+
+    /// A retain succeeds after another handle advanced the access branch.
+    ///
+    /// The access branch IS the profile repository's [`ACCESS_BRANCH`], so
+    /// anything else writing to the profile repo — a display-name fact, a
+    /// projection, a pull — moves the same head this operator's build-time
+    /// handle caches. That handle cannot observe the movement on its own,
+    /// so a retain CAS'ing against its cached snapshot fails with a version
+    /// mismatch, and every later delegation save through the same operator
+    /// fails identically. Field symptom: sign-in worked, then saving the
+    /// account's root delegation failed with `Version mismatch` forever.
+    #[dialog_common::test]
+    async fn it_retains_after_another_handle_moved_the_head() -> Result<()> {
+        use dialog_artifacts::{Attribute, Changes, Entity, Update as _, Value};
+        use dialog_repository::{ACCESS_BRANCH, Repository};
+
+        let (operator, profile) = operator("retain-stale-head").await;
+
+        // Retain once so the operator's handle caches a real head — the
+        // state a signing session leaves after saving its session grant.
+        let first_space = Ed25519Signer::generate().await?;
+        let first_holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &first_space, &first_holder, None).await;
+
+        // Another handle on the same branch, opened fresh (so it sees that
+        // head) and then committing through it — a display-name write, a
+        // projection, a pull. This advances the head the operator's own
+        // build-time handle still caches.
+        let elsewhere = Repository::from(&profile)
+            .branch(ACCESS_BRANCH)
+            .open()
+            .perform(&operator)
+            .await?;
+        for note in ["moved the head", "and again"] {
+            let mut moved = Changes::new();
+            moved.associate(
+                Attribute::try_from("test.profile/name".to_string())?,
+                Entity::new()?,
+                Value::String(note.to_string()),
+            );
+            elsewhere
+                .transaction()
+                .integrate(moved)
+                .commit()
+                .perform(&operator)
+                .await?;
+        }
+
+        // The operator's own handle still caches the pre-commit head.
+        // Retaining through it must not fail on that staleness.
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        // The retained grant proves, so the retain really landed.
+        let proof = operator.resolve(claim(&holder, &space)).await?;
+        assert_eq!(proof.proofs().len(), 1);
+        Ok(())
     }
 
     #[dialog_common::test]
