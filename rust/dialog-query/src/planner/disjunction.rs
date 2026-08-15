@@ -1,12 +1,8 @@
 use core::pin::Pin;
 
 use crate::selection::Selection;
-use crate::source::SelectRules;
 use crate::stream::{fork_stream, stream_select};
 use crate::try_stream;
-use dialog_artifacts::Select;
-use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
 use futures_util::stream::empty;
 
 use super::Conjunction;
@@ -56,7 +52,7 @@ impl Disjunction {
         env: &'a Env,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         match self {
             Self::Empty => Box::pin(empty()),
@@ -83,7 +79,7 @@ impl Disjunction {
         env: &'a Env,
     ) -> Pin<Box<dyn Selection + 'a>>
     where
-        Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+        Env: crate::Scope<'a>,
     {
         Box::pin(try_stream! {
             let (left_input, right_input) = fork_stream(selection);

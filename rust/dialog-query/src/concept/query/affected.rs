@@ -24,10 +24,9 @@
 use std::collections::{BTreeSet, HashMap};
 
 use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
 use futures_util::TryStreamExt as _;
 
-use crate::artifact::{Artifact, Select};
+use crate::artifact::Artifact;
 use crate::attribute::The;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::query::ConceptQuery;
@@ -59,7 +58,7 @@ pub async fn affected_entities<'a, Env>(
     env: &'a Env,
 ) -> Result<Option<BTreeSet<Entity>>, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     let root = concept.this();
 
@@ -161,7 +160,7 @@ async fn rule_heads<'a, Env>(
     env: &'a Env,
 ) -> Result<Option<BTreeSet<Entity>>, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     let premises = &rule.analysis().premises;
     let mut heads = BTreeSet::new();
@@ -295,7 +294,7 @@ async fn sideways_heads<'a, Env>(
     env: &'a Env,
 ) -> Result<Option<BTreeSet<Entity>>, EvaluationError>
 where
-    Env: Provider<Select<'a>> + Provider<SelectRules> + ConditionalSync,
+    Env: crate::Scope<'a>,
 {
     // The head may already be bound by the source premise itself.
     if let Ok(Binding::Present(Value::Entity(entity))) = matched.lookup(&Term::<Any>::var("this")) {

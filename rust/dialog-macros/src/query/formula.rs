@@ -367,9 +367,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     _env: &'__a __Env,
                 ) -> impl dialog_query::Selection + '__a
                 where
-                    __Env: dialog_query::Provider<dialog_query::Select<'__a>>
-                        + dialog_query::Provider<dialog_query::source::SelectRules>
-                        + dialog_query::ConditionalSync,
+                    __Env: dialog_query::Scope<'__a>,
                 {
                     let formula: dialog_query::FormulaQuery = self.into();
                     formula.evaluate(selection)

@@ -58,14 +58,20 @@ pub mod planner;
 pub mod predicate;
 /// Premise trait for rule conditions and pattern matching.
 pub mod premise;
+
 /// Query trait and store abstractions for polymorphic querying.
 pub mod query;
 /// The group-by fold behind the `reduce` clause on deductive rules.
 pub mod reduce;
+/// Resolver premises resolved by idempotent effects.
+pub mod resolver;
 /// Rule-based deduction system for deriving facts.
 pub mod rule;
 /// Schema system for describing parameter signatures.
 pub mod schema;
+
+/// The evaluation scope (provider bundle).
+pub mod scope;
 /// Selection and match types for query results.
 pub mod selection;
 /// Database sessions for querying and committing changes.
@@ -108,8 +114,10 @@ pub use premise::*;
 pub use proposition::*;
 pub use query::*;
 pub use reduce::{Aggregator, Reduce, ReduceEntry, ReduceSpec};
+pub use resolver::*;
 pub use rule::*;
 pub use schema::*;
+pub use scope::*;
 pub use selection::*;
 pub use session::*;
 pub use statement::*;
