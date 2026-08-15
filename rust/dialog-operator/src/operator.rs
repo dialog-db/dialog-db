@@ -11,6 +11,8 @@ mod test;
 
 pub use builder::{DeriveOperator, OperatorBuilder, OperatorError};
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use dialog_repository::Branch;
@@ -28,6 +30,45 @@ use dialog_identity::Authority;
 use dialog_network::Network;
 use dialog_storage::provider::storage::Storage;
 use dialog_varsig::{Did, Principal};
+
+/// A boxed effect dispatch: one remote fork effect's input to its output.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type ReachFuture<Output> = Pin<Box<dyn Future<Output = Output> + Send>>;
+/// A boxed effect dispatch (single-threaded wasm form).
+#[cfg(target_arch = "wasm32")]
+pub(crate) type ReachFuture<Output> = Pin<Box<dyn Future<Output = Output>>>;
+
+/// One remote fork effect the authorization walk may dispatch.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type ReachFn<Fx> =
+    Box<dyn Fn(Fx) -> ReachFuture<<Fx as dialog_capability::Command>::Output> + Send + Sync>;
+/// One remote fork effect (single-threaded wasm form).
+#[cfg(target_arch = "wasm32")]
+pub(crate) type ReachFn<Fx> =
+    Box<dyn Fn(Fx) -> ReachFuture<<Fx as dialog_capability::Command>::Output>>;
+
+/// The remote reach of the authorization walk: the fork effects a proof's
+/// tree and envelope reads may dispatch to replicate content on demand,
+/// exactly as any other read does.
+///
+/// Dyn-erased and installed at build time because naming the remote fork
+/// providers as bounds on the `Prove` provider itself would close the
+/// trait cycle authorization must not enter (Prove -> Fork -> Authorize
+/// -> Prove); at the build site the concrete operator satisfies them
+/// without any cycle. The operator clone captured inside these closures
+/// carries NO reach of its own, so the proof that authorizes a fetch
+/// resolves from what is already local — that is what bounds the
+/// recursion.
+pub(crate) struct WalkReach {
+    /// Remote block read for the walk's tree scans.
+    pub(crate) get: ReachFn<dialog_capability::Fork<dialog_repository::RemoteSite, archive::Get>>,
+    /// Remote head resolution for the walk's index store.
+    pub(crate) resolve:
+        ReachFn<dialog_capability::Fork<dialog_repository::RemoteSite, memory::Resolve>>,
+    /// Remote envelope read for candidate admission.
+    pub(crate) blob_read:
+        ReachFn<dialog_capability::Fork<dialog_repository::RemoteSite, blob::Read>>,
+}
 
 /// An operating environment built from a [`Profile`](crate::profile::Profile).
 ///
@@ -80,6 +121,12 @@ pub struct Operator<S: Clone> {
 
     /// Resolved-chain cache (see `operator/access.rs`).
     chains: Arc<Mutex<access::ChainCache>>,
+
+    /// The authorization walk's remote reach (see [`WalkReach`]).
+    /// Deliberately EMPTY on the operator clone captured inside the reach
+    /// closures — the proof that authorizes a fetch must resolve from
+    /// what is already local, or the recursion would never bottom out.
+    reach: Arc<OnceLock<WalkReach>>,
 }
 
 impl<S: Clone> Operator<S> {

@@ -40,6 +40,16 @@ impl<'a> Pull<'a> {
         Self { branch, from: None }
     }
 
+    /// The branch this pull targets.
+    pub(crate) fn branch(&self) -> &'a Branch {
+        self.branch
+    }
+
+    /// The explicit source set through [`Pull::from`], if any.
+    pub(crate) fn source(&self) -> Option<&Upstream> {
+        self.from.as_ref()
+    }
+
     /// Pull from the given branch instead of the default upstream.
     ///
     /// Accepts either a `&Branch` or a `&RemoteBranch` — the same inputs as

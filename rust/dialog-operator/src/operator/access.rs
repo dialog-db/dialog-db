@@ -22,6 +22,15 @@
 //! hit is as sound as a walk — it skips the search, never the checks. The
 //! epoch is the branch head version: any commit, retain, retract, or pull
 //! drops the cache. Failures are never cached.
+//!
+//! The walk's reads replicate content on demand like any other read: a
+//! delegation record or envelope the local store does not hold is fetched
+//! from the branch's upstream through the operator's [`WalkReach`](super::WalkReach)
+//! and cached locally. The proof authorizing such a fetch resolves from
+//! what is already local (bounding the recursion — see [`AccessEnv`]);
+//! offline, the walk simply skips what it cannot read. An embedder that
+//! does not want proving to pay download latency materializes the branch
+//! up front with `Branch::download`.
 
 use super::Operator;
 use dialog_capability::access::{
@@ -88,12 +97,17 @@ impl<T> LocalEnv for T where
 
 /// The environment the delegation walk and retain run against.
 ///
-/// Local effects delegate to the operator (storage and authority); the
-/// remote fork providers are stubs that report content as unavailable.
-/// Authorization therefore reads only locally hydrated state — it never
-/// reaches for a remote mid-proof, which would require authorizing the
-/// reach itself. Sync (pull through the ordinary flows) is what brings
-/// access-branch state local.
+/// Local effects delegate to the operator (storage and authority). The
+/// remote fork providers dispatch through the operator's [`WalkReach`] —
+/// dyn-erased fork effects installed at build — so the walk's tree and
+/// envelope reads replicate content on demand exactly as any other read
+/// does. The operator clone captured inside the reach closures carries
+/// no reach of its own: the proof that authorizes such a fetch resolves
+/// from what is already local (the retained cross-party grants and the
+/// in-memory session), which bounds the recursion a fork-inside-a-proof
+/// would otherwise open. Before the reach is installed (during build)
+/// and offline, the forks degrade to reporting content unavailable, and
+/// the walk skips what it cannot read.
 struct AccessEnv<S: Clone> {
     operator: Operator<S>,
 }
@@ -131,11 +145,14 @@ where
 {
     async fn execute(
         &self,
-        _input: <Fork<RemoteSite, Get> as Command>::Input,
+        input: <Fork<RemoteSite, Get> as Command>::Input,
     ) -> <Fork<RemoteSite, Get> as Command>::Output {
-        // Remote content is unavailable during authorization; a block the
-        // walk needs must already be local (sync hydrates it).
-        Ok(None)
+        match self.operator.reach.get() {
+            Some(reach) => (reach.get)(input).await,
+            // No reach installed (mid-build, or the recursion-bounding
+            // inner clone): the block must already be local.
+            None => Ok(None),
+        }
     }
 }
 
@@ -148,9 +165,12 @@ where
 {
     async fn execute(
         &self,
-        _input: <Fork<RemoteSite, Resolve> as Command>::Input,
+        input: <Fork<RemoteSite, Resolve> as Command>::Input,
     ) -> <Fork<RemoteSite, Resolve> as Command>::Output {
-        Ok(None)
+        match self.operator.reach.get() {
+            Some(reach) => (reach.resolve)(input).await,
+            None => Ok(None),
+        }
     }
 }
 
@@ -163,11 +183,14 @@ where
 {
     async fn execute(
         &self,
-        _input: <Fork<RemoteSite, BlobRead> as Command>::Input,
+        input: <Fork<RemoteSite, BlobRead> as Command>::Input,
     ) -> <Fork<RemoteSite, BlobRead> as Command>::Output {
-        Err(BlobError::NotFound(
-            "remote content is unavailable during authorization".to_string(),
-        ))
+        match self.operator.reach.get() {
+            Some(reach) => (reach.blob_read)(input).await,
+            None => Err(BlobError::NotFound(
+                "remote content is unavailable while the walk's reach is not installed".to_string(),
+            )),
+        }
     }
 }
 
@@ -248,6 +271,25 @@ impl<S: Clone> Operator<S> {
             .find(|grant| grant.verify(&claim.access).is_ok())
     }
 
+    /// Re-resolve the access branch handle's head and upstream from
+    /// storage. This is what makes a pull through ANOTHER handle of the
+    /// branch visible here: a pull moves the head in storage, not in
+    /// this handle's cache, and both the walk and the chain-cache epoch
+    /// read the cache. Best-effort: on a failure the walk still runs
+    /// over the last resolved head.
+    async fn refresh(&self)
+    where
+        Self: LocalEnv,
+        S: ConditionalSend + ConditionalSync + 'static,
+    {
+        let Ok(branch) = self.delegations() else {
+            return;
+        };
+        if let Err(error) = branch.refresh(self).await {
+            tracing::warn!(%error, "failed to refresh the access branch head");
+        }
+    }
+
     /// Resolve a proof for `claim` from the access branch, with the
     /// session composition when the principal is this operator.
     async fn resolve(&self, claim: Prove<Ucan>) -> Result<UcanProof, AuthorizeError>
@@ -255,6 +297,8 @@ impl<S: Clone> Operator<S> {
         Self: LocalEnv,
         S: ConditionalSend + ConditionalSync + 'static,
     {
+        self.refresh().await;
+
         let key = Self::cache_key(&claim);
         if let Some(key) = &key
             && let Some(proof) = self.cached(key, &claim)

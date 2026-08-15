@@ -2,15 +2,17 @@
 
 use std::sync::{Arc, OnceLock};
 
-use super::Operator;
-use dialog_capability::{Ability, Capability, Constraint};
+use super::{Operator, WalkReach};
+use dialog_capability::{Ability, Capability, Constraint, Fork, Provider};
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::key::KeyExport;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Directory;
+use dialog_effects::{archive, blob, memory};
 use dialog_identity::Authority;
 use dialog_identity::Profile;
 use dialog_network::Network;
-use dialog_repository::ACCESS_BRANCH;
+use dialog_repository::{ACCESS_BRANCH, RemoteSite};
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, UcanCertificate};
@@ -93,7 +95,14 @@ impl OperatorBuilder {
     /// which every proof of cross-party authority resolves.
     pub async fn build<S>(self, storage: Storage<S>) -> Result<Operator<S>, OperatorError>
     where
-        S: SpaceProvider + Clone + 'static,
+        S: SpaceProvider
+            + Provider<blob::Read>
+            + Provider<blob::Write>
+            + Provider<blob::Import>
+            + Clone
+            + ConditionalSend
+            + ConditionalSync
+            + 'static,
     {
         let operator_signer = derive_operator(&self.credential, &self.context).await?;
         let credentials = Authority::new(
@@ -126,6 +135,7 @@ impl OperatorBuilder {
             session: Arc::new(session),
             delegations: Arc::new(OnceLock::new()),
             chains: Arc::default(),
+            reach: Arc::new(OnceLock::new()),
         };
 
         // Open the profile repository's access branch: the store every
@@ -141,6 +151,50 @@ impl OperatorBuilder {
             .delegations
             .set(branch)
             .expect("freshly built operator has no access branch yet");
+
+        // Install the walk's remote reach: the authorization walk's tree
+        // and envelope reads replicate content on demand through these
+        // fork effects, like any other read. The captured operator clone
+        // carries NO reach of its own — the proof that authorizes such a
+        // fetch resolves from what is already local, which bounds the
+        // recursion a fork-inside-a-proof would otherwise open.
+        let anchor = Operator {
+            reach: Arc::new(OnceLock::new()),
+            ..operator.clone()
+        };
+        let reach = WalkReach {
+            get: {
+                let anchor = anchor.clone();
+                Box::new(move |input| {
+                    let anchor = anchor.clone();
+                    Box::pin(async move {
+                        Provider::<Fork<RemoteSite, archive::Get>>::execute(&anchor, input).await
+                    })
+                })
+            },
+            resolve: {
+                let anchor = anchor.clone();
+                Box::new(move |input| {
+                    let anchor = anchor.clone();
+                    Box::pin(async move {
+                        Provider::<Fork<RemoteSite, memory::Resolve>>::execute(&anchor, input).await
+                    })
+                })
+            },
+            blob_read: {
+                let anchor = anchor.clone();
+                Box::new(move |input| {
+                    let anchor = anchor.clone();
+                    Box::pin(async move {
+                        Provider::<Fork<RemoteSite, blob::Read>>::execute(&anchor, input).await
+                    })
+                })
+            },
+        };
+        operator
+            .reach
+            .set(reach)
+            .unwrap_or_else(|_| unreachable!("freshly built operator has no reach yet"));
 
         Ok(operator)
     }
