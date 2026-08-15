@@ -567,6 +567,65 @@ mod tests {
         Prove::<Ucan>::new(holder.did(), storage_scope(space))
     }
 
+    /// A retain succeeds after another handle advanced the access branch.
+    ///
+    /// The access branch IS the profile repository's [`ACCESS_BRANCH`], so
+    /// anything else writing to the profile repo — a display-name fact, a
+    /// projection, a pull — moves the same head this operator's build-time
+    /// handle caches. That handle cannot observe the movement on its own,
+    /// so a retain CAS'ing against its cached snapshot fails with a version
+    /// mismatch, and every later delegation save through the same operator
+    /// fails identically. Field symptom: sign-in worked, then saving the
+    /// account's root delegation failed with `Version mismatch` forever.
+    #[dialog_common::test]
+    async fn it_retains_after_another_handle_moved_the_head() -> Result<()> {
+        use dialog_artifacts::{Attribute, Changes, Entity, Update as _, Value};
+        use dialog_repository::{ACCESS_BRANCH, Repository, RepositoryExt as _};
+
+        let (operator, profile) = operator("retain-stale-head").await;
+
+        // Retain once so the operator's handle caches a real head — the
+        // state a signing session leaves after saving its session grant.
+        let first_space = Ed25519Signer::generate().await?;
+        let first_holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &first_space, &first_holder, None).await;
+
+        // Another handle on the same branch, opened fresh (so it sees that
+        // head) and then committing through it — a display-name write, a
+        // projection, a pull. This advances the head the operator's own
+        // build-time handle still caches.
+        let elsewhere = Repository::from(&profile)
+            .branch(ACCESS_BRANCH)
+            .open()
+            .perform(&operator)
+            .await?;
+        for note in ["moved the head", "and again"] {
+            let mut moved = Changes::new();
+            moved.associate(
+                Attribute::try_from("test.profile/name".to_string())?,
+                Entity::new()?,
+                Value::String(note.to_string()),
+            );
+            elsewhere
+                .transaction()
+                .integrate(moved)
+                .commit()
+                .perform(&operator)
+                .await?;
+        }
+
+        // The operator's own handle still caches the pre-commit head.
+        // Retaining through it must not fail on that staleness.
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        retain_grant(&operator, &space, &holder, None).await;
+
+        // The retained grant proves, so the retain really landed.
+        let proof = operator.resolve(claim(&holder, &space)).await?;
+        assert_eq!(proof.proofs().len(), 1);
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_serves_repeat_proofs_from_the_cache() -> Result<()> {
         let (operator, _profile) = operator("cache-repeat").await;
