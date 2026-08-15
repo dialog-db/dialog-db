@@ -580,7 +580,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_retains_after_another_handle_moved_the_head() -> Result<()> {
         use dialog_artifacts::{Attribute, Changes, Entity, Update as _, Value};
-        use dialog_repository::{ACCESS_BRANCH, Repository, RepositoryExt as _};
+        use dialog_repository::{ACCESS_BRANCH, Repository};
 
         let (operator, profile) = operator("retain-stale-head").await;
 
