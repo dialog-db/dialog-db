@@ -400,21 +400,52 @@ where
     Self: LocalEnv + ConditionalSend,
 {
     async fn execute(&self, input: Capability<Retain<Ucan>>) -> Result<(), AuthorizeError> {
+        // How many times a lost head race is retried before the failure
+        // surfaces. One concurrent writer per attempt is already unlikely;
+        // three in a row is not a race, it is a stampede worth reporting.
+        const RETRY_LIMIT: usize = 3;
+
         let delegation = Retain::<Ucan>::of(&input).delegation.clone();
         let env = AccessEnv {
             operator: self.clone(),
         };
-        Box::pin(
-            self.delegations()?
-                .delegations()
-                .retain(delegation)
-                .perform(&env),
-        )
-        .await
-        .map(|_| ())
-        .map_err(|error| AuthorizeError::Malformed {
-            detail: format!("failed to retain delegation: {error}"),
-        })
+        let branch = self.delegations()?;
+        let mut attempt = 0;
+        loop {
+            // The access branch is the profile repository's main branch,
+            // which other handles (content commits, pulls) advance
+            // concurrently — and this handle caches its head, so the
+            // retain's commit would CAS against a snapshot the handle can
+            // never advance on its own. Refresh first, and again after a
+            // lost race, the same refresh-and-retry contract
+            // documents for its callers.
+            branch
+                .refresh(&env)
+                .await
+                .map_err(|error| AuthorizeError::Unavailable {
+                    detail: format!("failed to refresh the access branch: {error}"),
+                })?;
+            match Box::pin(
+                branch
+                    .delegations()
+                    .retain(delegation.clone())
+                    .perform(&env),
+            )
+            .await
+            {
+                Ok(_) => return Ok(()),
+                Err(dialog_repository::CommitError::Publish(
+                    dialog_repository::PublishError::VersionMismatch { .. },
+                )) if attempt < RETRY_LIMIT => {
+                    attempt += 1;
+                }
+                Err(error) => {
+                    return Err(AuthorizeError::Malformed {
+                        detail: format!("failed to retain delegation: {error}"),
+                    });
+                }
+            }
+        }
     }
 }
 
