@@ -1671,10 +1671,13 @@ mod resolver_tests {
             );
         }
 
-        // Descend every child; leaves must carry the committed entries.
+        // Descend to the leaves whatever the depth: the fixture's
+        // entities are random, so the tree's shape is probabilistic and
+        // a child may itself be an index (the depth-3 draw that made
+        // the one-level version of this walk flaky).
         let mut entries = 0usize;
-        for span in &spans {
-            let child = text(span, "node");
+        let mut frontier: Vec<String> = spans.iter().map(|span| text(span, "node")).collect();
+        while let Some(child) = frontier.pop() {
             let child_node: Vec<ResolverConclusion> = branch
                 .query()
                 .select(tree_node(&child))
@@ -1695,6 +1698,14 @@ mod resolver_tests {
                     "one key row per segment entry"
                 );
                 entries += keys.len();
+            } else {
+                let child_spans: Vec<ResolverConclusion> = branch
+                    .query()
+                    .select(tree_span(&child))
+                    .perform(&operator)
+                    .try_vec()
+                    .await?;
+                frontier.extend(child_spans.iter().map(|span| text(span, "node")));
             }
         }
         assert!(
