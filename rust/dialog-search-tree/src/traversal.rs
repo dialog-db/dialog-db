@@ -36,6 +36,13 @@ use crate::{
     PersistentNode, PersistentTree, Value,
 };
 
+/// How many block reads one traversal level issues concurrently.
+///
+/// Sized for a backend that reaches a remote on a miss: enough in flight
+/// to hide round-trips, small enough not to swamp a local store or a
+/// remote's connection limits.
+const FETCH_CONCURRENCY: usize = 16;
+
 /// What a gap-tolerant traversal found at one position in the tree.
 #[derive(Debug, Clone)]
 pub enum Visit<K, V> {
@@ -97,31 +104,50 @@ where
         Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
             + ConditionalSend,
     {
+        use futures_util::StreamExt as _;
+
         let root = self.root().clone();
 
         try_stream! {
             if &root != NULL_BLAKE3_HASH {
-                let mut queue = vec![root];
+                // Level order with the whole frontier fetched concurrently:
+                // a level's reads are independent, so against a backend
+                // that reaches a remote on a miss the wall clock is depth
+                // round-trips, not node-count round-trips.
+                let mut frontier = vec![root];
 
-                while let Some(hash) = queue.pop() {
-                    // `retrieve` verifies stored bytes against the hash it
-                    // was asked for, so `None` here is genuinely "not
-                    // stored" -- a corrupt block raises instead, and still
-                    // fails the walk.
-                    let Some(bytes) = storage.retrieve(&hash).await? else {
-                        yield Visit::Absent(hash);
-                        continue;
-                    };
-                    let node: PersistentNode<Key, Value> =
-                        PersistentNode::try_from(Buffer::from(bytes))?;
+                while !frontier.is_empty() {
+                    let level = std::mem::take(&mut frontier);
+                    let mut reads = futures_util::stream::iter(level.into_iter().map(
+                        |hash| async move {
+                            // `retrieve` verifies stored bytes against the
+                            // hash it was asked for, so `None` here is
+                            // genuinely "not stored" -- a corrupt block
+                            // raises instead, and still fails the walk.
+                            let bytes = storage.retrieve(&hash).await;
+                            (hash, bytes)
+                        },
+                    ))
+                    .buffer_unordered(FETCH_CONCURRENCY);
 
-                    if let ArchivedNodeBody::Index(index) = node.body() {
-                        for link in index.links()? {
-                            queue.push(link.node);
+                    let mut next = Vec::new();
+                    while let Some((hash, bytes)) = reads.next().await {
+                        let Some(bytes) = bytes? else {
+                            yield Visit::Absent(hash);
+                            continue;
+                        };
+                        let node: PersistentNode<Key, Value> =
+                            PersistentNode::try_from(Buffer::from(bytes))?;
+
+                        if let ArchivedNodeBody::Index(index) = node.body() {
+                            for link in index.links()? {
+                                next.push(link.node);
+                            }
                         }
-                    }
 
-                    yield Visit::Present(node);
+                        yield Visit::Present(node);
+                    }
+                    frontier = next;
                 }
             }
         }

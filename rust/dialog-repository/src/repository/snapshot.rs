@@ -52,9 +52,10 @@ use dialog_effects::archive::{Catalog, Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_search_tree::{
-    ArchivedNodeBody, ContentAddressedStorage as TreeStorage, Traversable as _, Visit, into_owned,
+    ArchivedNodeBody, ContentAddressedStorage as TreeStorage, NoveltyOp, Traversable as _, Visit,
+    into_owned,
 };
-use futures_util::{Stream, StreamExt as _};
+use futures_util::{Stream, StreamExt as _, stream};
 
 use dialog_credentials::Credential;
 use dialog_varsig::Principal;
@@ -63,6 +64,13 @@ use crate::{
     Index, NetworkedIndex, RemoteRepository, RemoteSite, Repository, RepositoryArchiveExt as _,
     Revision, SnapshotError,
 };
+
+/// How many spill or blob fetches an export keeps in flight at once.
+///
+/// Concurrency, not parallelism: one task drives them, so this holds on
+/// wasm too. Sized to overlap remote round-trips under a downloading
+/// reach without swamping a local store or a remote's connection limits.
+const FETCH_CONCURRENCY: usize = 16;
 
 /// A block of a snapshot: content plus the digest it must hash to.
 ///
@@ -300,6 +308,10 @@ impl<C: Principal> SnapshotExport<'_, C> {
 
             let mut spills: HashSet<[u8; 32]> = HashSet::new();
             let mut blobs: Vec<NodeHash> = Vec::new();
+            // A key may surface twice — its stored leaf entry plus a
+            // buffered op riding an ancestor index node — naming the same
+            // content; ship each blob once.
+            let mut blob_seen: HashSet<NodeHash> = HashSet::new();
 
             let visits = tree.traverse_available(&storage);
             futures_util::pin_mut!(visits);
@@ -315,16 +327,34 @@ impl<C: Principal> SnapshotExport<'_, C> {
                     }
                 };
 
-                // A leaf is already decoded here, so its entries are lifted
-                // in this visit. The closure only collects: classification
-                // returns artifact errors, which do not belong in a
-                // tree-walk callback.
+                // A node is already decoded here, so the entries it holds
+                // are lifted in this visit — and every entry a node
+                // physically holds is in the revision's closure. For a
+                // leaf that includes entries a buffered op upstream has
+                // superseded: reads screen those, but their bytes (and
+                // the spill blocks and blobs they reference) are still
+                // stored and still served to history reads. For an index
+                // node it is the buffered asserts riding its novelty
+                // buffers, whose keys and values reference content
+                // exactly like stored entries (a buffered retract
+                // references nothing of its own). The closure only
+                // collects: classification returns artifact errors,
+                // which do not belong in a tree-walk callback.
                 let mut entries: Vec<(Key, State<Datum>)> = Vec::new();
-                if let ArchivedNodeBody::Segment(segment) = node.body() {
-                    segment.for_each_entry::<Key, _>(|key, value| {
-                        entries.push((Key::from(key.to_vec()), into_owned(value)?));
-                        Ok(())
-                    })?;
+                match node.body() {
+                    ArchivedNodeBody::Segment(segment) => {
+                        segment.for_each_entry::<Key, _>(|key, value| {
+                            entries.push((Key::from(key.to_vec()), into_owned(value)?));
+                            Ok(())
+                        })?;
+                    }
+                    ArchivedNodeBody::Index(index) => {
+                        for entry in index.all_novelty::<Key>()? {
+                            if let NoveltyOp::Assert(value) = entry.op {
+                                entries.push((Key::from(entry.key), value));
+                            }
+                        }
+                    }
                 }
                 for (key, value) in entries {
                     match shipment_ref(&key, &value, false)? {
@@ -332,7 +362,10 @@ impl<C: Principal> SnapshotExport<'_, C> {
                             spills.insert(reference);
                         }
                         Some(ShipmentRef::Blob(BlobChange::Added(hash))) => {
-                            blobs.push(NodeHash::from(hash));
+                            let hash = NodeHash::from(hash);
+                            if blob_seen.insert(hash.clone()) {
+                                blobs.push(hash);
+                            }
                         }
                         _ => {}
                     }
@@ -341,10 +374,24 @@ impl<C: Principal> SnapshotExport<'_, C> {
                 yield Item::Block(Block::new(node.buffer().clone()));
             }
 
-            // Spilled value blocks, discovered above.
-            for reference in spills {
-                let digest = NodeHash::from(reference);
-                match storage.retrieve(&digest).await? {
+            // Spilled value blocks, discovered above. Their reads are
+            // independent, so they run concurrently (bounded) and yield
+            // as they complete — against a downloading reach this
+            // overlaps the remote round-trips instead of paying them one
+            // after another.
+            let mut spill_reads = stream::iter(spills.into_iter().map(
+                |reference| {
+                    let storage = &storage;
+                    async move {
+                        let digest = NodeHash::from(reference);
+                        let bytes = storage.retrieve(&digest).await;
+                        (digest, bytes)
+                    }
+                },
+            ))
+            .buffer_unordered(FETCH_CONCURRENCY);
+            while let Some((digest, bytes)) = spill_reads.next().await {
+                match bytes? {
                     Some(bytes) => {
                         yield Item::Block(Block { digest, content: Buffer::from(bytes) });
                     }
@@ -352,75 +399,89 @@ impl<C: Principal> SnapshotExport<'_, C> {
                     None => Err(SnapshotError::MissingBlock { digest })?,
                 }
             }
+            drop(spill_reads);
 
             // Blob bytes, discovered above. The size comes from the tree's
             // own blob index rather than the traversal: `import` is opened
-            // with it, and reading it costs no byte fetch.
-            for digest in blobs {
-                let record = tree.get_blob(&index, digest.as_bytes()).await?;
-                let Some(record) = record else {
-                    if !sparse {
-                        Err(SnapshotError::MissingBlob { digest })?;
-                    }
-                    continue;
-                };
-                let reader = subject
-                    .clone()
-                    .archive()
-                    .blob()
-                    .read(digest.clone())
-                    .perform(env)
-                    .await;
-                let reader = match (reader, &hydrate) {
-                    // A local miss the reach says to resolve. The index
-                    // cannot serve this one -- blocks fall through to the
-                    // remote via `Get`, blob bytes travel their own
-                    // channel -- so fetch the whole blob through a local
-                    // digest-verified import first (a lying remote
-                    // surfaces as `DigestMismatch` at `finish`, and the
-                    // bytes are cached like every other download), then
-                    // serve the read from the now-local copy.
-                    (Err(BlobError::NotFound(_)), Some(remote)) => {
-                        let address = remote.address();
-                        let mut source = address
-                            .subject
-                            .clone()
-                            .archive()
-                            .blob()
-                            .read(digest.clone())
-                            .fork(address.site())
-                            .perform(env)
-                            .await?;
-                        let mut sink = subject
-                            .clone()
-                            .archive()
-                            .blob()
-                            .import(digest.clone(), record.size)
-                            .perform(env)
-                            .await?;
-                        while let Some(chunk) = source.next().await? {
-                            sink.write_all(&chunk).await?;
+            // with it, and reading it costs no byte fetch. Each blob's
+            // whole fetch (and, under a downloading reach, its local
+            // import) is one future; they run concurrently (bounded) and
+            // yield as they complete. `None` from a future means the blob
+            // is unavailable — no index record, or no bytes anywhere the
+            // reach extends — which sparse tolerates and complete refuses.
+            let mut blob_reads = stream::iter(blobs.into_iter().map(|digest| {
+                let tree = &tree;
+                let index = &index;
+                let hydrate = &hydrate;
+                let subject = subject.clone();
+                async move {
+                    let Some(record) = tree.get_blob(index, digest.as_bytes()).await? else {
+                        return Ok((digest, None));
+                    };
+                    let reader = subject
+                        .clone()
+                        .archive()
+                        .blob()
+                        .read(digest.clone())
+                        .perform(env)
+                        .await;
+                    let reader = match (reader, hydrate) {
+                        // A local miss the reach says to resolve. The index
+                        // cannot serve this one -- blocks fall through to the
+                        // remote via `Get`, blob bytes travel their own
+                        // channel -- so fetch the whole blob through a local
+                        // digest-verified import first (a lying remote
+                        // surfaces as `DigestMismatch` at `finish`, and the
+                        // bytes are cached like every other download), then
+                        // serve the read from the now-local copy.
+                        (Err(BlobError::NotFound(_)), Some(remote)) => {
+                            let address = remote.address();
+                            let mut source = address
+                                .subject
+                                .clone()
+                                .archive()
+                                .blob()
+                                .read(digest.clone())
+                                .fork(address.site())
+                                .perform(env)
+                                .await?;
+                            let mut sink = subject
+                                .clone()
+                                .archive()
+                                .blob()
+                                .import(digest.clone(), record.size)
+                                .perform(env)
+                                .await?;
+                            while let Some(chunk) = source.next().await? {
+                                sink.write_all(&chunk).await?;
+                            }
+                            sink.finish().await?;
+                            subject
+                                .clone()
+                                .archive()
+                                .blob()
+                                .read(digest.clone())
+                                .perform(env)
+                                .await
                         }
-                        sink.finish().await?;
-                        subject
-                            .clone()
-                            .archive()
-                            .blob()
-                            .read(digest.clone())
-                            .perform(env)
-                            .await
+                        (reader, _) => reader,
+                    };
+                    match reader {
+                        Ok(chunks) => Ok((digest, Some((record.size, chunks)))),
+                        Err(BlobError::NotFound(_)) => Ok((digest, None)),
+                        Err(error) => Err(SnapshotError::from(error)),
                     }
-                    (reader, _) => reader,
-                };
-                match reader {
-                    Ok(chunks) => {
-                        yield Item::Blob { digest, size: record.size, chunks };
+                }
+            }))
+            .buffer_unordered(FETCH_CONCURRENCY);
+            while let Some(fetched) = blob_reads.next().await {
+                let (digest, available) = fetched?;
+                match available {
+                    Some((size, chunks)) => {
+                        yield Item::Blob { digest, size, chunks };
                     }
-                    Err(BlobError::NotFound(_)) if sparse => {}
-                    Err(BlobError::NotFound(_)) => {
-                        Err(SnapshotError::MissingBlob { digest })?;
-                    }
-                    Err(error) => Err(SnapshotError::from(error))?,
+                    None if sparse => {}
+                    None => Err(SnapshotError::MissingBlob { digest })?,
                 }
             }
         }
