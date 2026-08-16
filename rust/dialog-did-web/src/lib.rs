@@ -27,6 +27,7 @@ mod error;
 mod fetch;
 mod provider;
 mod resolve;
+mod resolver;
 mod url;
 
 #[cfg(test)]
@@ -38,6 +39,7 @@ pub use error::ResolveError;
 pub use fetch::{Fetch, ReqwestFetch};
 pub use provider::{DidKeyProvider, DidWebProvider, MethodResolver, WebResolver};
 pub use resolve::Resolve;
+pub use resolver::PerformingResolver;
 pub use url::did_web_url;
 
 #[cfg(feature = "test-fetch")]

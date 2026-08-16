@@ -1433,6 +1433,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
+ "dialog-did-web",
  "dialog-effects",
  "dialog-remote-s3",
  "dialog-storage",

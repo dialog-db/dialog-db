@@ -19,7 +19,7 @@ use super::check_failed_to_container_error;
 use super::{Container, ContainerError};
 use crate::{
     Delegation, Invocation,
-    invocation::{InvocationCheckError, StoredCheckError},
+    invocation::{InvocationCheckError, SignatureVerificationError, StoredCheckError},
 };
 use dialog_varsig::AnySignature;
 use dialog_varsig::Did;
@@ -91,6 +91,15 @@ impl<S: Signature> InvocationChain<S> {
             .await
             .map(|_| ())
             .map_err(|err| match err {
+                // A resolution failure (an unreachable did:web host, a resolver
+                // that cannot look the issuer up) is our setup being unable to
+                // check their material, not a statement that their material is
+                // bad. It reads as Configuration, not Invocation.
+                InvocationCheckError::SignatureVerification(
+                    SignatureVerificationError::ResolutionError(resolve_err),
+                ) => ContainerError::Configuration(format!(
+                    "could not resolve the invocation issuer: {resolve_err}"
+                )),
                 InvocationCheckError::SignatureVerification(sig_err) => {
                     ContainerError::Invocation(format!("invalid signature: {}", sig_err))
                 }
