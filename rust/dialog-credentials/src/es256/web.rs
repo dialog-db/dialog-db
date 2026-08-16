@@ -577,8 +577,9 @@ mod tests {
         );
 
         // And therefore on the did:key string.
-        let web_verifier =
-            Es256Verifier::from(crate::es256::Es256VerifyingKey::WebCrypto(web_key.verifying_key()));
+        let web_verifier = Es256Verifier::from(crate::es256::Es256VerifyingKey::WebCrypto(
+            web_key.verifying_key(),
+        ));
         assert_eq!(web_verifier.to_string(), native_verifier.to_string());
     }
 
@@ -592,7 +593,9 @@ mod tests {
         .to_string();
 
         let export = signing.export().await.unwrap();
-        let restored = <SigningKey as ExtractableKey>::import(export).await.unwrap();
+        let restored = <SigningKey as ExtractableKey>::import(export)
+            .await
+            .unwrap();
         let did_after = Es256Verifier::from(crate::es256::Es256VerifyingKey::WebCrypto(
             restored.verifying_key(),
         ))

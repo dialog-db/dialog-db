@@ -46,7 +46,6 @@ use dialog_capability::access::{
 };
 use dialog_capability::{Command, Fork, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
-use dialog_credentials::Ed25519Signer;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Write as BlobWrite;
@@ -77,14 +76,14 @@ pub trait MigrateAccess {
 impl MigrateAccess for Access<'_> {
     fn migrate(&self) -> MigrateCertificates {
         MigrateCertificates {
-            credential: Ed25519Signer::from(self.signer().clone()),
+            credential: self.signer().signer().clone(),
         }
     }
 }
 
 /// The migration command. Created by [`MigrateAccess::migrate`].
 pub struct MigrateCertificates {
-    credential: Ed25519Signer,
+    credential: dialog_credentials::Signer,
 }
 
 /// The environment migration commits with: the profile identifies and
@@ -290,6 +289,7 @@ mod tests {
     use anyhow::Result;
     use dialog_artifacts::{ArtifactSelector, Value};
     use dialog_capability::access::Retain;
+    use dialog_credentials::Ed25519Signer;
     use dialog_identity::Profile;
     use dialog_operator::helpers::unique_name;
     use dialog_storage::provider::storage::{Storage, VolatileSpace};
@@ -344,7 +344,7 @@ mod tests {
             .await?;
         let space = signer().await;
         let other_space = signer().await;
-        let profile_signer = Ed25519Signer::from(profile.signer().clone());
+        let profile_signer = profile.signer().signer().as_ed25519().unwrap().clone();
 
         // Legacy store: two interchangeable space->profile grants (same
         // payload, different nonce), one distinct grant, and one
@@ -502,7 +502,7 @@ mod tests {
             .perform(&storage)
             .await?;
         let space = signer().await;
-        let profile_signer = Ed25519Signer::from(profile.signer().clone());
+        let profile_signer = profile.signer().signer().as_ed25519().unwrap().clone();
 
         // One migratable grant, one self-issued survivor.
         let seed = |issuer: Ed25519Signer, audience: dialog_capability::Did, subject| {
@@ -563,7 +563,7 @@ mod tests {
             .perform(&storage)
             .await?;
         let space = signer().await;
-        let profile_signer = Ed25519Signer::from(profile.signer().clone());
+        let profile_signer = profile.signer().signer().as_ed25519().unwrap().clone();
 
         let certificate = seed_legacy(
             &storage,

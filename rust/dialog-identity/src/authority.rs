@@ -4,9 +4,9 @@
 //! the provider traits needed by `Operator` for identity effects.
 
 use dialog_capability::{Capability, Provider, Subject};
-use dialog_credentials::Ed25519Signer;
+use dialog_credentials::Signer;
 use dialog_effects::authority::{self, AuthorityError, Operator as AuthOperator};
-use dialog_varsig::{Did, Principal};
+use dialog_varsig::{Did, Principal, Signer as _};
 
 // Authority always answers for the current session, regardless of which
 // repository we're operating on. We use the profile DID as the subject
@@ -20,18 +20,22 @@ use dialog_varsig::{Did, Principal};
 #[derive(Debug, Clone)]
 pub struct Authority {
     name: String,
-    profile: Ed25519Signer,
-    operator: Ed25519Signer,
+    profile: Signer,
+    operator: Signer,
     account: Option<Did>,
 }
 
 impl Authority {
     /// Create an opened profile from existing signers.
-    pub fn new(name: impl Into<String>, profile: Ed25519Signer, operator: Ed25519Signer) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        profile: impl Into<Signer>,
+        operator: impl Into<Signer>,
+    ) -> Self {
         Self {
             name: name.into(),
-            profile,
-            operator,
+            profile: profile.into(),
+            operator: operator.into(),
             account: None,
         }
     }
@@ -63,12 +67,12 @@ impl Authority {
     }
 
     /// Get a reference to the profile signer.
-    pub fn profile_signer(&self) -> &Ed25519Signer {
+    pub fn profile_signer(&self) -> &Signer {
         &self.profile
     }
 
     /// Get a reference to the operator signer.
-    pub fn operator_signer(&self) -> &Ed25519Signer {
+    pub fn operator_signer(&self) -> &Signer {
         &self.operator
     }
 
@@ -108,11 +112,10 @@ impl Provider<authority::Attest> for Authority {
     async fn execute(&self, input: authority::Attest) -> Result<Vec<u8>, AuthorityError> {
         // Sign with the operator key: the session identity `Identify`
         // reports as the issuer, so verifiers can resolve the operator's
-        // did:key to check the signature.
+        // did to check the signature.
         let signature = self
             .operator
-            .signing_key()
-            .sign_bytes(&input.payload)
+            .sign(&input.payload)
             .await
             .map_err(|error| AuthorityError::Attestation(format!("{error}")))?;
         Ok(signature.to_bytes().to_vec())
@@ -124,6 +127,8 @@ impl serde::Serialize for Authority {
     where
         S: serde::Serializer,
     {
-        self.operator.serialize(serializer)
+        // Serialize as the operator DID, mirroring the operator signer's own
+        // did:key serialization.
+        self.operator_did().serialize(serializer)
     }
 }

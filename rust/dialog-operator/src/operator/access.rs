@@ -489,7 +489,15 @@ where
             .perform(self)
             .await?;
 
-        proof.claim(self.authority.operator_signer().clone())
+        let operator_signer = self
+            .authority
+            .operator_signer()
+            .as_ed25519()
+            .cloned()
+            .ok_or_else(|| AuthorizeError::Malformed {
+                detail: "authorization requires an ed25519 operator signer".into(),
+            })?;
+        proof.claim(operator_signer)
     }
 }
 
