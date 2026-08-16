@@ -34,6 +34,18 @@ pub enum ContainerError {
     #[error("Invocation error: {0}")]
     Invocation(String),
 
+    /// A delegation link in the chain does not carry a valid signature
+    /// from the principal its `iss` field claims. Kept distinct from
+    /// [`Invocation`](Self::Invocation) so the authorize boundary can
+    /// name the forged issuer.
+    #[error("Delegation from '{issuer}' does not carry a valid signature: {detail}")]
+    InvalidDelegationSignature {
+        /// The principal the forged proof claims as its issuer.
+        issuer: dialog_varsig::Did,
+        /// Human-readable description of the verification failure.
+        detail: String,
+    },
+
     /// Invalid configuration.
     #[error("Configuration error: {0}")]
     Configuration(String),

@@ -50,6 +50,7 @@ url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-ucan-core = { workspace = true, features = ["helpers"] }
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
 dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }

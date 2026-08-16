@@ -387,6 +387,27 @@ impl ProveDelegation<'_> {
             return Ok(None);
         }
 
+        // The envelope's structure agrees with the facts, but structure is
+        // not authority: any peer with push access can plant a forged
+        // envelope whose `iss` claims a principal it cannot sign for. Verify
+        // the signature against the claimed issuer's key before admitting the
+        // link, so a forgery is skipped like any other broken candidate. The
+        // resolver is a local did:key parse (no network, no I/O), so this is
+        // a cheap check at admission.
+        if let Err(error) = certificate
+            .0
+            .verify_signature(&dialog_credentials::Ed25519KeyResolver)
+            .await
+        {
+            tracing::warn!(
+                entity = %candidate.entity,
+                issuer = %certificate.issuer(),
+                %error,
+                "delegation envelope signature does not verify; skipping candidate"
+            );
+            return Ok(None);
+        }
+
         let Ok(range) = certificate.verify(&self.access) else {
             return Ok(None);
         };
@@ -1032,6 +1053,130 @@ mod tests {
             matches!(verdict, Err(AuthorizeError::UnprovenSubject { .. })),
             "spoofed facts must not assemble a proof from a mismatched envelope: {:?}",
             verdict.err()
+        );
+        Ok(())
+    }
+
+    /// Plant a forged delegation whose `iss` claims `claimed_issuer` but is
+    /// signed by `actual_signer` (who cannot sign as `claimed_issuer`), with
+    /// facts that AGREE with the envelope so the fact/envelope consistency
+    /// guard passes. This is exactly what a peer with push access can write:
+    /// a self-consistent envelope + facts whose only defect is the signature.
+    async fn plant_forged(
+        harness: &Harness,
+        claimed_issuer: &Ed25519Signer,
+        audience: &Ed25519Signer,
+        subject: &Ed25519Signer,
+        actual_signer: &Ed25519Signer,
+    ) -> Result<()> {
+        let forged = dialog_ucan_core::Delegation::forge(
+            claimed_issuer.did(),
+            audience.did(),
+            UcanSubject::Specific(subject.did()),
+            Command(vec!["storage".to_string()]),
+            actual_signer,
+        )
+        .await
+        .expect("forge a delegation");
+        let certificate = UcanCertificate(forged);
+
+        use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+        let bytes: Vec<u8> = certificate
+            .encode()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let mut sink = harness
+            .branch
+            .archive()
+            .blob()
+            .write()
+            .perform(&harness.operator)
+            .await?;
+        sink.write_all(&bytes).await?;
+        let hash = sink.finish().await?;
+        let index_hash: dialog_storage::Blake3Hash = *hash.as_bytes();
+        let entity = Entity::from_blob(&index_hash)?;
+
+        // Facts that AGREE with the forged envelope, so it passes the
+        // fact/envelope consistency guard and only the signature is wrong.
+        plant_facts(
+            harness,
+            &entity,
+            &claimed_issuer.did(),
+            &audience.did(),
+            &subject.did(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// TEST A -- forged-only fails: the only delegation covering the request
+    /// carries a forged signature (iss claims the subject but is signed by an
+    /// attacker), with facts that AGREE with the envelope (passing the
+    /// consistency guard) and a command cover that satisfies `verify`. The
+    /// prover must skip the forged candidate and, finding no other authority,
+    /// return unproven. This is the primary hole: any peer with push access
+    /// can plant such an envelope + facts, and the signature check is the
+    /// only thing standing between it and a spliced proof.
+    #[dialog_common::test]
+    async fn it_rejects_a_forged_delegation_signature() -> Result<()> {
+        let harness = Harness::new("prove-forged-signature").await?;
+        let space = signer().await;
+        let holder = signer().await;
+        let attacker = signer().await;
+
+        // Forged direct grant: iss = space (the subject), signed by attacker.
+        plant_forged(&harness, &space, &holder, &space, &attacker).await?;
+
+        let verdict = harness
+            .branch
+            .delegations()
+            .prove(holder.did(), scope(&space, &["storage"]))
+            .perform(&harness.operator)
+            .await;
+        assert!(
+            matches!(verdict, Err(AuthorizeError::UnprovenSubject { .. })),
+            "a forged envelope signature must not assemble a proof: {:?}",
+            verdict.err()
+        );
+        Ok(())
+    }
+
+    /// TEST B -- a valid delegation heals it: the same forged delegation is
+    /// present, but a SECOND, properly-signed delegation also authorizes the
+    /// request. The prover must skip the forged candidate and prove via the
+    /// valid one. This pins the crucial semantic: a bad-signature candidate
+    /// is SKIPPED, not a hard error, so a malicious peer injecting a forged
+    /// fact cannot deny service to an otherwise-provable request.
+    #[dialog_common::test]
+    async fn it_proves_via_a_valid_delegation_despite_a_forged_one() -> Result<()> {
+        let harness = Harness::new("prove-forged-plus-valid").await?;
+        let space = signer().await;
+        let holder = signer().await;
+        let attacker = signer().await;
+
+        // The forged direct grant from `space` to `holder`, still present.
+        plant_forged(&harness, &space, &holder, &space, &attacker).await?;
+
+        // A genuine direct grant from `space` to `holder`, properly signed.
+        harness
+            .retain(delegate(&space, &holder, UcanSubject::Specific(space.did())).await)
+            .await?;
+
+        let verdict = harness
+            .branch
+            .delegations()
+            .prove(holder.did(), scope(&space, &["storage"]))
+            .perform(&harness.operator)
+            .await;
+        assert!(
+            verdict.is_ok(),
+            "a forged candidate must be skipped, not poison an otherwise-provable request: {:?}",
+            verdict.err()
+        );
+        assert_eq!(
+            verdict.expect("valid delegation proves").proofs().len(),
+            1,
+            "the proof is assembled from the valid delegation alone"
         );
         Ok(())
     }

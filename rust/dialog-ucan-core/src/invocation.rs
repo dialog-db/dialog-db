@@ -141,10 +141,13 @@ impl<S: Signature> Invocation<S> {
             .await
             .map_err(InvocationCheckError::SignatureVerification)?;
 
-        // 2. Check proof chain and compute valid time range
+        // 2. Check proof chain and compute valid time range. This also
+        //    verifies each delegation link's own signature against its
+        //    resolved issuer key, so a forged proof cannot pass just
+        //    because the invocation itself is validly signed.
         let time_range = self
             .payload()
-            .check(proof_store)
+            .check(proof_store, resolver)
             .await
             .map_err(InvocationCheckError::StoredCheck)?;
 
@@ -326,6 +329,11 @@ impl InvocationPayload {
 
     /// Check if an [`InvocationPayload`] with proofs stored in a delegation store is valid.
     ///
+    /// In addition to the structural [`syntactic_checks`](Self::syntactic_checks),
+    /// this verifies each delegation link's own signature against the key its
+    /// `iss` resolves to. A proof that is not actually signed by its claimed
+    /// issuer is rejected, even when the invocation itself is validly signed.
+    ///
     /// # Errors
     ///
     /// Returns a [`StoredCheckError`] if the check fails.
@@ -334,15 +342,31 @@ impl InvocationPayload {
         S: Signature,
         T: Borrow<Delegation<S>>,
         St: DelegationStore<K, S, T>,
+        R: Resolver<S>,
     >(
         &self,
         proof_store: &St,
-    ) -> Result<TimeRange, StoredCheckError<K, S, T, St>> {
+        resolver: &R,
+    ) -> Result<TimeRange, StoredCheckError<K, S, T, St, R>> {
         let realized_proofs: Vec<T> = proof_store
             .get_all(&self.proofs)
             .await
             .map_err(StoredCheckError::GetError)?;
         let dlgs: Vec<&Delegation<S>> = realized_proofs.iter().map(Borrow::borrow).collect();
+
+        // Every link must carry a signature that verifies against its own
+        // resolved issuer key. Without this a forged delegation (valid
+        // structure, garbage signature) would authorize an attacker.
+        for delegation in &dlgs {
+            delegation
+                .verify_signature(resolver)
+                .await
+                .map_err(|source| StoredCheckError::SignatureVerification {
+                    issuer: delegation.issuer().clone(),
+                    source,
+                })?;
+        }
+
         Ok(self.syntactic_checks(dlgs)?)
     }
 
@@ -713,16 +737,28 @@ pub enum CheckFailed {
 }
 
 /// Errors that can occur when checking an invocation with proofs stored in a delegation store
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Error)]
 pub enum StoredCheckError<
     K: FutureKind,
     S: Signature,
     T: Borrow<Delegation<S>>,
     St: DelegationStore<K, S, T>,
+    R: Resolver<S>,
 > {
     /// Error getting proofs from the store
     #[error(transparent)]
     GetError(St::GetError),
+
+    /// A delegation link's own signature did not verify against its
+    /// resolved issuer key. The `issuer` is the principal the proof claims
+    /// to be signed by.
+    #[error("delegation from '{issuer}' does not carry a valid signature: {source}")]
+    SignatureVerification {
+        /// The principal the forged proof claims as its issuer.
+        issuer: Did,
+        /// The underlying verification failure.
+        source: crate::delegation::SignatureVerificationError<R::Error>,
+    },
 
     /// Proof check failed
     #[error(transparent)]
@@ -760,7 +796,7 @@ pub enum InvocationCheckError<
 
     /// Proof chain check failed
     #[error(transparent)]
-    StoredCheck(StoredCheckError<K, S, T, St>),
+    StoredCheck(StoredCheckError<K, S, T, St, R>),
 }
 
 #[cfg(test)]
