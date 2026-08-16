@@ -1055,3 +1055,78 @@ fn jwk_p256_document(did_web: &str, x: &[u8], y: &[u8]) -> String {
         y = encode(y)
     )
 }
+
+/// A passkey published as a `publicKeyMultibase` (a `did:key` with the WebAuthn
+/// multicodec) must resolve through the ordinary did:web multi-key path to a
+/// verifier that accepts a WebAuthn assertion. The signature is built
+/// synthetically with a P-256 key (a real browser assertion needs a user
+/// gesture), then routed through the resolved verifier as an `AnySignature`.
+#[cfg(feature = "webauthn")]
+#[dialog_common::test]
+async fn it_resolves_a_webauthn_passkey_did_web() {
+    use base64::Engine;
+    use dialog_credentials::webauthn::WebAuthnVerifier;
+    use dialog_varsig::AnySignature;
+    use dialog_varsig::webauthn::WebAuthnSignature;
+    use p256::ecdsa::{SigningKey, signature::Signer as _};
+    use sha2::{Digest, Sha256};
+
+    let sk = SigningKey::from_bytes(&[42u8; 32].into()).unwrap();
+    let compressed = sk.verifying_key().to_encoded_point(true);
+    let passkey = WebAuthnVerifier::from_sec1_bytes(compressed.as_bytes()).unwrap();
+
+    // The passkey did:key multibase tail (the `z...` after `did:key:`).
+    let passkey_did = passkey.to_string();
+    let multibase = passkey_did.strip_prefix("did:key:").unwrap();
+
+    let did_web = "did:web:passkey.example";
+    let doc = format!(
+        r#"{{
+            "id": "{did_web}",
+            "verificationMethod": [{{
+                "id": "{did_web}#key-1",
+                "type": "Multikey",
+                "controller": "{did_web}",
+                "publicKeyMultibase": "{multibase}"
+            }}]
+        }}"#
+    );
+    let fetch = MapFetch::new().with(
+        "https://passkey.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let provider = DidWebProvider::with_fetch(fetch);
+
+    let did: Did = did_web.parse().unwrap();
+    let verifier = Resolve::new(did).perform(&provider).await.unwrap();
+    assert_eq!(verifier.did().as_str(), did_web);
+
+    // Build a synthetic WebAuthn assertion over `payload`.
+    let payload = b"passkey signs a did:web payload";
+    let payload_hash = Sha256::digest(payload);
+    let mut multihash = vec![0x12u8, 0x20];
+    multihash.extend_from_slice(&payload_hash);
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&multihash);
+    let client_data_json = serde_json::to_vec(&serde_json::json!({
+        "type": "webauthn.get",
+        "challenge": challenge,
+        "origin": "https://passkey.example",
+    }))
+    .unwrap();
+    let rp_id_hash = Sha256::digest(b"passkey.example");
+    let mut authenticator_data = rp_id_hash.to_vec();
+    authenticator_data.push(0x05);
+    authenticator_data.extend_from_slice(&[0, 0, 0, 1]);
+    let mut signed = authenticator_data.clone();
+    signed.extend_from_slice(&Sha256::digest(&client_data_json));
+    let ecdsa_sig: p256::ecdsa::DerSignature = sk.sign(&signed);
+    let webauthn_sig = WebAuthnSignature::new(
+        client_data_json,
+        authenticator_data,
+        ecdsa_sig.to_bytes().to_vec(),
+    );
+
+    // Route it through the resolved verifier as an agnostic signature.
+    let any_sig = AnySignature::from(webauthn_sig);
+    verifier.verify(payload, &any_sig).await.unwrap();
+}

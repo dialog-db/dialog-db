@@ -25,6 +25,9 @@ use ::signature::SignatureEncoding;
 #[cfg(feature = "es256")]
 use crate::algorithm::ecdsa::{Es256, Es256Signature};
 
+#[cfg(feature = "webauthn")]
+use crate::algorithm::webauthn::{WebAuthnP256, WebAuthnSignature};
+
 /// The algorithm tag carried by [`AnySignature`] and [`AnyAlgorithm`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlgorithmTag {
@@ -33,20 +36,27 @@ pub enum AlgorithmTag {
     /// ES256 (ECDSA over P-256).
     #[cfg(feature = "es256")]
     Es256,
+    /// WebAuthn (P-256 assertion carrying authenticator context).
+    #[cfg(feature = "webauthn")]
+    WebAuthn,
 }
 
 impl AlgorithmTag {
     /// Whether a signature body of `len` bytes is valid for this algorithm.
     ///
-    /// Both algorithms defined today are fixed-width at 64 bytes. Variable
-    /// algorithms (future RSA / `WebAuthn`) would relax this to a range or a
-    /// permitted set; adding such an arm is a localized change here.
+    /// Ed25519 and ES256 are fixed-width at 64 bytes. WebAuthn is variable
+    /// length: its body is a varint-length-prefixed `clientDataJSON` and
+    /// `authenticatorData` followed by a DER ECDSA signature, so the only
+    /// structural constraint here is non-emptiness (the full parse happens when
+    /// the concrete `WebAuthnSignature` is reconstructed).
     #[must_use]
     fn accepts_len(self, len: usize) -> bool {
         match self {
             AlgorithmTag::Ed25519 => len == 64,
             #[cfg(feature = "es256")]
             AlgorithmTag::Es256 => len == 64,
+            #[cfg(feature = "webauthn")]
+            AlgorithmTag::WebAuthn => len > 0,
         }
     }
 }
@@ -71,6 +81,8 @@ impl SignatureAlgorithm for AnyAlgorithm {
             AlgorithmTag::Ed25519 => Ed25519::default().prefix(),
             #[cfg(feature = "es256")]
             AlgorithmTag::Es256 => Es256::default().prefix(),
+            #[cfg(feature = "webauthn")]
+            AlgorithmTag::WebAuthn => WebAuthnP256::default().prefix(),
         }
     }
 
@@ -79,10 +91,21 @@ impl SignatureAlgorithm for AnyAlgorithm {
             AlgorithmTag::Ed25519 => Ed25519::default().config_tags(),
             #[cfg(feature = "es256")]
             AlgorithmTag::Es256 => Es256::default().config_tags(),
+            #[cfg(feature = "webauthn")]
+            AlgorithmTag::WebAuthn => WebAuthnP256::default().config_tags(),
         }
     }
 
     fn try_from_tags(bytes: &[u64]) -> Option<(Self, &[u64])> {
+        // WebAuthn MUST be tried before Es256: a WebAuthn-over-Es256 header is
+        // the full Es256 header followed by the 0x300001 marker, so Es256 alone
+        // would match its prefix and swallow the inner tags. Trying WebAuthn
+        // first consumes the marker and only falls through to bare Es256 when the
+        // marker is absent.
+        #[cfg(feature = "webauthn")]
+        if let Some((_, rest)) = WebAuthnP256::try_from_tags(bytes) {
+            return Some((AnyAlgorithm(AlgorithmTag::WebAuthn), rest));
+        }
         if let Some((_, rest)) = Ed25519::try_from_tags(bytes) {
             return Some((AnyAlgorithm(AlgorithmTag::Ed25519), rest));
         }
@@ -162,6 +185,16 @@ impl From<Es256Signature> for AnySignature {
         Self {
             algorithm: AlgorithmTag::Es256,
             bytes: Box::from(sig.to_bytes().as_slice()),
+        }
+    }
+}
+
+#[cfg(feature = "webauthn")]
+impl From<WebAuthnSignature> for AnySignature {
+    fn from(sig: WebAuthnSignature) -> Self {
+        Self {
+            algorithm: AlgorithmTag::WebAuthn,
+            bytes: sig.to_vec().into_boxed_slice(),
         }
     }
 }
@@ -319,5 +352,53 @@ mod tests {
         let agnostic_wire = serde_ipld_dagcbor::to_vec(&agnostic).unwrap();
 
         assert_eq!(concrete_wire, agnostic_wire);
+    }
+
+    #[cfg(feature = "webauthn")]
+    #[test]
+    fn webauthn_header_distinguishes_from_es256() {
+        use crate::SignatureAlgorithm;
+
+        // The WebAuthn header ends in the 0x300001 marker; Es256 ends in 0x15.
+        // Feeding each header through the agnostic try_from_tags must land on
+        // the matching tag and never confuse the two.
+        let webauthn = AnyAlgorithm(AlgorithmTag::WebAuthn);
+        let mut wa_header = vec![webauthn.prefix()];
+        wa_header.extend(webauthn.config_tags());
+        let (parsed, rest) = AnyAlgorithm::try_from_tags(&wa_header).unwrap();
+        assert_eq!(parsed.0, AlgorithmTag::WebAuthn);
+        assert!(rest.is_empty());
+
+        #[cfg(feature = "es256")]
+        {
+            let es = AnyAlgorithm(AlgorithmTag::Es256);
+            let mut es_header = vec![es.prefix()];
+            es_header.extend(es.config_tags());
+            let (parsed_es, _) = AnyAlgorithm::try_from_tags(&es_header).unwrap();
+            assert_eq!(parsed_es.0, AlgorithmTag::Es256);
+            // The two headers are not equal, so neither can parse as the other.
+            assert_ne!(wa_header, es_header);
+        }
+    }
+
+    #[cfg(feature = "webauthn")]
+    #[test]
+    fn webauthn_variable_body_roundtrips_through_any() {
+        use crate::algorithm::webauthn::WebAuthnSignature;
+
+        let sig = WebAuthnSignature::new(
+            br#"{"type":"webauthn.get","challenge":"abc"}"#.to_vec(),
+            vec![0xAA; 37],
+            vec![0x30, 0x44, 0x02, 0x20], // DER-ish stub
+        );
+        let expected = sig.to_vec();
+
+        let any = AnySignature::from(sig);
+        assert_eq!(any.algorithm(), AlgorithmTag::WebAuthn);
+        // A WebAuthn body is variable length; the agnostic signature stores it
+        // verbatim and a verifier can reconstruct the concrete signature from it.
+        assert_eq!(any.to_bytes(), expected.as_slice());
+        let restored = WebAuthnSignature::from_bytes(any.to_bytes()).unwrap();
+        assert_eq!(restored.authenticator_data, vec![0xAA; 37]);
     }
 }

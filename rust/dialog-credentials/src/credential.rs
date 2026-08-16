@@ -169,6 +169,18 @@ impl Credential {
             }
         }
 
+        #[cfg(feature = "webauthn")]
+        {
+            use constants::{
+                WEBAUTHN_PUBLIC_TAG, WEBAUTHN_PUBLIC_TAG_SIZE, WEBAUTHN_VERIFIER_EXPORT_SIZE,
+            };
+            if bytes.starts_with(WEBAUTHN_PUBLIC_TAG)
+                && bytes.len() == WEBAUTHN_VERIFIER_EXPORT_SIZE
+            {
+                return Self::webauthn_verifier_from_pubkey(&bytes[WEBAUTHN_PUBLIC_TAG_SIZE..]);
+            }
+        }
+
         Err(CredentialExportError::InvalidFormat(format!(
             "unrecognized credential format: length={}",
             bytes.len()
@@ -186,6 +198,17 @@ impl Credential {
             use constants::{ES256_PUBLIC_TAG, ES256_PUBLIC_TAG_SIZE, ES256_VERIFIER_EXPORT_SIZE};
             if bytes.starts_with(ES256_PUBLIC_TAG) && bytes.len() == ES256_VERIFIER_EXPORT_SIZE {
                 return Self::es256_verifier_from_pubkey(&bytes[ES256_PUBLIC_TAG_SIZE..]);
+            }
+        }
+        #[cfg(feature = "webauthn")]
+        {
+            use constants::{
+                WEBAUTHN_PUBLIC_TAG, WEBAUTHN_PUBLIC_TAG_SIZE, WEBAUTHN_VERIFIER_EXPORT_SIZE,
+            };
+            if bytes.starts_with(WEBAUTHN_PUBLIC_TAG)
+                && bytes.len() == WEBAUTHN_VERIFIER_EXPORT_SIZE
+            {
+                return Self::webauthn_verifier_from_pubkey(&bytes[WEBAUTHN_PUBLIC_TAG_SIZE..]);
             }
         }
         Err(CredentialExportError::InvalidFormat(format!(
@@ -211,6 +234,15 @@ impl Credential {
             .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
         Ok(Self::Verifier(VerifierCredential(Verifier::Es256(
             crate::Es256Verifier(crate::es256::Es256VerifyingKey::Native(vk)),
+        ))))
+    }
+
+    #[cfg(feature = "webauthn")]
+    fn webauthn_verifier_from_pubkey(pubkey: &[u8]) -> Result<Self, CredentialExportError> {
+        let verifier = crate::webauthn::WebAuthnVerifier::from_sec1_bytes(pubkey)
+            .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
+        Ok(Self::Verifier(VerifierCredential(Verifier::WebAuthn(
+            verifier,
         ))))
     }
 
@@ -247,6 +279,15 @@ fn tagged_public_bytes(verifier: &Verifier) -> Vec<u8> {
             let compressed = v.0.to_compressed_bytes();
             let mut buffer = Vec::with_capacity(ES256_PUBLIC_TAG.len() + compressed.len());
             buffer.extend_from_slice(ES256_PUBLIC_TAG);
+            buffer.extend_from_slice(&compressed);
+            buffer
+        }
+        #[cfg(feature = "webauthn")]
+        Verifier::WebAuthn(v) => {
+            use constants::WEBAUTHN_PUBLIC_TAG;
+            let compressed = v.to_sec1_bytes();
+            let mut buffer = Vec::with_capacity(WEBAUTHN_PUBLIC_TAG.len() + compressed.len());
+            buffer.extend_from_slice(WEBAUTHN_PUBLIC_TAG);
             buffer.extend_from_slice(&compressed);
             buffer
         }
