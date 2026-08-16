@@ -396,7 +396,7 @@ impl ProveDelegation<'_> {
         // a cheap check at admission.
         if let Err(error) = certificate
             .0
-            .verify_signature(&dialog_credentials::Ed25519KeyResolver)
+            .verify_signature(&dialog_credentials::DidKeyResolver)
             .await
         {
             tracing::warn!(
@@ -1074,7 +1074,7 @@ mod tests {
             audience.did(),
             UcanSubject::Specific(subject.did()),
             Command(vec!["storage".to_string()]),
-            actual_signer,
+            &dialog_credentials::Signer::from(actual_signer.clone()),
         )
         .await
         .expect("forge a delegation");

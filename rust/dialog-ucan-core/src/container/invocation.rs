@@ -546,7 +546,7 @@ mod tests {
 
         // Must be rejected: the delegation link's signature is not the
         // subject's, so the chain grants the attacker nothing.
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_err(),
             "forged delegation-link signature must be rejected, got: {result:?}"
