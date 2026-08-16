@@ -143,12 +143,16 @@ impl VarsigVerifier<Signature> for Verifier {
         }
         match self {
             Self::Ed25519(v) => {
-                let sig = Ed25519Signature::from_bytes(signature.to_bytes());
+                // The body is variable-length; reconstruct the concrete
+                // fixed-width signature, refusing a body of the wrong length.
+                let sig = Ed25519Signature::try_from(signature.to_bytes())
+                    .map_err(|_| signature::Error::new())?;
                 v.verify(msg, &sig).await
             }
             #[cfg(feature = "es256")]
             Self::Es256(v) => {
-                let sig = Es256Signature::from_bytes(signature.to_bytes());
+                let sig = Es256Signature::try_from(signature.to_bytes())
+                    .map_err(|_| signature::Error::new())?;
                 v.verify(msg, &sig).await
             }
         }

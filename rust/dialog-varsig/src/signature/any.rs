@@ -35,6 +35,22 @@ pub enum AlgorithmTag {
     Es256,
 }
 
+impl AlgorithmTag {
+    /// Whether a signature body of `len` bytes is valid for this algorithm.
+    ///
+    /// Both algorithms defined today are fixed-width at 64 bytes. Variable
+    /// algorithms (future RSA / `WebAuthn`) would relax this to a range or a
+    /// permitted set; adding such an arm is a localized change here.
+    #[must_use]
+    fn accepts_len(self, len: usize) -> bool {
+        match self {
+            AlgorithmTag::Ed25519 => len == 64,
+            #[cfg(feature = "es256")]
+            AlgorithmTag::Es256 => len == 64,
+        }
+    }
+}
+
 /// Algorithm-agnostic [`SignatureAlgorithm`].
 ///
 /// Wraps the concrete varsig algorithm descriptors. `Default` resolves to
@@ -80,13 +96,16 @@ impl SignatureAlgorithm for AnyAlgorithm {
 
 /// Algorithm-agnostic signature: an algorithm tag plus the raw signature bytes.
 ///
-/// Both supported algorithms use a 64-byte fixed-width signature, so the bytes
-/// are stored inline. The tag lets a verifier reject a signature produced by a
-/// different algorithm than it holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The body is stored variable-length (`Box<[u8]>`): the varsig header names the
+/// algorithm, and the algorithm determines the width. The two algorithms defined
+/// today are 64-byte fixed-width, but the type imposes no such limit, leaving
+/// room for algorithms with wider or variable signatures (RSA, `WebAuthn`). The
+/// tag lets a verifier reject a signature produced by a different algorithm than
+/// it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnySignature {
     algorithm: AlgorithmTag,
-    bytes: [u8; 64],
+    bytes: Box<[u8]>,
 }
 
 impl AnySignature {
@@ -96,30 +115,34 @@ impl AnySignature {
         self.algorithm
     }
 
-    /// The raw 64-byte signature.
+    /// The raw signature body.
     #[must_use]
-    pub const fn to_bytes(&self) -> [u8; 64] {
-        self.bytes
+    pub fn to_bytes(&self) -> &[u8] {
+        &self.bytes
     }
 
     /// Reconstruct a signature from the algorithm named by a varsig header and
     /// the raw signature body.
     ///
-    /// The header is the single source of truth for the algorithm; the 64-byte
-    /// body alone cannot distinguish algorithms that share a signature width.
-    /// This refuses (rather than defaulting) when the body is not 64 bytes.
+    /// The header is the single source of truth for the algorithm; the body
+    /// alone cannot distinguish algorithms that share a signature width. The
+    /// body length is validated against the named algorithm and this refuses
+    /// (rather than defaulting) when the length does not match.
     ///
     /// # Errors
     ///
-    /// Returns an error if `bytes` is not exactly 64 bytes.
+    /// Returns an error if `bytes` is not a valid signature length for
+    /// `algorithm`.
     pub fn from_algorithm_and_bytes(
         algorithm: &AnyAlgorithm,
         bytes: &[u8],
     ) -> Result<Self, ::signature::Error> {
-        let bytes: [u8; 64] = bytes.try_into().map_err(|_| ::signature::Error::new())?;
+        if !algorithm.0.accepts_len(bytes.len()) {
+            return Err(::signature::Error::new());
+        }
         Ok(Self {
             algorithm: algorithm.0,
-            bytes,
+            bytes: Box::from(bytes),
         })
     }
 }
@@ -128,7 +151,7 @@ impl From<Ed25519Signature> for AnySignature {
     fn from(sig: Ed25519Signature) -> Self {
         Self {
             algorithm: AlgorithmTag::Ed25519,
-            bytes: sig.to_bytes(),
+            bytes: Box::from(sig.to_bytes().as_slice()),
         }
     }
 }
@@ -138,19 +161,19 @@ impl From<Es256Signature> for AnySignature {
     fn from(sig: Es256Signature) -> Self {
         Self {
             algorithm: AlgorithmTag::Es256,
-            bytes: sig.to_bytes(),
+            bytes: Box::from(sig.to_bytes().as_slice()),
         }
     }
 }
 
-/// [`AnySignature`] encodes as its raw 64-byte body. The algorithm tag is
+/// [`AnySignature`] encodes as its raw signature body. The algorithm tag is
 /// carried out of band by the varsig header, which already names the algorithm
 /// separately from the signature body.
 impl SignatureEncoding for AnySignature {
-    type Repr = [u8; 64];
+    type Repr = Box<[u8]>;
 }
 
-impl From<AnySignature> for [u8; 64] {
+impl From<AnySignature> for Box<[u8]> {
     fn from(sig: AnySignature) -> Self {
         sig.bytes
     }
@@ -160,13 +183,12 @@ impl TryFrom<&[u8]> for AnySignature {
     type Error = ::signature::Error;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        let bytes: [u8; 64] = bytes.try_into().map_err(|_| ::signature::Error::new())?;
         // Bytes alone cannot name the algorithm. This byte-only path exists only
         // to satisfy `SignatureEncoding`; decode goes through
         // `from_algorithm_bytes`, which takes the tag from the varsig header.
         Ok(Self {
             algorithm: AlgorithmTag::Ed25519,
-            bytes,
+            bytes: Box::from(bytes),
         })
     }
 }
@@ -186,13 +208,9 @@ impl<'de> serde::Deserialize<'de> for AnySignature {
         // Deserialize` bound; a varsig envelope never decodes the signature this
         // way, it goes through `from_algorithm_bytes` with the header algorithm.
         let bytes = serde_bytes::ByteBuf::deserialize(deserializer)?;
-        let bytes: [u8; 64] = bytes
-            .as_ref()
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("expected a 64-byte signature"))?;
         Ok(Self {
             algorithm: AlgorithmTag::Ed25519,
-            bytes,
+            bytes: bytes.into_vec().into_boxed_slice(),
         })
     }
 }
@@ -241,6 +259,8 @@ mod tests {
 
     #[test]
     fn from_algorithm_bytes_refuses_wrong_length() {
+        // A 32-byte body is not a valid ed25519 signature length; per-algorithm
+        // validation refuses it rather than defaulting.
         let short = [0u8; 32];
         assert!(
             <AnySignature as Signature>::from_algorithm_bytes(
@@ -249,5 +269,55 @@ mod tests {
             )
             .is_err()
         );
+
+        #[cfg(feature = "es256")]
+        assert!(
+            <AnySignature as Signature>::from_algorithm_bytes(
+                &AnyAlgorithm(AlgorithmTag::Es256),
+                &short,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ed25519_and_es256_roundtrip_as_64_byte_bodies() {
+        let bytes = [3u8; 64];
+
+        let ed = <AnySignature as Signature>::from_algorithm_bytes(
+            &AnyAlgorithm(AlgorithmTag::Ed25519),
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(ed.to_bytes(), &bytes[..]);
+        assert_eq!(ed.to_bytes().len(), 64);
+
+        #[cfg(feature = "es256")]
+        {
+            let es = <AnySignature as Signature>::from_algorithm_bytes(
+                &AnyAlgorithm(AlgorithmTag::Es256),
+                &bytes,
+            )
+            .unwrap();
+            assert_eq!(es.to_bytes(), &bytes[..]);
+            assert_eq!(es.to_bytes().len(), 64);
+        }
+    }
+
+    #[test]
+    fn agnostic_ed25519_wire_bytes_match_concrete() {
+        // The agnostic signature must serialize byte-identically to a concrete
+        // Ed25519Signature carrying the same body. This is the on-wire proof
+        // that widening the in-memory body to Box<[u8]> did not change the
+        // encoding for the fixed-width algorithms.
+        let body = [9u8; 64];
+
+        let concrete = Ed25519Signature::from_bytes(body);
+        let agnostic = AnySignature::from(concrete);
+
+        let concrete_wire = serde_ipld_dagcbor::to_vec(&concrete).unwrap();
+        let agnostic_wire = serde_ipld_dagcbor::to_vec(&agnostic).unwrap();
+
+        assert_eq!(concrete_wire, agnostic_wire);
     }
 }
