@@ -98,6 +98,12 @@ impl<S: Signature> InvocationChain<S> {
                     StoredCheckError::GetError(get_err) => {
                         ContainerError::Invocation(format!("proof not found: {}", get_err))
                     }
+                    StoredCheckError::SignatureVerification { issuer, source } => {
+                        ContainerError::InvalidDelegationSignature {
+                            issuer,
+                            detail: source.to_string(),
+                        }
+                    }
                     StoredCheckError::CheckFailed(check_err) => {
                         check_failed_to_container_error(check_err)
                     }
@@ -412,6 +418,69 @@ mod tests {
         // Should fail verification due to issuer mismatch
         let result = chain.verify(&Ed25519KeyResolver).await;
         assert!(result.is_err());
+    }
+
+    // Pins the delegation-link signature forgery. A structurally-valid
+    // delegation whose `iss` claims the subject but whose signature is not
+    // the subject's must be rejected: the attacker cannot sign as the
+    // subject, so the chain must not authorize them. Before delegation
+    // signatures were verified this passed verification, since only the
+    // invocation's own signature was checked.
+    #[dialog_common::test]
+    async fn it_fails_verification_when_delegation_signature_is_forged() {
+        use crate::command::Command;
+        use crate::subject::Subject;
+
+        let subject_signer = generate_signer().await;
+        let subject_did = subject_signer.did();
+        let attacker_signer = generate_signer().await;
+        let attacker_did = attacker_signer.did();
+
+        // Forge a delegation: iss claims the subject, aud is the attacker,
+        // sub is the subject's resource, but it is signed by the attacker,
+        // not the subject. The structure is valid (root issuer == subject),
+        // only the signature does not verify against the subject's key.
+        let forged = Delegation::forge(
+            subject_did.clone(),
+            attacker_did.clone(),
+            Subject::Specific(subject_did.clone()),
+            Command::new(vec!["storage".to_string(), "get".to_string()]),
+            &attacker_signer,
+        )
+        .await
+        .expect("Failed to forge delegation");
+
+        let forged_cid = forged.to_cid();
+
+        // Attacker builds a valid invocation, correctly signed by themselves,
+        // referencing the forged delegation as its proof.
+        let invocation = InvocationBuilder::new()
+            .issuer(attacker_signer.clone())
+            .audience(&subject_did)
+            .subject(&subject_did)
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .proofs(vec![forged_cid])
+            .try_build()
+            .await
+            .expect("Failed to build invocation");
+
+        let mut delegations = HashMap::new();
+        delegations.insert(forged_cid, Arc::new(forged));
+
+        let chain = InvocationChain::new(invocation, delegations);
+
+        // Must be rejected: the delegation link's signature is not the
+        // subject's, so the chain grants the attacker nothing.
+        let result = chain.verify(&Ed25519KeyResolver).await;
+        assert!(
+            result.is_err(),
+            "forged delegation-link signature must be rejected, got: {result:?}"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("signature"),
+            "rejection should name a signature failure, got: {err}"
+        );
     }
 
     #[dialog_common::test]

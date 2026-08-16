@@ -301,6 +301,12 @@ impl UcanAuthorizer {
             // Only the first is a statement about their request, so only
             // the first may read as one.
             S3Error::Authorization(match e {
+                // A proof whose signature is not its claimed issuer's is a
+                // forged chain, not merely malformed input: name the issuer
+                // so the caller learns exactly which link did not hold.
+                ContainerError::InvalidDelegationSignature { issuer, .. } => {
+                    AuthorizeError::InvalidSignature { issuer }
+                }
                 ContainerError::Invocation(detail) => AuthorizeError::Malformed {
                     detail: format!("invocation chain did not verify: {detail}"),
                 },
@@ -391,6 +397,81 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
         chain.to_bytes().expect("Failed to serialize container")
+    }
+
+    // A forged proof (iss claims the subject, but signed by the attacker)
+    // must not authorize the attacker. The authorize path has to reject it
+    // and name the forged issuer via `AuthorizeError::InvalidSignature`,
+    // rather than passing because only the invocation's own signature was
+    // ever checked.
+    #[dialog_common::test]
+    async fn it_rejects_a_forged_delegation_signature() {
+        let subject_signer = test_signer().await;
+        let subject_did = subject_signer.did();
+        let attacker_signer = Ed25519Signer::import(&[7u8; 32]).await.unwrap();
+        let attacker_did = attacker_signer.did();
+
+        let command = vec!["memory".to_string(), "resolve".to_string()];
+
+        // Forge: iss = subject, aud = attacker, sub = subject, signed by
+        // the attacker (who cannot sign as the subject).
+        let forged = dialog_ucan_core::Delegation::forge(
+            subject_did.clone(),
+            attacker_did.clone(),
+            DelegatedSubject::Specific(subject_did.clone()),
+            dialog_ucan_core::command::Command::new(command.clone()),
+            &attacker_signer,
+        )
+        .await
+        .expect("Failed to forge delegation");
+
+        let forged_cid = forged.to_cid();
+
+        let mut args = BTreeMap::new();
+        args.insert(
+            "space".to_string(),
+            Promised::String("test-space".to_string()),
+        );
+        args.insert(
+            "cell".to_string(),
+            Promised::String("test-cell".to_string()),
+        );
+
+        // Attacker validly signs the invocation referencing the forged proof.
+        let invocation = InvocationBuilder::new()
+            .issuer(attacker_signer.clone())
+            .audience(&subject_did)
+            .subject(&subject_did)
+            .command(command)
+            .arguments(args)
+            .proofs(vec![forged_cid])
+            .try_build()
+            .await
+            .expect("Failed to build invocation");
+
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(forged_cid, std::sync::Arc::new(forged));
+        let chain = InvocationChain::new(invocation, delegations);
+        let container = chain.to_bytes().expect("Failed to serialize container");
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+
+        let result = authorizer.authorize(&container).await;
+        match result {
+            Err(S3Error::Authorization(AuthorizeError::InvalidSignature { issuer })) => {
+                assert_eq!(
+                    issuer, subject_did,
+                    "the forged issuer named in the rejection must be the subject"
+                );
+            }
+            other => panic!("expected InvalidSignature, got {other:?}"),
+        }
     }
 
     #[dialog_common::test]

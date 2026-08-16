@@ -182,6 +182,54 @@ impl<S: Signature> Delegation<S> {
     }
 }
 
+#[cfg(any(test, feature = "helpers"))]
+impl<S: Signature> Delegation<S> {
+    /// Build a delegation whose `iss` field claims one principal while the
+    /// envelope is actually signed by another.
+    ///
+    /// This exists solely to forge structurally-valid delegations with
+    /// signatures that do not verify against the claimed issuer, so tests
+    /// can prove that chain verification rejects them. It must never be
+    /// reachable in production, hence the feature gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`builder::BuildError`] if encoding or signing fails.
+    pub async fn forge<I: crate::issuer::Issuer<S>>(
+        claimed_issuer: Did,
+        audience: Did,
+        subject: Subject,
+        command: Command,
+        actual_signer: &I,
+    ) -> Result<Self, builder::BuildError> {
+        let payload = DelegationPayload {
+            issuer: claimed_issuer,
+            audience,
+            subject,
+            command,
+            policy: Vec::new(),
+            expiration: None,
+            not_before: None,
+            meta: None,
+            #[allow(clippy::expect_used)]
+            nonce: Nonce::generate_16().expect("failed to generate nonce"),
+        };
+
+        let envelope = EnvelopePayload::from(payload);
+        let encoded = envelope
+            .encode()
+            .map_err(|e| builder::BuildError::EncodingError(e.to_string()))?;
+
+        // Signed by `actual_signer`, not by `claimed_issuer`, so the
+        // signature will not verify against the resolved issuer key.
+        let signature = dialog_varsig::signature::Signer::sign(actual_signer, &encoded)
+            .await
+            .map_err(builder::BuildError::SigningError)?;
+
+        Ok(Self::new(Envelope(signature, envelope)))
+    }
+}
+
 impl<S: Signature> Debug for Delegation<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("Delegation").field(&self.envelope).finish()
