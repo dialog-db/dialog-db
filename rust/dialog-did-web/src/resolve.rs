@@ -9,16 +9,19 @@
 
 use dialog_capability::{Command, Provider};
 use dialog_common::ConditionalSync;
-use dialog_credentials::Verifier;
 use dialog_varsig::Did;
 
 use crate::error::ResolveError;
+use crate::verifier::MultiVerifier;
 
-/// Resolve a DID to its algorithm-agnostic verifier.
+/// Resolve a DID to its multi-key verifier.
 ///
-/// The output is the agnostic [`Verifier`], so a `did:key`, `did:web`, or
-/// (later) `did:plc` all resolve to the same type regardless of the key
-/// algorithm the DID's document names.
+/// The output is a [`MultiVerifier`], so a `did:key`, `did:web`, or (later)
+/// `did:plc` all resolve to the same type regardless of the key algorithm the
+/// DID's document names, or how many keys it names. A `did:key` resolves to a
+/// single-key set; a `did:web`/`did:plc` document may name several, and the
+/// verifier accepts a signature that any of them verifies (each member still
+/// only verifies signatures of its own algorithm).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolve {
     /// The DID to resolve.
@@ -38,7 +41,7 @@ impl Resolve {
     ///
     /// Returns whatever [`ResolveError`] the provider produces: an unsupported
     /// method, a fetch failure, a malformed document, or an unsupported key.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Verifier, ResolveError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<MultiVerifier, ResolveError>
     where
         Env: Provider<Resolve> + ConditionalSync,
     {
@@ -48,5 +51,5 @@ impl Resolve {
 
 impl Command for Resolve {
     type Input = Self;
-    type Output = Result<Verifier, ResolveError>;
+    type Output = Result<MultiVerifier, ResolveError>;
 }

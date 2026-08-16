@@ -13,11 +13,11 @@ use std::time::Duration;
 
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_credentials::Verifier;
 use web_time::Instant;
 
 use crate::error::ResolveError;
 use crate::resolve::Resolve;
+use crate::verifier::MultiVerifier;
 
 /// The default time-to-live for a successful resolution.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
@@ -26,7 +26,7 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(300);
 pub const DEFAULT_NEGATIVE_TTL: Duration = Duration::from_secs(30);
 
 struct Entry {
-    result: Result<Verifier, ResolveError>,
+    result: Result<MultiVerifier, ResolveError>,
     expires_at: Instant,
 }
 
@@ -56,7 +56,7 @@ impl<P> CachingResolver<P> {
         }
     }
 
-    fn cached(&self, did: &str) -> Option<Result<Verifier, ResolveError>> {
+    fn cached(&self, did: &str) -> Option<Result<MultiVerifier, ResolveError>> {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         match entries.get(did) {
             Some(entry) if entry.expires_at > Instant::now() => Some(entry.result.clone()),
@@ -68,7 +68,7 @@ impl<P> CachingResolver<P> {
         }
     }
 
-    fn store(&self, did: String, result: &Result<Verifier, ResolveError>) {
+    fn store(&self, did: String, result: &Result<MultiVerifier, ResolveError>) {
         let ttl = if result.is_ok() {
             self.ttl
         } else {
@@ -91,7 +91,7 @@ impl<P> Provider<Resolve> for CachingResolver<P>
 where
     P: Provider<Resolve> + ConditionalSync,
 {
-    async fn execute(&self, input: Resolve) -> Result<Verifier, ResolveError> {
+    async fn execute(&self, input: Resolve) -> Result<MultiVerifier, ResolveError> {
         let key = input.did.as_str().to_string();
         if let Some(hit) = self.cached(&key) {
             return hit;

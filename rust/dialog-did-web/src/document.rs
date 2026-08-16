@@ -9,9 +9,11 @@
 
 use base58::ToBase58;
 use dialog_credentials::Verifier;
+use dialog_varsig::Did;
 use serde::Deserialize;
 
 use crate::error::ResolveError;
+use crate::verifier::MultiVerifier;
 
 /// The ed25519 public-key multicodec prefix (`0xed 0x01`).
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
@@ -76,18 +78,36 @@ pub struct Jwk {
 }
 
 impl DidDocument {
-    /// Recover an algorithm-agnostic verifier from this document.
+    /// Recover a multi-key verifier from this document.
     ///
-    /// If `fragment` is `Some`, the verification method whose `id` ends with
-    /// `#fragment` is used; otherwise the first verification method that yields
-    /// a supported key wins.
+    /// A DID document names an *array* of verification methods, and a signature
+    /// could have been produced by any of them; a resolver cannot know which.
+    /// So this collects *every* supported key into a [`MultiVerifier`], which
+    /// verifies a signature if any member key does. The header-authoritative
+    /// signature already carries its algorithm, and each member verifier rejects
+    /// a signature whose algorithm tag does not match, so trying all members
+    /// only ever succeeds on a key of the right algorithm.
+    ///
+    /// If `fragment` is `Some`, the set is restricted to the verification method
+    /// whose `id` ends with `#fragment` (the seed of a future `kid`-hint fast
+    /// path); otherwise every supported method is included. A method with an
+    /// unsupported key type is skipped, not fatal, as long as at least one
+    /// supported key remains.
+    ///
+    /// The `did` is the DID this document was resolved for; the returned
+    /// verifier reports it as its identity (not any single key's `did:key`).
     ///
     /// # Errors
     ///
-    /// Returns [`ResolveError::NoSupportedVerificationMethod`] if no method
-    /// yields a usable key, or [`ResolveError::UnsupportedKey`] if the selected
-    /// method's key type or encoding is not supported.
-    pub fn verifier(&self, fragment: Option<&str>) -> Result<Verifier, ResolveError> {
+    /// Returns [`ResolveError::NoSupportedVerificationMethod`] if no candidate
+    /// method yields a usable key. If exactly one method was selected (e.g. via
+    /// a fragment) and its key is unsupported, that method's
+    /// [`ResolveError::UnsupportedKey`] is surfaced instead.
+    pub fn verifier(
+        &self,
+        did: &Did,
+        fragment: Option<&str>,
+    ) -> Result<MultiVerifier, ResolveError> {
         let candidates: Vec<&VerificationMethod> = match fragment {
             Some(frag) => self
                 .verification_method
@@ -101,16 +121,21 @@ impl DidDocument {
             return Err(ResolveError::NoSupportedVerificationMethod);
         }
 
+        let mut keys: Vec<Verifier> = Vec::new();
         let mut last_key_error: Option<ResolveError> = None;
         for method in candidates {
             match method.verifier() {
-                Ok(verifier) => return Ok(verifier),
+                Ok(verifier) => keys.push(verifier),
                 Err(err @ ResolveError::UnsupportedKey(_)) => last_key_error = Some(err),
                 Err(other) => return Err(other),
             }
         }
 
-        Err(last_key_error.unwrap_or(ResolveError::NoSupportedVerificationMethod))
+        if keys.is_empty() {
+            return Err(last_key_error.unwrap_or(ResolveError::NoSupportedVerificationMethod));
+        }
+
+        Ok(MultiVerifier::new(did.clone(), keys))
     }
 }
 

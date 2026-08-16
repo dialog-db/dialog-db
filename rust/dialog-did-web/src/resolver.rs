@@ -15,11 +15,11 @@
 
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_credentials::Verifier;
 use dialog_varsig::{AnySignature, Did, resolver::Resolver};
 
 use crate::error::ResolveError;
 use crate::resolve::Resolve;
+use crate::verifier::MultiVerifier;
 
 /// Adapts a [`Resolve`](crate::Resolve) provider into a varsig
 /// [`Resolver`](dialog_varsig::resolver::Resolver).
@@ -49,7 +49,7 @@ where
         &self,
         did: &Did,
     ) -> Result<impl dialog_varsig::Verifier<AnySignature>, ResolveError> {
-        let verifier: Verifier = Resolve::new(did.clone()).perform(self.env).await?;
+        let verifier: MultiVerifier = Resolve::new(did.clone()).perform(self.env).await?;
         Ok(verifier)
     }
 }

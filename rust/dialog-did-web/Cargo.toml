@@ -25,6 +25,7 @@ percent-encoding = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+signature = { workspace = true }
 thiserror = { workspace = true }
 web-time = { workspace = true }
 

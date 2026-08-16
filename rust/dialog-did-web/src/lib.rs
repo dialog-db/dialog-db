@@ -29,6 +29,7 @@ mod provider;
 mod resolve;
 mod resolver;
 mod url;
+mod verifier;
 
 #[cfg(test)]
 mod tests;
@@ -41,6 +42,7 @@ pub use provider::{DidKeyProvider, DidWebProvider, MethodResolver, WebResolver};
 pub use resolve::Resolve;
 pub use resolver::PerformingResolver;
 pub use url::did_web_url;
+pub use verifier::MultiVerifier;
 
 #[cfg(feature = "test-fetch")]
 pub use fetch::MapFetch;

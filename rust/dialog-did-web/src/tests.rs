@@ -40,6 +40,123 @@ fn did_document_multibase(did_web: &str, signer: &Signer) -> String {
     )
 }
 
+/// A did.json naming two verification methods, `#key-1` and `#key-2`, keyed by
+/// two signers' `publicKeyMultibase`.
+fn did_document_two_keys(did_web: &str, first: &Signer, second: &Signer) -> String {
+    format!(
+        r#"{{
+            "id": "{did_web}",
+            "verificationMethod": [
+                {{
+                    "id": "{did_web}#key-1",
+                    "type": "Multikey",
+                    "controller": "{did_web}",
+                    "publicKeyMultibase": "{first}"
+                }},
+                {{
+                    "id": "{did_web}#key-2",
+                    "type": "Multikey",
+                    "controller": "{did_web}",
+                    "publicKeyMultibase": "{second}"
+                }}
+            ]
+        }}"#,
+        first = multibase_of(first),
+        second = multibase_of(second),
+    )
+}
+
+/// A did:web document with two keys must verify a signature made with EITHER
+/// key. This is the multi-key any-match fix: before it, only the first key's
+/// signatures verified, so a signature by the SECOND key was refused.
+#[dialog_common::test]
+async fn it_verifies_a_signature_by_any_document_key() {
+    let key1 = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let key2 = Signer::from(Es256Signer::generate().await.unwrap());
+    let did_web = "did:web:multi.example";
+    let doc = did_document_two_keys(did_web, &key1, &key2);
+    let fetch = MapFetch::new().with(
+        "https://multi.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let provider = DidWebProvider::with_fetch(fetch);
+
+    let did: Did = did_web.parse().unwrap();
+    let verifier = Resolve::new(did).perform(&provider).await.unwrap();
+
+    // The verifier reports the did:web DID, not either member key's did:key.
+    assert_eq!(verifier.did().as_str(), did_web);
+
+    let msg = b"any key may have signed";
+
+    // A signature by the SECOND key must verify (the bug being fixed).
+    let sig2 = VarsigSigner::sign(&key2, msg).await.unwrap();
+    verifier.verify(msg, &sig2).await.unwrap();
+
+    // A signature by the FIRST key must also verify.
+    let sig1 = VarsigSigner::sign(&key1, msg).await.unwrap();
+    verifier.verify(msg, &sig1).await.unwrap();
+}
+
+/// A signature made with a key that is NOT in the document must be refused,
+/// even though the document names two other keys.
+#[dialog_common::test]
+async fn it_refuses_a_signature_by_a_key_not_in_the_document() {
+    let key1 = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let key2 = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let did_web = "did:web:strangers.example";
+    let doc = did_document_two_keys(did_web, &key1, &key2);
+    let fetch = MapFetch::new().with(
+        "https://strangers.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let provider = DidWebProvider::with_fetch(fetch);
+
+    let did: Did = did_web.parse().unwrap();
+    let verifier = Resolve::new(did).perform(&provider).await.unwrap();
+
+    let outsider = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let msg = b"i am not in the document";
+    let sig = VarsigSigner::sign(&outsider, msg).await.unwrap();
+    assert!(
+        verifier.verify(msg, &sig).await.is_err(),
+        "a signature by a key absent from the document must not verify"
+    );
+}
+
+/// A `#fragment` in the resolved DID selects exactly that verification method:
+/// the kid-hint path. A signature by `key-2` verifies through `#key-2`, while a
+/// signature by `key-1` is refused (its key is not in the selected set).
+#[dialog_common::test]
+async fn it_selects_a_single_key_by_fragment() {
+    let key1 = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let key2 = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let did_web = "did:web:pick.example";
+    let doc = did_document_two_keys(did_web, &key1, &key2);
+    let fetch = MapFetch::new().with(
+        "https://pick.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let provider = DidWebProvider::with_fetch(fetch);
+
+    // Resolve did:web:pick.example#key-2: only key-2 is in the verifier.
+    let did: Did = format!("{did_web}#key-2").parse().unwrap();
+    let verifier = Resolve::new(did).perform(&provider).await.unwrap();
+
+    // The verifier's identity is the base did:web DID (fragment stripped).
+    assert_eq!(verifier.did().as_str(), did_web);
+
+    let msg = b"selected by fragment";
+    let sig2 = VarsigSigner::sign(&key2, msg).await.unwrap();
+    verifier.verify(msg, &sig2).await.unwrap();
+
+    let sig1 = VarsigSigner::sign(&key1, msg).await.unwrap();
+    assert!(
+        verifier.verify(msg, &sig1).await.is_err(),
+        "a fragment-selected verifier must refuse a signature by another key"
+    );
+}
+
 async fn resolves_algorithm(signer: Signer) {
     let did_web = "did:web:example.com";
     let doc = did_document_multibase(did_web, &signer);
@@ -240,7 +357,8 @@ fn document_selects_by_fragment() {
     .unwrap();
     // Selecting a fragment restricts to that method; both keys here are junk, so
     // it fails as an unsupported key rather than silently using another method.
-    let err = doc.verifier(Some("key-1")).unwrap_err();
+    let did: Did = "did:web:frag.example".parse().unwrap();
+    let err = doc.verifier(&did, Some("key-1")).unwrap_err();
     assert!(
         matches!(err, ResolveError::UnsupportedKey(_)),
         "got {err:?}"

@@ -1189,6 +1189,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "signature",
  "thiserror 2.0.18",
  "tokio",
  "wasm-bindgen-test",
