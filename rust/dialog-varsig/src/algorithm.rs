@@ -5,6 +5,8 @@ pub mod ecdsa;
 pub mod eddsa;
 pub mod hash;
 pub mod rsa;
+#[cfg(feature = "webauthn")]
+pub mod webauthn;
 
 use std::fmt::Debug;
 

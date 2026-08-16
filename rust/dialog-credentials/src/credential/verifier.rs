@@ -55,6 +55,10 @@ impl VerifierCredential {
             }
             #[cfg(feature = "es256")]
             Verifier::Es256(verifier) => VerifierCredentialExport(es256_native::export(verifier)),
+            #[cfg(feature = "webauthn")]
+            Verifier::WebAuthn(verifier) => {
+                VerifierCredentialExport(webauthn_native::export(verifier))
+            }
         }
     }
 
@@ -77,6 +81,11 @@ impl VerifierCredential {
         #[cfg(feature = "es256")]
         if let Some(verifier) = es256_native::try_import(data)? {
             return Ok(Self(Verifier::Es256(verifier)));
+        }
+
+        #[cfg(feature = "webauthn")]
+        if let Some(verifier) = webauthn_native::try_import(data)? {
+            return Ok(Self(Verifier::WebAuthn(verifier)));
         }
 
         Err(CredentialExportError::InvalidFormat(
@@ -112,6 +121,37 @@ mod es256_native {
         let vk = p256::ecdsa::VerifyingKey::from_sec1_bytes(key_arr)
             .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
         Ok(Some(Es256Verifier(Es256VerifyingKey::Native(vk))))
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "webauthn"))]
+mod webauthn_native {
+    use super::CredentialExportError;
+    use crate::credential::constants::{
+        WEBAUTHN_PUBLIC_KEY_SIZE, WEBAUTHN_PUBLIC_TAG, WEBAUTHN_PUBLIC_TAG_SIZE,
+        WEBAUTHN_VERIFIER_EXPORT_SIZE,
+    };
+    use crate::webauthn::WebAuthnVerifier;
+
+    pub(super) fn export(verifier: &WebAuthnVerifier) -> Vec<u8> {
+        let compressed = verifier.to_sec1_bytes();
+        let mut buffer = vec![0u8; WEBAUTHN_VERIFIER_EXPORT_SIZE];
+        buffer[..WEBAUTHN_PUBLIC_TAG_SIZE].copy_from_slice(WEBAUTHN_PUBLIC_TAG);
+        buffer[WEBAUTHN_PUBLIC_TAG_SIZE..].copy_from_slice(&compressed);
+        buffer
+    }
+
+    pub(super) fn try_import(
+        data: &[u8],
+    ) -> Result<Option<WebAuthnVerifier>, CredentialExportError> {
+        if data.len() != WEBAUTHN_VERIFIER_EXPORT_SIZE || !data.starts_with(WEBAUTHN_PUBLIC_TAG) {
+            return Ok(None);
+        }
+        let key = &data[WEBAUTHN_PUBLIC_TAG_SIZE..];
+        debug_assert_eq!(key.len(), WEBAUTHN_PUBLIC_KEY_SIZE);
+        let verifier = WebAuthnVerifier::from_sec1_bytes(key)
+            .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
+        Ok(Some(verifier))
     }
 }
 
@@ -159,6 +199,15 @@ impl VerifierCredential {
                 buffer.extend_from_slice(&compressed);
                 buffer
             }
+            #[cfg(feature = "webauthn")]
+            Verifier::WebAuthn(verifier) => {
+                use crate::credential::constants::WEBAUTHN_PUBLIC_TAG;
+                let compressed = verifier.to_sec1_bytes();
+                let mut buffer = Vec::with_capacity(WEBAUTHN_PUBLIC_TAG.len() + compressed.len());
+                buffer.extend_from_slice(WEBAUTHN_PUBLIC_TAG);
+                buffer.extend_from_slice(&compressed);
+                buffer
+            }
         }
     }
 
@@ -201,6 +250,19 @@ impl VerifierCredential {
                 return Ok(Self(Verifier::Es256(crate::Es256Verifier(
                     Es256VerifyingKey::Native(vk),
                 ))));
+            }
+        }
+
+        #[cfg(feature = "webauthn")]
+        {
+            use crate::credential::constants::WEBAUTHN_PUBLIC_TAG;
+            if bytes.starts_with(WEBAUTHN_PUBLIC_TAG)
+                && bytes.len() == WEBAUTHN_PUBLIC_TAG.len() + 33
+            {
+                let key = &bytes[WEBAUTHN_PUBLIC_TAG.len()..];
+                let verifier = crate::webauthn::WebAuthnVerifier::from_sec1_bytes(key)
+                    .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
+                return Ok(Self(Verifier::WebAuthn(verifier)));
             }
         }
 

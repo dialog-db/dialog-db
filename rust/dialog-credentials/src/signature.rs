@@ -37,6 +37,11 @@ use crate::{Es256Signer, Es256Verifier};
 #[cfg(feature = "es256")]
 use dialog_varsig::ecdsa::Es256Signature;
 
+#[cfg(feature = "webauthn")]
+use crate::webauthn::WebAuthnVerifier;
+#[cfg(feature = "webauthn")]
+use dialog_varsig::webauthn::WebAuthnSignature;
+
 /// Algorithm-agnostic verifier.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verifier {
@@ -45,6 +50,10 @@ pub enum Verifier {
     /// An ES256 (P-256) verifier.
     #[cfg(feature = "es256")]
     Es256(Es256Verifier),
+    /// A WebAuthn (P-256 passkey) verifier. Distinct from `Es256`: it verifies
+    /// the full WebAuthn assertion structure, not a bare ECDSA signature.
+    #[cfg(feature = "webauthn")]
+    WebAuthn(WebAuthnVerifier),
 }
 
 impl From<Ed25519Verifier> for Verifier {
@@ -60,6 +69,13 @@ impl From<Es256Verifier> for Verifier {
     }
 }
 
+#[cfg(feature = "webauthn")]
+impl From<WebAuthnVerifier> for Verifier {
+    fn from(v: WebAuthnVerifier) -> Self {
+        Self::WebAuthn(v)
+    }
+}
+
 impl Verifier {
     /// The algorithm this verifier checks.
     #[must_use]
@@ -68,6 +84,8 @@ impl Verifier {
             Self::Ed25519(_) => AlgorithmTag::Ed25519,
             #[cfg(feature = "es256")]
             Self::Es256(_) => AlgorithmTag::Es256,
+            #[cfg(feature = "webauthn")]
+            Self::WebAuthn(_) => AlgorithmTag::WebAuthn,
         }
     }
 
@@ -78,6 +96,8 @@ impl Verifier {
             Self::Ed25519(v) => Some(v),
             #[cfg(feature = "es256")]
             Self::Es256(_) => None,
+            #[cfg(feature = "webauthn")]
+            Self::WebAuthn(_) => None,
         }
     }
 
@@ -88,6 +108,20 @@ impl Verifier {
         match self {
             Self::Es256(v) => Some(v),
             Self::Ed25519(_) => None,
+            #[cfg(feature = "webauthn")]
+            Self::WebAuthn(_) => None,
+        }
+    }
+
+    /// Get the WebAuthn verifier, if this is a WebAuthn arm.
+    #[cfg(feature = "webauthn")]
+    #[must_use]
+    pub const fn as_webauthn(&self) -> Option<&WebAuthnVerifier> {
+        match self {
+            Self::WebAuthn(v) => Some(v),
+            Self::Ed25519(_) => None,
+            #[cfg(feature = "es256")]
+            Self::Es256(_) => None,
         }
     }
 
@@ -100,6 +134,13 @@ impl Verifier {
     pub fn from_did_key(s: &str) -> Result<Self, DidFromStrError> {
         if let Ok(v) = s.parse::<Ed25519Verifier>() {
             return Ok(Self::Ed25519(v));
+        }
+        // WebAuthn carries a distinct multicodec prefix from plain p256-pub, so
+        // it is tried on its own before Es256; a passkey did:key resolves to a
+        // WebAuthnVerifier, an ordinary P-256 did:key to an Es256Verifier.
+        #[cfg(feature = "webauthn")]
+        if let Ok(v) = s.parse::<WebAuthnVerifier>() {
+            return Ok(Self::WebAuthn(v));
         }
         #[cfg(feature = "es256")]
         if let Ok(v) = s.parse::<Es256Verifier>() {
@@ -123,6 +164,8 @@ impl std::fmt::Display for Verifier {
             Self::Ed25519(v) => write!(f, "{v}"),
             #[cfg(feature = "es256")]
             Self::Es256(v) => write!(f, "{v}"),
+            #[cfg(feature = "webauthn")]
+            Self::WebAuthn(v) => write!(f, "{v}"),
         }
     }
 }
@@ -133,6 +176,8 @@ impl Principal for Verifier {
             Self::Ed25519(v) => v.did(),
             #[cfg(feature = "es256")]
             Self::Es256(v) => v.did(),
+            #[cfg(feature = "webauthn")]
+            Self::WebAuthn(v) => v.did(),
         }
     }
 }
@@ -153,6 +198,16 @@ impl VarsigVerifier<Signature> for Verifier {
             #[cfg(feature = "es256")]
             Self::Es256(v) => {
                 let sig = Es256Signature::try_from(signature.to_bytes())
+                    .map_err(|_| signature::Error::new())?;
+                v.verify(msg, &sig).await
+            }
+            #[cfg(feature = "webauthn")]
+            Self::WebAuthn(v) => {
+                // The agnostic body is the varint-prefixed WebAuthn wire form;
+                // reconstruct the concrete signature and run the full assertion
+                // check (challenge binding + inner ECDSA over authenticatorData
+                // || SHA-256(clientDataJSON)).
+                let sig = WebAuthnSignature::from_bytes(signature.to_bytes())
                     .map_err(|_| signature::Error::new())?;
                 v.verify(msg, &sig).await
             }

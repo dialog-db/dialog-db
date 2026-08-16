@@ -23,6 +23,15 @@ es256 = [
     "dialog-varsig/secp256r1",
     "dialog-varsig/sha2_256",
 ]
+# WebAuthn / passkeys wrap ES256 (P-256), so this builds on the es256 stack and
+# adds the JSON / base64 / hashing needed to parse and verify assertions.
+webauthn = [
+    "es256",
+    "dep:sha2",
+    "dep:base64",
+    "dep:serde_json",
+    "dialog-varsig/webauthn",
+]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -42,6 +51,11 @@ base58 = { workspace = true, optional = true }
 # `pkcs8` is used by the browser WebCrypto arm to encode the private scalar as
 # PKCS#8 for `SubtleCrypto.importKey`; it is inert on native builds.
 p256 = { workspace = true, optional = true, features = ["ecdsa", "pkcs8"] }
+
+# webauthn feature deps: parse clientDataJSON, base64url the challenge, hash.
+sha2 = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
