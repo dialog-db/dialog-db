@@ -112,6 +112,28 @@ impl Signature {
     pub const fn to_bytes(&self) -> [u8; 64] {
         self.bytes
     }
+
+    /// Reconstruct a signature from the algorithm named by a varsig header and
+    /// the raw signature body.
+    ///
+    /// The header is the single source of truth for the algorithm; the 64-byte
+    /// body alone cannot distinguish algorithms that share a signature width.
+    /// This refuses (rather than defaulting) when the header names an algorithm
+    /// this build does not support, or when the body is not 64 bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `bytes` is not exactly 64 bytes.
+    pub fn from_algorithm_and_bytes(
+        algorithm: &Algorithm,
+        bytes: &[u8],
+    ) -> Result<Self, signature::Error> {
+        let bytes: [u8; 64] = bytes.try_into().map_err(|_| signature::Error::new())?;
+        Ok(Self {
+            algorithm: algorithm.0,
+            bytes,
+        })
+    }
 }
 
 impl From<Ed25519Signature> for Signature {
@@ -162,6 +184,13 @@ impl TryFrom<&[u8]> for Signature {
 
 impl VarsigSignature for Signature {
     type Algorithm = Algorithm;
+
+    fn from_algorithm_bytes(
+        algorithm: &Self::Algorithm,
+        bytes: &[u8],
+    ) -> Result<Self, signature::Error> {
+        Self::from_algorithm_and_bytes(algorithm, bytes)
+    }
 }
 
 /// Algorithm-agnostic verifier.
@@ -390,6 +419,45 @@ mod tests {
         let sig = VarsigSigner::sign(&signer, msg).await.unwrap();
         assert_eq!(sig.algorithm(), AlgorithmTag::Ed25519);
         verifier.verify(msg, &sig).await.unwrap();
+    }
+
+    #[dialog_common::test]
+    fn from_algorithm_bytes_takes_tag_from_header_not_bytes() {
+        // The 64-byte body cannot name its algorithm. Reconstruction must take
+        // the tag from the (header-provided) algorithm, never guess from bytes.
+        let bytes = [7u8; 64];
+
+        let ed = <Signature as VarsigSignature>::from_algorithm_bytes(
+            &Algorithm(AlgorithmTag::Ed25519),
+            &bytes,
+        )
+        .unwrap();
+        assert_eq!(ed.algorithm(), AlgorithmTag::Ed25519);
+
+        #[cfg(feature = "es256")]
+        {
+            let es = <Signature as VarsigSignature>::from_algorithm_bytes(
+                &Algorithm(AlgorithmTag::Es256),
+                &bytes,
+            )
+            .unwrap();
+            assert_eq!(es.algorithm(), AlgorithmTag::Es256);
+            // Same bytes, different header algorithm, different tag: the header
+            // is authoritative.
+            assert_ne!(ed.algorithm(), es.algorithm());
+        }
+    }
+
+    #[dialog_common::test]
+    fn from_algorithm_bytes_refuses_wrong_length() {
+        let short = [0u8; 32];
+        assert!(
+            <Signature as VarsigSignature>::from_algorithm_bytes(
+                &Algorithm(AlgorithmTag::Ed25519),
+                &short,
+            )
+            .is_err()
+        );
     }
 
     #[cfg(feature = "es256")]
