@@ -539,7 +539,7 @@ mod tests {
         subject: UcanSubject,
     ) -> UcanDelegation {
         let delegation = DelegationBuilder::new()
-            .issuer(issuer.clone())
+            .issuer(dialog_credentials::Signer::from(issuer.clone()))
             .audience(audience)
             .subject(subject)
             .command(vec!["storage".to_string()])
@@ -692,7 +692,7 @@ mod tests {
             .as_secs();
         let past = Timestamp::try_from((now - 3600) as i128).unwrap();
         let delegation = DelegationBuilder::new()
-            .issuer(space.clone())
+            .issuer(dialog_credentials::Signer::from(space.clone()))
             .audience(&holder)
             .subject(UcanSubject::Specific(space.did()))
             .command(vec!["storage".to_string()])
@@ -932,7 +932,7 @@ mod tests {
         let holder = signer().await;
 
         let root = DelegationBuilder::new()
-            .issuer(space.clone())
+            .issuer(dialog_credentials::Signer::from(space.clone()))
             .audience(&mid)
             .subject(UcanSubject::Specific(space.did()))
             .command(vec!["storage".to_string()])
@@ -940,7 +940,7 @@ mod tests {
             .await
             .unwrap();
         let leaf = DelegationBuilder::new()
-            .issuer(mid.clone())
+            .issuer(dialog_credentials::Signer::from(mid.clone()))
             .audience(&holder)
             .subject(UcanSubject::Specific(space.did()))
             .command(vec!["storage".to_string()])

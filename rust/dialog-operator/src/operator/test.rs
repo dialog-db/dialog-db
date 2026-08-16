@@ -514,7 +514,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let signer = profile.signer().signer().as_ed25519().unwrap().clone();
+            let signer = profile.signer().signer().clone();
             let authorization = proof.claim(signer).unwrap();
 
             // Try to set expiration beyond proof bounds
@@ -554,7 +554,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let signer = profile.signer().signer().as_ed25519().unwrap().clone();
+            let signer = profile.signer().signer().clone();
             let authorization = proof.claim(signer).unwrap();
 
             // Try to set not_before earlier than proof bounds
@@ -595,7 +595,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let signer = profile.signer().signer().as_ed25519().unwrap().clone();
+            let signer = profile.signer().signer().clone();
             let authorization = proof.claim(signer).unwrap();
 
             // Narrow the window - should succeed

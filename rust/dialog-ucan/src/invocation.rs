@@ -2,7 +2,7 @@
 
 use dialog_capability::Did;
 use dialog_ucan_core::InvocationChain;
-use dialog_varsig::eddsa::Ed25519Signature;
+use dialog_varsig::AnySignature;
 
 /// A signed UCAN invocation ready to be redeemed at an access service.
 ///
@@ -13,7 +13,7 @@ use dialog_varsig::eddsa::Ed25519Signature;
 #[derive(Debug, Clone)]
 pub struct UcanInvocation {
     /// The signed invocation chain (invocation + delegation proofs).
-    pub chain: Box<InvocationChain<Ed25519Signature>>,
+    pub chain: Box<InvocationChain<AnySignature>>,
     /// The subject DID this invocation acts on.
     pub subject: Did,
     /// The ability path (e.g., "/storage/get").
@@ -32,7 +32,7 @@ impl UcanInvocation {
     }
 
     /// Get the invocation chain.
-    pub fn chain(&self) -> &InvocationChain<Ed25519Signature> {
+    pub fn chain(&self) -> &InvocationChain<AnySignature> {
         &self.chain
     }
 

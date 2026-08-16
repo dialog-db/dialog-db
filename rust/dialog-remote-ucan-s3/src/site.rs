@@ -310,7 +310,7 @@ mod tests {
             .expect("operator key");
         let command = vec!["memory".to_string(), "resolve".to_string()];
         let delegation = DelegationBuilder::new()
-            .issuer(subject.clone())
+            .issuer(dialog_credentials::Signer::from(subject.clone()))
             .audience(&operator)
             .subject(DelegatedSubject::Specific(subject.did()))
             .command(command.clone())
@@ -319,7 +319,7 @@ mod tests {
             .expect("delegation");
         let delegation_cid = delegation.to_cid();
         let invocation = InvocationBuilder::new()
-            .issuer(operator)
+            .issuer(dialog_credentials::Signer::from(operator))
             .audience(&subject.did())
             .subject(&subject.did())
             .command(command)

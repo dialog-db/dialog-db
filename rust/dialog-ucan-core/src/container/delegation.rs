@@ -13,8 +13,8 @@ use super::{Container, ContainerError};
 use crate::Delegation;
 use crate::subject::Subject;
 use crate::time::Timestamp;
+use dialog_varsig::AnySignature;
 use dialog_varsig::Did;
-use dialog_varsig::eddsa::Ed25519Signature;
 use ipld_core::cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
@@ -32,7 +32,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct DelegationChain {
     /// The delegation proofs keyed by CID.
-    delegations: HashMap<Cid, Arc<Delegation<Ed25519Signature>>>,
+    delegations: HashMap<Cid, Arc<Delegation<AnySignature>>>,
     /// The CIDs of the delegation proofs in subject-first (root-to-leaf) order.
     /// This is guaranteed to be non-empty.
     proof_cids: Vec<Cid>,
@@ -53,7 +53,7 @@ impl DelegationChain {
     ///
     /// This is the primary constructor for creating a delegation chain from a single
     /// root delegation (typically subject -> operator).
-    pub fn new(delegation: Delegation<Ed25519Signature>) -> Self {
+    pub fn new(delegation: Delegation<AnySignature>) -> Self {
         let cid = delegation.to_cid();
         let mut delegations = HashMap::with_capacity(1);
         delegations.insert(cid, Arc::new(delegation));
@@ -81,7 +81,7 @@ impl DelegationChain {
 
         let mut delegations_vec = Vec::with_capacity(proof_bytes.len());
         for (i, bytes) in proof_bytes.iter().enumerate() {
-            let delegation: Delegation<Ed25519Signature> = serde_ipld_dagcbor::from_slice(bytes)
+            let delegation: Delegation<AnySignature> = serde_ipld_dagcbor::from_slice(bytes)
                 .map_err(|e| {
                     ContainerError::Invocation(format!("failed to decode delegation {}: {}", i, e))
                 })?;
@@ -104,7 +104,7 @@ impl DelegationChain {
     }
 
     /// Iterate the chain's delegations in root-to-leaf order.
-    pub fn proofs(&self) -> impl Iterator<Item = &Delegation<Ed25519Signature>> {
+    pub fn proofs(&self) -> impl Iterator<Item = &Delegation<AnySignature>> {
         self.proof_cids
             .iter()
             .map(|cid| self.proof_for_cid(cid).as_ref())
@@ -116,13 +116,13 @@ impl DelegationChain {
     /// For constructing a delegation lookup table — most commonly to
     /// hand to `InvocationChain::new`. Collect into a `HashMap` at
     /// the call site.
-    pub fn export(&self) -> impl Iterator<Item = (Cid, Arc<Delegation<Ed25519Signature>>)> + '_ {
+    pub fn export(&self) -> impl Iterator<Item = (Cid, Arc<Delegation<AnySignature>>)> + '_ {
         self.proof_cids
             .iter()
             .map(|cid| (*cid, self.proof_for_cid(cid).clone()))
     }
 
-    fn proof_for_cid(&self, cid: &Cid) -> &Arc<Delegation<Ed25519Signature>> {
+    fn proof_for_cid(&self, cid: &Cid) -> &Arc<Delegation<AnySignature>> {
         self.delegations
             .get(cid)
             .expect("proof_cids and delegations are kept in sync by construction")
@@ -201,7 +201,7 @@ impl DelegationChain {
     /// Push a delegation onto the chain (closer to invoker).
     ///
     /// Its issuer must match the current chain's audience.
-    pub fn push(&self, delegation: Delegation<Ed25519Signature>) -> Result<Self, ContainerError> {
+    pub fn push(&self, delegation: Delegation<AnySignature>) -> Result<Self, ContainerError> {
         let current_audience = self.audience();
         let new_issuer = delegation.issuer();
         if new_issuer != current_audience {
@@ -226,7 +226,7 @@ impl DelegationChain {
     }
 }
 
-impl TryFrom<Vec<Delegation<Ed25519Signature>>> for DelegationChain {
+impl TryFrom<Vec<Delegation<AnySignature>>> for DelegationChain {
     type Error = ContainerError;
 
     /// Create a delegation chain from a vector of delegations.
@@ -243,7 +243,7 @@ impl TryFrom<Vec<Delegation<Ed25519Signature>>> for DelegationChain {
     /// # Errors
     ///
     /// Returns an error if the vector is empty or if principal alignment fails.
-    fn try_from(delegations_vec: Vec<Delegation<Ed25519Signature>>) -> Result<Self, Self::Error> {
+    fn try_from(delegations_vec: Vec<Delegation<AnySignature>>) -> Result<Self, Self::Error> {
         if delegations_vec.is_empty() {
             return Err(ContainerError::Configuration(
                 "DelegationChain requires at least one delegation".to_string(),
@@ -282,8 +282,8 @@ impl TryFrom<Vec<Delegation<Ed25519Signature>>> for DelegationChain {
     }
 }
 
-impl From<Delegation<Ed25519Signature>> for DelegationChain {
-    fn from(delegation: Delegation<Ed25519Signature>) -> Self {
+impl From<Delegation<AnySignature>> for DelegationChain {
+    fn from(delegation: Delegation<AnySignature>) -> Self {
         Self::new(delegation)
     }
 }
@@ -306,10 +306,10 @@ impl TryFrom<Container> for DelegationChain {
         let token_bytes = container.into_tokens();
 
         // Deserialize delegations and verify principal alignment
-        let mut delegations_vec: Vec<Delegation<Ed25519Signature>> =
+        let mut delegations_vec: Vec<Delegation<AnySignature>> =
             Vec::with_capacity(token_bytes.len());
         for (i, bytes) in token_bytes.iter().enumerate() {
-            let delegation: Delegation<Ed25519Signature> = serde_ipld_dagcbor::from_slice(bytes)
+            let delegation: Delegation<AnySignature> = serde_ipld_dagcbor::from_slice(bytes)
                 .map_err(|e| {
                     ContainerError::Invocation(format!("failed to decode delegation {}: {}", i, e))
                 })?;

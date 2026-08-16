@@ -489,14 +489,7 @@ where
             .perform(self)
             .await?;
 
-        let operator_signer = self
-            .authority
-            .operator_signer()
-            .as_ed25519()
-            .cloned()
-            .ok_or_else(|| AuthorizeError::Malformed {
-                detail: "authorization requires an ed25519 operator signer".into(),
-            })?;
+        let operator_signer = self.authority.operator_signer().clone();
         proof.claim(operator_signer)
     }
 }
@@ -553,7 +546,7 @@ mod tests {
         expiration: Option<Timestamp>,
     ) -> UcanDelegation {
         let mut builder = DelegationBuilder::new()
-            .issuer(space.clone())
+            .issuer(dialog_credentials::Signer::from(space.clone()))
             .audience(holder)
             .subject(UcanSubject::Specific(space.did()))
             .command(vec!["storage".to_string()]);
@@ -716,7 +709,7 @@ mod tests {
         let holder = Ed25519Signer::generate().await?;
 
         let constrained = DelegationBuilder::new()
-            .issuer(space.clone())
+            .issuer(dialog_credentials::Signer::from(space.clone()))
             .audience(&holder)
             .subject(UcanSubject::Specific(space.did()))
             .command(vec!["storage".to_string()])
@@ -875,7 +868,7 @@ mod tests {
 
         // space -> profile, retained (the explicit, synced act).
         let delegation = DelegationBuilder::new()
-            .issuer(space.clone())
+            .issuer(dialog_credentials::Signer::from(space.clone()))
             .audience(&profile.did())
             .subject(UcanSubject::Specific(space.did()))
             .command(vec![])

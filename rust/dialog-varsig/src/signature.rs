@@ -1,10 +1,12 @@
 //! Varsig header, signature trait, and signing/verification re-exports.
 
+pub mod any;
 pub mod signer;
 pub mod verifier;
 
 use super::{Codec, Format, SignatureAlgorithm};
 use ::signature::SignatureEncoding;
+pub use any::{AlgorithmTag, AnyAlgorithm, AnySignature};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 pub use signer::Signer;

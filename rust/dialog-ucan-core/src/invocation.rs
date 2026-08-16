@@ -816,7 +816,8 @@ mod tests {
         time::{TimeRange, Timestamp},
     };
     use builder::InvocationBuilder;
-    use dialog_credentials::ed25519::{Ed25519KeyResolver, Ed25519Signer};
+    use dialog_credentials::DidKeyResolver;
+    use dialog_credentials::ed25519::Ed25519Signer;
     use dialog_varsig::{did::Did, eddsa::Ed25519Signature, principal::Principal};
     use std::{
         cell::RefCell,
@@ -920,7 +921,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let resolver = Ed25519KeyResolver;
+        let resolver = DidKeyResolver;
         invocation.verify_signature(&resolver).await?;
 
         Ok(())
@@ -995,7 +996,7 @@ mod tests {
         assert_eq!(invocation1.nonce(), invocation2.nonce());
 
         // Both signatures should verify
-        let resolver = Ed25519KeyResolver;
+        let resolver = DidKeyResolver;
         invocation1.verify_signature(&resolver).await?;
         invocation2.verify_signature(&resolver).await?;
 
@@ -1049,7 +1050,7 @@ mod tests {
         );
 
         // But both should verify with their respective keys
-        let resolver = Ed25519KeyResolver;
+        let resolver = DidKeyResolver;
         invocation1.verify_signature(&resolver).await?;
         invocation2.verify_signature(&resolver).await?;
 
@@ -1082,7 +1083,7 @@ mod tests {
         assert_eq!(invocation.arguments(), &args);
 
         // Signature should still verify
-        let resolver = Ed25519KeyResolver;
+        let resolver = DidKeyResolver;
         invocation.verify_signature(&resolver).await?;
 
         Ok(())
@@ -1130,9 +1131,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         Ok(())
     }
@@ -1168,9 +1167,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err = result.expect_err("Chain check should fail when proof audience != invoker");
         let err_msg = err.to_string();
         assert!(
@@ -1218,9 +1215,7 @@ mod tests {
             .await?;
 
         // Should fail: proof.issuer (random) != subject
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err = result.expect_err("Chain check should fail when proof issuer != subject");
         let err_msg = err.to_string();
         assert!(
@@ -1266,7 +1261,7 @@ mod tests {
         let tampered: Result<Invocation<Ed25519Signature>, _> =
             serde_ipld_dagcbor::from_slice(&bytes);
         if let Ok(tampered) = tampered {
-            let resolver = Ed25519KeyResolver;
+            let resolver = DidKeyResolver;
             let result = tampered.verify_signature(&resolver).await;
             assert!(
                 result.is_err(),
@@ -1305,9 +1300,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         Ok(())
     }
@@ -1342,9 +1335,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err = result.expect_err("Should fail: proof subject (b) != invocation subject (a)");
         let err_msg = err.to_string();
         assert!(
@@ -1393,9 +1384,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err = result.expect_err("Should fail: root delegation issuer (b) != subject (a)");
         let err_msg = err.to_string();
         assert!(
@@ -1442,9 +1431,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         Ok(())
     }
@@ -1478,9 +1465,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err = result.expect_err("Should fail: powerline issuer (b) != invocation subject (a)");
         let err_msg = err.to_string();
         assert!(
@@ -1539,9 +1524,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         Ok(())
     }
@@ -1588,9 +1571,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err =
             result.expect_err("Should fail: second proof subject (b) != established subject (a)");
         let err_msg = err.to_string();
@@ -1628,9 +1609,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err = result.expect_err("Should fail: self-issued invocation with issuer != subject");
         let err_msg = err.to_string();
         assert!(
@@ -1665,9 +1644,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         Ok(())
     }
@@ -1699,9 +1676,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err = result.expect_err("Should fail: invocation command not covered by delegation");
         let err_msg = err.to_string();
         assert!(
@@ -1747,9 +1722,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         Ok(())
     }
@@ -1795,9 +1768,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err = result.expect_err("Should fail: arguments violate delegation policy");
         let err_msg = err.to_string();
         assert!(
@@ -1846,9 +1817,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         Ok(())
     }
@@ -1904,9 +1873,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err = result.expect_err("Should fail: chain linkage broken at second hop");
         let err_msg = err.to_string();
         assert!(
@@ -1973,9 +1940,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         Ok(())
     }
@@ -2010,9 +1975,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         Ok(())
     }
@@ -2036,9 +1999,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         Ok(())
     }
@@ -2058,9 +2019,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let range = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        let range = invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         assert_eq!(range, TimeRange::unbounded());
         Ok(())
@@ -2095,9 +2054,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let range = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        let range = invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         assert_eq!(range.not_before, Bound::Unbounded);
         assert_eq!(range.expiration, Bound::Included(exp));
@@ -2152,9 +2109,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let range = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        let range = invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         // nbf = max(now, unbounded) = now
         assert_eq!(range.not_before, Bound::Included(now));
@@ -2211,9 +2166,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await;
+        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
         let err = result.expect_err("Should fail: time windows don't overlap");
         let err_msg = err.to_string();
         assert!(
@@ -2256,9 +2209,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let range = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        let range = invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         // The invocation's tighter expiration should win
         assert_eq!(range.expiration, Bound::Included(exp_invocation));
@@ -2313,9 +2264,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let range = invocation
-            .check(&delegation_store, &Ed25519KeyResolver)
-            .await?;
+        let range = invocation.check(&delegation_store, &DidKeyResolver).await?;
 
         // nbf = max(now, unbounded) = now (narrow wins)
         assert_eq!(range.not_before, Bound::Included(now));

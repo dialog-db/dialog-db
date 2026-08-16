@@ -21,10 +21,10 @@ use crate::{
     Delegation, Invocation,
     invocation::{InvocationCheckError, StoredCheckError},
 };
+use dialog_varsig::AnySignature;
 use dialog_varsig::Did;
 use dialog_varsig::Resolver;
 use dialog_varsig::Signature;
-use dialog_varsig::eddsa::Ed25519Signature;
 use ipld_core::cid::Cid;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
@@ -147,7 +147,7 @@ where
     }
 }
 
-impl TryFrom<&[u8]> for InvocationChain<Ed25519Signature> {
+impl TryFrom<&[u8]> for InvocationChain<AnySignature> {
     type Error = ContainerError;
 
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
@@ -156,7 +156,7 @@ impl TryFrom<&[u8]> for InvocationChain<Ed25519Signature> {
     }
 }
 
-impl TryFrom<Container> for InvocationChain<Ed25519Signature> {
+impl TryFrom<Container> for InvocationChain<AnySignature> {
     type Error = ContainerError;
 
     /// Convert a container to an invocation chain.
@@ -172,16 +172,16 @@ impl TryFrom<Container> for InvocationChain<Ed25519Signature> {
         }
 
         // First token is the invocation
-        let invocation: Invocation<Ed25519Signature> =
-            serde_ipld_dagcbor::from_slice(&token_bytes[0]).map_err(|e| {
+        let invocation: Invocation<AnySignature> = serde_ipld_dagcbor::from_slice(&token_bytes[0])
+            .map_err(|e| {
                 ContainerError::Invocation(format!("failed to decode invocation: {}", e))
             })?;
 
         // Remaining tokens are delegations - build a map keyed by CID
-        let mut delegations: HashMap<Cid, Arc<Delegation<Ed25519Signature>>> =
+        let mut delegations: HashMap<Cid, Arc<Delegation<AnySignature>>> =
             HashMap::with_capacity(token_bytes.len() - 1);
         for (i, bytes) in token_bytes.iter().skip(1).enumerate() {
-            let delegation: Delegation<Ed25519Signature> = serde_ipld_dagcbor::from_slice(bytes)
+            let delegation: Delegation<AnySignature> = serde_ipld_dagcbor::from_slice(bytes)
                 .map_err(|e| {
                     ContainerError::Invocation(format!("failed to decode delegation {}: {}", i, e))
                 })?;
@@ -232,7 +232,7 @@ where
     }
 }
 
-impl<'de> Deserialize<'de> for InvocationChain<Ed25519Signature> {
+impl<'de> Deserialize<'de> for InvocationChain<AnySignature> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -249,11 +249,11 @@ mod tests {
     use crate::helpers::{create_delegation, generate_signer};
     use crate::subject::Subject;
     use crate::{DelegationBuilder, InvocationBuilder};
-    use dialog_credentials::Ed25519KeyResolver;
+    use dialog_credentials::DidKeyResolver;
     use dialog_varsig::Principal;
 
     /// Create a test invocation chain with a valid delegation.
-    async fn create_test_invocation_chain() -> (InvocationChain<Ed25519Signature>, Did) {
+    async fn create_test_invocation_chain() -> (InvocationChain<AnySignature>, Did) {
         let subject_signer = generate_signer().await;
         let subject_did = subject_signer.did();
         let operator_signer = generate_signer().await;
@@ -320,7 +320,7 @@ mod tests {
         let cbor_bytes = serde_ipld_dagcbor::to_vec(&chain).expect("Failed to serialize");
 
         // Deserialize via serde from DAG-CBOR (this uses dialog_common::Bytes)
-        let restored: InvocationChain<Ed25519Signature> =
+        let restored: InvocationChain<AnySignature> =
             serde_ipld_dagcbor::from_slice(&cbor_bytes).expect("Failed to deserialize");
 
         // Verify the chains match
@@ -334,11 +334,86 @@ mod tests {
         let (chain, _) = create_test_invocation_chain().await;
 
         // Should verify successfully
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_ok(),
             "Expected verification to succeed: {:?}",
             result
+        );
+    }
+
+    /// End-to-end acceptance test for algorithm-agnostic signing: an ed25519
+    /// principal delegates to a p256 principal, the p256 principal invokes with
+    /// that delegation as its proof, and the full chain verifies. The delegation
+    /// link is signed and verified under ed25519, the invocation link under
+    /// p256, each algorithm taken from its own varsig header.
+    #[dialog_common::test]
+    async fn it_verifies_mixed_algorithm_chain() {
+        use dialog_credentials::{Ed25519Signer, Es256Signer, Signer};
+
+        let issuer = Signer::from(Ed25519Signer::generate().await.unwrap());
+        let audience = Signer::from(Es256Signer::generate().await.unwrap());
+        let subject_did = issuer.did();
+        let audience_did = audience.did();
+
+        // ed25519 issuer delegates to the p256 audience.
+        let delegation = DelegationBuilder::new()
+            .issuer(issuer.clone())
+            .audience(&audience)
+            .subject(Subject::Specific(subject_did.clone()))
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .try_build()
+            .await
+            .expect("Failed to build delegation");
+        let delegation_cid = delegation.to_cid();
+
+        // The p256 audience invokes, referencing the delegation as its proof.
+        let invocation = InvocationBuilder::new()
+            .issuer(audience.clone())
+            .audience(&audience_did)
+            .subject(&subject_did)
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .proofs(vec![delegation_cid])
+            .try_build()
+            .await
+            .expect("Failed to build invocation");
+
+        let mut delegations = HashMap::new();
+        delegations.insert(delegation_cid, Arc::new(delegation));
+        let chain = InvocationChain::new(invocation, delegations);
+
+        // The full chain verifies: the delegation link under ed25519, the
+        // invocation link under p256, one validation pass over mixed algorithms.
+        let result = chain.verify(&DidKeyResolver).await;
+        assert!(
+            result.is_ok(),
+            "Expected mixed-algorithm chain to verify: {:?}",
+            result
+        );
+    }
+
+    /// Negative counterpart: a signature whose varsig header names one algorithm
+    /// but is checked against the other algorithm's key must be refused. A p256
+    /// signature verified by an ed25519 verifier is rejected on the tag
+    /// mismatch, so a forged or corrupted link cannot slip through.
+    #[dialog_common::test]
+    async fn it_refuses_mismatched_algorithm_signature() {
+        use dialog_credentials::{Ed25519Signer, Es256Signer, Signer};
+        use dialog_varsig::{Signer as VarsigSigner, Verifier as VarsigVerifier};
+
+        let es_signer = Signer::from(Es256Signer::generate().await.unwrap());
+        let ed_signer = Signer::from(Ed25519Signer::generate().await.unwrap());
+
+        let msg = b"mixed";
+        let sig = VarsigSigner::sign(&es_signer, msg).await.unwrap();
+
+        // The matching p256 verifier accepts it.
+        assert!(es_signer.verifier().verify(msg, &sig).await.is_ok());
+
+        // An ed25519 verifier refuses the p256-tagged signature.
+        assert!(
+            ed_signer.verifier().verify(msg, &sig).await.is_err(),
+            "Expected a p256 signature to be refused by an ed25519 verifier"
         );
     }
 
@@ -375,7 +450,7 @@ mod tests {
         let chain = InvocationChain::new(invocation, HashMap::new());
 
         // Should fail verification due to missing proof
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("proof not found"));
     }
@@ -416,7 +491,7 @@ mod tests {
         let chain = InvocationChain::new(invocation, delegations);
 
         // Should fail verification due to issuer mismatch
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(result.is_err());
     }
 
@@ -557,7 +632,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_ok(),
             "Expected verification to succeed with powerline in middle: {:?}",
@@ -597,7 +672,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_err(),
             "Expected verification to fail when invocation subject doesn't match powerline root issuer"
@@ -636,7 +711,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_ok(),
             "Expected verification to succeed when invocation subject matches powerline root issuer: {:?}",
@@ -689,7 +764,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_err(),
             "Expected verification to fail when redelegation after powerline root uses wrong subject"
@@ -741,7 +816,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_ok(),
             "Expected verification to succeed when redelegation after powerline root uses correct subject: {:?}",
@@ -826,7 +901,7 @@ mod tests {
 
         let cbor_bytes = serde_ipld_dagcbor::to_vec(&chain).expect("Failed to serialize");
 
-        let restored: InvocationChain<Ed25519Signature> =
+        let restored: InvocationChain<AnySignature> =
             serde_ipld_dagcbor::from_slice(&cbor_bytes).expect("Failed to deserialize");
 
         assert_eq!(restored.command().to_string(), "/archive/put");
@@ -866,7 +941,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_ok(),
             "Expected /archive delegation to authorize /archive/put invocation: {:?}",
@@ -909,16 +984,16 @@ mod tests {
         let original_chain = InvocationChain::new(invocation, delegations);
 
         assert!(
-            original_chain.verify(&Ed25519KeyResolver).await.is_ok(),
+            original_chain.verify(&DidKeyResolver).await.is_ok(),
             "Original chain should verify"
         );
 
         let cbor_bytes = serde_ipld_dagcbor::to_vec(&original_chain).expect("Failed to serialize");
 
-        let restored_chain: InvocationChain<Ed25519Signature> =
+        let restored_chain: InvocationChain<AnySignature> =
             serde_ipld_dagcbor::from_slice(&cbor_bytes).expect("Failed to deserialize");
 
-        let result = restored_chain.verify(&Ed25519KeyResolver).await;
+        let result = restored_chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_ok(),
             "Restored chain should still verify: {:?}",
@@ -950,7 +1025,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, HashMap::new());
 
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_ok(),
             "Self-invocation (issuer == subject, empty proofs) should verify: {:?}",
@@ -975,7 +1050,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, HashMap::new());
 
-        let result = chain.verify(&Ed25519KeyResolver).await;
+        let result = chain.verify(&DidKeyResolver).await;
         assert!(
             result.is_err(),
             "Invocation with issuer != subject and no proofs should fail verification"

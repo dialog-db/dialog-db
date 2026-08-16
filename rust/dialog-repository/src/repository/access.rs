@@ -310,7 +310,7 @@ mod tests {
         subject: UcanSubject,
     ) -> UcanCertificate {
         let delegation = DelegationBuilder::new()
-            .issuer(issuer.clone())
+            .issuer(dialog_credentials::Signer::from(issuer.clone()))
             .audience(&audience)
             .subject(subject)
             .command(vec!["storage".to_string()])
@@ -510,7 +510,7 @@ mod tests {
             let profile = &profile;
             async move {
                 let delegation = DelegationBuilder::new()
-                    .issuer(issuer)
+                    .issuer(dialog_credentials::Signer::from(issuer))
                     .audience(&audience)
                     .subject(subject)
                     .command(vec!["storage".to_string()])

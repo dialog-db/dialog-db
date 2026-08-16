@@ -30,6 +30,10 @@ pub use es256::*;
 // The algorithm-agnostic identity types. Available whenever ed25519 is (the
 // always-on default); enabling further algorithms adds arms to the enums.
 #[cfg(feature = "ed25519")]
+pub mod resolver;
+#[cfg(feature = "ed25519")]
+pub use resolver::{DidKeyResolveError, DidKeyResolver};
+#[cfg(feature = "ed25519")]
 pub use signature::{Algorithm, AlgorithmTag, DidFromStrError, Signature, Signer, Verifier};
 
 pub use credential::*;

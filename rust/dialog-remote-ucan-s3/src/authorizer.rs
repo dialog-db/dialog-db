@@ -57,7 +57,7 @@ use dialog_ucan_core::ContainerError;
 use std::collections::BTreeMap;
 
 use dialog_capability::{Capability, Constraint, Did, Policy};
-use dialog_credentials::Ed25519KeyResolver;
+use dialog_credentials::DidKeyResolver;
 use dialog_effects::{archive, blob, memory};
 use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
 use dialog_ucan_core::InvocationChain;
@@ -295,7 +295,7 @@ impl UcanAuthorizer {
                 detail: e.to_string(),
             })
         })?;
-        chain.verify(&Ed25519KeyResolver).await.map_err(|e| {
+        chain.verify(&DidKeyResolver).await.map_err(|e| {
             // Two different failures arrive here: their material not
             // verifying, and our own setup being unable to check it.
             // Only the first is a statement about their request, so only

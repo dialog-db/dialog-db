@@ -152,28 +152,19 @@ where
     where
         Env: Provider<access::Prove<Ucan>> + ConditionalSync,
     {
-        let signer = ed25519_signer(self.claim.by)?;
+        let signer = signer_of(self.claim.by);
         let proof_chain = self.claim.perform(env).await?;
         let authorization = proof_chain.claim(signer)?;
         authorization.invoke().await
     }
 }
 
-/// Extract the ed25519 signer from a credential for UCAN signing.
+/// The algorithm-agnostic signer for UCAN signing.
 ///
-/// The UCAN authorization chain currently signs with a concrete ed25519 key; a
-/// profile backed by another algorithm is rejected here rather than silently
-/// mis-signing.
-fn ed25519_signer(
-    credential: &SignerCredential,
-) -> Result<dialog_credentials::Ed25519Signer, AuthorizeError> {
-    credential
-        .signer()
-        .as_ed25519()
-        .cloned()
-        .ok_or_else(|| AuthorizeError::Malformed {
-            detail: "authorization requires an ed25519 profile signer".into(),
-        })
+/// The UCAN authorization chain signs with the agnostic
+/// [`Signer`](dialog_credentials::Signer), so any supported algorithm works.
+fn signer_of(credential: &SignerCredential) -> dialog_credentials::Signer {
+    credential.signer().clone()
 }
 
 /// A delegation request combining a claim with a target audience.
@@ -194,7 +185,7 @@ where
     where
         Env: Provider<access::Prove<Ucan>> + ConditionalSync,
     {
-        let signer = ed25519_signer(self.claim.by)?;
+        let signer = signer_of(self.claim.by);
         let duration = self.claim.duration();
         let proof_chain = self.claim.perform(env).await?;
         let mut authorization = proof_chain.claim(signer)?;

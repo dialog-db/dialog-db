@@ -113,7 +113,7 @@ impl OperatorBuilder {
         let mut session = Vec::with_capacity(self.allowed.len());
         for scope in &self.allowed {
             let delegation = DelegationBuilder::new()
-                .issuer(profile_signer.clone())
+                .issuer(dialog_credentials::Signer::from(profile_signer.clone()))
                 .audience(&operator_signer)
                 .subject(scope.subject.clone())
                 .command(scope.command.segments().clone())
