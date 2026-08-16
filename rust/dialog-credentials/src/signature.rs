@@ -23,6 +23,7 @@
 #![allow(clippy::single_match_else)]
 
 use dialog_capability::Issuer;
+use dialog_common::ConditionalSync;
 use dialog_varsig::{
     Did, Principal, Signer as VarsigSigner, Verifier as VarsigVerifier, eddsa::Ed25519Signature,
 };
@@ -254,6 +255,75 @@ impl Issuer for Signer {
     type Signature = Signature;
 }
 
+/// A signer that presents an arbitrary DID while delegating the actual signing
+/// to a wrapped key.
+///
+/// A [`Signer`] normally identifies as its key's `did:key`. `WithDid` overrides
+/// that DID (for example a `did:web:` name) while keeping the underlying crypto
+/// unchanged: the signature is produced by the wrapped signer, and a verifier
+/// resolves the presented DID to that same key. This is how an identity signs
+/// UCANs under a `did:web` (or any other method) name.
+///
+/// The presented DID is arbitrary; it is the caller's responsibility to make it
+/// resolve to the wrapped key's public key (for `did:web`, by serving a DID
+/// document whose verification method is that key).
+#[derive(Debug, Clone)]
+pub struct WithDid<S> {
+    did: Did,
+    signer: S,
+}
+
+impl<S> WithDid<S> {
+    /// Wrap `signer` so it presents `did` instead of its key's `did:key`.
+    pub const fn new(did: Did, signer: S) -> Self {
+        Self { did, signer }
+    }
+
+    /// The wrapped signer.
+    pub const fn signer(&self) -> &S {
+        &self.signer
+    }
+
+    /// Consume the wrapper and return the inner signer.
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn into_signer(self) -> S {
+        self.signer
+    }
+}
+
+impl<S> Principal for WithDid<S> {
+    fn did(&self) -> Did {
+        self.did.clone()
+    }
+}
+
+impl<S> VarsigSigner<Signature> for WithDid<S>
+where
+    S: VarsigSigner<Signature> + ConditionalSync,
+{
+    async fn sign(&self, msg: &[u8]) -> Result<Signature, signature::Error> {
+        self.signer.sign(msg).await
+    }
+}
+
+impl<S> Issuer for WithDid<S>
+where
+    S: VarsigSigner<Signature> + ConditionalSync,
+{
+    type Signature = Signature;
+}
+
+impl Signer {
+    /// Present this signer under an arbitrary DID (for example a `did:web:`
+    /// name) while still signing with the underlying key.
+    ///
+    /// See [`WithDid`].
+    #[must_use]
+    pub const fn with_did(self, did: Did) -> WithDid<Self> {
+        WithDid::new(did, self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +376,48 @@ mod tests {
             assert_eq!(parsed.did(), did);
             assert_eq!(parsed.algorithm(), verifier.algorithm());
         }
+    }
+
+    #[dialog_common::test]
+    async fn with_did_presents_custom_did() {
+        let signer = Signer::from(Ed25519Signer::generate().await.unwrap());
+        let key_did = signer.did();
+        let web_did: Did = "did:web:issuer.example".parse().unwrap();
+
+        let wrapped = signer.with_did(web_did.clone());
+
+        // The wrapper presents the custom DID, not the key's did:key.
+        assert_eq!(wrapped.did(), web_did);
+        assert_ne!(wrapped.did(), key_did);
+    }
+
+    #[dialog_common::test]
+    async fn with_did_signs_with_underlying_key() {
+        let signer = Signer::from(Ed25519Signer::generate().await.unwrap());
+        // The verifier is derived from the underlying key, before wrapping.
+        let verifier = signer.verifier();
+        let web_did: Did = "did:web:issuer.example".parse().unwrap();
+
+        let wrapped = signer.with_did(web_did);
+        let msg = b"signed under did:web";
+        let sig = VarsigSigner::sign(&wrapped, msg).await.unwrap();
+
+        // The signature was produced by the wrapped key, so the key's own
+        // verifier accepts it even though the presented DID is did:web.
+        verifier.verify(msg, &sig).await.unwrap();
+    }
+
+    #[cfg(feature = "es256")]
+    #[dialog_common::test]
+    async fn with_did_signs_with_underlying_p256_key() {
+        let signer = Signer::from(Es256Signer::generate().await.unwrap());
+        let verifier = signer.verifier();
+        let web_did: Did = "did:web:issuer.example".parse().unwrap();
+
+        let wrapped = signer.with_did(web_did);
+        let msg = b"signed under did:web";
+        let sig = VarsigSigner::sign(&wrapped, msg).await.unwrap();
+        assert_eq!(sig.algorithm(), AlgorithmTag::Es256);
+        verifier.verify(msg, &sig).await.unwrap();
     }
 }

@@ -254,3 +254,109 @@ fn url_derivation_is_wired() {
         "https://example.com/users/alice/did.json"
     );
 }
+
+/// Build a self-issued UCAN invocation whose issuer signs under a `did:web`
+/// name (via [`WithDid`]), then verify it through a `did:web`-resolving
+/// resolver. This is the full loop: an identity SIGNS a UCAN under
+/// `did:web:issuer.example`, resolution fetches that identity's DID document,
+/// and VERIFICATION recovers the underlying key and checks the
+/// header-declared-algorithm signature over the invocation the resolved key
+/// produced. It exercises the same `InvocationChain::verify` path (and its
+/// `verify_signature` step, which resolves the invocation issuer) the authorizer
+/// uses.
+async fn signs_and_verifies_under_did_web(key: Signer) {
+    use crate::PerformingResolver;
+    use dialog_ucan_core::{InvocationBuilder, InvocationChain};
+    use std::collections::HashMap;
+
+    // The did:web identity: the underlying key signs, but it presents
+    // did:web:issuer.example as its DID.
+    let web_did: Did = "did:web:issuer.example".parse().unwrap();
+    let issuer = key.clone().with_did(web_did.clone());
+    assert_eq!(
+        issuer.did(),
+        web_did,
+        "issuer must present its did:web name"
+    );
+
+    // A self-issued invocation: issuer and subject are both did:web:issuer.example,
+    // so verification resolves that did:web DID and checks the signature the
+    // underlying key produced.
+    let invocation = InvocationBuilder::new()
+        .issuer(issuer)
+        .audience(&web_did)
+        .subject(&web_did)
+        .command(vec!["storage".to_string(), "get".to_string()])
+        .proofs(vec![])
+        .try_build()
+        .await
+        .expect("invocation signed under did:web should build");
+    let chain = InvocationChain::new(invocation, HashMap::new());
+
+    // Publish the issuer's key under did:web:issuer.example, served by the mock.
+    let doc = did_document_multibase(web_did.as_str(), &key);
+    let fetch = MapFetch::new().with(
+        "https://issuer.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let env = MethodResolver::with_providers(DidKeyProvider, DidWebProvider::with_fetch(fetch));
+
+    let resolver = PerformingResolver::new(&env);
+    chain
+        .verify(&resolver)
+        .await
+        .expect("a did:web-issued invocation should verify");
+}
+
+#[dialog_common::test]
+async fn it_signs_and_verifies_under_did_web_ed25519() {
+    let key = Signer::from(Ed25519Signer::generate().await.unwrap());
+    signs_and_verifies_under_did_web(key).await;
+}
+
+#[cfg(feature = "es256")]
+#[dialog_common::test]
+async fn it_signs_and_verifies_under_did_web_p256() {
+    let key = Signer::from(Es256Signer::generate().await.unwrap());
+    signs_and_verifies_under_did_web(key).await;
+}
+
+/// Negative: if the `did:web` document publishes the WRONG key, a UCAN signed
+/// under that `did:web` name must NOT verify. Resolution recovers a key that did
+/// not produce the signature, so `verify_signature` fails.
+#[dialog_common::test]
+async fn it_refuses_did_web_with_wrong_key() {
+    use crate::PerformingResolver;
+    use dialog_ucan_core::{InvocationBuilder, InvocationChain};
+    use std::collections::HashMap;
+
+    let web_did: Did = "did:web:issuer.example".parse().unwrap();
+    let key = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let issuer = key.with_did(web_did.clone());
+
+    let invocation = InvocationBuilder::new()
+        .issuer(issuer)
+        .audience(&web_did)
+        .subject(&web_did)
+        .command(vec!["storage".to_string(), "get".to_string()])
+        .proofs(vec![])
+        .try_build()
+        .await
+        .expect("invocation should build");
+    let chain = InvocationChain::new(invocation, HashMap::new());
+
+    // Publish a DIFFERENT key under did:web:issuer.example.
+    let wrong_key = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let doc = did_document_multibase(web_did.as_str(), &wrong_key);
+    let fetch = MapFetch::new().with(
+        "https://issuer.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let env = MethodResolver::with_providers(DidKeyProvider, DidWebProvider::with_fetch(fetch));
+
+    let resolver = PerformingResolver::new(&env);
+    assert!(
+        chain.verify(&resolver).await.is_err(),
+        "a did:web document with the wrong key must not verify"
+    );
+}

@@ -37,6 +37,7 @@ dialog-credentials = { workspace = true, features = ["es256"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 wasm-bindgen-test = { workspace = true }
+dialog-ucan-core = { workspace = true }
 
 [lints.rust]
 # These cfgs are used by the dialog_common::test proc macro.

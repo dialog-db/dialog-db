@@ -1182,6 +1182,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
+ "dialog-ucan-core",
  "dialog-varsig",
  "getrandom 0.2.16",
  "percent-encoding",
