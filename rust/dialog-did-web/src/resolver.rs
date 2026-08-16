@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use crate::document::DidDocument;
     use crate::fetch::MapFetch;
-    use crate::provider::{DidWebProvider, MethodResolver};
+    use crate::provider::{DidPlcProvider, DidWebProvider, MethodResolver};
     use dialog_credentials::{Ed25519Signer, Signer};
     use dialog_varsig::{
         AnySignature, Principal, Signer as VarsigSigner, Verifier as VarsigVerifier,
@@ -101,6 +101,7 @@ mod tests {
         let env = MethodResolver::with_providers(
             crate::provider::DidKeyProvider,
             DidWebProvider::with_fetch(fetch),
+            DidPlcProvider::with_fetch(MapFetch::new()),
         );
         let resolver = PerformingResolver::new(&env);
 
@@ -128,6 +129,7 @@ mod tests {
         let env = MethodResolver::with_providers(
             crate::provider::DidKeyProvider,
             DidWebProvider::with_fetch(MapFetch::new()),
+            DidPlcProvider::with_fetch(MapFetch::new()),
         );
         let resolver = PerformingResolver::new(&env);
 

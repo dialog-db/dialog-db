@@ -10,7 +10,7 @@ use dialog_varsig::{Did, Principal, Signer as VarsigSigner, Verifier as VarsigVe
 
 use crate::document::DidDocument;
 use crate::fetch::MapFetch;
-use crate::provider::{DidKeyProvider, DidWebProvider, MethodResolver};
+use crate::provider::{DidKeyProvider, DidPlcProvider, DidWebProvider, MethodResolver};
 use crate::resolve::Resolve;
 use crate::url::did_web_url;
 use crate::{CachingResolver, ResolveError};
@@ -155,6 +155,179 @@ async fn it_selects_a_single_key_by_fragment() {
         verifier.verify(msg, &sig1).await.is_err(),
         "a fragment-selected verifier must refuse a signature by another key"
     );
+}
+
+/// A plausible `did:plc` identifier (24 chars of base32 [a-z2-7]).
+const PLC_DID: &str = "did:plc:ewvi7nxzyoun6zhxrhs64oiz";
+
+/// The `plc.directory` URL a `did:plc` resolves against.
+fn plc_url(did: &str) -> String {
+    format!("https://plc.directory/{did}")
+}
+
+/// A `did:plc` document is the same shape as a `did:web` one: a Multikey
+/// verification method carrying `publicKeyMultibase`. Resolving it recovers a
+/// verifier that checks a signature the matching signer produced.
+async fn resolves_plc_algorithm(signer: Signer) {
+    let doc = did_document_multibase(PLC_DID, &signer);
+    let fetch = MapFetch::new().with(plc_url(PLC_DID), doc.into_bytes());
+    let provider = DidPlcProvider::with_fetch(fetch);
+
+    let did: Did = PLC_DID.parse().unwrap();
+    let verifier = Resolve::new(did).perform(&provider).await.unwrap();
+    assert_eq!(verifier.did().as_str(), PLC_DID);
+
+    let msg = b"resolve me through the plc directory";
+    let sig = VarsigSigner::sign(&signer, msg).await.unwrap();
+    verifier.verify(msg, &sig).await.unwrap();
+}
+
+#[dialog_common::test]
+async fn it_resolves_ed25519_did_plc() {
+    let signer = Signer::from(Ed25519Signer::generate().await.unwrap());
+    resolves_plc_algorithm(signer).await;
+}
+
+#[dialog_common::test]
+async fn it_resolves_es256_did_plc() {
+    let signer = Signer::from(Es256Signer::generate().await.unwrap());
+    resolves_plc_algorithm(signer).await;
+}
+
+/// A `did:plc` document with two keys must verify a signature by EITHER key.
+#[dialog_common::test]
+async fn it_verifies_a_signature_by_any_did_plc_key() {
+    let key1 = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let key2 = Signer::from(Es256Signer::generate().await.unwrap());
+    let doc = did_document_two_keys(PLC_DID, &key1, &key2);
+    let fetch = MapFetch::new().with(plc_url(PLC_DID), doc.into_bytes());
+    let provider = DidPlcProvider::with_fetch(fetch);
+
+    let did: Did = PLC_DID.parse().unwrap();
+    let verifier = Resolve::new(did).perform(&provider).await.unwrap();
+    assert_eq!(verifier.did().as_str(), PLC_DID);
+
+    let msg = b"either plc key may have signed";
+    let sig2 = VarsigSigner::sign(&key2, msg).await.unwrap();
+    verifier.verify(msg, &sig2).await.unwrap();
+    let sig1 = VarsigSigner::sign(&key1, msg).await.unwrap();
+    verifier.verify(msg, &sig1).await.unwrap();
+}
+
+/// A `did:plc` document may list an unsupported key type (plc DIDs may carry a
+/// secp256k1 key we do not support yet). That method is SKIPPED, and resolution
+/// still succeeds as long as one supported key remains.
+#[dialog_common::test]
+async fn it_skips_unsupported_key_but_keeps_supported() {
+    let supported = Signer::from(Ed25519Signer::generate().await.unwrap());
+    // A fake secp256k1 Multikey: a `z`-multibase whose bytes are not a key type
+    // this build can parse. It must be skipped, not fatal.
+    let doc = format!(
+        r#"{{
+            "id": "{PLC_DID}",
+            "verificationMethod": [
+                {{
+                    "id": "{PLC_DID}#atproto",
+                    "type": "Multikey",
+                    "controller": "{PLC_DID}",
+                    "publicKeyMultibase": "zQ3shokFTS3brHcDQrn82RUDfCZESWL1ZdCEJwekUDPQiYBmed"
+                }},
+                {{
+                    "id": "{PLC_DID}#key-2",
+                    "type": "Multikey",
+                    "controller": "{PLC_DID}",
+                    "publicKeyMultibase": "{multibase}"
+                }}
+            ]
+        }}"#,
+        multibase = multibase_of(&supported),
+    );
+    let fetch = MapFetch::new().with(plc_url(PLC_DID), doc.into_bytes());
+    let provider = DidPlcProvider::with_fetch(fetch);
+
+    let did: Did = PLC_DID.parse().unwrap();
+    let verifier = Resolve::new(did).perform(&provider).await.unwrap();
+
+    let msg = b"only the supported key can sign";
+    let sig = VarsigSigner::sign(&supported, msg).await.unwrap();
+    verifier.verify(msg, &sig).await.unwrap();
+}
+
+#[dialog_common::test]
+async fn it_refuses_missing_plc_document() {
+    let provider = DidPlcProvider::with_fetch(MapFetch::new());
+    let did: Did = PLC_DID.parse().unwrap();
+    let err = Resolve::new(did).perform(&provider).await.unwrap_err();
+    assert!(matches!(err, ResolveError::Fetch(_)), "got {err:?}");
+}
+
+#[dialog_common::test]
+async fn it_refuses_malformed_plc_document() {
+    let fetch = MapFetch::new().with(plc_url(PLC_DID), b"not json".to_vec());
+    let provider = DidPlcProvider::with_fetch(fetch);
+    let did: Did = PLC_DID.parse().unwrap();
+    let err = Resolve::new(did).perform(&provider).await.unwrap_err();
+    assert!(
+        matches!(err, ResolveError::MalformedDocument(_)),
+        "got {err:?}"
+    );
+}
+
+#[dialog_common::test]
+async fn it_refuses_plc_no_verification_method() {
+    let doc = format!(r#"{{ "id": "{PLC_DID}", "verificationMethod": [] }}"#);
+    let fetch = MapFetch::new().with(plc_url(PLC_DID), doc.into_bytes());
+    let provider = DidPlcProvider::with_fetch(fetch);
+    let did: Did = PLC_DID.parse().unwrap();
+    let err = Resolve::new(did).perform(&provider).await.unwrap_err();
+    assert!(
+        matches!(err, ResolveError::NoSupportedVerificationMethod),
+        "got {err:?}"
+    );
+}
+
+/// The plc provider refuses a non-plc method.
+#[dialog_common::test]
+async fn it_refuses_non_plc_method() {
+    let provider = DidPlcProvider::with_fetch(MapFetch::new());
+    let did: Did = "did:web:example.com".parse().unwrap();
+    let err = Resolve::new(did).perform(&provider).await.unwrap_err();
+    assert!(
+        matches!(err, ResolveError::UnsupportedMethod(_)),
+        "got {err:?}"
+    );
+}
+
+/// `did:plc` routes to the plc provider (which fetches the plc.directory URL),
+/// while `did:key` stays local and `did:web` routes to the web provider. Asserts
+/// routing by the URL each arm's mock fetcher is asked for.
+#[dialog_common::test]
+async fn method_dispatch_routes_did_plc_to_plc_fetcher() {
+    let signer = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let doc = did_document_multibase(PLC_DID, &signer);
+    let plc_fetch = MapFetch::new().with(plc_url(PLC_DID), doc.into_bytes());
+    let web_fetch = MapFetch::new();
+    let resolver = MethodResolver::with_providers(
+        DidKeyProvider,
+        DidWebProvider::with_fetch(web_fetch.clone()),
+        DidPlcProvider::with_fetch(plc_fetch.clone()),
+    );
+
+    let did: Did = PLC_DID.parse().unwrap();
+    let verifier = Resolve::new(did).perform(&resolver).await.unwrap();
+    assert_eq!(verifier.did().as_str(), PLC_DID);
+
+    assert_eq!(plc_fetch.calls(), 1, "did:plc must hit the plc fetcher");
+    assert_eq!(web_fetch.calls(), 0, "did:plc must not hit the web fetcher");
+
+    // did:key through the same resolver stays local: no fetch on either arm.
+    let key_signer = Signer::from(Ed25519Signer::generate().await.unwrap());
+    Resolve::new(key_signer.did())
+        .perform(&resolver)
+        .await
+        .unwrap();
+    assert_eq!(plc_fetch.calls(), 1, "did:key must not hit the plc fetcher");
+    assert_eq!(web_fetch.calls(), 0, "did:key must not hit the web fetcher");
 }
 
 async fn resolves_algorithm(signer: Signer) {
@@ -372,8 +545,11 @@ async fn it_excludes_a_method_controlled_by_another_did() {
 async fn method_dispatch_resolves_did_key_without_fetching() {
     let signer = Signer::from(Ed25519Signer::generate().await.unwrap());
     let fetch = MapFetch::new();
-    let resolver =
-        MethodResolver::with_providers(DidKeyProvider, DidWebProvider::with_fetch(fetch.clone()));
+    let resolver = MethodResolver::with_providers(
+        DidKeyProvider,
+        DidWebProvider::with_fetch(fetch.clone()),
+        DidPlcProvider::with_fetch(fetch.clone()),
+    );
 
     let did = signer.did();
     let verifier = Resolve::new(did).perform(&resolver).await.unwrap();
@@ -393,8 +569,11 @@ async fn method_dispatch_routes_did_web_to_fetcher() {
         "https://route.example/.well-known/did.json",
         doc.into_bytes(),
     );
-    let resolver =
-        MethodResolver::with_providers(DidKeyProvider, DidWebProvider::with_fetch(fetch.clone()));
+    let resolver = MethodResolver::with_providers(
+        DidKeyProvider,
+        DidWebProvider::with_fetch(fetch.clone()),
+        DidPlcProvider::with_fetch(MapFetch::new()),
+    );
 
     let did: Did = did_web.parse().unwrap();
     Resolve::new(did).perform(&resolver).await.unwrap();
@@ -505,7 +684,11 @@ async fn signs_and_verifies_under_did_web(key: Signer) {
         "https://issuer.example/.well-known/did.json",
         doc.into_bytes(),
     );
-    let env = MethodResolver::with_providers(DidKeyProvider, DidWebProvider::with_fetch(fetch));
+    let env = MethodResolver::with_providers(
+        DidKeyProvider,
+        DidWebProvider::with_fetch(fetch),
+        DidPlcProvider::with_fetch(MapFetch::new()),
+    );
 
     let resolver = PerformingResolver::new(&env);
     chain
@@ -558,7 +741,11 @@ async fn it_refuses_did_web_with_wrong_key() {
         "https://issuer.example/.well-known/did.json",
         doc.into_bytes(),
     );
-    let env = MethodResolver::with_providers(DidKeyProvider, DidWebProvider::with_fetch(fetch));
+    let env = MethodResolver::with_providers(
+        DidKeyProvider,
+        DidWebProvider::with_fetch(fetch),
+        DidPlcProvider::with_fetch(MapFetch::new()),
+    );
 
     let resolver = PerformingResolver::new(&env);
     assert!(

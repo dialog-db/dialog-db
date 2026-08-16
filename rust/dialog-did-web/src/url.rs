@@ -1,9 +1,13 @@
-//! `did:web` to HTTPS URL derivation, per the did:web method spec.
+//! DID to HTTPS URL derivation.
 //!
+//! `did:web`, per the did:web method spec:
 //! - `did:web:example.com` becomes `https://example.com/.well-known/did.json`.
 //! - `did:web:example.com:path:to` becomes `https://example.com/path/to/did.json`.
 //! - a percent-encoded colon in the host segment (`did:web:host%3A3000`) decodes
 //!   to a port (`host:3000`).
+//!
+//! `did:plc`, resolved against the PLC directory:
+//! - `did:plc:xxxx` becomes `https://plc.directory/did:plc:xxxx`.
 //!
 //! # Validating the decoded output
 //!
@@ -20,6 +24,9 @@
 //! an identity-substitution vector. So each *decoded* segment is checked against
 //! an allowlist: a host may hold only letters, digits, `-`, `.`, and a single
 //! `:port` suffix, and a path segment only unreserved characters.
+//!
+//! `did:plc` needs no decoding at all: the identifier is base32 (`a-z2-7`) of a
+//! fixed length, which [`did_plc_url`] checks before it reaches the URL.
 
 use percent_encoding::percent_decode_str;
 
@@ -141,6 +148,63 @@ pub fn did_web_url(did: &str) -> Result<String, ResolveError> {
     };
 
     Ok(url)
+}
+
+/// The `plc.directory` origin every `did:plc` resolves against.
+const PLC_DIRECTORY: &str = "https://plc.directory";
+
+/// The fixed length of a `did:plc` identifier: 24 base32 characters.
+const PLC_IDENTIFIER_LEN: usize = 24;
+
+/// Derive the resolution URL for a `did:plc` DID string.
+///
+/// The whole DID (`did:plc:<identifier>`) is the last path segment:
+/// `did:plc:xxxx` becomes `https://plc.directory/did:plc:xxxx`. A `did:plc`
+/// identifier is 24 characters of base32 (`a-z2-7`) and contains no `:`, so the
+/// DID has exactly three colon-separated segments and needs no percent-encoding
+/// (a literal `:` is valid in a URL path segment).
+///
+/// Both the charset and the length are checked before the identifier reaches
+/// the URL. The charset is what keeps a crafted DID from escaping the
+/// `plc.directory` path (no `/`, `?`, `#`, `.` or `%` can appear), and the
+/// length is what keeps a well-formed-looking but bogus identifier from
+/// becoming a directory request at all.
+///
+/// # Errors
+///
+/// Returns [`ResolveError::MalformedDid`] if the string is not a `did:plc` DID
+/// whose identifier is 24 base32 characters.
+pub fn did_plc_url(did: &str) -> Result<String, ResolveError> {
+    let identifier = did
+        .strip_prefix("did:plc:")
+        .ok_or_else(|| ResolveError::MalformedDid(format!("not a did:plc DID: {did}")))?;
+
+    if identifier.is_empty() {
+        return Err(ResolveError::MalformedDid(format!(
+            "did:plc has no identifier: {did}"
+        )));
+    }
+
+    // A did:plc identifier is base32 [a-z2-7]. Anything else (an embedded ':',
+    // a '/', uppercase, a fragment) is not a plc identifier and must not be
+    // spliced into the URL path.
+    if !identifier
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+    {
+        return Err(ResolveError::MalformedDid(format!(
+            "did:plc identifier is not base32 [a-z2-7]: {did}"
+        )));
+    }
+
+    if identifier.len() != PLC_IDENTIFIER_LEN {
+        return Err(ResolveError::MalformedDid(format!(
+            "did:plc identifier must be {PLC_IDENTIFIER_LEN} characters, got {}: {did}",
+            identifier.len()
+        )));
+    }
+
+    Ok(format!("{PLC_DIRECTORY}/did:plc:{identifier}"))
 }
 
 #[cfg(test)]
@@ -317,5 +381,41 @@ mod tests {
             matches!(url, Err(ResolveError::MalformedDid(_))),
             "a path segment decoding to control bytes must be refused, got {url:?}"
         );
+    }
+
+    #[test]
+    fn plc_identifier_in_path() {
+        assert_eq!(
+            did_plc_url("did:plc:ewvi7nxzyoun6zhxrhs64oiz").unwrap(),
+            "https://plc.directory/did:plc:ewvi7nxzyoun6zhxrhs64oiz"
+        );
+    }
+
+    #[test]
+    fn plc_rejects_non_plc() {
+        assert!(matches!(
+            did_plc_url("did:web:example.com"),
+            Err(ResolveError::MalformedDid(_))
+        ));
+    }
+
+    #[test]
+    fn plc_rejects_empty_identifier() {
+        assert!(matches!(
+            did_plc_url("did:plc:"),
+            Err(ResolveError::MalformedDid(_))
+        ));
+    }
+
+    #[test]
+    fn plc_rejects_non_base32_identifier() {
+        assert!(matches!(
+            did_plc_url("did:plc:has/slash"),
+            Err(ResolveError::MalformedDid(_))
+        ));
+        assert!(matches!(
+            did_plc_url("did:plc:UPPERCASE"),
+            Err(ResolveError::MalformedDid(_))
+        ));
     }
 }

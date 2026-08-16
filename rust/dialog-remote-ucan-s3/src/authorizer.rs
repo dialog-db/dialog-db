@@ -835,7 +835,9 @@ mod tests {
     /// configurable-resolver wiring carries through to `authorize`.
     #[dialog_common::test]
     async fn it_authorizes_through_an_injected_resolver() {
-        use dialog_did_web::{DidKeyProvider, DidWebProvider, MapFetch, MethodResolver};
+        use dialog_did_web::{
+            DidKeyProvider, DidPlcProvider, DidWebProvider, MapFetch, MethodResolver,
+        };
 
         let signer = test_signer().await;
 
@@ -851,6 +853,7 @@ mod tests {
         let resolver = MethodResolver::with_providers(
             DidKeyProvider,
             DidWebProvider::with_fetch(MapFetch::new()),
+            DidPlcProvider::with_fetch(MapFetch::new()),
         );
         let authorizer = UcanAuthorizer::with_resolver(address, Some(credentials), resolver);
 
