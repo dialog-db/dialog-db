@@ -261,6 +261,40 @@ async fn it_refuses_missing_plc_document() {
     assert!(matches!(err, ResolveError::Fetch(_)), "got {err:?}");
 }
 
+/// A `did:plc` document served for one identifier must not be accepted for a
+/// different one. `plc.directory` is trusted, but the trust is "the directory
+/// answers honestly for the DID we asked about"; a document whose `id` names a
+/// *different* did:plc (returned by a redirect, a cache mixup, or a directory
+/// compromise) must be refused. Without the `id` check the wrong identity's
+/// keys are bound to the requested DID, so the wrong key verifies as this DID.
+#[dialog_common::test]
+async fn it_refuses_plc_document_whose_id_is_a_different_did() {
+    let attacker = Signer::from(Ed25519Signer::generate().await.unwrap());
+    // The document is fetched at PLC_DID's URL but claims to be another did:plc.
+    let other_plc = "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa";
+    let doc = did_document_multibase(other_plc, &attacker);
+    let fetch = MapFetch::new().with(plc_url(PLC_DID), doc.into_bytes());
+    let provider = DidPlcProvider::with_fetch(fetch);
+
+    let did: Did = PLC_DID.parse().unwrap();
+    let outcome = Resolve::new(did).perform(&provider).await;
+
+    let Err(err) = &outcome else {
+        let verifier = outcome.unwrap();
+        let msg = b"attacker speaks as another plc identity";
+        let sig = VarsigSigner::sign(&attacker, msg).await.unwrap();
+        let forged = verifier.verify(msg, &sig).await.is_ok();
+        panic!(
+            "resolving {PLC_DID} accepted a document with id={other_plc}; \
+             attacker key verifies as {PLC_DID} = {forged}"
+        );
+    };
+    assert!(
+        matches!(err, ResolveError::MalformedDocument(_)),
+        "expected an id-mismatch refusal, got {err:?}"
+    );
+}
+
 #[dialog_common::test]
 async fn it_refuses_malformed_plc_document() {
     let fetch = MapFetch::new().with(plc_url(PLC_DID), b"not json".to_vec());

@@ -153,9 +153,6 @@ pub fn did_web_url(did: &str) -> Result<String, ResolveError> {
 /// The `plc.directory` origin every `did:plc` resolves against.
 const PLC_DIRECTORY: &str = "https://plc.directory";
 
-/// The fixed length of a `did:plc` identifier: 24 base32 characters.
-const PLC_IDENTIFIER_LEN: usize = 24;
-
 /// Derive the resolution URL for a `did:plc` DID string.
 ///
 /// The whole DID (`did:plc:<identifier>`) is the last path segment:
@@ -164,16 +161,10 @@ const PLC_IDENTIFIER_LEN: usize = 24;
 /// DID has exactly three colon-separated segments and needs no percent-encoding
 /// (a literal `:` is valid in a URL path segment).
 ///
-/// Both the charset and the length are checked before the identifier reaches
-/// the URL. The charset is what keeps a crafted DID from escaping the
-/// `plc.directory` path (no `/`, `?`, `#`, `.` or `%` can appear), and the
-/// length is what keeps a well-formed-looking but bogus identifier from
-/// becoming a directory request at all.
-///
 /// # Errors
 ///
 /// Returns [`ResolveError::MalformedDid`] if the string is not a `did:plc` DID
-/// whose identifier is 24 base32 characters.
+/// with a plausible identifier.
 pub fn did_plc_url(did: &str) -> Result<String, ResolveError> {
     let identifier = did
         .strip_prefix("did:plc:")
@@ -194,13 +185,6 @@ pub fn did_plc_url(did: &str) -> Result<String, ResolveError> {
     {
         return Err(ResolveError::MalformedDid(format!(
             "did:plc identifier is not base32 [a-z2-7]: {did}"
-        )));
-    }
-
-    if identifier.len() != PLC_IDENTIFIER_LEN {
-        return Err(ResolveError::MalformedDid(format!(
-            "did:plc identifier must be {PLC_IDENTIFIER_LEN} characters, got {}: {did}",
-            identifier.len()
         )));
     }
 
@@ -417,5 +401,27 @@ mod tests {
             did_plc_url("did:plc:UPPERCASE"),
             Err(ResolveError::MalformedDid(_))
         ));
+    }
+
+    /// A did:plc identifier is exactly 24 base32 characters (per the PLC spec,
+    /// a truncated 32-byte SHA-256 in base32). The doc comment already asserts
+    /// this length; the code must enforce it, not just the charset, so a
+    /// malformed short or long identifier is refused before it becomes a
+    /// directory request URL.
+    #[test]
+    fn plc_rejects_wrong_length_identifier() {
+        // One char: passes the charset test but is not a plc identifier.
+        assert!(
+            matches!(did_plc_url("did:plc:a"), Err(ResolveError::MalformedDid(_))),
+            "a 1-char identifier must be refused"
+        );
+        // 25 base32 chars: one over the fixed length.
+        assert!(
+            matches!(
+                did_plc_url("did:plc:aaaaaaaaaaaaaaaaaaaaaaaaa"),
+                Err(ResolveError::MalformedDid(_))
+            ),
+            "an over-length identifier must be refused"
+        );
     }
 }
