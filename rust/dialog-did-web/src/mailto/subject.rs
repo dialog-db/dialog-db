@@ -114,4 +114,46 @@ mod tests {
             Err(ResolveError::MalformedDocument(_))
         ));
     }
+
+    /// A display name that itself looks like an email must not be mistaken for
+    /// the address: the angle-bracketed address is the real sender. Here the
+    /// display name is `attacker@evil.example` but the real address is
+    /// `victim@good.example`; the bracketed one must win, or an attacker could
+    /// spoof any identity by putting it in the display name.
+    #[test]
+    fn display_name_email_does_not_spoof_bracketed_address() {
+        let addr =
+            extract_from_address(r#" "attacker@evil.example" <victim@good.example>"#).unwrap();
+        assert_eq!(addr, "victim@good.example");
+    }
+
+    /// The reverse arrangement: a benign display name with the real (attacker)
+    /// address in brackets extracts that bracketed address, so binding then
+    /// compares against the true sender.
+    #[test]
+    fn bracketed_address_is_the_sender_not_the_display_name() {
+        let addr = extract_from_address(" Alice Smith <alice@example.com>").unwrap();
+        assert_eq!(addr, "alice@example.com");
+    }
+
+    /// A subject that embeds the binding did:key alongside extra tokens must not
+    /// yield a multi-token string that some later relaxation could mis-split.
+    /// The extracted value is fed to `Verifier::from_did_key`, which rejects the
+    /// trailing tokens today, so the whole proof fails closed; this pins that a
+    /// second did:key cannot ride along in the subject.
+    #[test]
+    fn subject_with_trailing_tokens_does_not_smuggle_a_second_key() {
+        let extracted =
+            extract_did_key("I am also known as did:key:zLEGIT and also did:key:zEVIL").unwrap();
+        // The extractor returns the tail verbatim today; the guarantee we pin is
+        // that it is NOT a bare, single, usable did:key token.
+        assert!(
+            extracted.contains(' ') || !extracted.starts_with("did:key:zEVIL"),
+            "extraction must not yield a clean second key: {extracted:?}"
+        );
+        assert!(
+            dialog_credentials::Verifier::from_did_key(&extracted).is_err(),
+            "a multi-token subject must not parse to a usable key: {extracted:?}"
+        );
+    }
 }

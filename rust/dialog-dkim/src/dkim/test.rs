@@ -356,6 +356,150 @@ fn dns_record_roundtrips_ed25519_key() {
     assert_eq!(parsed, direct_key);
 }
 
+/// Build a signed email whose `DKIM-Signature` carries extra tags (`extra_tags`,
+/// e.g. `"t=1000; x=2000;"`) inserted into the signed header block, so the tags
+/// are covered by `b=`. Mirrors [`build_signed_eml`] with RSA + relaxed canon.
+fn build_signed_eml_with_extra_tags(
+    headers: &[Header],
+    signed_header_names: &[&str],
+    domain: &str,
+    selector: &str,
+    extra_tags: &str,
+    signing: &SigningKey<Sha256>,
+) -> Vec<u8> {
+    let canon = Canonicalization {
+        header: HeaderCanon::Relaxed,
+        body: super::canonicalize::BodyCanon::Simple,
+    };
+    let body = "hello body";
+    let body_hash = base64::engine::general_purpose::STANDARD
+        .encode(<Sha256 as rsa::sha2::Digest>::digest(body.as_bytes()));
+    let h_list = signed_header_names.join(":");
+
+    // The extra tags ride inside the signed DKIM-Signature value (before b=), so
+    // b= commits to them: a real signer's t=/x= are covered the same way.
+    let dkim_value_unsigned = format!(
+        " v=1; a=rsa-sha256; c=relaxed/simple; d={domain}; s={selector}; {extra_tags}\r\n \
+         h={h_list}; bh={body_hash};\r\n b="
+    );
+
+    let selected: Vec<Header> = signed_header_names
+        .iter()
+        .map(|name| {
+            headers
+                .iter()
+                .find(|h| h.name_eq_ignore_case(name))
+                .expect("signed header present")
+                .clone()
+        })
+        .collect();
+
+    let mut signed_data = Vec::new();
+    for h in &selected {
+        signed_data.extend_from_slice(&canon.canonicalize_header(h));
+    }
+    signed_data.extend_from_slice(&canon.canonicalize_dkim_signature(&dkim_value_unsigned));
+
+    let b_value =
+        base64::engine::general_purpose::STANDARD.encode(signing.sign(&signed_data).to_bytes());
+    let dkim_value_signed = format!("{dkim_value_unsigned}{b_value}");
+
+    let mut eml = String::new();
+    eml.push_str("DKIM-Signature:");
+    eml.push_str(&dkim_value_signed);
+    eml.push_str("\r\n");
+    for h in headers {
+        eml.push_str(&h.name);
+        eml.push(':');
+        eml.push_str(&h.raw_value);
+        eml.push_str("\r\n");
+    }
+    eml.push_str("\r\n");
+    eml.push_str(body);
+    eml.into_bytes()
+}
+
+/// A DKIM signature whose `x=` (signature expiration, RFC 6376 section 3.5) is
+/// in the past must not verify. `x=` is the signer's own assertion that the
+/// signature is no longer valid after a point in time; honoring it is stricter
+/// than any delegation-level policy. This proof is cryptographically valid (the
+/// signature covers a well-formed, in-the-past `x=`), so verification passes
+/// today: `x=` is never parsed or enforced. This pins that gap.
+#[test]
+fn expired_signature_is_rejected() {
+    let (signing, key) = rsa_signing_key();
+    let headers = sample_headers();
+    // t= well in the past, x= just after it: expired for any plausible clock.
+    let eml = build_signed_eml_with_extra_tags(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        "t=1000; x=2000;",
+        &signing,
+    );
+    // Sanity: the signature itself is valid (the vector is correctly signed).
+    assert!(
+        verify(&eml, &key).is_ok(),
+        "test vector must be a validly signed email"
+    );
+
+    // The real assertion: an expired signature must be refused. Fails today
+    // because x= is ignored.
+    let proof = SignedEmail::from_raw_eml(&eml).unwrap();
+    assert!(
+        verify_with_key(&proof, &key).is_err(),
+        "a DKIM signature whose x= expiration is in the past must not verify"
+    );
+}
+
+/// An unsigned second `From:` prepended to a captured proof must not change
+/// which `From:` the verifier trusts. DKIM signs only the headers named in `h=`
+/// (bottom-up for repeats); the injected top `From:` is outside the signed set.
+/// This is a defense-in-depth regression pin: it must PASS (the guarantee holds
+/// today) and stay passing.
+#[test]
+fn unsigned_injected_from_header_does_not_displace_signed_from() {
+    let (signing, key) = rsa_signing_key();
+    let headers = sample_headers();
+    let eml = build_signed_eml(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Relaxed,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Rsa(&signing),
+        "hello body",
+    );
+
+    // Inject an attacker From: at the very top, outside the signature.
+    let mut tampered = Vec::new();
+    tampered.extend_from_slice(b"From: attacker@evil.example\r\n");
+    tampered.extend_from_slice(&eml);
+
+    // The signature still verifies (the injected header is not in h=), and the
+    // captured signed From: is the original one, not the attacker's.
+    let proof = SignedEmail::from_raw_eml(&tampered).unwrap();
+    verify_with_key(&proof, &key).unwrap();
+    let signed_from = proof
+        .signed_headers
+        .iter()
+        .find(|h| h.name_eq_ignore_case("from"))
+        .expect("From is signed");
+    assert!(
+        signed_from.raw_value.contains("alice@example.com"),
+        "the signed From must be the original, got {:?}",
+        signed_from.raw_value
+    );
+    assert!(
+        !signed_from.raw_value.contains("attacker@evil.example"),
+        "the injected unsigned From must not be the trusted one"
+    );
+}
+
 /// Placeholder for the real Gmail `.eml` vector.
 ///
 /// When a real DKIM-signed email is available:
