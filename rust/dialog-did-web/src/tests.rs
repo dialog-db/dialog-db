@@ -917,7 +917,11 @@ async fn caching_is_bounded_against_attacker_chosen_dids() {
 
     let fetch = MapFetch::new();
     let cached = CachingResolver::with_ttls_and_capacity(
-        MethodResolver::with_providers(DidKeyProvider, DidWebProvider::with_fetch(fetch.clone())),
+        MethodResolver::with_providers(
+            DidKeyProvider,
+            DidWebProvider::with_fetch(fetch.clone()),
+            DidPlcProvider::with_fetch(fetch.clone()),
+        ),
         std::time::Duration::from_secs(300),
         std::time::Duration::from_secs(30),
         CAPACITY,
