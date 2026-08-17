@@ -21,6 +21,7 @@ members = [
     "rust/dialog-capability",
     "rust/dialog-credentials",
     "rust/dialog-did-web",
+    "rust/dialog-dkim",
     "rust/dialog-common",
     "rust/dialog-effects",
     "rust/dialog-macros",
@@ -201,6 +202,9 @@ path = "./rust/dialog-credentials"
 
 [workspace.dependencies.dialog-did-web]
 path = "./rust/dialog-did-web"
+
+[workspace.dependencies.dialog-dkim]
+path = "./rust/dialog-dkim"
 
 [workspace.dependencies.dialog-encoding]
 path = "./rust/dialog-encoding"

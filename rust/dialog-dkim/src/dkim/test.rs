@@ -1,0 +1,394 @@
+//! DKIM verification tests, built test-vector-first.
+//!
+//! A real Gmail `.eml` is not available yet, so the vectors here are
+//! **self-signed**: a known RSA (and ed25519) key signs a constructed
+//! DKIM email, and the verify path checks the signature against that same key.
+//! This exercises canonicalization, header reconstruction, and inner-signature
+//! verification end to end against a signature produced with a known key.
+//!
+//! # Dropping in a real `.eml` later
+//!
+//! When a real DKIM-signed email arrives, add its bytes as a fixture file under
+//! `fixtures/` and its domain key (the DNS `p=` value) and call
+//! [`run_full_verify`] with `(raw_eml_bytes, key)`. No code here needs to
+//! change: [`run_full_verify`] is the exact `(raw_eml, domain_key) -> result`
+//! entry point a real vector plugs into. See [`real_eml_drop_in_point`] for the
+//! placeholder test that becomes the real one.
+
+#![cfg(feature = "dkim")]
+
+use super::canonicalize::{Canonicalization, HeaderCanon};
+use super::error::DkimError;
+use super::key::DkimPublicKey;
+use super::message::Header;
+use super::signature::DkimSignatureHeader;
+use super::verify::{SignedEmail, verify, verify_with_key};
+
+use base64::Engine;
+use rsa::pkcs1::DecodeRsaPrivateKey;
+use rsa::pkcs1v15::SigningKey;
+use rsa::pkcs8::EncodePublicKey;
+use rsa::sha2::Sha256;
+use rsa::signature::{SignatureEncoding, Signer};
+use rsa::{RsaPrivateKey, RsaPublicKey};
+
+/// The cached 2048-bit RSA key shared with the rest of the workspace. Generating
+/// one per test is far too slow.
+fn rsa_signing_key() -> (SigningKey<Sha256>, DkimPublicKey) {
+    let der = include_bytes!("../../fixtures/test_2048.pkcs1.der");
+    let private_key = RsaPrivateKey::from_pkcs1_der(der).unwrap();
+    let public_key = RsaPublicKey::from(&private_key);
+    let spki_der = public_key.to_public_key_der().unwrap().as_bytes().to_vec();
+    (
+        SigningKey::<Sha256>::new(private_key),
+        DkimPublicKey::rsa_from_spki_der(spki_der),
+    )
+}
+
+/// A deterministic ed25519 key pair for ed25519-sha256 vectors.
+fn ed25519_signing_key() -> (ed25519_dalek::SigningKey, DkimPublicKey) {
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+    let public = signing.verifying_key().to_bytes();
+    (signing, DkimPublicKey::ed25519_from_bytes(public))
+}
+
+/// A header as it would appear in the email (name plus raw value, the raw value
+/// beginning with the space after the colon).
+fn header(name: &str, value: &str) -> Header {
+    Header {
+        name: name.to_string(),
+        raw_value: format!(" {value}"),
+    }
+}
+
+/// The inner algorithm to sign a generated vector with.
+enum InnerKey<'a> {
+    Rsa(&'a SigningKey<Sha256>),
+    Ed25519(&'a ed25519_dalek::SigningKey),
+}
+
+/// Build a complete DKIM-signed raw email from a set of headers, signing with
+/// the given key and canonicalization. Returns the raw `.eml` bytes.
+///
+/// This is the test-vector generator: it reproduces the signer's side of RFC
+/// 6376 (canonicalize the signed headers, canonicalize the DKIM-Signature header
+/// with an empty `b=`, sign, then fill `b=`), so a successful round-trip through
+/// [`verify`] proves the verifier reconstructs exactly what a signer produced.
+fn build_signed_eml(
+    headers: &[Header],
+    signed_header_names: &[&str],
+    domain: &str,
+    selector: &str,
+    canon: Canonicalization,
+    inner: InnerKey<'_>,
+    body: &str,
+) -> Vec<u8> {
+    let algorithm = match inner {
+        InnerKey::Rsa(_) => "rsa-sha256",
+        InnerKey::Ed25519(_) => "ed25519-sha256",
+    };
+    let canon_str = format!(
+        "{}/{}",
+        match canon.header {
+            HeaderCanon::Simple => "simple",
+            HeaderCanon::Relaxed => "relaxed",
+        },
+        "simple"
+    );
+
+    // A plausible bh=; its exact value is irrelevant to b= verification because
+    // the body is never re-hashed, but it must be present and stable.
+    let body_hash = base64::engine::general_purpose::STANDARD
+        .encode(<Sha256 as rsa::sha2::Digest>::digest(body.as_bytes()));
+
+    let h_list = signed_header_names.join(":");
+
+    // The DKIM-Signature value WITH an empty b= (what the signer hashes over).
+    let dkim_value_unsigned = format!(
+        " v=1; a={algorithm}; c={canon_str}; d={domain}; s={selector};\r\n \
+         h={h_list}; bh={body_hash};\r\n b="
+    );
+
+    // Reconstruct the signed data exactly as the verifier will: selected signed
+    // headers canonicalized, then the DKIM-Signature header (empty b=) with no
+    // trailing CRLF.
+    let selected: Vec<Header> = signed_header_names
+        .iter()
+        .map(|name| {
+            headers
+                .iter()
+                .find(|h| h.name_eq_ignore_case(name))
+                .expect("signed header present")
+                .clone()
+        })
+        .collect();
+
+    let mut signed_data = Vec::new();
+    for h in &selected {
+        signed_data.extend_from_slice(&canon.canonicalize_header(h));
+    }
+    signed_data.extend_from_slice(&canon.canonicalize_dkim_signature(&dkim_value_unsigned));
+
+    // Sign and base64 the signature.
+    let b_value = match inner {
+        InnerKey::Rsa(key) => {
+            let sig = key.sign(&signed_data);
+            base64::engine::general_purpose::STANDARD.encode(sig.to_bytes())
+        }
+        InnerKey::Ed25519(key) => {
+            use ed25519_dalek::Signer as _;
+            use sha2::{Digest, Sha256 as PlainSha256};
+            let digest = PlainSha256::digest(&signed_data);
+            let sig = key.sign(&digest);
+            base64::engine::general_purpose::STANDARD.encode(sig.to_bytes())
+        }
+    };
+
+    // The final DKIM-Signature header value, now with b= filled in. The bytes
+    // before b= must be byte-identical to `dkim_value_unsigned` for the empty-b
+    // reconstruction to match, so we append the signature after the trailing
+    // `b=`.
+    let dkim_value_signed = format!("{dkim_value_unsigned}{b_value}");
+
+    // Assemble the raw email: DKIM-Signature first, then the other headers, a
+    // blank line, and the body.
+    let mut eml = String::new();
+    eml.push_str("DKIM-Signature:");
+    eml.push_str(&dkim_value_signed);
+    eml.push_str("\r\n");
+    for h in headers {
+        eml.push_str(&h.name);
+        eml.push(':');
+        eml.push_str(&h.raw_value);
+        eml.push_str("\r\n");
+    }
+    eml.push_str("\r\n");
+    eml.push_str(body);
+    eml.into_bytes()
+}
+
+/// The drop-in entry point for a real `.eml`: parse, extract the proof, and
+/// verify against the given domain key. A real Gmail vector needs only to call
+/// this with `(raw_eml_bytes, key)`.
+///
+/// # Errors
+///
+/// Propagates any [`DkimError`] from parsing or verification.
+pub fn run_full_verify(
+    raw_eml: &[u8],
+    key: &DkimPublicKey,
+) -> Result<DkimSignatureHeader, DkimError> {
+    verify(raw_eml, key)
+}
+
+fn sample_headers() -> Vec<Header> {
+    vec![
+        header("From", "Alice <alice@example.com>"),
+        header("To", "verify@service.example"),
+        header(
+            "Subject",
+            "I am also known as did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+        ),
+        header("Date", "Mon, 16 Aug 2026 12:00:00 +0000"),
+        header("Message-ID", "<abc123@example.com>"),
+    ]
+}
+
+const SIGNED_NAMES: &[&str] = &["From", "To", "Subject", "Date", "Message-ID"];
+
+#[test]
+fn rsa_sha256_relaxed_verifies() {
+    let (signing, key) = rsa_signing_key();
+    let headers = sample_headers();
+    let eml = build_signed_eml(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Relaxed,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Rsa(&signing),
+        "hello body",
+    );
+    let sig = verify(&eml, &key).unwrap();
+    assert_eq!(sig.domain, "example.com");
+    assert_eq!(sig.selector, "sel");
+}
+
+#[test]
+fn rsa_sha256_simple_verifies() {
+    let (signing, key) = rsa_signing_key();
+    let headers = sample_headers();
+    let eml = build_signed_eml(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Simple,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Rsa(&signing),
+        "hello body",
+    );
+    verify(&eml, &key).unwrap();
+}
+
+#[test]
+fn ed25519_sha256_relaxed_verifies() {
+    let (signing, key) = ed25519_signing_key();
+    let headers = sample_headers();
+    let eml = build_signed_eml(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Relaxed,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Ed25519(&signing),
+        "hello body",
+    );
+    verify(&eml, &key).unwrap();
+}
+
+#[test]
+fn ed25519_sha256_simple_verifies() {
+    let (signing, key) = ed25519_signing_key();
+    let headers = sample_headers();
+    let eml = build_signed_eml(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Simple,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Ed25519(&signing),
+        "hello body",
+    );
+    verify(&eml, &key).unwrap();
+}
+
+#[test]
+fn tampered_signed_header_fails() {
+    let (signing, key) = rsa_signing_key();
+    let headers = sample_headers();
+    let eml = build_signed_eml(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Relaxed,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Rsa(&signing),
+        "hello body",
+    );
+    // Flip a byte in the signed Subject value.
+    let tampered = String::from_utf8(eml)
+        .unwrap()
+        .replace("I am also known as", "I am ALSO known as");
+    let outcome = verify(tampered.as_bytes(), &key);
+    assert!(matches!(outcome, Err(DkimError::VerificationFailed)));
+}
+
+#[test]
+fn wrong_key_fails() {
+    let (signing, _correct) = rsa_signing_key();
+    let (_other_signing, wrong_key) = ed25519_signing_key();
+    let headers = sample_headers();
+    let eml = build_signed_eml(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Relaxed,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Rsa(&signing),
+        "hello body",
+    );
+    // An ed25519 key cannot verify an rsa-sha256 signature: algorithm mismatch.
+    assert!(matches!(
+        verify(&eml, &wrong_key),
+        Err(DkimError::KeyAlgorithmMismatch)
+    ));
+}
+
+#[test]
+fn captured_proof_verifies_offline() {
+    // The portable proof (no body) verifies with only the domain key.
+    let (signing, key) = rsa_signing_key();
+    let headers = sample_headers();
+    let eml = build_signed_eml(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Relaxed,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Rsa(&signing),
+        "a body that the proof does not carry",
+    );
+    let proof = SignedEmail::from_raw_eml(&eml).unwrap();
+    // The proof carries the signed headers but not the body.
+    assert!(proof.signed_headers.iter().any(|h| h.name == "Subject"));
+    verify_with_key(&proof, &key).unwrap();
+}
+
+#[test]
+fn dns_record_roundtrips_ed25519_key() {
+    // The DNS p= form of an ed25519 key parses back to the same key that
+    // verifies a signature from its private half.
+    let (signing, direct_key) = ed25519_signing_key();
+    let p = base64::engine::general_purpose::STANDARD.encode(signing.verifying_key().to_bytes());
+    let record = format!("v=DKIM1; k=ed25519; p={p}");
+    let parsed = DkimPublicKey::from_dns_txt(&record).unwrap();
+    assert_eq!(parsed, direct_key);
+}
+
+/// Placeholder for the real Gmail `.eml` vector.
+///
+/// When a real DKIM-signed email is available:
+/// 1. Save it as `fixtures/real_gmail.eml`.
+/// 2. Obtain the domain's DKIM key (the DNS `p=` value at
+///    `<selector>._domainkey.<domain>`) and build a [`DkimPublicKey`] via
+///    [`DkimPublicKey::from_dns_txt`].
+/// 3. Replace the body of this test with a call that reads the fixture via
+///    `include_bytes!("../../fixtures/real_gmail.eml")`, builds the key via
+///    `DkimPublicKey::from_dns_txt("v=DKIM1; k=rsa; p=...")`, calls
+///    [`run_full_verify`] with the two, and asserts on the returned
+///    `sig.domain` (e.g. `"gmail.com"`).
+///
+/// No production code changes are needed; only this fixture + assertion.
+#[test]
+fn real_eml_drop_in_point() {
+    // Until a real vector exists, prove the drop-in helper is wired to the same
+    // verify path a real vector will use, by round-tripping a generated vector
+    // through it.
+    let (signing, key) = rsa_signing_key();
+    let headers = sample_headers();
+    let eml = build_signed_eml(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Relaxed,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Rsa(&signing),
+        "hello body",
+    );
+    let sig = run_full_verify(&eml, &key).unwrap();
+    assert_eq!(sig.domain, "example.com");
+}
