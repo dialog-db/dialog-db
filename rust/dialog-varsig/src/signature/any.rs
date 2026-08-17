@@ -31,6 +31,9 @@ use crate::algorithm::webauthn::{WebAuthnP256, WebAuthnSignature};
 #[cfg(feature = "rsa")]
 use crate::algorithm::rsa::{Rs256, RsaSignature};
 
+#[cfg(feature = "dkim")]
+use crate::algorithm::dkim::{Dkim, DkimSignature};
+
 /// The algorithm tag carried by [`AnySignature`] and [`AnyAlgorithm`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlgorithmTag {
@@ -48,6 +51,9 @@ pub enum AlgorithmTag {
     /// RSA-4096 PKCS#1 v1.5 with SHA-256 (512-byte signatures).
     #[cfg(feature = "rsa")]
     Rsa4096,
+    /// DKIM did:mailto proof (variable-length captured email material).
+    #[cfg(feature = "dkim")]
+    Dkim,
 }
 
 impl AlgorithmTag {
@@ -73,6 +79,11 @@ impl AlgorithmTag {
             AlgorithmTag::Rsa2048 => len == 256,
             #[cfg(feature = "rsa")]
             AlgorithmTag::Rsa4096 => len == 512,
+            // A DKIM proof body is variable length (the captured DKIM-Signature
+            // header and signed headers); the only structural constraint here is
+            // non-emptiness, with the full parse deferred to `DkimSignature`.
+            #[cfg(feature = "dkim")]
+            AlgorithmTag::Dkim => len > 0,
         }
     }
 }
@@ -103,6 +114,8 @@ impl SignatureAlgorithm for AnyAlgorithm {
             AlgorithmTag::Rsa2048 => Rs256::<256>::default().prefix(),
             #[cfg(feature = "rsa")]
             AlgorithmTag::Rsa4096 => Rs256::<512>::default().prefix(),
+            #[cfg(feature = "dkim")]
+            AlgorithmTag::Dkim => Dkim.prefix(),
         }
     }
 
@@ -117,6 +130,8 @@ impl SignatureAlgorithm for AnyAlgorithm {
             AlgorithmTag::Rsa2048 => Rs256::<256>::default().config_tags(),
             #[cfg(feature = "rsa")]
             AlgorithmTag::Rsa4096 => Rs256::<512>::default().config_tags(),
+            #[cfg(feature = "dkim")]
+            AlgorithmTag::Dkim => Dkim.config_tags(),
         }
     }
 
@@ -126,6 +141,12 @@ impl SignatureAlgorithm for AnyAlgorithm {
         // would match its prefix and swallow the inner tags. Trying WebAuthn
         // first consumes the marker and only falls through to bare Es256 when the
         // marker is absent.
+        // DKIM's header is a single private-use marker (0x300002), distinct from
+        // every other algorithm's prefix, so trying it first is unambiguous.
+        #[cfg(feature = "dkim")]
+        if let Some((_, rest)) = Dkim::try_from_tags(bytes) {
+            return Some((AnyAlgorithm(AlgorithmTag::Dkim), rest));
+        }
         #[cfg(feature = "webauthn")]
         if let Some((_, rest)) = WebAuthnP256::try_from_tags(bytes) {
             return Some((AnyAlgorithm(AlgorithmTag::WebAuthn), rest));
@@ -250,6 +271,16 @@ impl From<RsaSignature<512>> for AnySignature {
         Self {
             algorithm: AlgorithmTag::Rsa4096,
             bytes: sig.0.into_boxed_slice(),
+        }
+    }
+}
+
+#[cfg(feature = "dkim")]
+impl From<DkimSignature> for AnySignature {
+    fn from(sig: DkimSignature) -> Self {
+        Self {
+            algorithm: AlgorithmTag::Dkim,
+            bytes: sig.to_vec().into_boxed_slice(),
         }
     }
 }
