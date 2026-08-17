@@ -180,4 +180,34 @@ mod tests {
             Err(RsaDidFromStrError::WrongMulticodec | RsaDidFromStrError::InvalidBase58)
         ));
     }
+
+    /// An over-long `did:key` must be refused on length *before* it is decoded.
+    ///
+    /// The RSA arm is the only variable-length one, so unlike the curve arms it
+    /// hands the whole string to `multibase::decode` with no bound. base58
+    /// decoding is O(n^2), so the cost is set by an attacker-chosen string
+    /// length. The fixed-width arms are immune only by accident: the `base58`
+    /// crate's 132-byte output buffer makes them bail in microseconds.
+    ///
+    /// This is reachable from unauthenticated input. `Verifier::from_did_key`
+    /// tries ed25519, WebAuthn, and es256 (each bailing immediately) and then
+    /// falls through to this arm, and the authorizer resolves the issuer DID of
+    /// any submitted invocation. A 4096-bit RSA `did:key` is about 730
+    /// characters, so a cap well above that costs nothing legitimate.
+    #[dialog_common::test]
+    fn rsa_did_from_str_rejects_an_over_long_did_before_decoding() {
+        // Far longer than any real RSA key, but still valid base58 characters.
+        let oversized = format!("did:key:z{}", "1".repeat(100_000));
+
+        let started = std::time::Instant::now();
+        let result: Result<RsaVerifier, _> = oversized.parse();
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "an over-long did:key must not parse");
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "an over-long did:key must be refused on length before the O(n^2) \
+             base58 decode; took {elapsed:?} for a 100k-character DID"
+        );
+    }
 }
