@@ -280,6 +280,94 @@ async fn it_refuses_unsupported_key_type() {
     );
 }
 
+/// The resolved document's `id` must equal the DID being resolved. Here the
+/// document served for `did:web:victim.example` claims to be
+/// `did:web:attacker.example` and carries the attacker's key. A correct
+/// resolver refuses (the document is not this DID's document); without the
+/// check it binds the attacker's key to the victim DID, so any signature the
+/// attacker produces would verify as the victim. Combined with the URL-injection
+/// surface (see `url.rs`), a redirecting or shared host makes this reachable
+/// from remote input.
+///
+/// did:web spec: resolution MUST confirm the document `id` matches the DID.
+#[dialog_common::test]
+async fn it_refuses_document_whose_id_is_a_different_did() {
+    let attacker = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let victim_did = "did:web:victim.example";
+    // The document is served at the victim's URL but its `id` (and its only
+    // key) belong to the attacker.
+    let doc = did_document_multibase("did:web:attacker.example", &attacker);
+    let fetch = MapFetch::new().with(
+        "https://victim.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let provider = DidWebProvider::with_fetch(fetch);
+
+    let did: Did = victim_did.parse().unwrap();
+    let outcome = Resolve::new(did).perform(&provider).await;
+
+    // Must refuse: the served document is not the victim DID's document.
+    let Err(err) = &outcome else {
+        let verifier = outcome.unwrap();
+        let msg = b"attacker speaks as victim";
+        let sig = VarsigSigner::sign(&attacker, msg).await.unwrap();
+        let forged = verifier.verify(msg, &sig).await.is_ok();
+        panic!(
+            "resolving {victim_did} accepted a document with id=did:web:attacker.example; \
+             attacker key verifies as victim = {forged}"
+        );
+    };
+    assert!(
+        matches!(err, ResolveError::MalformedDocument(_)),
+        "expected an id-mismatch refusal, got {err:?}"
+    );
+}
+
+/// A verification method whose `controller` is a *different* DID must not
+/// contribute a key to this DID's verifier. The document for
+/// `did:web:subject.example` lists a method controlled by
+/// `did:web:other.example`; a correct resolver excludes it (the subject never
+/// authorized that key), so a signature by that key is refused.
+#[dialog_common::test]
+async fn it_excludes_a_method_controlled_by_another_did() {
+    let foreign = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let subject_did = "did:web:subject.example";
+    let doc = format!(
+        r#"{{
+            "id": "{subject_did}",
+            "verificationMethod": [{{
+                "id": "{subject_did}#key-1",
+                "type": "Multikey",
+                "controller": "did:web:other.example",
+                "publicKeyMultibase": "{key}"
+            }}]
+        }}"#,
+        key = multibase_of(&foreign)
+    );
+    let fetch = MapFetch::new().with(
+        "https://subject.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let provider = DidWebProvider::with_fetch(fetch);
+
+    let did: Did = subject_did.parse().unwrap();
+    let outcome = Resolve::new(did).perform(&provider).await;
+
+    // The only key is controlled by another DID, so no usable key remains.
+    match outcome {
+        Err(ResolveError::NoSupportedVerificationMethod) => {}
+        Err(other) => panic!("expected NoSupportedVerificationMethod, got {other:?}"),
+        Ok(verifier) => {
+            let msg = b"foreign-controlled key signs";
+            let sig = VarsigSigner::sign(&foreign, msg).await.unwrap();
+            assert!(
+                verifier.verify(msg, &sig).await.is_err(),
+                "a method controlled by did:web:other.example must not verify for {subject_did}"
+            );
+        }
+    }
+}
+
 #[dialog_common::test]
 async fn method_dispatch_resolves_did_key_without_fetching() {
     let signer = Signer::from(Ed25519Signer::generate().await.unwrap());

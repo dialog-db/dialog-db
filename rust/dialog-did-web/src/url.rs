@@ -109,4 +109,57 @@ mod tests {
             Err(ResolveError::MalformedDid(_))
         ));
     }
+
+    /// A percent-encoded `/` and `?` in the host segment must not smuggle an
+    /// arbitrary path and query into the fetch URL. `did:web` permits decoding
+    /// only `%3A` (a port colon) in the host; a decoded `/` or `?` here turns
+    /// the fixed `/.well-known/did.json` suffix into a query-string tail,
+    /// letting a crafted DID choose any path on the host. Because the S3
+    /// authorizer resolves attacker-supplied issuer DIDs over the network, this
+    /// is a server-side request-forgery primitive.
+    #[test]
+    fn rejects_path_and_query_smuggled_into_host() {
+        let url = did_web_url("did:web:victim.example%2Fadmin%3Fx%3D");
+        assert!(
+            matches!(url, Err(ResolveError::MalformedDid(_))),
+            "a host that decodes to contain '/' or '?' must be refused, got {url:?}"
+        );
+    }
+
+    /// A percent-encoded `@` in the host segment must not introduce a userinfo
+    /// component, which would make the fetch target a different host than the
+    /// one the DID string appears to name (`good.com@evil.com` fetches
+    /// `evil.com`).
+    #[test]
+    fn rejects_userinfo_in_host() {
+        let url = did_web_url("did:web:good.com%40evil.example");
+        assert!(
+            matches!(url, Err(ResolveError::MalformedDid(_))),
+            "a host that decodes to contain '@' (userinfo) must be refused, got {url:?}"
+        );
+    }
+
+    /// Dot-segments in the path must not walk the fetch to a different resource
+    /// on the host (`did:web:host:..:..` -> `https://host/../../did.json`),
+    /// which combined with a missing document-`id` check lets any
+    /// DID-document-shaped JSON on the host masquerade as this identity.
+    #[test]
+    fn rejects_dot_segment_path_traversal() {
+        let url = did_web_url("did:web:host.example:..:..");
+        assert!(
+            matches!(url, Err(ResolveError::MalformedDid(_))),
+            "path segments of '..' must be refused, got {url:?}"
+        );
+    }
+
+    /// A raw control or delimiter byte introduced by percent-decoding a path
+    /// segment (here a CR/LF) must be refused rather than spliced into the URL.
+    #[test]
+    fn rejects_control_bytes_in_path() {
+        let url = did_web_url("did:web:host.example:a%0d%0ab");
+        assert!(
+            matches!(url, Err(ResolveError::MalformedDid(_))),
+            "a path segment decoding to control bytes must be refused, got {url:?}"
+        );
+    }
 }
