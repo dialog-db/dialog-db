@@ -4,10 +4,43 @@
 //! canned response instead of hitting the network. The default implementation,
 //! [`ReqwestFetch`], uses the workspace `reqwest` (no `stream` feature, so it
 //! builds for both native and wasm).
+//!
+//! # Fetching for a security decision
+//!
+//! This fetch feeds a signature check, and the URL comes from a DID an
+//! unauthenticated party supplied, so the client is configured rather than
+//! defaulted:
+//!
+//! - **No redirects.** `reqwest`'s default follows up to ten, across origins. A
+//!   `did:web` host (or the plc directory) that redirects would have its
+//!   document read from somewhere else entirely, so a resolution must fail
+//!   loudly rather than silently follow.
+//! - **A request timeout**, so an unresponsive host cannot pin a verification
+//!   task open.
+//! - **A response size cap**, so a host cannot answer a DID-document request
+//!   with an unbounded body.
+//!
+//! `reqwest` on wasm32 runs on `fetch`, whose redirect and timeout policy the
+//! browser owns and the builder cannot set; the size cap is enforced here on
+//! every target.
 
 use dialog_common::{ConditionalSend, ConditionalSync};
 
 use crate::error::ResolveError;
+
+/// The largest DID document this fetcher will read.
+///
+/// A DID document is a small JSON object naming a handful of keys; real ones
+/// are well under a kilobyte. This bound only has to exclude a body sent to
+/// exhaust memory.
+pub const MAX_DOCUMENT_BYTES: usize = 1 << 20;
+
+/// How long a single DID-document request may take.
+///
+/// Native only: on wasm32 `reqwest` runs on the browser's `fetch`, which owns
+/// the timeout, so there is nothing for the client builder to set.
+#[cfg(not(target_arch = "wasm32"))]
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Fetches the bytes of an `https` URL.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -23,19 +56,43 @@ pub trait Fetch: ConditionalSync {
 }
 
 /// The default [`Fetch`], backed by `reqwest`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReqwestFetch {
     client: reqwest::Client,
 }
 
+impl Default for ReqwestFetch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ReqwestFetch {
-    /// Create a fetcher with a fresh `reqwest` client.
+    /// Create a fetcher whose client refuses redirects and times out.
+    ///
+    /// See the module docs for why this is configured rather than defaulted.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let builder = reqwest::Client::builder();
+
+        // `redirect` and `timeout` are native-only: on wasm32 `reqwest` is a
+        // thin wrapper over the browser's `fetch`, which owns both policies.
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = builder
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(REQUEST_TIMEOUT);
+
+        Self {
+            // A builder with only these options set cannot fail; fall back to
+            // a default client rather than panicking if that ever changes.
+            client: builder.build().unwrap_or_default(),
+        }
     }
 
     /// Create a fetcher from an existing `reqwest` client.
+    ///
+    /// The caller owns that client's redirect, timeout, and proxy policy;
+    /// [`ReqwestFetch::new`] is the configured default.
     #[must_use]
     pub fn with_client(client: reqwest::Client) -> Self {
         Self { client }
@@ -60,11 +117,38 @@ impl Fetch for ReqwestFetch {
             )));
         }
 
-        response
+        // A redirect is refused rather than followed, so a 3xx arrives here as
+        // a non-success status above. Name it plainly for the operator.
+        if status.is_redirection() {
+            return Err(ResolveError::Fetch(format!(
+                "{url} redirected; a DID document must be served by the host the DID names"
+            )));
+        }
+
+        // Refuse an over-large body before reading it, when the host declares
+        // its length.
+        if let Some(len) = response.content_length()
+            && len > MAX_DOCUMENT_BYTES as u64
+        {
+            return Err(ResolveError::Fetch(format!(
+                "{url} returned {len} bytes, over the {MAX_DOCUMENT_BYTES}-byte limit"
+            )));
+        }
+
+        let body = response
             .bytes()
             .await
-            .map(|b| b.to_vec())
-            .map_err(|e| ResolveError::Fetch(format!("reading body of {url} failed: {e}")))
+            .map_err(|e| ResolveError::Fetch(format!("reading body of {url} failed: {e}")))?;
+
+        // And again after reading, for a host that declared no length.
+        if body.len() > MAX_DOCUMENT_BYTES {
+            return Err(ResolveError::Fetch(format!(
+                "{url} returned {} bytes, over the {MAX_DOCUMENT_BYTES}-byte limit",
+                body.len()
+            )));
+        }
+
+        Ok(body.to_vec())
     }
 }
 

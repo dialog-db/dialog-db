@@ -97,17 +97,50 @@ impl DidDocument {
     /// The `did` is the DID this document was resolved for; the returned
     /// verifier reports it as its identity (not any single key's `did:key`).
     ///
+    /// # Binding the answer to the question
+    ///
+    /// Two checks tie the document back to the DID being resolved, because
+    /// fetching a document proves only that *some* host served *some* JSON:
+    ///
+    /// - The document's `id` must equal `did`. Without it, a document served at
+    ///   the victim's URL but naming the attacker (and carrying the attacker's
+    ///   key) binds that key to the victim's DID, so the attacker's signatures
+    ///   verify as the victim. Any party that can influence the response body —
+    ///   a redirect to another origin, a shared host, the directory itself —
+    ///   gets a full authentication bypass.
+    /// - A verification method whose `controller` names a *different* DID is
+    ///   excluded. The subject never authorized that key, so it must not join
+    ///   this DID's key set. A method with no `controller` is taken as
+    ///   controlled by the subject, which is the DID-core default.
+    ///
     /// # Errors
     ///
-    /// Returns [`ResolveError::NoSupportedVerificationMethod`] if no candidate
-    /// method yields a usable key. If exactly one method was selected (e.g. via
-    /// a fragment) and its key is unsupported, that method's
+    /// Returns [`ResolveError::MalformedDocument`] if the document's `id` is
+    /// absent or names a different DID, or
+    /// [`ResolveError::NoSupportedVerificationMethod`] if no candidate method
+    /// yields a usable key. If exactly one method was selected (e.g. via a
+    /// fragment) and its key is unsupported, that method's
     /// [`ResolveError::UnsupportedKey`] is surfaced instead.
     pub fn verifier(
         &self,
         did: &Did,
         fragment: Option<&str>,
     ) -> Result<MultiVerifier, ResolveError> {
+        // The document must be *this* DID's document.
+        match self.id.as_deref() {
+            Some(id) if id == did.as_str() => {}
+            Some(id) => {
+                return Err(ResolveError::MalformedDocument(format!(
+                    "document id {id} does not match the resolved DID {did}"
+                )));
+            }
+            None => {
+                return Err(ResolveError::MalformedDocument(format!(
+                    "document for {did} has no id"
+                )));
+            }
+        }
+
         let candidates: Vec<&VerificationMethod> = match fragment {
             Some(frag) => self
                 .verification_method
@@ -124,6 +157,10 @@ impl DidDocument {
         let mut keys: Vec<Verifier> = Vec::new();
         let mut last_key_error: Option<ResolveError> = None;
         for method in candidates {
+            // A key some other DID controls is not this DID's to speak with.
+            if !method.is_controlled_by(did) {
+                continue;
+            }
             match method.verifier() {
                 Ok(verifier) => keys.push(verifier),
                 Err(err @ ResolveError::UnsupportedKey(_)) => last_key_error = Some(err),
@@ -140,6 +177,18 @@ impl DidDocument {
 }
 
 impl VerificationMethod {
+    /// Is this method controlled by `did`?
+    ///
+    /// An absent `controller` means the document subject controls the method,
+    /// which is the DID-core default. A `controller` naming another DID means
+    /// the key belongs to someone else and must not join this DID's key set.
+    #[must_use]
+    pub fn is_controlled_by(&self, did: &Did) -> bool {
+        self.controller
+            .as_deref()
+            .is_none_or(|controller| controller == did.as_str())
+    }
+
     /// Recover an algorithm-agnostic verifier from this method.
     ///
     /// # Errors
