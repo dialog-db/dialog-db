@@ -9,6 +9,24 @@ use std::str::FromStr;
 /// The `rsa-pub` multicodec code `0x1205`, encoded as an unsigned varint.
 const RSA_PUB_MULTICODEC: [u8; 2] = [0x85, 0x24];
 
+/// The longest `did:key` multibase body this parser will decode.
+///
+/// The RSA arm is the only variable-length one, so unlike the curve arms it
+/// would otherwise hand an attacker-chosen string straight to
+/// `multibase::decode`. base58 decoding is quadratic in the input length, so
+/// the cost would be the caller's to choose: measured in release, a
+/// 100k-character `did:key` takes about 77ms, and 200k takes seconds. That is
+/// reachable from unauthenticated input, because the authorizer resolves the
+/// issuer DID of any submitted invocation and
+/// [`Verifier::from_did_key`](crate::Verifier::from_did_key) falls through to
+/// this arm after the curve arms bail.
+///
+/// The curve arms are immune only by accident: the `base58` crate's 132-byte
+/// output buffer makes them refuse an over-long string in microseconds. This
+/// is the deliberate equivalent. A 4096-bit RSA `did:key` is about 730
+/// characters, so this leaves ample headroom for every real key.
+const MAX_DID_KEY_MULTIBASE_LEN: usize = 1024;
+
 /// An RSA `did:key`.
 ///
 /// Unlike the fixed-width curve keys, the RSA public key is variable length: a
@@ -61,6 +79,12 @@ impl FromStr for RsaVerifier {
         let multibase_str = parts.get(2).ok_or(RsaDidFromStrError::InvalidDidHeader)?;
         if !multibase_str.starts_with('z') {
             return Err(RsaDidFromStrError::MissingBase58Prefix);
+        }
+        // Refuse on length before decoding: base58 is quadratic, so this is
+        // what keeps the cost off the caller's choosing. See
+        // `MAX_DID_KEY_MULTIBASE_LEN`.
+        if multibase_str.len() > MAX_DID_KEY_MULTIBASE_LEN {
+            return Err(RsaDidFromStrError::InvalidBase58);
         }
         let (base, raw) =
             multibase::decode(multibase_str).map_err(|_| RsaDidFromStrError::InvalidBase58)?;
