@@ -419,6 +419,189 @@ fn build_signed_eml_with_extra_tags(
     eml.into_bytes()
 }
 
+/// Build a signed email whose `h=` names a header more than once, so the
+/// captured proof carries two `Subject:` values.
+///
+/// Unlike [`build_signed_eml`], which resolves each `h=` name by first match,
+/// this reproduces the signer's real behavior for repeated names: RFC 6376
+/// section 5.4.2 consumes them bottom-up, so `h=...:subject:subject` signs the
+/// bottom-most `Subject:` first and the one above it second.
+fn build_signed_eml_with_repeated_names(
+    headers: &[Header],
+    signed_header_names: &[&str],
+    domain: &str,
+    selector: &str,
+    signing: &SigningKey<Sha256>,
+) -> Vec<u8> {
+    let canon = Canonicalization {
+        header: HeaderCanon::Relaxed,
+        body: super::canonicalize::BodyCanon::Simple,
+    };
+    let body = "hello body";
+    let body_hash = base64::engine::general_purpose::STANDARD
+        .encode(<Sha256 as rsa::sha2::Digest>::digest(body.as_bytes()));
+    let h_list = signed_header_names.join(":");
+
+    let dkim_value_unsigned = format!(
+        " v=1; a=rsa-sha256; c=relaxed/simple; d={domain}; s={selector};\r\n \
+         h={h_list}; bh={body_hash};\r\n b="
+    );
+
+    // Bottom-up selection with a per-name consumed count, matching the verifier.
+    let mut consumed: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let selected: Vec<Header> = signed_header_names
+        .iter()
+        .map(|name| {
+            let already = consumed.entry(name.to_ascii_lowercase()).or_insert(0);
+            let found = headers
+                .iter()
+                .rev()
+                .filter(|h| h.name_eq_ignore_case(name))
+                .nth(*already)
+                .expect("signed header present")
+                .clone();
+            *already += 1;
+            found
+        })
+        .collect();
+
+    let mut signed_data = Vec::new();
+    for h in &selected {
+        signed_data.extend_from_slice(&canon.canonicalize_header(h));
+    }
+    signed_data.extend_from_slice(&canon.canonicalize_dkim_signature(&dkim_value_unsigned));
+
+    let b_value =
+        base64::engine::general_purpose::STANDARD.encode(signing.sign(&signed_data).to_bytes());
+    let dkim_value_signed = format!("{dkim_value_unsigned}{b_value}");
+
+    let mut eml = String::new();
+    eml.push_str("DKIM-Signature:");
+    eml.push_str(&dkim_value_signed);
+    eml.push_str("\r\n");
+    for h in headers {
+        eml.push_str(&h.name);
+        eml.push(':');
+        eml.push_str(&h.raw_value);
+        eml.push_str("\r\n");
+    }
+    eml.push_str("\r\n");
+    eml.push_str(body);
+    eml.into_bytes()
+}
+
+/// A proof must not carry two `Subject:` headers, because which one is
+/// authoritative diverges between the verifier and the human.
+///
+/// `select_signed_headers` consumes repeated `h=` names bottom-up (RFC 6376
+/// section 5.4.2), so `signed_headers[0]` for a doubled name is the
+/// *bottom-most* `Subject:`. Every mail client displays the *top-most* one, and
+/// the `did:mailto` binding reads the first match. So the subject the user read
+/// and the subject that authorizes a key are different headers.
+///
+/// Oversigning (`h=from:subject:subject`) is standard anti-replay practice
+/// (RFC 6376 section 8.15), so this is a normal configuration, not an exotic
+/// one. The attack: get the victim to send one message with a doubled Subject,
+/// and the key bound is one they never saw.
+///
+/// Refusing a duplicate outright is the fix; a binding proof has no legitimate
+/// reason to sign two subjects.
+#[dialog_common::test]
+fn duplicate_signed_subject_is_rejected() {
+    let (signing, key) = rsa_signing_key();
+
+    let headers = vec![
+        header("From", "Alice <alice@example.com>"),
+        // What a mail client shows the user.
+        header("Subject", "Hello, this is a totally normal email"),
+        // What the verifier reads: signed first under bottom-up selection.
+        header(
+            "Subject",
+            "I am also known as did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+        ),
+        header("Date", "Mon, 16 Aug 2026 12:00:00 +0000"),
+    ];
+
+    let eml = build_signed_eml_with_repeated_names(
+        &headers,
+        &["From", "Subject", "Subject", "Date"],
+        "example.com",
+        "sel",
+        &signing,
+    );
+
+    // Sanity: the vector is a correctly signed email.
+    assert!(
+        verify(&eml, &key).is_ok(),
+        "test vector must be a validly signed email"
+    );
+
+    let proof = SignedEmail::from_raw_eml(&eml).unwrap();
+
+    // Confirm the divergence is real before asserting the fix: the first signed
+    // Subject is the bottom one, not the one a client would display.
+    let first_subject = proof
+        .signed_headers
+        .iter()
+        .find(|h| h.name_eq_ignore_case("subject"))
+        .expect("a signed Subject");
+    assert!(
+        first_subject.raw_value.contains("I am also known as"),
+        "the first signed Subject is the bottom-most one, which the user never saw"
+    );
+
+    assert!(
+        verify_with_key(&proof, &key).is_err(),
+        "a proof signing two Subject: headers must be refused: the header the \
+         verifier reads is not the header the sender saw"
+    );
+}
+
+/// A DKIM key below the RFC 8301 floor must not verify a binding.
+///
+/// `verify_rsa_sha256` checks no modulus size, and the `rsa` crate happily
+/// parses a 512-bit key. 512-bit RSA is factorable on commodity hardware in
+/// hours, and 512-bit DKIM keys are still published in the wild. Anyone who
+/// factors a domain's weak DKIM key mints an "I am also known as" binding for
+/// every mailbox at that domain, so the whole `did:mailto` identity for that
+/// domain falls to an offline computation.
+///
+/// RFC 8301 requires at least 1024 bits and recommends 2048.
+#[dialog_common::test]
+fn undersized_rsa_dkim_key_is_rejected() {
+    use rsa::pkcs1v15::SigningKey as Pkcs1SigningKey;
+
+    // 512 bits: far below the RFC 8301 floor, but a well-formed RSA key.
+    let mut rng = rand::thread_rng();
+    let weak_private = RsaPrivateKey::new(&mut rng, 512).expect("512-bit key");
+    let weak_public = RsaPublicKey::from(&weak_private);
+    let weak_key = DkimPublicKey::rsa_from_spki_der(
+        weak_public.to_public_key_der().unwrap().as_bytes().to_vec(),
+    );
+    let weak_signing = Pkcs1SigningKey::<Sha256>::new(weak_private);
+
+    let headers = sample_headers();
+    let eml = build_signed_eml(
+        &headers,
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Relaxed,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Rsa(&weak_signing),
+        "hello body",
+    );
+
+    let proof = SignedEmail::from_raw_eml(&eml).unwrap();
+    assert!(
+        verify_with_key(&proof, &weak_key).is_err(),
+        "a 512-bit RSA DKIM key is below the RFC 8301 floor and must not \
+         authorize a binding, even though the signature itself is valid"
+    );
+}
+
 /// A DKIM signature whose `x=` (signature expiration, RFC 6376 section 3.5) is
 /// in the past must not verify. `x=` is the signer's own assertion that the
 /// signature is no longer valid after a point in time; honoring it is stricter

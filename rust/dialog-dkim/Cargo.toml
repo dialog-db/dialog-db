@@ -37,9 +37,20 @@ rsa = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
+# Generating a deliberately undersized key for the RFC 8301 key-floor test.
+rand = { workspace = true }
+# The workspace test attribute, so these tests run on wasm32 as well as native.
+dialog-common = { workspace = true, features = ["helpers"] }
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
 wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+# These cfgs are used by the dialog_common::test proc macro.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(dialog_test_wasm_integration)",
+    "cfg(feature, values(\"web-integration-tests\"))",
+] }
