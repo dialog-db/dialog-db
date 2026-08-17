@@ -1,9 +1,9 @@
 //! WebAuthn P-256 verifier.
 //!
-//! Verifies WebAuthn assertions on any platform by:
-//! 1. Parsing `clientDataJSON` to extract and validate the challenge.
-//! 2. Computing `authenticatorData || SHA-256(clientDataJSON)` as the signed message.
-//! 3. Verifying the inner ECDSA P-256 signature (DER-encoded) against that message.
+//! Verifies WebAuthn assertions on any platform by checking the ceremony type,
+//! the challenge, the authenticator's flags and relying party, and the inner
+//! ECDSA P-256 signature over `authenticatorData || SHA-256(clientDataJSON)`.
+//! See [`WebAuthnVerifier`] for the full list and the reason for each check.
 //!
 //! A WebAuthn credential is presented as a distinct `did:key` variant: the key
 //! bytes are a plain 33-byte compressed P-256 point, but the multicodec prefix
@@ -30,13 +30,64 @@ use std::str::FromStr;
 /// key bytes that follow are an ordinary 33-byte compressed P-256 point.
 pub const WEBAUTHN_P256_MULTICODEC: [u8; 4] = [0x81, 0x80, 0xc0, 0x01];
 
+/// The smallest valid `authenticatorData`: a 32-byte rpIdHash, a flags byte,
+/// and a 4-byte signature counter.
+const MIN_AUTHENTICATOR_DATA_LEN: usize = 37;
+
+/// The offset of the flags byte in `authenticatorData`.
+const FLAGS_OFFSET: usize = 32;
+
+/// The User Present bit of the flags byte: a human performed a gesture.
+const FLAG_USER_PRESENT: u8 = 0x01;
+
+/// The `clientData.type` an *assertion* carries. A registration carries
+/// `"webauthn.create"` and must never be accepted as an authorization.
+const CLIENT_DATA_TYPE_GET: &str = "webauthn.get";
+
 /// A WebAuthn P-256 `did:key` verifier.
 ///
 /// Wraps a P-256 ECDSA verifying key and verifies [`WebAuthnSignature`]s on any
 /// platform (native or WASM).
+///
+/// # What verification checks
+///
+/// A valid inner ECDSA signature is necessary but nowhere near sufficient: the
+/// same key signs both WebAuthn ceremonies, and the bytes it signs are
+/// structured data whose meaning lives in fields the signature alone does not
+/// interpret. So [`verify_webauthn`](Self::verify_webauthn) checks, in order:
+///
+/// 1. `clientData.type` is `webauthn.get`. A registration
+///    (`navigator.credentials.create()`) signs the same
+///    `authenticatorData || SHA-256(clientDataJSON)` shape, so without this a
+///    site that prompts "register a passkey with us", having set the challenge
+///    to the hash of a payload it chose, converts a registration gesture into
+///    an authorization over that payload.
+/// 2. The challenge is the multihash of the payload being authorized.
+/// 3. `authenticatorData` is long enough to hold the fields it must.
+/// 4. The User Present flag is set, so a human actually gestured. The signer
+///    asks the browser for `userVerification: "required"`, but that is a
+///    signing-time hint; an attacker assembling an assertion never goes
+///    through it.
+/// 5. `rpIdHash` matches the expected relying party, *when one is known* (see
+///    [`expecting_rp_id`](Self::expecting_rp_id)).
+/// 6. The inner ECDSA signature verifies, in its canonical low-S form.
+///
+/// # Why the relying party is optional
+///
+/// A passkey is presented as a `did:key`, which carries a public key and
+/// nothing else. Resolution can therefore recover the key but not the origin
+/// the credential was registered for, so a verifier built from a DID alone
+/// cannot know which `rpIdHash` to expect. Where the caller does know it (a
+/// server verifying assertions for its own origin), [`expecting_rp_id`] binds
+/// it and the check becomes mandatory. Where it does not, the remaining checks
+/// still hold, and the key itself remains the authorization boundary.
+///
+/// [`expecting_rp_id`]: Self::expecting_rp_id
 #[derive(Debug, Clone)]
 pub struct WebAuthnVerifier {
     key: p256::ecdsa::VerifyingKey,
+    /// SHA-256 of the expected relying-party id, when the caller knows it.
+    rp_id_hash: Option<[u8; 32]>,
 }
 
 impl WebAuthnVerifier {
@@ -49,7 +100,29 @@ impl WebAuthnVerifier {
     pub fn from_sec1_bytes(bytes: &[u8]) -> Result<Self, WebAuthnDidFromStrError> {
         let key = p256::ecdsa::VerifyingKey::from_sec1_bytes(bytes)
             .map_err(|_| WebAuthnDidFromStrError::InvalidKey)?;
-        Ok(Self { key })
+        Ok(Self {
+            key,
+            rp_id_hash: None,
+        })
+    }
+
+    /// Require assertions to name `rp_id` as their relying party.
+    ///
+    /// Binds the `rpIdHash` check, which is otherwise skipped because a
+    /// `did:key` cannot carry an origin. A caller that knows which relying
+    /// party should have produced these assertions should always set it: it is
+    /// what stops an assertion harvested from another origin the same
+    /// authenticator serves from being replayed here.
+    #[must_use]
+    pub fn expecting_rp_id(mut self, rp_id: &str) -> Self {
+        self.rp_id_hash = Some(Sha256::digest(rp_id.as_bytes()).into());
+        self
+    }
+
+    /// The expected relying-party id hash, if one was bound.
+    #[must_use]
+    pub const fn rp_id_hash(&self) -> Option<&[u8; 32]> {
+        self.rp_id_hash.as_ref()
     }
 
     /// Get the inner P-256 verifying key.
@@ -66,10 +139,8 @@ impl WebAuthnVerifier {
 
     /// Verify a WebAuthn signature against a payload.
     ///
-    /// This performs the full WebAuthn verification flow:
-    /// 1. Parse `clientDataJSON` and validate the challenge matches the payload.
-    /// 2. Compute the signed message `authenticatorData || SHA-256(clientDataJSON)`.
-    /// 3. Verify the inner DER-encoded ECDSA P-256 signature.
+    /// See the [type docs](Self) for the full list of checks and why each one
+    /// is needed.
     ///
     /// # Errors
     ///
@@ -79,7 +150,8 @@ impl WebAuthnVerifier {
         payload: &[u8],
         sig: &WebAuthnSignature,
     ) -> Result<(), WebAuthnVerifyError> {
-        self.validate_challenge(payload, &sig.client_data_json)?;
+        self.validate_client_data(payload, &sig.client_data_json)?;
+        self.validate_authenticator_data(&sig.authenticator_data)?;
 
         // Per WebAuthn: signedData = authenticatorData || SHA-256(clientDataJSON).
         let client_data_hash = Sha256::digest(&sig.client_data_json);
@@ -92,25 +164,51 @@ impl WebAuthnVerifier {
         // the wire and parses it here, rather than converting to raw r||s.
         let ecdsa_sig = p256::ecdsa::DerSignature::from_bytes(&sig.signature)
             .map_err(|e| WebAuthnVerifyError::InvalidSignature(e.to_string()))?;
+
+        // ECDSA signatures are malleable: negating s yields a second, distinct
+        // encoding that verifies against the same key and message. Normalize to
+        // the canonical low-S form before verifying, so the two encodings of one
+        // authorization become one value and nothing downstream that keys on a
+        // signature can be fooled by a duplicate.
+        //
+        // Normalizing rather than rejecting is deliberate. Real authenticators
+        // do emit high-S signatures, and refusing them would break genuine
+        // passkeys; the malleability only matters because two byte strings map
+        // to one authorization, and collapsing them fixes exactly that.
+        let scalars = p256::ecdsa::Signature::try_from(ecdsa_sig)
+            .map_err(|e| WebAuthnVerifyError::InvalidSignature(e.to_string()))?;
+        let canonical = scalars.normalize_s().unwrap_or(scalars);
+
         self.key
-            .verify(&signed_data, &ecdsa_sig)
+            .verify(&signed_data, &canonical)
             .map_err(|e| WebAuthnVerifyError::InvalidSignature(e.to_string()))
     }
 
-    /// Validate that the challenge in `clientDataJSON` is
+    /// Validate `clientDataJSON`: it must be an *assertion* whose challenge is
     /// `base64url(multihash-sha256(payload))`.
-    fn validate_challenge(
+    fn validate_client_data(
         &self,
         payload: &[u8],
         client_data_json: &[u8],
     ) -> Result<(), WebAuthnVerifyError> {
+        // `type` is required, not optional: a clientDataJSON without one is not
+        // a WebAuthn ceremony, and serde would otherwise ignore its absence.
         #[derive(serde::Deserialize)]
         struct ClientData {
+            #[serde(rename = "type")]
+            type_: String,
             challenge: String,
         }
 
         let client_data: ClientData = serde_json::from_slice(client_data_json)
             .map_err(|e| WebAuthnVerifyError::InvalidClientData(e.to_string()))?;
+
+        if client_data.type_ != CLIENT_DATA_TYPE_GET {
+            return Err(WebAuthnVerifyError::InvalidClientData(format!(
+                "expected a {CLIENT_DATA_TYPE_GET} assertion, got {}",
+                client_data.type_
+            )));
+        }
 
         use base64::Engine;
         let challenge_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -127,6 +225,40 @@ impl WebAuthnVerifier {
 
         if challenge_bytes != expected_multihash {
             return Err(WebAuthnVerifyError::ChallengeMismatch);
+        }
+
+        Ok(())
+    }
+
+    /// Validate `authenticatorData`: long enough, gestured for, and (when the
+    /// caller bound one) naming the expected relying party.
+    fn validate_authenticator_data(
+        &self,
+        authenticator_data: &[u8],
+    ) -> Result<(), WebAuthnVerifyError> {
+        if authenticator_data.len() < MIN_AUTHENTICATOR_DATA_LEN {
+            return Err(WebAuthnVerifyError::InvalidAuthenticatorData(format!(
+                "authenticatorData must be at least {MIN_AUTHENTICATOR_DATA_LEN} bytes, got {}",
+                authenticator_data.len()
+            )));
+        }
+
+        // A human must have gestured. Without this an assertion assembled
+        // without anyone touching the authenticator verifies.
+        if authenticator_data[FLAGS_OFFSET] & FLAG_USER_PRESENT == 0 {
+            return Err(WebAuthnVerifyError::InvalidAuthenticatorData(
+                "the User Present flag is not set".into(),
+            ));
+        }
+
+        // Bind the assertion to its origin, when the caller knows which one to
+        // expect. A did:key carries no origin, so this is skipped otherwise.
+        if let Some(expected) = &self.rp_id_hash
+            && &authenticator_data[..FLAGS_OFFSET] != expected.as_slice()
+        {
+            return Err(WebAuthnVerifyError::InvalidAuthenticatorData(
+                "rpIdHash does not match the expected relying party".into(),
+            ));
         }
 
         Ok(())
@@ -281,6 +413,7 @@ mod tests {
         let sk = SigningKey::from_bytes(&[42u8; 32].into()).unwrap();
         let vk = WebAuthnVerifier {
             key: *sk.verifying_key(),
+            rp_id_hash: None,
         };
 
         let client_data_json = build_client_data_json(payload);
@@ -335,6 +468,7 @@ mod tests {
         let other_sk = SigningKey::from_bytes(&[99u8; 32].into()).unwrap();
         let other_verifier = WebAuthnVerifier {
             key: *other_sk.verifying_key(),
+            rp_id_hash: None,
         };
         assert!(other_verifier.verify_webauthn(payload, &sig).is_err());
     }
@@ -371,6 +505,7 @@ mod tests {
         let sk = SigningKey::from_bytes(&[42u8; 32].into()).unwrap();
         let verifier = WebAuthnVerifier {
             key: *sk.verifying_key(),
+            rp_id_hash: None,
         };
         let did_string = verifier.to_string();
         assert!(did_string.starts_with("did:key:z"));
@@ -401,6 +536,7 @@ mod tests {
         let sk = SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
         let verifier = WebAuthnVerifier {
             key: *sk.verifying_key(),
+            rp_id_hash: None,
         };
         let sec1 = verifier.to_sec1_bytes();
         assert_eq!(sec1.len(), 33);
@@ -449,6 +585,7 @@ mod tests {
         let sk = SigningKey::from_bytes(&[42u8; 32].into()).unwrap();
         let vk = WebAuthnVerifier {
             key: *sk.verifying_key(),
+            rp_id_hash: None,
         };
 
         // The challenge is honest: this test is about the fields *around* it.
@@ -527,13 +664,16 @@ mod tests {
 
     /// The first 32 bytes of `authenticatorData` are the SHA-256 of the relying
     /// party id. Binding a signature to one origin is the entire point of that
-    /// field, but `verify_webauthn` only ever concatenates `authenticator_data`
-    /// into the signed message and never inspects it.
+    /// field.
     ///
     /// The attack: a passkey the user registered at `evil.example` produces
-    /// assertions that verify here as authorizations for this identity. Any
-    /// relying party the same authenticator serves can harvest a signature and
-    /// replay it into this system.
+    /// assertions that would otherwise verify here as authorizations for this
+    /// identity, so any relying party the same authenticator serves could
+    /// harvest a signature and replay it into this system.
+    ///
+    /// A `did:key` carries no origin, so a verifier built from a DID alone
+    /// cannot know which rpIdHash to expect; a caller that does know binds it
+    /// with [`WebAuthnVerifier::expecting_rp_id`], and the check applies.
     #[dialog_common::test]
     async fn webauthn_refuses_an_assertion_for_a_different_relying_party() {
         let payload = b"signed at the wrong origin";
@@ -551,10 +691,33 @@ mod tests {
             foreign_auth_data,
         );
 
+        // Bound to this relying party, the foreign assertion is refused.
+        let bound = verifier.clone().expecting_rp_id("example.com");
         assert!(
-            verifier.verify_webauthn(payload, &sig).is_err(),
+            bound.verify_webauthn(payload, &sig).is_err(),
             "an assertion whose rpIdHash is another relying party's must not verify"
         );
+
+        // Bound to the party that actually produced it, the same assertion
+        // verifies: the check is a real comparison, not a blanket refusal.
+        let matching = verifier.expecting_rp_id("evil.example");
+        matching
+            .verify_webauthn(payload, &sig)
+            .expect("an assertion matching its bound relying party must verify");
+    }
+
+    /// An assertion whose `authenticatorData` is well-formed but whose relying
+    /// party is simply unknown to the verifier still authorizes: a `did:key`
+    /// carries no origin, so binding one is the caller's choice. The key
+    /// remains the authorization boundary in that case.
+    #[dialog_common::test]
+    async fn webauthn_without_a_bound_relying_party_still_verifies() {
+        let payload = b"no relying party bound";
+        let (_, verifier, sig) = create_test_fixture(payload);
+        assert!(verifier.rp_id_hash().is_none());
+        verifier
+            .verify_webauthn(payload, &sig)
+            .expect("an unbound verifier checks everything but the relying party");
     }
 
     /// Bit 0 of `authenticatorData[32]` is User Present: the authenticator
@@ -611,24 +774,25 @@ mod tests {
     }
 
     /// ECDSA signatures are malleable: negating `s` yields a second, distinct
-    /// DER encoding that verifies against the same key and message. The p256
-    /// verifier does no low-S normalization, so one logical authorization has
-    /// two valid byte encodings.
+    /// DER encoding that verifies against the same key and message, so one
+    /// logical authorization would otherwise have two valid byte encodings.
     ///
-    /// This is not exploitable today (the delegation compaction key excludes
-    /// the signature bytes), but it becomes so the moment any CID, dedup, or
-    /// idempotency key covers a signature, so pin the canonical-encoding
-    /// requirement here.
+    /// Verification normalizes to the canonical low-S form rather than refusing
+    /// high-S, because real authenticators do emit high-S and refusing would
+    /// break genuine passkeys. What matters is that the two encodings collapse
+    /// to one value, so nothing downstream that keys on a signature can be
+    /// fooled by a duplicate. This pins that collapse: both encodings verify,
+    /// and both normalize to the same scalars.
     #[dialog_common::test]
-    async fn webauthn_refuses_a_high_s_malleated_signature() {
+    async fn webauthn_normalizes_a_high_s_malleated_signature() {
         let payload = b"malleable signature";
         let (_, verifier, sig) = create_test_fixture(payload);
         verifier.verify_webauthn(payload, &sig).unwrap();
 
         // Re-encode the same signature with s negated (high-S form).
         let der = p256::ecdsa::DerSignature::from_bytes(&sig.signature).unwrap();
-        let normalized = p256::ecdsa::Signature::try_from(der).unwrap();
-        let (r, s) = (normalized.r(), normalized.s());
+        let original = p256::ecdsa::Signature::try_from(der).unwrap();
+        let (r, s) = (original.r(), original.s());
         let high_s = -*s;
         let malleated =
             p256::ecdsa::Signature::from_scalars(*r, high_s).expect("valid malleated scalars");
@@ -640,10 +804,18 @@ mod tests {
             "the malleated encoding must differ from the original"
         );
 
-        assert!(
-            verifier.verify_webauthn(payload, &forged).is_err(),
-            "a high-S malleated signature must be refused so one authorization \
-             has exactly one valid encoding"
+        // Both encodings verify (an authenticator may emit either)...
+        verifier
+            .verify_webauthn(payload, &forged)
+            .expect("a high-S encoding is normalized, not refused");
+
+        // ...and both name the same canonical signature, so the two byte
+        // strings are one authorization rather than two.
+        let canonical = |s: p256::ecdsa::Signature| s.normalize_s().unwrap_or(s);
+        assert_eq!(
+            canonical(original),
+            canonical(malleated),
+            "both encodings must normalize to the same signature"
         );
     }
 }

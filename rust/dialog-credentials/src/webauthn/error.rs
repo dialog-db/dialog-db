@@ -17,9 +17,10 @@ pub enum WebAuthnVerifyError {
     #[error("challenge mismatch")]
     ChallengeMismatch,
 
-    /// The authenticator data is too short or malformed.
-    #[error("invalid authenticator data")]
-    InvalidAuthenticatorData,
+    /// The authenticator data is too short, was not gestured for, or names a
+    /// relying party other than the expected one.
+    #[error("invalid authenticator data: {0}")]
+    InvalidAuthenticatorData(String),
 }
 
 /// Errors when parsing a WebAuthn verifier from a `did:key` string.
