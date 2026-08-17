@@ -74,12 +74,18 @@ where
                     return Err(de::Error::custom("expected signature to be bytes"));
                 };
 
-                let signature = S::try_from(sig_bytes.as_slice())
-                    .map_err(|_| de::Error::custom("invalid signature bytes"))?;
-
+                // The payload's varsig header is the single source of truth for
+                // the signature algorithm. Decode it first, then reconstruct the
+                // signature from the header's algorithm and the raw body. The
+                // body alone cannot distinguish algorithms of equal width, so we
+                // never guess from the bytes.
                 let payload: EnvelopePayload<S, T> = seq
                     .next_element()?
                     .ok_or_else(|| de::Error::invalid_length(1, &self))?;
+
+                let signature =
+                    S::from_algorithm_bytes(payload.header.algorithm(), sig_bytes.as_slice())
+                        .map_err(|_| de::Error::custom("invalid signature bytes"))?;
 
                 Ok(Envelope(signature, payload))
             }

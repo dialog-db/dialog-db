@@ -4,7 +4,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use dialog_capability::access::{Certificate, CertificateStore};
-    use dialog_credentials::Ed25519Signer;
+    use dialog_credentials::{Ed25519Signer, Signer};
     use dialog_effects::storage::{Directory, Location};
     use dialog_storage::resource::Resource;
     use dialog_ucan_core::subject::Subject;
@@ -13,15 +13,11 @@ mod tests {
 
     use crate::{Ucan, UcanDelegation};
 
-    async fn generate_signer() -> Ed25519Signer {
-        Ed25519Signer::generate().await.unwrap()
+    async fn generate_signer() -> Signer {
+        Signer::from(Ed25519Signer::generate().await.unwrap())
     }
 
-    async fn delegate(
-        issuer: &Ed25519Signer,
-        audience: &Ed25519Signer,
-        subject: Subject,
-    ) -> UcanDelegation {
+    async fn delegate(issuer: &Signer, audience: &Signer, subject: Subject) -> UcanDelegation {
         let delegation = DelegationBuilder::new()
             .issuer(issuer.clone())
             .audience(audience)
@@ -261,7 +257,7 @@ mod tests {
         use dialog_ucan_core::command::Command;
         use dialog_ucan_core::subject::Subject as UcanSubject;
 
-        fn scope(subject: &Ed25519Signer, command: &[&str]) -> Scope {
+        fn scope(subject: &Signer, command: &[&str]) -> Scope {
             Scope {
                 subject: UcanSubject::Specific(subject.did()),
                 command: Command(command.iter().map(|s| s.to_string()).collect()),
@@ -359,8 +355,8 @@ mod tests {
         }
 
         async fn delegate_with_expiration(
-            issuer: &Ed25519Signer,
-            audience: &Ed25519Signer,
+            issuer: &Signer,
+            audience: &Signer,
             subject: Subject,
             expiration: dialog_ucan_core::time::timestamp::Timestamp,
         ) -> UcanDelegation {

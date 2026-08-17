@@ -561,7 +561,8 @@ mod tests {
         subject::Subject,
     };
     use base64::prelude::*;
-    use dialog_credentials::ed25519::{Ed25519KeyResolver, Ed25519Signer};
+    use dialog_credentials::DidKeyResolver;
+    use dialog_credentials::ed25519::Ed25519Signer;
     use dialog_varsig::{did::Did, eddsa::Ed25519Signature, principal::Principal};
     use testresult::TestResult;
 
@@ -717,7 +718,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let resolver = Ed25519KeyResolver;
+        let resolver = DidKeyResolver;
         delegation.verify_signature(&resolver).await?;
 
         Ok(())
@@ -834,7 +835,7 @@ mod tests {
 
         assert_eq!(delegation.subject(), &Subject::Any);
 
-        let resolver = Ed25519KeyResolver;
+        let resolver = DidKeyResolver;
         delegation.verify_signature(&resolver).await?;
 
         Ok(())
@@ -875,7 +876,7 @@ mod tests {
         assert_eq!(delegation1.nonce(), delegation2.nonce());
 
         // Both signatures should verify
-        let resolver = Ed25519KeyResolver;
+        let resolver = DidKeyResolver;
         delegation1.verify_signature(&resolver).await?;
         delegation2.verify_signature(&resolver).await?;
 
@@ -926,7 +927,7 @@ mod tests {
         );
 
         // But both should verify with their respective keys
-        let resolver = Ed25519KeyResolver;
+        let resolver = DidKeyResolver;
         delegation1.verify_signature(&resolver).await?;
         delegation2.verify_signature(&resolver).await?;
 

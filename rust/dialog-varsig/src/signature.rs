@@ -1,10 +1,12 @@
 //! Varsig header, signature trait, and signing/verification re-exports.
 
+pub mod any;
 pub mod signer;
 pub mod verifier;
 
 use super::{Codec, Format, SignatureAlgorithm};
 use ::signature::SignatureEncoding;
+pub use any::{AlgorithmTag, AnyAlgorithm, AnySignature};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use serde::{Deserialize, Serialize};
 pub use signer::Signer;
@@ -15,6 +17,26 @@ pub use verifier::Verifier;
 pub trait Signature: SignatureEncoding + Debug + ConditionalSend + ConditionalSync {
     /// The signature algorithm that produces this signature type.
     type Algorithm: SignatureAlgorithm + ConditionalSend + ConditionalSync;
+
+    /// Reconstruct a signature from the algorithm named by a varsig header and
+    /// the raw signature body.
+    ///
+    /// For a concrete signature type the algorithm is implied by the type
+    /// itself, so the default implementation ignores it and decodes the bytes
+    /// exactly as [`TryFrom<&[u8]>`] would. An algorithm-agnostic signature that
+    /// stores an algorithm tag alongside its bytes overrides this to recover the
+    /// tag from the header, since the body alone cannot distinguish algorithms
+    /// whose signatures share a width.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bytes are not a valid signature body.
+    fn from_algorithm_bytes(
+        _algorithm: &Self::Algorithm,
+        bytes: &[u8],
+    ) -> Result<Self, ::signature::Error> {
+        Self::try_from(bytes).map_err(|_| ::signature::Error::new())
+    }
 }
 
 /// Variable signature configuration that ties signature algorithm

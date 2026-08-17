@@ -112,7 +112,7 @@ mod tests {
     async fn self_authorization(signer: &Ed25519Signer) -> UcanAuthorization {
         let did = signer.did();
         let invocation = InvocationBuilder::new()
-            .issuer(signer.clone())
+            .issuer(dialog_credentials::Signer::from(signer.clone()))
             .audience(&did)
             .subject(&did)
             .command(vec!["archive".to_string(), "get".to_string()])

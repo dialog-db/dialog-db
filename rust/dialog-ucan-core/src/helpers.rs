@@ -7,28 +7,31 @@ use super::ContainerError;
 use crate::DelegationBuilder;
 use crate::delegation::Delegation;
 use crate::subject::Subject;
-use dialog_credentials::Ed25519Signer;
+use dialog_credentials::{Ed25519Signer, Signer};
+use dialog_varsig::AnySignature;
 use dialog_varsig::Principal;
-use dialog_varsig::eddsa::Ed25519Signature;
 
-/// Generate a new random Ed25519 signer.
+/// Generate a new random signer.
 ///
-/// This is useful for creating space signers in tests.
-pub async fn generate_signer() -> Ed25519Signer {
-    Ed25519Signer::generate()
-        .await
-        .expect("Failed to generate signer")
+/// Returns the algorithm-agnostic [`Signer`] (backed by a fresh ed25519 key),
+/// so delegations built with it carry the agnostic signature type.
+pub async fn generate_signer() -> Signer {
+    Signer::from(
+        Ed25519Signer::generate()
+            .await
+            .expect("Failed to generate signer"),
+    )
 }
 
 /// Create a delegation from issuer to audience for a subject with the given command.
 ///
 /// This is a convenience function for building simple delegations in tests.
 pub async fn create_delegation(
-    issuer: &Ed25519Signer,
+    issuer: &Signer,
     audience: &impl Principal,
     subject: &impl Principal,
     command: &[&str],
-) -> Result<Delegation<Ed25519Signature>, ContainerError> {
+) -> Result<Delegation<AnySignature>, ContainerError> {
     DelegationBuilder::new()
         .issuer(issuer.clone())
         .audience(audience)

@@ -401,7 +401,7 @@ mod tests {
         subject: UcanSubject,
     ) -> UcanDelegation {
         let delegation = DelegationBuilder::new()
-            .issuer(issuer.clone())
+            .issuer(dialog_credentials::Signer::from(issuer.clone()))
             .audience(audience)
             .subject(subject)
             .command(vec!["storage".to_string()])

@@ -533,7 +533,7 @@ async fn it_replicates_retained_delegations(s3: S3Address) -> Result<()> {
     let space = Ed25519Signer::generate().await?;
     let holder = Ed25519Signer::generate().await?;
     let delegation = dialog_ucan_core::DelegationBuilder::new()
-        .issuer(space.clone())
+        .issuer(dialog_credentials::Signer::from(space.clone()))
         .audience(&holder)
         .subject(dialog_ucan_core::subject::Subject::Specific(
             dialog_varsig::Principal::did(&space),
@@ -1351,7 +1351,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
     // so a compromised device profile cannot cost the access.
     let space = Ed25519Signer::generate().await?;
     let space_grant = DelegationBuilder::new()
-        .issuer(space.clone())
+        .issuer(dialog_credentials::Signer::from(space.clone()))
         .audience(&account_signer)
         .subject(UcanSubject::Specific(space.did()))
         .command(vec!["storage".to_string()])
@@ -1409,7 +1409,7 @@ async fn it_regains_access_by_pulling_the_account(ucan: UcanS3Address) -> Result
         .await?;
 
     let login_grant = DelegationBuilder::new()
-        .issuer(account_signer.clone())
+        .issuer(dialog_credentials::Signer::from(account_signer.clone()))
         .audience(&device_profile.did())
         .subject(UcanSubject::Any)
         .command(vec![])
@@ -1527,7 +1527,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         .await?;
     let space = Ed25519Signer::generate().await?;
     let space_grant = DelegationBuilder::new()
-        .issuer(space.clone())
+        .issuer(dialog_credentials::Signer::from(space.clone()))
         .audience(&account_signer)
         .subject(UcanSubject::Specific(space.did()))
         .command(vec!["storage".to_string()])
@@ -1581,7 +1581,7 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
         .build(device_storage.clone())
         .await?;
     let login_grant = DelegationBuilder::new()
-        .issuer(account_signer.clone())
+        .issuer(dialog_credentials::Signer::from(account_signer.clone()))
         .audience(&device_profile.did())
         .subject(UcanSubject::Any)
         .command(vec![])

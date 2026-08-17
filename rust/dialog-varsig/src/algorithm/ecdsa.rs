@@ -9,6 +9,10 @@ use super::{
     curve::{Secp256k1, Secp256r1},
     hash::Multihasher,
 };
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+use crate::signature::Signature;
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+use signature::SignatureEncoding;
 use std::marker::PhantomData;
 
 /// The ECDSA signature algorithm.
@@ -51,6 +55,81 @@ impl SignatureAlgorithm for Es256 {
             None
         }
     }
+}
+
+/// ES256 (ECDSA over P-256) signature bytes (64 bytes: r followed by s).
+///
+/// This is a platform-agnostic fixed-width representation of a P-256 ECDSA
+/// signature. It converts to and from `p256::ecdsa::Signature`, whose
+/// canonical fixed-size encoding is exactly `r || s`, 32 bytes each.
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Es256Signature(#[serde(with = "serde_bytes")] pub [u8; 64]);
+
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+impl Es256Signature {
+    /// Create a new signature from raw bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 64]) -> Self {
+        Self(bytes)
+    }
+
+    /// Get the raw signature bytes.
+    #[must_use]
+    pub const fn to_bytes(&self) -> [u8; 64] {
+        self.0
+    }
+}
+
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+impl From<[u8; 64]> for Es256Signature {
+    fn from(bytes: [u8; 64]) -> Self {
+        Self(bytes)
+    }
+}
+
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+impl From<Es256Signature> for [u8; 64] {
+    fn from(sig: Es256Signature) -> Self {
+        sig.0
+    }
+}
+
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+impl From<p256::ecdsa::Signature> for Es256Signature {
+    fn from(sig: p256::ecdsa::Signature) -> Self {
+        Self(sig.to_bytes().into())
+    }
+}
+
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+impl TryFrom<Es256Signature> for p256::ecdsa::Signature {
+    type Error = signature::Error;
+
+    fn try_from(sig: Es256Signature) -> Result<Self, Self::Error> {
+        p256::ecdsa::Signature::from_slice(&sig.0)
+    }
+}
+
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+impl SignatureEncoding for Es256Signature {
+    type Repr = [u8; 64];
+}
+
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+impl TryFrom<&[u8]> for Es256Signature {
+    type Error = signature::Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        let bytes: [u8; 64] = bytes.try_into().map_err(|_| signature::Error::new())?;
+        Ok(Self(bytes))
+    }
+}
+
+#[cfg(all(feature = "secp256r1", feature = "sha2_256"))]
+impl Signature for Es256Signature {
+    type Algorithm = Es256;
 }
 
 /// The ES384 signature algorithm.

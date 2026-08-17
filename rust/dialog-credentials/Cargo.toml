@@ -7,6 +7,7 @@ authors.workspace = true
 license.workspace = true
 
 [features]
+# ed25519 is the always-on default. Other algorithms are opt-in.
 default = ["ed25519"]
 ed25519 = [
     "dep:ed25519-dalek",
@@ -14,6 +15,13 @@ ed25519 = [
     "dep:base58",
     "dialog-varsig/edwards25519",
     "dialog-varsig/sha2_512",
+]
+es256 = [
+    "dep:p256",
+    "dep:getrandom",
+    "dep:base58",
+    "dialog-varsig/secp256r1",
+    "dialog-varsig/sha2_256",
 ]
 
 [dependencies]
@@ -29,6 +37,11 @@ signature = { workspace = true }
 ed25519-dalek = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 base58 = { workspace = true, optional = true }
+
+# es256 (p256) feature deps
+# `pkcs8` is used by the browser WebCrypto arm to encode the private scalar as
+# PKCS#8 for `SubtleCrypto.importKey`; it is inert on native builds.
+p256 = { workspace = true, optional = true, features = ["ecdsa", "pkcs8"] }
 
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

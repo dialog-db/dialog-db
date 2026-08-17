@@ -274,7 +274,6 @@ mod tests {
         use crate::Operator;
         use dialog_capability::Subject;
         use dialog_capability::access::{Authorization as _, Proof as _};
-        use dialog_credentials::Ed25519Signer;
         use dialog_effects::archive::prelude::{ArchiveExt, ArchiveSubjectExt};
         use dialog_identity::Profile;
         use dialog_ucan_core::time::Timestamp;
@@ -515,7 +514,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let signer = Ed25519Signer::from(profile.signer().clone());
+            let signer = profile.signer().signer().clone();
             let authorization = proof.claim(signer).unwrap();
 
             // Try to set expiration beyond proof bounds
@@ -555,7 +554,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let signer = Ed25519Signer::from(profile.signer().clone());
+            let signer = profile.signer().signer().clone();
             let authorization = proof.claim(signer).unwrap();
 
             // Try to set not_before earlier than proof bounds
@@ -596,7 +595,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let signer = Ed25519Signer::from(profile.signer().clone());
+            let signer = profile.signer().signer().clone();
             let authorization = proof.claim(signer).unwrap();
 
             // Narrow the window - should succeed

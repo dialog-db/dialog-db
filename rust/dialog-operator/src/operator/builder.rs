@@ -104,19 +104,16 @@ impl OperatorBuilder {
             + ConditionalSync
             + 'static,
     {
-        let operator_signer = derive_operator(&self.credential, &self.context).await?;
-        let credentials = Authority::new(
-            "operator",
-            Ed25519Signer::from(self.credential.clone()),
-            operator_signer.clone(),
-        );
+        let profile_signer = ed25519_signer(&self.credential)?;
+        let operator_signer = derive_operator(&profile_signer, &self.context).await?;
+        let credentials =
+            Authority::new("operator", profile_signer.clone(), operator_signer.clone());
 
         // Mint the session: one in-memory grant per allowed scope.
-        let profile_signer = Ed25519Signer::from(self.credential.clone());
         let mut session = Vec::with_capacity(self.allowed.len());
         for scope in &self.allowed {
             let delegation = DelegationBuilder::new()
-                .issuer(profile_signer.clone())
+                .issuer(dialog_credentials::Signer::from(profile_signer.clone()))
                 .audience(&operator_signer)
                 .subject(scope.subject.clone())
                 .command(scope.command.segments().clone())
@@ -200,11 +197,24 @@ impl OperatorBuilder {
     }
 }
 
+/// Extract the ed25519 signer from a credential.
+///
+/// Operator derivation currently assumes an ed25519 profile key (the blake3
+/// derivation and `did:key` operator identity are ed25519-specific). A profile
+/// backed by another algorithm is rejected here rather than deriving a wrong
+/// operator.
+fn ed25519_signer(credential: &SignerCredential) -> Result<Ed25519Signer, OperatorError> {
+    credential
+        .signer()
+        .as_ed25519()
+        .cloned()
+        .ok_or_else(|| OperatorError::Key("operator derivation requires an ed25519 profile".into()))
+}
+
 async fn derive_operator(
-    credential: &SignerCredential,
+    signer: &Ed25519Signer,
     context: &[u8],
 ) -> Result<Ed25519Signer, OperatorError> {
-    let signer = Ed25519Signer::from(credential.clone());
     let export = signer
         .export()
         .await

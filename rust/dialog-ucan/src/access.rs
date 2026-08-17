@@ -8,13 +8,13 @@ use dialog_capability::access::{
     Authorization, AuthorizeError, Certificate, Delegation as AccessDelegation, Proof, Protocol,
     TimeRange,
 };
-use dialog_credentials::Ed25519Signer;
+use dialog_credentials::Signer;
 use dialog_ucan_core::delegation::builder::DelegationBuilder;
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use dialog_ucan_core::time::Timestamp;
 use dialog_ucan_core::time::timestamp::{Duration, UNIX_EPOCH};
 use dialog_ucan_core::{Delegation, DelegationChain, InvocationBuilder, InvocationChain};
-use dialog_varsig::eddsa::Ed25519Signature;
+use dialog_varsig::AnySignature;
 
 use super::scope::Scope;
 use super::{Ucan, UcanInvocation};
@@ -24,7 +24,7 @@ use super::{Ucan, UcanInvocation};
 /// Implements [`Certificate`] for generic chain verification.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct UcanCertificate(pub Delegation<Ed25519Signature>);
+pub struct UcanCertificate(pub Delegation<AnySignature>);
 
 impl Certificate for UcanCertificate {
     type Access = Scope;
@@ -149,7 +149,7 @@ impl Proof<Ucan> for UcanProof {
         self.duration = duration;
     }
 
-    fn claim(self, signer: Ed25519Signer) -> Result<UcanAuthorization, AuthorizeError> {
+    fn claim(self, signer: Signer) -> Result<UcanAuthorization, AuthorizeError> {
         let mut iter = self.proofs.into_iter();
         let chain = match iter.next() {
             None => None,
@@ -181,7 +181,7 @@ pub struct UcanAuthorization {
     /// The delegation chain proving authority (None if self-authorized).
     pub chain: Option<DelegationChain>,
     /// The signer (operator key).
-    pub signer: Ed25519Signer,
+    pub signer: Signer,
     /// The scope of the capability being authorized.
     pub scope: Scope,
     /// The time range this authorization is valid for.
@@ -351,7 +351,7 @@ impl AccessDelegation for UcanDelegation {
 
 impl Protocol for Ucan {
     type Access = Scope;
-    type Signer = Ed25519Signer;
+    type Signer = Signer;
     type Certificate = UcanCertificate;
     type Delegation = UcanDelegation;
     type Invocation = UcanInvocation;
@@ -365,26 +365,27 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use dialog_credentials::Ed25519Signer;
     use dialog_varsig::Principal;
 
-    async fn signer(seed: u8) -> Ed25519Signer {
-        Ed25519Signer::import(&[seed; 32]).await.unwrap()
+    async fn signer(seed: u8) -> Signer {
+        Signer::from(Ed25519Signer::import(&[seed; 32]).await.unwrap())
     }
 
     async fn build_delegation(
-        issuer: Ed25519Signer,
+        issuer: Signer,
         audience: &Did,
         subject: &Did,
-    ) -> Delegation<Ed25519Signature> {
+    ) -> Delegation<AnySignature> {
         build_delegation_for(issuer, audience, subject, vec![]).await
     }
 
     async fn build_delegation_for(
-        issuer: Ed25519Signer,
+        issuer: Signer,
         audience: &Did,
         subject: &Did,
         command: Vec<String>,
-    ) -> Delegation<Ed25519Signature> {
+    ) -> Delegation<AnySignature> {
         DelegationBuilder::new()
             .issuer(issuer)
             .audience(audience)

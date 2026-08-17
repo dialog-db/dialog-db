@@ -154,6 +154,12 @@ impl From<Ed25519Signer> for Repository<SignerCredential> {
     }
 }
 
+impl From<dialog_credentials::Signer> for Repository<SignerCredential> {
+    fn from(signer: dialog_credentials::Signer) -> Self {
+        SignerCredential::from(signer).into()
+    }
+}
+
 impl From<Profile> for Repository<SignerCredential> {
     fn from(profile: Profile) -> Self {
         Self::new(profile.signer().clone())

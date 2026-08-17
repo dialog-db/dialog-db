@@ -21,6 +21,7 @@ signature = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+serde_ipld_dagcbor = { workspace = true }
 testresult = { workspace = true }
 
 [target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]

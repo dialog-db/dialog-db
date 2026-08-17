@@ -152,11 +152,19 @@ where
     where
         Env: Provider<access::Prove<Ucan>> + ConditionalSync,
     {
-        let signer = self.claim.by.signer().clone();
+        let signer = signer_of(self.claim.by);
         let proof_chain = self.claim.perform(env).await?;
         let authorization = proof_chain.claim(signer)?;
         authorization.invoke().await
     }
+}
+
+/// The algorithm-agnostic signer for UCAN signing.
+///
+/// The UCAN authorization chain signs with the agnostic
+/// [`Signer`](dialog_credentials::Signer), so any supported algorithm works.
+fn signer_of(credential: &SignerCredential) -> dialog_credentials::Signer {
+    credential.signer().clone()
 }
 
 /// A delegation request combining a claim with a target audience.
@@ -177,7 +185,7 @@ where
     where
         Env: Provider<access::Prove<Ucan>> + ConditionalSync,
     {
-        let signer = self.claim.by.signer().clone();
+        let signer = signer_of(self.claim.by);
         let duration = self.claim.duration();
         let proof_chain = self.claim.perform(env).await?;
         let mut authorization = proof_chain.claim(signer)?;

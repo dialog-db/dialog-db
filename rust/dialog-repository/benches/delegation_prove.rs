@@ -38,7 +38,7 @@ const SIZES: &[usize] = &[32, 512, 6144];
 
 async fn delegate(issuer: &Ed25519Signer, audience: &Did, subject: UcanSubject) -> UcanDelegation {
     let delegation = DelegationBuilder::new()
-        .issuer(issuer.clone())
+        .issuer(dialog_credentials::Signer::from(issuer.clone()))
         .audience(audience)
         .subject(subject)
         .command(vec!["storage".to_string()])

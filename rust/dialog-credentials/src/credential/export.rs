@@ -2,12 +2,22 @@
 //!
 //! These are plain data containers for serialized credential material.
 //! Import/export logic lives on the credential types themselves.
+//!
+//! On native the stored form is variable-length, multicodec-tagged bytes: the
+//! leading tag names the algorithm, so ed25519 and p256 credentials round-trip
+//! through the same container. ed25519's byte layout is unchanged.
 
 use thiserror::Error;
 
 #[cfg(not(target_arch = "wasm32"))]
+use super::constants::{PRIVATE_TAG, PUBLIC_KEY_OFFSET, PUBLIC_TAG, SIGNER_EXPORT_SIZE};
+
+#[cfg(not(target_arch = "wasm32"))]
+use super::constants::VERIFIER_EXPORT_SIZE;
+#[cfg(all(not(target_arch = "wasm32"), feature = "es256"))]
 use super::constants::{
-    PRIVATE_TAG, PUBLIC_KEY_OFFSET, PUBLIC_TAG, SIGNER_EXPORT_SIZE, VERIFIER_EXPORT_SIZE,
+    ES256_PRIVATE_TAG, ES256_PUBLIC_KEY_OFFSET, ES256_PUBLIC_TAG, ES256_SIGNER_EXPORT_SIZE,
+    ES256_VERIFIER_EXPORT_SIZE,
 };
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -29,11 +39,12 @@ pub enum CredentialExportError {
 
 /// Platform-specific serialized form of a signer credential.
 ///
-/// On native: multicodec-tagged fixed-size bytes (68 bytes).
+/// On native: variable-length multicodec-tagged bytes (68 bytes for ed25519,
+/// 70 for p256).
 /// On web: JsValue wrapping a CryptoKeyPair.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
-pub struct SignerCredentialExport(pub [u8; SIGNER_EXPORT_SIZE]);
+pub struct SignerCredentialExport(pub Vec<u8>);
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 #[derive(Debug, Clone)]
@@ -41,11 +52,12 @@ pub struct SignerCredentialExport(pub JsValue);
 
 /// Platform-specific serialized form of a verifier credential.
 ///
-/// On native: multicodec-tagged fixed-size bytes (34 bytes).
+/// On native: variable-length multicodec-tagged bytes (34 bytes for ed25519,
+/// 35 for p256).
 /// On web: JsValue wrapping a Uint8Array of public key bytes.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
-pub struct VerifierCredentialExport(pub [u8; VERIFIER_EXPORT_SIZE]);
+pub struct VerifierCredentialExport(pub Vec<u8>);
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 #[derive(Debug, Clone)]
@@ -54,65 +66,35 @@ pub struct VerifierCredentialExport(pub JsValue);
 /// Platform-specific serialized form of a credential (signer or verifier).
 #[derive(Debug, Clone)]
 pub enum CredentialExport {
+    /// A serialized signing credential.
     Signer(SignerCredentialExport),
+    /// A serialized verifying credential.
     Verifier(VerifierCredentialExport),
 }
 
-/// Raw byte type for a serialized signer credential.
 #[cfg(not(target_arch = "wasm32"))]
-pub type SignerExport = [u8; SIGNER_EXPORT_SIZE];
-
-/// Raw byte type for a serialized verifier credential.
-#[cfg(not(target_arch = "wasm32"))]
-pub type VerifierExport = [u8; VERIFIER_EXPORT_SIZE];
-
-#[cfg(not(target_arch = "wasm32"))]
-impl TryFrom<Vec<u8>> for SignerCredentialExport {
-    type Error = CredentialExportError;
-
-    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
-        let arr: SignerExport = bytes.try_into().map_err(|_| {
-            CredentialExportError::InvalidFormat("invalid signer export length".into())
-        })?;
-        Ok(Self(arr))
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl TryFrom<Vec<u8>> for VerifierCredentialExport {
-    type Error = CredentialExportError;
-
-    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
-        let arr: VerifierExport = bytes.try_into().map_err(|_| {
-            CredentialExportError::InvalidFormat("invalid verifier export length".into())
-        })?;
-        Ok(Self(arr))
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl From<SignerExport> for SignerCredentialExport {
-    fn from(bytes: SignerExport) -> Self {
+impl From<Vec<u8>> for SignerCredentialExport {
+    fn from(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl From<SignerCredentialExport> for SignerExport {
+impl From<SignerCredentialExport> for Vec<u8> {
     fn from(export: SignerCredentialExport) -> Self {
         export.0
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl From<VerifierExport> for VerifierCredentialExport {
-    fn from(bytes: VerifierExport) -> Self {
+impl From<Vec<u8>> for VerifierCredentialExport {
+    fn from(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl From<VerifierCredentialExport> for VerifierExport {
+impl From<VerifierCredentialExport> for Vec<u8> {
     fn from(export: VerifierCredentialExport) -> Self {
         export.0
     }
@@ -132,24 +114,47 @@ impl AsRef<[u8]> for VerifierCredentialExport {
     }
 }
 
+/// Whether these bytes are a signer export for some supported algorithm.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_signer_export(bytes: &[u8]) -> bool {
+    if bytes.len() == SIGNER_EXPORT_SIZE
+        && bytes.starts_with(PRIVATE_TAG)
+        && bytes[PUBLIC_KEY_OFFSET..].starts_with(PUBLIC_TAG)
+    {
+        return true;
+    }
+    #[cfg(feature = "es256")]
+    if bytes.len() == ES256_SIGNER_EXPORT_SIZE
+        && bytes.starts_with(ES256_PRIVATE_TAG)
+        && bytes[ES256_PUBLIC_KEY_OFFSET..].starts_with(ES256_PUBLIC_TAG)
+    {
+        return true;
+    }
+    false
+}
+
+/// Whether these bytes are a verifier export for some supported algorithm.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_verifier_export(bytes: &[u8]) -> bool {
+    if bytes.len() == VERIFIER_EXPORT_SIZE && bytes.starts_with(PUBLIC_TAG) {
+        return true;
+    }
+    #[cfg(feature = "es256")]
+    if bytes.len() == ES256_VERIFIER_EXPORT_SIZE && bytes.starts_with(ES256_PUBLIC_TAG) {
+        return true;
+    }
+    false
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl TryFrom<Vec<u8>> for CredentialExport {
     type Error = CredentialExportError;
 
     fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
-        if bytes.len() == SIGNER_EXPORT_SIZE
-            && bytes.starts_with(PRIVATE_TAG)
-            && bytes[PUBLIC_KEY_OFFSET..].starts_with(PUBLIC_TAG)
-        {
-            let arr: SignerExport = bytes.try_into().map_err(|_| {
-                CredentialExportError::InvalidFormat("invalid signer length".into())
-            })?;
-            Ok(Self::Signer(arr.into()))
-        } else if bytes.len() == VERIFIER_EXPORT_SIZE && bytes.starts_with(PUBLIC_TAG) {
-            let arr: VerifierExport = bytes.try_into().map_err(|_| {
-                CredentialExportError::InvalidFormat("invalid verifier length".into())
-            })?;
-            Ok(Self::Verifier(arr.into()))
+        if is_signer_export(&bytes) {
+            Ok(Self::Signer(SignerCredentialExport(bytes)))
+        } else if is_verifier_export(&bytes) {
+            Ok(Self::Verifier(VerifierCredentialExport(bytes)))
         } else {
             Err(CredentialExportError::InvalidFormat(format!(
                 "unrecognized credential format: length={}",
