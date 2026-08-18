@@ -1176,6 +1176,7 @@ dependencies = [
 name = "dialog-did-web"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base58",
  "base64",

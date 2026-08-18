@@ -21,6 +21,9 @@
 //! # }
 //! ```
 
+#[cfg(feature = "helpers")]
+pub mod helpers;
+
 mod cache;
 mod document;
 mod error;
@@ -37,7 +40,7 @@ mod tests;
 pub use cache::{CachingResolver, DEFAULT_NEGATIVE_TTL, DEFAULT_TTL};
 pub use document::{DidDocument, Jwk, VerificationMethod};
 pub use error::ResolveError;
-pub use fetch::{Fetch, ReqwestFetch};
+pub use fetch::{Fetch, MAX_DOCUMENT_BYTES, ReqwestFetch};
 pub use provider::{DidKeyProvider, DidWebProvider, MethodResolver, WebResolver};
 pub use resolve::Resolve;
 pub use resolver::PerformingResolver;

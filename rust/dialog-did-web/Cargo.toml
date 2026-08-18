@@ -12,6 +12,11 @@ ed25519 = ["dialog-credentials/ed25519"]
 es256 = ["dialog-credentials/es256"]
 # Exposes `MapFetch`, an in-memory `Fetch` for tests and downstream mocking.
 test-fetch = []
+# Exposes the local did:web HTTP test server and its provisioning provider, for
+# cross-target fetch integration tests. Pulls the native server stack.
+helpers = ["dep:anyhow", "dep:tokio", "dialog-common/helpers"]
+integration-tests = ["helpers", "dialog-common/integration-tests"]
+web-integration-tests = ["helpers", "dialog-common/web-integration-tests"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -29,6 +34,12 @@ signature = { workspace = true }
 thiserror = { workspace = true }
 web-time = { workspace = true }
 
+# Native-only deps for the `helpers` feature (the local did:web test server).
+# A raw TcpListener serving fixed HTTP/1.1 responses needs no server framework.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+anyhow = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt", "macros", "net", "sync", "io-util"], optional = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = ["js"] }
 
@@ -36,13 +47,19 @@ getrandom = { workspace = true, features = ["js"] }
 dialog-common = { workspace = true, features = ["helpers"] }
 dialog-credentials = { workspace = true, features = ["es256"] }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt", "macros"] }
 wasm-bindgen-test = { workspace = true }
 dialog-ucan-core = { workspace = true }
+anyhow = { workspace = true }
+
+# tokio for the test process is native-only: the wasm test client uses the
+# browser event loop via wasm-bindgen-test, and tokio's `net` pulls `mio`,
+# which does not build for wasm.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "net", "sync"] }
 
 [lints.rust]
 # These cfgs are used by the dialog_common::test proc macro.
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(dialog_test_wasm_integration)",
-    "cfg(feature, values(\"web-integration-tests\"))",
+    "cfg(feature, values(\"web-integration-tests\", \"integration-tests\", \"helpers\"))",
 ] }
