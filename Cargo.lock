@@ -1186,6 +1186,7 @@ dependencies = [
  "dialog-ucan-core",
  "dialog-varsig",
  "getrandom 0.2.16",
+ "p256",
  "percent-encoding",
  "reqwest",
  "serde",
@@ -1193,6 +1194,7 @@ dependencies = [
  "signature",
  "thiserror 2.0.18",
  "tokio",
+ "wasm-bindgen",
  "wasm-bindgen-test",
  "web-time",
 ]

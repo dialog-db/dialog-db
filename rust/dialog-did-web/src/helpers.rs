@@ -10,6 +10,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod server;
 
+#[cfg(test)]
+mod test;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::did_web_server;
 

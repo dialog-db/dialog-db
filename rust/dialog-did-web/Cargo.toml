@@ -9,7 +9,7 @@ license.workspace = true
 [features]
 default = ["ed25519"]
 ed25519 = ["dialog-credentials/ed25519"]
-es256 = ["dialog-credentials/es256"]
+es256 = ["dialog-credentials/es256", "dep:p256"]
 # Exposes `MapFetch`, an in-memory `Fetch` for tests and downstream mocking.
 test-fetch = []
 # Exposes the local did:web HTTP test server and its provisioning provider, for
@@ -26,6 +26,7 @@ dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-varsig = { workspace = true }
+p256 = { workspace = true, optional = true }
 percent-encoding = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -42,9 +43,15 @@ tokio = { workspace = true, features = ["rt", "macros", "net", "sync", "io-util"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { workspace = true, features = ["js"] }
+# The cross-target test macro's wasm inner-test expansion references
+# `wasm_bindgen`, so it must be a real dependency on wasm, not just a dev-dep.
+wasm-bindgen = { workspace = true }
 
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
+# The P-256 JWK tests build and validate raw curve points to pin that an
+# invalid (x, y) is refused rather than reinterpreted.
+p256 = { workspace = true }
 dialog-credentials = { workspace = true, features = ["es256"] }
 serde_json = { workspace = true }
 wasm-bindgen-test = { workspace = true }
