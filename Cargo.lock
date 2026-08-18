@@ -1213,8 +1213,10 @@ name = "dialog-dkim"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "dialog-common",
  "ed25519-dalek",
  "getrandom 0.2.16",
+ "rand 0.8.5",
  "rsa",
  "sha2 0.10.9",
  "thiserror 2.0.18",
