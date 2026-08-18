@@ -155,7 +155,7 @@ fn split_keep_crlf(block: &str) -> impl Iterator<Item = &str> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn parses_simple_headers_and_body() {
         let raw = b"From: alice@example.com\r\nSubject: hello\r\n\r\nbody here";
         let msg = Message::parse(raw).unwrap();
@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(msg.body, b"body here");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn joins_folded_continuation_lines() {
         let raw =
             b"DKIM-Signature: v=1; a=rsa-sha256;\r\n d=example.com; s=sel\r\nFrom: a@b.c\r\n\r\n";
@@ -179,7 +179,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn accepts_bare_lf_line_endings() {
         let raw = b"From: a@b.c\nSubject: hi\n\nbody";
         let msg = Message::parse(raw).unwrap();
@@ -187,14 +187,14 @@ mod tests {
         assert_eq!(msg.body, b"body");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn last_header_is_bottom_most() {
         let raw = b"Received: one\r\nReceived: two\r\nFrom: a@b.c\r\n\r\n";
         let msg = Message::parse(raw).unwrap();
         assert_eq!(msg.last_header("received").unwrap().raw_value, " two");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn header_with_no_colon_is_rejected() {
         let raw = b"not a header\r\n\r\n";
         assert!(matches!(

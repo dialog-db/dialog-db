@@ -225,7 +225,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn parses_pairs_and_defaults() {
         assert_eq!(
             Canonicalization::parse("relaxed/relaxed").unwrap(),
@@ -244,7 +244,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn simple_header_is_verbatim() {
         let c = Canonicalization {
             header: HeaderCanon::Simple,
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(out, b"From: Alice <a@b.c>\r\n");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn relaxed_header_lowercases_name_and_collapses_ws() {
         let c = Canonicalization {
             header: HeaderCanon::Relaxed,
@@ -268,7 +268,7 @@ mod tests {
         assert_eq!(out, b"subject:hello there world\r\n");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn dkim_signature_b_tag_is_emptied_no_trailing_crlf() {
         let c = Canonicalization {
             header: HeaderCanon::Relaxed,
@@ -284,7 +284,7 @@ mod tests {
         assert!(!s.ends_with("\r\n"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn empty_b_does_not_touch_bh() {
         // The `b` inside `bh=` must not be mistaken for the `b=` tag.
         let raw = "a=rsa-sha256; bh=BODYHASH; b=SIG";
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(out, "a=rsa-sha256; bh=BODYHASH; b=");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn empty_b_when_b_is_not_last_tag() {
         let raw = "b=SIG; h=from";
         let out = empty_b_tag(raw);

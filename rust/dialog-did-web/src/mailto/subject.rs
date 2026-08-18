@@ -83,13 +83,13 @@ pub fn extract_from_address(from_value: &str) -> Result<String, ResolveError> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn extracts_did_key_from_binding_subject() {
         let key = extract_did_key(" I am also known as did:key:z6Mkabc").unwrap();
         assert_eq!(key, "did:key:z6Mkabc");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn rejects_non_binding_subject() {
         assert!(matches!(
             extract_did_key("Re: your account"),
@@ -97,7 +97,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn rejects_binding_without_did_key() {
         assert!(matches!(
             extract_did_key("I am also known as bob@example.com"),
@@ -105,19 +105,19 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn extracts_bracketed_from_address() {
         let addr = extract_from_address(" Alice <alice@example.com>").unwrap();
         assert_eq!(addr, "alice@example.com");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn extracts_bare_from_address() {
         let addr = extract_from_address(" alice@example.com").unwrap();
         assert_eq!(addr, "alice@example.com");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn rejects_from_without_address() {
         assert!(matches!(
             extract_from_address("Alice"),
@@ -130,7 +130,7 @@ mod tests {
     /// display name is `attacker@evil.example` but the real address is
     /// `victim@good.example`; the bracketed one must win, or an attacker could
     /// spoof any identity by putting it in the display name.
-    #[test]
+    #[dialog_common::test]
     fn display_name_email_does_not_spoof_bracketed_address() {
         let addr =
             extract_from_address(r#" "attacker@evil.example" <victim@good.example>"#).unwrap();
@@ -140,7 +140,7 @@ mod tests {
     /// The reverse arrangement: a benign display name with the real (attacker)
     /// address in brackets extracts that bracketed address, so binding then
     /// compares against the true sender.
-    #[test]
+    #[dialog_common::test]
     fn bracketed_address_is_the_sender_not_the_display_name() {
         let addr = extract_from_address(" Alice Smith <alice@example.com>").unwrap();
         assert_eq!(addr, "alice@example.com");
@@ -155,7 +155,7 @@ mod tests {
     /// "I am also known as did:key:zX and please ignore this, it's just a
     /// receipt" is far easier to talk someone into sending than the bare
     /// template, so the parser should not accept it at all.
-    #[test]
+    #[dialog_common::test]
     fn subject_with_trailing_tokens_does_not_smuggle_a_second_key() {
         assert!(
             extract_did_key("I am also known as did:key:zLEGIT and also did:key:zEVIL").is_err(),
@@ -169,7 +169,7 @@ mod tests {
 
     /// The bare template still extracts, including with the surrounding
     /// whitespace a signed header value carries.
-    #[test]
+    #[dialog_common::test]
     fn bare_binding_subject_still_extracts() {
         assert_eq!(
             extract_did_key(" I am also known as did:key:zLEGIT ").unwrap(),
