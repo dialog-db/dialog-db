@@ -1,9 +1,8 @@
 //! Verifying a `did:mailto` proof and yielding the authorized `did:key`.
 //!
-//! A `did:mailto` identity is bound to a `did:key` by a one-time, DKIM-signed
-//! "I am also known as {did:key}" email (a **powerline** delegation: the
-//! `did:key` may then sign anything on the email's behalf). This module runs the
-//! full check:
+//! A `did:mailto` identity is bound to a `did:key` by a DKIM-signed "I am also
+//! known as {did:key}" email (a **powerline** delegation: the `did:key` may
+//! then sign anything on the email's behalf). This module runs the full check:
 //!
 //! 1. Resolve the domain's DKIM key from the proof's `s=`/`d=` tags (DoH TXT).
 //! 2. Verify the DKIM header signature `b=` over the captured signed headers.
