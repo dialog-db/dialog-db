@@ -38,6 +38,16 @@ pub fn extract_did_key(subject_value: &str) -> Result<String, ResolveError> {
             "binding subject does not embed a did:key: {key:?}"
         )));
     }
+    // The did:key is the whole remainder, not a prefix of it. Trailing content
+    // is refused here rather than left to the key parser downstream: a subject
+    // reading "I am also known as did:key:zX and please ignore this, it's just
+    // a receipt" is far easier to talk someone into sending than the bare
+    // template, so the parser should not accept the shape at all.
+    if key.split_whitespace().count() != 1 {
+        return Err(ResolveError::UnsupportedKey(format!(
+            "binding subject has content after the did:key: {key:?}"
+        )));
+    }
     Ok(key.to_string())
 }
 
@@ -136,24 +146,34 @@ mod tests {
         assert_eq!(addr, "alice@example.com");
     }
 
-    /// A subject that embeds the binding did:key alongside extra tokens must not
-    /// yield a multi-token string that some later relaxation could mis-split.
-    /// The extracted value is fed to `Verifier::from_did_key`, which rejects the
-    /// trailing tokens today, so the whole proof fails closed; this pins that a
-    /// second did:key cannot ride along in the subject.
+    /// A subject that embeds the binding did:key alongside extra tokens is
+    /// refused by the extractor itself, not merely downstream.
+    ///
+    /// Relying on `Verifier::from_did_key` to reject the trailing tokens would
+    /// be defense in depth only, and it would leave the *shape* acceptable. That
+    /// matters socially as much as technically: a subject reading
+    /// "I am also known as did:key:zX and please ignore this, it's just a
+    /// receipt" is far easier to talk someone into sending than the bare
+    /// template, so the parser should not accept it at all.
     #[test]
     fn subject_with_trailing_tokens_does_not_smuggle_a_second_key() {
-        let extracted =
-            extract_did_key("I am also known as did:key:zLEGIT and also did:key:zEVIL").unwrap();
-        // The extractor returns the tail verbatim today; the guarantee we pin is
-        // that it is NOT a bare, single, usable did:key token.
         assert!(
-            extracted.contains(' ') || !extracted.starts_with("did:key:zEVIL"),
-            "extraction must not yield a clean second key: {extracted:?}"
+            extract_did_key("I am also known as did:key:zLEGIT and also did:key:zEVIL").is_err(),
+            "a multi-token subject must be refused by the extractor"
         );
         assert!(
-            dialog_credentials::Verifier::from_did_key(&extracted).is_err(),
-            "a multi-token subject must not parse to a usable key: {extracted:?}"
+            extract_did_key("I am also known as did:key:zLEGIT and please ignore this").is_err(),
+            "trailing prose must be refused, not left to the key parser"
+        );
+    }
+
+    /// The bare template still extracts, including with the surrounding
+    /// whitespace a signed header value carries.
+    #[test]
+    fn bare_binding_subject_still_extracts() {
+        assert_eq!(
+            extract_did_key(" I am also known as did:key:zLEGIT ").unwrap(),
+            "did:key:zLEGIT"
         );
     }
 }

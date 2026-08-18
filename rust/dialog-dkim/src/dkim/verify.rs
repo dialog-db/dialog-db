@@ -27,6 +27,12 @@ use super::key::DkimPublicKey;
 use super::message::{Header, Message};
 use super::signature::{DkimSignatureHeader, SignatureAlgorithm};
 
+/// The smallest RSA modulus a DKIM key may have, in bits.
+///
+/// RFC 8301 requires at least 1024 and recommends 2048.
+#[cfg(feature = "dkim")]
+const MIN_RSA_MODULUS_BITS: usize = 1024;
+
 /// The DKIM header name.
 const DKIM_SIGNATURE: &str = "DKIM-Signature";
 
@@ -169,12 +175,45 @@ pub fn verify(raw_eml: &[u8], key: &DkimPublicKey) -> Result<DkimSignatureHeader
 /// This is the offline entry point: it needs only the captured proof (no full
 /// email, no body) and the resolved domain key.
 ///
+/// Does not check `x=`; the caller supplies the clock, so use
+/// [`verify_with_key_at`] to honor the signer's expiry.
+///
 /// # Errors
 ///
 /// Returns [`DkimError`] on a key/algorithm mismatch, invalid base64 in `b=`, or
 /// a signature that does not verify.
 #[cfg(feature = "dkim")]
 pub fn verify_with_key(email: &SignedEmail, key: &DkimPublicKey) -> Result<(), DkimError> {
+    verify_signature(email, key)
+}
+
+/// Verify a captured proof and honor the signer's `x=` expiration, as of `now`
+/// (seconds since the UNIX epoch).
+///
+/// `x=` is the signer's own statement that the signature is no longer valid,
+/// which is a stronger constraint than any policy layered above it. This crate
+/// takes no clock of its own: the caller owns the notion of "now", which also
+/// keeps expiry deterministically testable.
+///
+/// # Errors
+///
+/// As [`verify_with_key`], plus [`DkimError::SignatureExpired`] if `x=` has
+/// passed.
+#[cfg(feature = "dkim")]
+pub fn verify_with_key_at(
+    email: &SignedEmail,
+    key: &DkimPublicKey,
+    now: u64,
+) -> Result<(), DkimError> {
+    if email.signature.is_expired_at(now) {
+        return Err(DkimError::SignatureExpired);
+    }
+    verify_signature(email, key)
+}
+
+/// The signature check shared by both entry points.
+#[cfg(feature = "dkim")]
+fn verify_signature(email: &SignedEmail, key: &DkimPublicKey) -> Result<(), DkimError> {
     let algorithm = email.signature.algorithm;
     if !key.matches(algorithm) {
         return Err(DkimError::KeyAlgorithmMismatch);
@@ -215,6 +254,19 @@ fn verify_rsa_sha256(
 
     let public_key = RsaPublicKey::from_public_key_der(spki_der)
         .map_err(|e| DkimError::InvalidPublicKey(e.to_string()))?;
+
+    // RFC 8301 requires at least 1024-bit RSA and recommends 2048. The `rsa`
+    // crate parses smaller moduli happily, so this is the only floor. It
+    // matters: 512-bit RSA is factorable on commodity hardware in hours, and
+    // 512-bit DKIM keys are still published. Whoever factors a domain's weak
+    // key can mint a binding for every mailbox at that domain, so the whole
+    // identity for the domain would fall to an offline computation.
+    use rsa::traits::PublicKeyParts as _;
+    let modulus_bits = public_key.n().bits();
+    if modulus_bits < MIN_RSA_MODULUS_BITS {
+        return Err(DkimError::WeakPublicKey(modulus_bits));
+    }
+
     let verifying_key = VerifyingKey::<Sha256>::new(public_key);
     let signature = Signature::try_from(signature)
         .map_err(|_| DkimError::MalformedSignature("b= is not a valid RSA signature".into()))?;

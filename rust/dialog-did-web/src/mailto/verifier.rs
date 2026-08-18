@@ -88,10 +88,8 @@ fn bind_and_extract(
 
     // The signed From: address must be the identity's email. From: MUST be in
     // the signed set (RFC 6376 requires it), so a missing signed From: is a
-    // malformed proof.
-    let from = signed_header(proof, "from").ok_or_else(|| {
-        ResolveError::MalformedDocument("proof does not sign a From: header".into())
-    })?;
+    // malformed proof, and a doubled one is refused (see `signed_header`).
+    let from = signed_header(proof, "from")?;
     let from_address = extract_from_address(&from.raw_value)?;
     if !mailto.matches_email(&from_address) {
         return Err(ResolveError::UnsupportedKey(format!(
@@ -101,9 +99,7 @@ fn bind_and_extract(
     }
 
     // Extract the authorized did:key from the signed Subject template.
-    let subject = signed_header(proof, "subject").ok_or_else(|| {
-        ResolveError::MalformedDocument("proof does not sign a Subject: header".into())
-    })?;
+    let subject = signed_header(proof, "subject")?;
     let did_key = extract_did_key(&subject.raw_value)?;
     let authorized_key = Verifier::from_did_key(&did_key)
         .map_err(|_| ResolveError::UnsupportedKey(format!("unsupported did:key: {did_key}")))?;
@@ -118,12 +114,41 @@ fn bind_and_extract(
     })
 }
 
-/// The signed header with the given (lowercased) name, if the proof carries it.
-fn signed_header<'a>(proof: &'a SignedEmail, name: &str) -> Option<&'a dialog_dkim::Header> {
-    proof
+/// The *only* signed header with the given (lowercased) name.
+///
+/// A binding proof must sign exactly one `From:` and exactly one `Subject:`,
+/// and a duplicate is refused rather than resolved by picking one.
+///
+/// Picking one would be a divergence between what the verifier reads and what
+/// the sender saw. RFC 6376 section 5.4.2 consumes repeated `h=` names
+/// bottom-up, so the first entry for a doubled name is the *bottom-most*
+/// header, while every mail client displays the *top-most*. A message signed
+/// with `h=from:subject:subject` would therefore show the sender an innocuous
+/// subject while authorizing a key from a different one. Oversigning like that
+/// is standard anti-replay practice (RFC 6376 section 8.15), so it is a normal
+/// configuration rather than an exotic one, and a binding proof has no
+/// legitimate reason to sign two subjects.
+fn signed_header<'a>(
+    proof: &'a SignedEmail,
+    name: &str,
+) -> Result<&'a dialog_dkim::Header, ResolveError> {
+    let mut matches = proof
         .signed_headers
         .iter()
-        .find(|h| h.name_eq_ignore_case(name))
+        .filter(|h| h.name_eq_ignore_case(name));
+
+    let first = matches.next().ok_or_else(|| {
+        ResolveError::MalformedDocument(format!("proof does not sign a {name}: header"))
+    })?;
+
+    if matches.next().is_some() {
+        return Err(ResolveError::MalformedDocument(format!(
+            "proof signs more than one {name}: header; the header the verifier \
+             reads would not be the one the sender saw"
+        )));
+    }
+
+    Ok(first)
 }
 
 /// Build a [`MultiVerifier`] over a `did:mailto` from one or more verified

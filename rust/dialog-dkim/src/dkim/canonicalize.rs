@@ -133,8 +133,13 @@ fn canonicalize_header_simple(header: &Header) -> Vec<u8> {
 
 /// `relaxed` header canonicalization (RFC 6376 section 3.4.2).
 fn canonicalize_header_relaxed(header: &Header) -> Vec<u8> {
-    // 1. Lowercase the field name.
-    let name = header.name.to_ascii_lowercase();
+    // 1. Lowercase the field name, and delete any WSP *before* the colon (RFC
+    //    6376 section 3.4.2 requires removing WSP on both sides of it). The
+    //    parse path already trims names, but `DkimSignature::from_bytes`
+    //    rebuilds headers straight from the wire, so an untrimmed name can
+    //    reach here and would canonicalize to a different byte string than the
+    //    signer produced.
+    let name = header.name.trim().to_ascii_lowercase();
     // 2/3/4. Unfold, collapse internal whitespace runs to one SP, and trim the
     // value's leading and trailing whitespace.
     let value = relax_value(&header.raw_value);
@@ -173,34 +178,40 @@ fn relax_value(raw_value: &str) -> String {
 /// Return `raw_header_value` with the contents of its `b=` tag removed (the tag
 /// and its `=` are kept; only the value between `b=` and the next `;` or the end
 /// is deleted). RFC 6376 section 3.7 step 4.
+///
+/// The tag list is split on `;` first, rather than scanned byte by byte for a
+/// `b=` preceded by a separator. A byte scan that treats whitespace as a tag
+/// boundary also matches a `b=` sitting *inside another tag's value*: in
+/// `i=foo b=bar; bh=A; b=REALSIG` it would blank `b=bar` and leave the real
+/// signature in the hashed input, so a legitimate proof would never verify.
+/// Splitting on `;` means only an actual tag can match.
 fn empty_b_tag(raw_header_value: &str) -> String {
-    // Find the `b=` tag. It is a tag boundary: preceded by start-or-`;`-or-WSP
-    // and the letter `b` then `=`. Scanning for the exact `b=` that is a tag
-    // (not the `b` inside `bh=`) is done by requiring the char before `b` to be
-    // a tag separator.
-    let bytes = raw_header_value.as_bytes();
-    let mut idx = 0;
-    while idx < bytes.len() {
-        if bytes[idx] == b'b' && idx + 1 < bytes.len() && bytes[idx + 1] == b'=' {
-            let prev_is_boundary = idx == 0 || {
-                let p = bytes[idx - 1];
-                p == b';' || p == b' ' || p == b'\t' || p == b'\n' || p == b'\r'
-            };
-            if prev_is_boundary {
-                // Keep up to and including `b=`, then drop until the next `;`.
-                let keep = &raw_header_value[..=idx + 1];
-                let after = &raw_header_value[idx + 2..];
-                let tail = match after.find(';') {
-                    Some(pos) => &after[pos..],
-                    None => "",
-                };
-                return format!("{keep}{tail}");
-            }
+    let mut out = String::with_capacity(raw_header_value.len());
+    let mut emptied = false;
+
+    for (index, segment) in raw_header_value.split(';').enumerate() {
+        if index > 0 {
+            out.push(';');
         }
-        idx += 1;
+
+        // A tag is `[WSP] name [WSP] = value`. Only the first `b` tag is
+        // blanked; a second one would be a duplicate tag, which the signature
+        // parser rejects outright.
+        let name_end = segment.find('=');
+        let is_b_tag =
+            !emptied && name_end.is_some_and(|end| segment[..end].trim().eq_ignore_ascii_case("b"));
+
+        if is_b_tag {
+            // Keep everything up to and including the `=`, drop the value.
+            let end = name_end.unwrap_or(segment.len());
+            out.push_str(&segment[..=end]);
+            emptied = true;
+        } else {
+            out.push_str(segment);
+        }
     }
-    // No b= tag found; return unchanged (the caller validated its presence).
-    raw_header_value.to_string()
+
+    out
 }
 
 #[cfg(test)]

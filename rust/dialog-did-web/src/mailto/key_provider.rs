@@ -34,6 +34,38 @@ const DEFAULT_DOH_ENDPOINT: &str = "https://dns.google/resolve";
 /// The default cache TTL for a resolved DKIM key.
 pub const DEFAULT_DKIM_KEY_TTL: Duration = Duration::from_secs(3600);
 
+/// Check that `label` is a DNS name safe to interpolate into the DoH query.
+///
+/// The selector and domain come from the proof's `s=` and `d=` tags, so both
+/// are attacker-chosen. Interpolating them unvalidated is query-parameter
+/// injection: `s=x&name=evil.example` adds a second `name=` parameter, and
+/// `s=x#frag` truncates the query at the fragment. Which key comes back then
+/// depends on how the resolver breaks the tie, and `with_endpoint` invites
+/// resolvers other than the default. A `/` would leave the endpoint's path
+/// entirely.
+///
+/// So this allows only what a DNS name may hold: letters, digits, `-`, `.`,
+/// and the `_` that `_domainkey` itself uses.
+fn validate_dns_label(label: &str, what: &str) -> Result<(), ResolveError> {
+    if label.is_empty() {
+        return Err(ResolveError::MalformedDid(format!("{what} is empty")));
+    }
+    if !label
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+    {
+        return Err(ResolveError::MalformedDid(format!(
+            "{what} is not a valid DNS name: {label:?}"
+        )));
+    }
+    if label.split('.').any(str::is_empty) {
+        return Err(ResolveError::MalformedDid(format!(
+            "{what} has an empty label: {label:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// Resolves a domain's DKIM public key by DNS-over-HTTPS TXT lookup.
 ///
 /// Generic over a [`Fetch`] so the network dependency is mockable.
@@ -87,12 +119,19 @@ impl<F: Fetch> DkimKeyProvider<F> {
     /// The DoH query URL for a `(selector, domain)` pair.
     ///
     /// The DKIM record lives at `<selector>._domainkey.<domain>`.
-    #[must_use]
-    pub fn query_url(&self, selector: &str, domain: &str) -> String {
-        format!(
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResolveError::MalformedDid`] if either label is not a valid
+    /// DNS name. Both come from the proof (`s=` and `d=`), so both are
+    /// attacker-chosen; see [`validate_dns_label`].
+    pub fn query_url(&self, selector: &str, domain: &str) -> Result<String, ResolveError> {
+        validate_dns_label(selector, "DKIM selector (s=)")?;
+        validate_dns_label(domain, "DKIM domain (d=)")?;
+        Ok(format!(
             "{}?name={selector}._domainkey.{domain}&type=TXT",
             self.endpoint
-        )
+        ))
     }
 
     /// Resolve the DKIM public key for `(selector, domain)`, caching the result.
@@ -112,7 +151,7 @@ impl<F: Fetch> DkimKeyProvider<F> {
             return Ok(hit);
         }
 
-        let url = self.query_url(selector, domain);
+        let url = self.query_url(selector, domain)?;
         let body = self.fetch.get(&url).await?;
         let record = parse_doh_txt(&body)?;
         let key = DkimPublicKey::from_dns_txt(&record).map_err(|e| {
@@ -209,9 +248,63 @@ mod tests {
     fn builds_domainkey_query_url() {
         let provider = DkimKeyProvider::with_fetch(crate::fetch::MapFetch::new());
         assert_eq!(
-            provider.query_url("sel", "example.com"),
+            provider.query_url("sel", "example.com").unwrap(),
             "https://dns.google/resolve?name=sel._domainkey.example.com&type=TXT"
         );
+    }
+
+    /// The selector and domain come from the proof's `s=` and `d=` tags, so
+    /// both are attacker-chosen. Unvalidated, they are a query-parameter
+    /// injection: a second `name=` parameter, or a `#` that truncates the
+    /// query, changes which key comes back depending on how the resolver breaks
+    /// the tie, and `with_endpoint` invites resolvers other than the default.
+    /// A `/` would leave the endpoint's path entirely.
+    #[test]
+    fn refuses_a_selector_that_injects_query_parameters() {
+        let provider = DkimKeyProvider::with_fetch(crate::fetch::MapFetch::new());
+        for selector in [
+            "x&name=evil.example",
+            "x#frag",
+            "a b",
+            "../../evil",
+            "x?type=A",
+            "",
+        ] {
+            assert!(
+                provider.query_url(selector, "example.com").is_err(),
+                "selector {selector:?} must be refused"
+            );
+        }
+    }
+
+    /// The same allowlist applies to `d=`, which also reaches the URL.
+    #[test]
+    fn refuses_a_domain_that_injects_query_parameters() {
+        let provider = DkimKeyProvider::with_fetch(crate::fetch::MapFetch::new());
+        for domain in ["example.com&name=evil", "example.com/x", "ex..ample.com"] {
+            assert!(
+                provider.query_url("sel", domain).is_err(),
+                "domain {domain:?} must be refused"
+            );
+        }
+    }
+
+    /// Real selectors do use `-`, digits, and dotted labels, so the allowlist
+    /// must not reject them.
+    #[test]
+    fn accepts_ordinary_selectors_and_domains() {
+        let provider = DkimKeyProvider::with_fetch(crate::fetch::MapFetch::new());
+        for (selector, domain) in [
+            ("s1", "example.com"),
+            ("google", "gmail.com"),
+            ("dkim-2024", "mail.example.co.uk"),
+            ("s._sub", "example.com"),
+        ] {
+            assert!(
+                provider.query_url(selector, domain).is_ok(),
+                "{selector} / {domain} should be allowed"
+            );
+        }
     }
 
     #[test]
