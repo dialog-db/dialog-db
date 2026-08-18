@@ -84,7 +84,7 @@ impl FromStr for RsaVerifier {
         // what keeps the cost off the caller's choosing. See
         // `MAX_DID_KEY_MULTIBASE_LEN`.
         if multibase_str.len() > MAX_DID_KEY_MULTIBASE_LEN {
-            return Err(RsaDidFromStrError::InvalidBase58);
+            return Err(RsaDidFromStrError::TooLong);
         }
         let (base, raw) =
             multibase::decode(multibase_str).map_err(|_| RsaDidFromStrError::InvalidBase58)?;
@@ -223,15 +223,30 @@ mod tests {
         // Far longer than any real RSA key, but still valid base58 characters.
         let oversized = format!("did:key:z{}", "1".repeat(100_000));
 
-        let started = std::time::Instant::now();
+        // The distinct `TooLong` variant proves the length guard fired, not the
+        // decoder: if the string had reached `multibase::decode` it would fail
+        // as `InvalidBase58` instead (and pay the O(n^2) cost this guards
+        // against). Asserting the variant rather than timing the call keeps the
+        // test meaningful on wasm, where `Instant` is unavailable.
         let result: Result<RsaVerifier, _> = oversized.parse();
-        let elapsed = started.elapsed();
-
-        assert!(result.is_err(), "an over-long did:key must not parse");
-        assert!(
-            elapsed < std::time::Duration::from_millis(50),
-            "an over-long did:key must be refused on length before the O(n^2) \
-             base58 decode; took {elapsed:?} for a 100k-character DID"
+        assert_eq!(
+            result.unwrap_err(),
+            RsaDidFromStrError::TooLong,
+            "an over-long did:key must be refused on length before decoding"
         );
+    }
+
+    #[dialog_common::test]
+    fn rsa_did_at_the_length_cap_still_decodes() {
+        // A real 2048-bit RSA did:key is well under the cap; confirm the guard
+        // does not reject legitimate keys.
+        let vk = test_signing_key().verifying_key();
+        let did = RsaVerifier(vk).to_string();
+        let multibase_len = did.strip_prefix("did:key:").unwrap().len();
+        assert!(
+            multibase_len <= MAX_DID_KEY_MULTIBASE_LEN,
+            "a real RSA did:key ({multibase_len} chars) must fit under the cap"
+        );
+        assert!(did.parse::<RsaVerifier>().is_ok());
     }
 }

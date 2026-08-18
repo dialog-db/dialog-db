@@ -68,6 +68,12 @@ pub enum RsaDidFromStrError {
     #[error("missing base58 prefix 'z'")]
     MissingBase58Prefix,
 
+    /// The `did:key` is longer than any real RSA key, so it is refused before
+    /// the quadratic base58 decode rather than paying for it. See
+    /// [`super::RsaVerifier`]'s parser.
+    #[error("did:key is too long to be an RSA key")]
+    TooLong,
+
     /// The base58 encoding is invalid.
     #[error("invalid base58 encoding")]
     InvalidBase58,
