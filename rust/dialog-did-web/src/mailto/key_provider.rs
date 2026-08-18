@@ -244,7 +244,7 @@ fn unquote_txt(data: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn builds_domainkey_query_url() {
         let provider = DkimKeyProvider::with_fetch(crate::fetch::MapFetch::new());
         assert_eq!(
@@ -259,7 +259,7 @@ mod tests {
     /// query, changes which key comes back depending on how the resolver breaks
     /// the tie, and `with_endpoint` invites resolvers other than the default.
     /// A `/` would leave the endpoint's path entirely.
-    #[test]
+    #[dialog_common::test]
     fn refuses_a_selector_that_injects_query_parameters() {
         let provider = DkimKeyProvider::with_fetch(crate::fetch::MapFetch::new());
         for selector in [
@@ -278,7 +278,7 @@ mod tests {
     }
 
     /// The same allowlist applies to `d=`, which also reaches the URL.
-    #[test]
+    #[dialog_common::test]
     fn refuses_a_domain_that_injects_query_parameters() {
         let provider = DkimKeyProvider::with_fetch(crate::fetch::MapFetch::new());
         for domain in ["example.com&name=evil", "example.com/x", "ex..ample.com"] {
@@ -291,7 +291,7 @@ mod tests {
 
     /// Real selectors do use `-`, digits, and dotted labels, so the allowlist
     /// must not reject them.
-    #[test]
+    #[dialog_common::test]
     fn accepts_ordinary_selectors_and_domains() {
         let provider = DkimKeyProvider::with_fetch(crate::fetch::MapFetch::new());
         for (selector, domain) in [
@@ -307,28 +307,28 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn parses_single_quoted_txt_record() {
         let body = br#"{"Answer":[{"data":"\"v=DKIM1; k=rsa; p=ABC123\""}]}"#;
         let record = parse_doh_txt(body).unwrap();
         assert_eq!(record, "v=DKIM1; k=rsa; p=ABC123");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn concatenates_multipart_txt_record() {
         let body = br#"{"Answer":[{"data":"\"v=DKIM1; k=rsa; p=AAAA\" \"BBBB\""}]}"#;
         let record = parse_doh_txt(body).unwrap();
         assert_eq!(record, "v=DKIM1; k=rsa; p=AAAABBBB");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn skips_non_dkim_txt_records() {
         let body = br#"{"Answer":[{"data":"\"some-other-txt\""},{"data":"\"v=DKIM1; p=KEY\""}]}"#;
         let record = parse_doh_txt(body).unwrap();
         assert_eq!(record, "v=DKIM1; p=KEY");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn empty_answer_is_an_error() {
         let body = br#"{"Answer":[]}"#;
         assert!(matches!(

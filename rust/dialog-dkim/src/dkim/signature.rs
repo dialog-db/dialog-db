@@ -224,7 +224,7 @@ fn strip_ws(value: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn parses_all_required_tags() {
         let raw = " v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=sel;\r\n \
                    h=from:subject; bh=AAAA; b=BBBB==";
@@ -237,7 +237,7 @@ mod tests {
         assert_eq!(sig.signature, "BBBB==");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn strips_folding_from_signature_value() {
         let raw = " v=1; a=ed25519-sha256; d=d.com; s=s; h=from; bh=x;\r\n \
                    b=abc\r\n def";
@@ -247,14 +247,14 @@ mod tests {
         assert_eq!(sig.signature, "abcdef");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn canonicalization_defaults_to_simple_simple() {
         let raw = " v=1; a=rsa-sha256; d=d.com; s=s; h=from; bh=x; b=y";
         let sig = DkimSignatureHeader::parse(raw).unwrap();
         assert_eq!(sig.canonicalization, Canonicalization::default());
     }
 
-    #[test]
+    #[dialog_common::test]
     fn missing_required_tag_is_rejected() {
         // No b= tag.
         let raw = " v=1; a=rsa-sha256; d=d.com; s=s; h=from; bh=x";
@@ -264,7 +264,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn rejects_unsupported_algorithm() {
         let raw = " v=1; a=rsa-sha1; d=d.com; s=s; h=from; bh=x; b=y";
         assert!(matches!(

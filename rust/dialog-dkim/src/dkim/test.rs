@@ -196,7 +196,7 @@ fn sample_headers() -> Vec<Header> {
 
 const SIGNED_NAMES: &[&str] = &["From", "To", "Subject", "Date", "Message-ID"];
 
-#[test]
+#[dialog_common::test]
 fn rsa_sha256_relaxed_verifies() {
     let (signing, key) = rsa_signing_key();
     let headers = sample_headers();
@@ -217,7 +217,7 @@ fn rsa_sha256_relaxed_verifies() {
     assert_eq!(sig.selector, "sel");
 }
 
-#[test]
+#[dialog_common::test]
 fn rsa_sha256_simple_verifies() {
     let (signing, key) = rsa_signing_key();
     let headers = sample_headers();
@@ -236,7 +236,7 @@ fn rsa_sha256_simple_verifies() {
     verify(&eml, &key).unwrap();
 }
 
-#[test]
+#[dialog_common::test]
 fn ed25519_sha256_relaxed_verifies() {
     let (signing, key) = ed25519_signing_key();
     let headers = sample_headers();
@@ -255,7 +255,7 @@ fn ed25519_sha256_relaxed_verifies() {
     verify(&eml, &key).unwrap();
 }
 
-#[test]
+#[dialog_common::test]
 fn ed25519_sha256_simple_verifies() {
     let (signing, key) = ed25519_signing_key();
     let headers = sample_headers();
@@ -274,7 +274,7 @@ fn ed25519_sha256_simple_verifies() {
     verify(&eml, &key).unwrap();
 }
 
-#[test]
+#[dialog_common::test]
 fn tampered_signed_header_fails() {
     let (signing, key) = rsa_signing_key();
     let headers = sample_headers();
@@ -298,7 +298,7 @@ fn tampered_signed_header_fails() {
     assert!(matches!(outcome, Err(DkimError::VerificationFailed)));
 }
 
-#[test]
+#[dialog_common::test]
 fn wrong_key_fails() {
     let (signing, _correct) = rsa_signing_key();
     let (_other_signing, wrong_key) = ed25519_signing_key();
@@ -322,7 +322,7 @@ fn wrong_key_fails() {
     ));
 }
 
-#[test]
+#[dialog_common::test]
 fn captured_proof_verifies_offline() {
     // The portable proof (no body) verifies with only the domain key.
     let (signing, key) = rsa_signing_key();
@@ -345,7 +345,7 @@ fn captured_proof_verifies_offline() {
     verify_with_key(&proof, &key).unwrap();
 }
 
-#[test]
+#[dialog_common::test]
 fn dns_record_roundtrips_ed25519_key() {
     // The DNS p= form of an ed25519 key parses back to the same key that
     // verifies a signature from its private half.
@@ -724,7 +724,7 @@ fn b_inside_another_tag_value_is_not_the_signature_tag() {
 /// (bottom-up for repeats); the injected top `From:` is outside the signed set.
 /// This is a defense-in-depth regression pin: it must PASS (the guarantee holds
 /// today) and stay passing.
-#[test]
+#[dialog_common::test]
 fn unsigned_injected_from_header_does_not_displace_signed_from() {
     let (signing, key) = rsa_signing_key();
     let headers = sample_headers();
@@ -780,7 +780,7 @@ fn unsigned_injected_from_header_does_not_displace_signed_from() {
 ///    `sig.domain` (e.g. `"gmail.com"`).
 ///
 /// No production code changes are needed; only this fixture + assertion.
-#[test]
+#[dialog_common::test]
 fn real_eml_drop_in_point() {
     // Until a real vector exists, prove the drop-in helper is wired to the same
     // verify path a real vector will use, by round-tripping a generated vector

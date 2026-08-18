@@ -92,7 +92,7 @@ impl MailtoDid {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn parses_plain_identity() {
         let did = MailtoDid::parse("did:mailto:example.com:alice").unwrap();
         assert_eq!(did.domain, "example.com");
@@ -100,7 +100,7 @@ mod tests {
         assert_eq!(did.email(), "alice@example.com");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn percent_decodes_local_part() {
         // `alice+tag` where `+` is left literal but a percent-encoded colon is
         // decoded.
@@ -109,7 +109,7 @@ mod tests {
         assert_eq!(did.email(), "alice+tag@example.com");
     }
 
-    #[test]
+    #[dialog_common::test]
     fn matches_email_case_insensitive_domain() {
         let did = MailtoDid::parse("did:mailto:Example.com:Alice").unwrap();
         assert!(did.matches_email("Alice@EXAMPLE.COM"));
@@ -117,7 +117,7 @@ mod tests {
         assert!(!did.matches_email("alice@example.com"));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn rejects_missing_local_part() {
         assert!(matches!(
             MailtoDid::parse("did:mailto:example.com"),
@@ -125,7 +125,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn rejects_non_mailto() {
         assert!(matches!(
             MailtoDid::parse("did:web:example.com"),

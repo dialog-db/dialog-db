@@ -141,7 +141,7 @@ impl DkimPublicKey {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn parses_ed25519_record() {
         use base64::Engine;
         let raw_key = [7u8; 32];
@@ -153,7 +153,7 @@ mod tests {
         assert!(!key.matches(SignatureAlgorithm::RsaSha256));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn key_type_defaults_to_rsa() {
         use base64::Engine;
         let p = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 4]);
@@ -162,7 +162,7 @@ mod tests {
         assert_eq!(key.key_type(), DkimKeyType::Rsa);
     }
 
-    #[test]
+    #[dialog_common::test]
     fn missing_p_is_rejected() {
         assert!(matches!(
             DkimPublicKey::from_dns_txt("v=DKIM1; k=rsa"),
@@ -170,7 +170,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn empty_p_is_rejected() {
         assert!(matches!(
             DkimPublicKey::from_dns_txt("v=DKIM1; k=rsa; p="),
@@ -178,7 +178,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn folded_p_value_is_reassembled() {
         use base64::Engine;
         let raw_key = [9u8; 32];
