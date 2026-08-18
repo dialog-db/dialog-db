@@ -58,6 +58,15 @@ pub struct DkimSignatureHeader {
     pub signature: String,
     /// `i=`: the signing identity / AUID, if present (e.g. `@example.com`).
     pub identity: Option<String>,
+    /// `t=`: the signature timestamp, seconds since the UNIX epoch, if present.
+    pub timestamp: Option<u64>,
+    /// `x=`: the signature expiration, seconds since the UNIX epoch, if
+    /// present.
+    ///
+    /// The signer's own statement that the signature is no longer valid after
+    /// this point. It is a stronger constraint than any policy layered above,
+    /// so [`verify_with_key`](super::verify::verify_with_key) honors it.
+    pub expiration: Option<u64>,
     /// The raw field value of the whole `DKIM-Signature` header (no name, no
     /// trailing CRLF), verbatim including folding, as needed to reconstruct the
     /// header with `b=` emptied.
@@ -77,10 +86,36 @@ impl DkimSignatureHeader {
     pub fn parse(raw_value: &str) -> Result<Self, DkimError> {
         let tags = parse_tags(raw_value);
 
+        // RFC 6376 section 3.2: a duplicate tag makes the whole tag-list
+        // invalid. Taking the first occurrence instead would be a parser
+        // differential: another implementation that takes the last would read a
+        // different d=, s= or h= from the same bytes.
+        for (index, (tag, _)) in tags.iter().enumerate() {
+            if tags[..index].iter().any(|(earlier, _)| earlier == tag) {
+                return Err(DkimError::MalformedSignature(format!(
+                    "duplicate {tag}= tag"
+                )));
+            }
+        }
+
         let get = |k: &str| {
             tags.iter()
                 .find(|(tag, _)| tag == k)
                 .map(|(_, v)| v.clone())
+        };
+
+        // A tag that must be a decimal number if present at all. A malformed
+        // one is a malformed signature, not an absent constraint: silently
+        // dropping an unparseable x= would turn an expired signature into a
+        // valid one.
+        let numeric = |k: &str| -> Result<Option<u64>, DkimError> {
+            match get(k) {
+                None => Ok(None),
+                Some(raw) => strip_ws(&raw)
+                    .parse::<u64>()
+                    .map(Some)
+                    .map_err(|_| DkimError::MalformedSignature(format!("invalid {k}= tag"))),
+            }
         };
 
         let algorithm = SignatureAlgorithm::parse(
@@ -117,6 +152,20 @@ impl DkimSignatureHeader {
             &get("b").ok_or_else(|| DkimError::MalformedSignature("missing b= tag".into()))?,
         );
 
+        let timestamp = numeric("t")?;
+        let expiration = numeric("x")?;
+
+        // RFC 6376 section 3.5: x= must be greater than t=. A signature that
+        // expires before it was made is nonsense, and accepting one would make
+        // the expiry check meaningless.
+        if let (Some(t), Some(x)) = (timestamp, expiration)
+            && x <= t
+        {
+            return Err(DkimError::MalformedSignature(
+                "x= expiration is not after t= timestamp".into(),
+            ));
+        }
+
         Ok(Self {
             algorithm,
             canonicalization,
@@ -126,8 +175,21 @@ impl DkimSignatureHeader {
             body_hash,
             signature,
             identity: get("i"),
+            timestamp,
+            expiration,
             raw_header_value: raw_value.to_string(),
         })
+    }
+
+    /// Has this signature expired, as of `now` (seconds since the UNIX epoch)?
+    ///
+    /// A signature with no `x=` never expires on its own.
+    #[must_use]
+    pub const fn is_expired_at(&self, now: u64) -> bool {
+        match self.expiration {
+            Some(expiration) => now > expiration,
+            None => false,
+        }
     }
 }
 

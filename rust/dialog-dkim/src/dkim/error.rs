@@ -60,4 +60,15 @@ pub enum DkimError {
     /// string with the domain public key.
     #[error("DKIM signature verification failed")]
     VerificationFailed,
+
+    /// The signer's `x=` expiration has passed. The signer's own statement that
+    /// the signature is no longer valid, which no policy above may relax.
+    #[error("DKIM signature has expired")]
+    SignatureExpired,
+
+    /// The RSA key is below the RFC 8301 floor of 1024 bits. A weak DKIM key
+    /// can be factored offline, which would let its holder mint a binding for
+    /// any mailbox at the domain.
+    #[error("DKIM RSA key is too weak: {0} bits, minimum 1024")]
+    WeakPublicKey(usize),
 }

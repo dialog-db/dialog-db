@@ -149,6 +149,80 @@ const RELAXED: Canonicalization = Canonicalization {
     body: BodyCanon::Simple,
 };
 
+/// Build a binding email that signs **two** `Subject:` headers, the shape an
+/// oversigning signer (`h=...:subject:subject`) produces.
+///
+/// `displayed` is the top-most Subject, which is what a mail client shows the
+/// sender. `signed_first` is the one below it, which RFC 6376 section 5.4.2's
+/// bottom-up selection puts first in the signed set.
+fn build_doubled_subject_eml(
+    from: &str,
+    displayed: &str,
+    signed_first: &str,
+    domain: &str,
+    selector: &str,
+    signing: &SigningKey<Sha256>,
+) -> Vec<u8> {
+    let headers = vec![
+        header("From", from),
+        header("Subject", displayed),
+        header("Subject", signed_first),
+        header("Date", "Mon, 16 Aug 2026 12:00:00 +0000"),
+    ];
+    let signed_names = ["From", "Subject", "Subject", "Date"];
+
+    let body = "hello body";
+    let body_hash = base64::engine::general_purpose::STANDARD
+        .encode(<Sha256 as rsa::sha2::Digest>::digest(body.as_bytes()));
+    let h_list = signed_names.join(":");
+    let dkim_value_unsigned = format!(
+        " v=1; a=rsa-sha256; c=relaxed/simple; d={domain}; s={selector};\r\n \
+         h={h_list}; bh={body_hash};\r\n b="
+    );
+
+    // Bottom-up selection with a per-name consumed count, matching the verifier.
+    let mut consumed: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let selected: Vec<Header> = signed_names
+        .iter()
+        .map(|name| {
+            let already = consumed.entry(name.to_ascii_lowercase()).or_insert(0);
+            let found = headers
+                .iter()
+                .rev()
+                .filter(|h| h.name_eq_ignore_case(name))
+                .nth(*already)
+                .unwrap()
+                .clone();
+            *already += 1;
+            found
+        })
+        .collect();
+
+    let mut signed_data = Vec::new();
+    for h in &selected {
+        signed_data.extend_from_slice(&RELAXED.canonicalize_header(h));
+    }
+    signed_data.extend_from_slice(&RELAXED.canonicalize_dkim_signature(&dkim_value_unsigned));
+
+    let b_value =
+        base64::engine::general_purpose::STANDARD.encode(signing.sign(&signed_data).to_bytes());
+    let dkim_value_signed = format!("{dkim_value_unsigned}{b_value}");
+
+    let mut eml = String::new();
+    eml.push_str("DKIM-Signature:");
+    eml.push_str(&dkim_value_signed);
+    eml.push_str("\r\n");
+    for h in &headers {
+        eml.push_str(&h.name);
+        eml.push(':');
+        eml.push_str(&h.raw_value);
+        eml.push_str("\r\n");
+    }
+    eml.push_str("\r\n");
+    eml.push_str(body);
+    eml.into_bytes()
+}
+
 /// A DoH JSON response body carrying the given DKIM record.
 fn doh_body(record: &str) -> Vec<u8> {
     format!(r#"{{"Answer":[{{"data":"\"{record}\""}}]}}"#).into_bytes()
@@ -182,6 +256,59 @@ async fn rsa_binding_verifies_and_extracts_key() {
         .unwrap();
     assert_eq!(binding.authorized_key.did().as_str(), did_key);
     assert_eq!(binding.identity, identity);
+}
+
+/// A proof signing two `Subject:` headers must be refused, because which one
+/// is authoritative diverges between the verifier and the human.
+///
+/// RFC 6376 section 5.4.2 consumes repeated `h=` names bottom-up, so the first
+/// signed `Subject:` is the bottom-most header, while every mail client
+/// displays the top-most. Picking by first match would therefore authorize a
+/// key from a subject the sender never read. Oversigning `h=...:subject:subject`
+/// is standard anti-replay practice (RFC 6376 section 8.15), so this is a
+/// normal signer configuration rather than an exotic one.
+///
+/// The DKIM signature itself is valid here: the signer really did sign both
+/// subjects. The refusal belongs at the binding layer, which is what this pins.
+#[dialog_common::test]
+async fn duplicate_signed_subject_is_refused() {
+    let (signing, _key, p) = rsa_key();
+    let attacker_key = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+
+    let eml = build_doubled_subject_eml(
+        "Alice <alice@example.com>",
+        // What Alice saw in her mail client.
+        "Hello, this is a totally normal email",
+        // What first-match selection would have read instead.
+        &format!("I am also known as {attacker_key}"),
+        "example.com",
+        "sel",
+        &signing,
+    );
+
+    let proof = SignedEmail::from_raw_eml(&eml).unwrap();
+
+    // Confirm the divergence is real: the first signed Subject is the one Alice
+    // never saw.
+    let first_subject = proof
+        .signed_headers
+        .iter()
+        .find(|h| h.name_eq_ignore_case("subject"))
+        .expect("a signed Subject");
+    assert!(
+        first_subject.raw_value.contains("I am also known as"),
+        "bottom-up selection must put the hidden Subject first"
+    );
+
+    let provider = key_provider_for("sel", "example.com", &format!("v=DKIM1; k=rsa; p={p}"));
+    let identity: Did = "did:mailto:example.com:alice".parse().unwrap();
+
+    let outcome = verify_mailto_proof(&identity, &proof, &provider).await;
+    assert!(
+        outcome.is_err(),
+        "a proof signing two Subject: headers must be refused: the header the \
+         verifier reads is not the one the sender saw"
+    );
 }
 
 #[dialog_common::test]

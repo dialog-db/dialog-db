@@ -15,4 +15,4 @@ pub use error::DkimError;
 pub use key::{DkimKeyType, DkimPublicKey};
 pub use message::{Header, Message};
 pub use signature::{DkimSignatureHeader, SignatureAlgorithm};
-pub use verify::{SignedEmail, verify, verify_with_key};
+pub use verify::{SignedEmail, verify, verify_with_key, verify_with_key_at};

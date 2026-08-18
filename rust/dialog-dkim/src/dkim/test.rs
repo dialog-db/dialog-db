@@ -22,7 +22,7 @@ use super::error::DkimError;
 use super::key::DkimPublicKey;
 use super::message::Header;
 use super::signature::DkimSignatureHeader;
-use super::verify::{SignedEmail, verify, verify_with_key};
+use super::verify::{SignedEmail, verify, verify_with_key, verify_with_key_at};
 
 use base64::Engine;
 use rsa::pkcs1::DecodeRsaPrivateKey;
@@ -490,8 +490,8 @@ fn build_signed_eml_with_repeated_names(
     eml.into_bytes()
 }
 
-/// A proof must not carry two `Subject:` headers, because which one is
-/// authoritative diverges between the verifier and the human.
+/// Repeated `h=` names are consumed bottom-up, which is what makes a doubled
+/// `Subject:` dangerous for a consumer that picks by first match.
 ///
 /// `select_signed_headers` consumes repeated `h=` names bottom-up (RFC 6376
 /// section 5.4.2), so `signed_headers[0]` for a doubled name is the
@@ -507,7 +507,7 @@ fn build_signed_eml_with_repeated_names(
 /// Refusing a duplicate outright is the fix; a binding proof has no legitimate
 /// reason to sign two subjects.
 #[dialog_common::test]
-fn duplicate_signed_subject_is_rejected() {
+fn repeated_signed_headers_are_selected_bottom_up() {
     let (signing, key) = rsa_signing_key();
 
     let headers = vec![
@@ -538,8 +538,17 @@ fn duplicate_signed_subject_is_rejected() {
 
     let proof = SignedEmail::from_raw_eml(&eml).unwrap();
 
-    // Confirm the divergence is real before asserting the fix: the first signed
-    // Subject is the bottom one, not the one a client would display.
+    // The DKIM signature itself is genuinely valid: the signer really did sign
+    // both subjects, so this layer must accept it. The divergence is a
+    // *binding* problem, and did:mailto refuses the doubled Subject there (see
+    // `duplicate_signed_subject_is_refused` in dialog-did-web).
+    verify_with_key(&proof, &key)
+        .expect("the DKIM signature over two signed Subjects is itself valid");
+
+    // What this layer pins is the ordering that makes the divergence possible:
+    // RFC 6376 section 5.4.2 consumes repeated h= names bottom-up, so the FIRST
+    // signed Subject is the BOTTOM-most header, while every mail client shows
+    // the top-most one.
     let first_subject = proof
         .signed_headers
         .iter()
@@ -547,13 +556,8 @@ fn duplicate_signed_subject_is_rejected() {
         .expect("a signed Subject");
     assert!(
         first_subject.raw_value.contains("I am also known as"),
-        "the first signed Subject is the bottom-most one, which the user never saw"
-    );
-
-    assert!(
-        verify_with_key(&proof, &key).is_err(),
-        "a proof signing two Subject: headers must be refused: the header the \
-         verifier reads is not the header the sender saw"
+        "the first signed Subject must be the bottom-most one, which the user \
+         never saw: that ordering is why a consumer must not pick by first match"
     );
 }
 
@@ -605,14 +609,17 @@ fn undersized_rsa_dkim_key_is_rejected() {
 /// A DKIM signature whose `x=` (signature expiration, RFC 6376 section 3.5) is
 /// in the past must not verify. `x=` is the signer's own assertion that the
 /// signature is no longer valid after a point in time; honoring it is stricter
-/// than any delegation-level policy. This proof is cryptographically valid (the
-/// signature covers a well-formed, in-the-past `x=`), so verification passes
-/// today: `x=` is never parsed or enforced. This pins that gap.
-#[test]
+/// than any delegation-level policy. The proof is cryptographically valid (the
+/// signature covers a well-formed, in-the-past `x=`), so only an explicit
+/// expiry check refuses it.
+///
+/// The clock is the caller's: this crate takes none of its own, which keeps it
+/// pure and makes expiry deterministically testable.
+#[dialog_common::test]
 fn expired_signature_is_rejected() {
     let (signing, key) = rsa_signing_key();
     let headers = sample_headers();
-    // t= well in the past, x= just after it: expired for any plausible clock.
+    // t= well in the past, x= just after it.
     let eml = build_signed_eml_with_extra_tags(
         &headers,
         SIGNED_NAMES,
@@ -627,13 +634,89 @@ fn expired_signature_is_rejected() {
         "test vector must be a validly signed email"
     );
 
-    // The real assertion: an expired signature must be refused. Fails today
-    // because x= is ignored.
     let proof = SignedEmail::from_raw_eml(&eml).unwrap();
+    assert_eq!(proof.signature.timestamp, Some(1000));
+    assert_eq!(proof.signature.expiration, Some(2000));
+
+    // After x=, the signature is refused...
     assert!(
-        verify_with_key(&proof, &key).is_err(),
-        "a DKIM signature whose x= expiration is in the past must not verify"
+        matches!(
+            verify_with_key_at(&proof, &key, 2001),
+            Err(DkimError::SignatureExpired)
+        ),
+        "a DKIM signature whose x= expiration has passed must not verify"
     );
+
+    // ...and at or before it, the same proof still verifies, so the check is a
+    // real comparison rather than a blanket refusal.
+    verify_with_key_at(&proof, &key, 2000).expect("a signature at its expiry is still valid");
+    verify_with_key_at(&proof, &key, 1500).expect("a signature before its expiry is valid");
+}
+
+/// A signature with no `x=` never expires on its own.
+#[dialog_common::test]
+fn signature_without_expiry_never_expires() {
+    let (signing, key) = rsa_signing_key();
+    let eml = build_signed_eml(
+        &sample_headers(),
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        Canonicalization {
+            header: HeaderCanon::Relaxed,
+            body: super::canonicalize::BodyCanon::Simple,
+        },
+        InnerKey::Rsa(&signing),
+        "hello body",
+    );
+    let proof = SignedEmail::from_raw_eml(&eml).unwrap();
+    assert_eq!(proof.signature.expiration, None);
+    verify_with_key_at(&proof, &key, u64::MAX).expect("no x= means no expiry");
+}
+
+/// RFC 6376 section 3.2: a duplicate tag invalidates the whole tag list.
+/// Taking the first occurrence would be a parser differential, since an
+/// implementation that takes the last would read a different `d=` from the
+/// same bytes.
+#[dialog_common::test]
+fn duplicate_tag_is_rejected() {
+    let (signing, _) = rsa_signing_key();
+    let eml = build_signed_eml_with_extra_tags(
+        &sample_headers(),
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        "d=evil.example;",
+        &signing,
+    );
+    assert!(
+        matches!(
+            SignedEmail::from_raw_eml(&eml),
+            Err(DkimError::MalformedSignature(_))
+        ),
+        "a DKIM-Signature carrying two d= tags must be refused"
+    );
+}
+
+/// A `b=` sitting inside another tag's *value* must not be mistaken for the
+/// signature tag. Blanking the wrong one leaves the real signature in the
+/// hashed input, so a legitimate proof would never verify.
+#[dialog_common::test]
+fn b_inside_another_tag_value_is_not_the_signature_tag() {
+    let (signing, key) = rsa_signing_key();
+    let eml = build_signed_eml_with_extra_tags(
+        &sample_headers(),
+        SIGNED_NAMES,
+        "example.com",
+        "sel",
+        // A value containing a space and a `b=`, the shape that fooled the
+        // byte scan.
+        "i=foo b=bar;",
+        &signing,
+    );
+    let proof = SignedEmail::from_raw_eml(&eml).unwrap();
+    verify_with_key(&proof, &key)
+        .expect("a b= inside another tag's value must not displace the real b= tag");
 }
 
 /// An unsigned second `From:` prepended to a captured proof must not change
