@@ -10,10 +10,16 @@
 //! wasm run is what validates the browser `fetch` path the resolver uses in a
 //! browser.
 //!
-//! These live in `src/` rather than `tests/` deliberately: the
-//! `#[dialog_common::test]` macro spawns the wasm inner test with `--lib`, so a
-//! test in a separate integration-test target is never found and reports as
-//! "skipped in wasm".
+//! These are **native-only**. The client talks to a server on `127.0.0.1`,
+//! which a browser cannot reach (cross-origin / mixed content), so running the
+//! client on wasm is not meaningful: every request fails before a status is
+//! seen. `web-integration-tests` therefore does not enable `helpers`,
+//! mirroring how `dialog-remote-s3` keeps its server-backed tests out of the
+//! wasm run.
+//!
+//! They live in `src/` rather than `tests/` because the
+//! `#[dialog_common::test]` macro spawns its inner test with `--lib`, so a test
+//! in a separate integration-test target is never found.
 //!
 //! The server, its `Behavior`, and the byte cap are provisioning concerns:
 //! they appear only inside the `#[dialog_common::test(...)]` attribute, which

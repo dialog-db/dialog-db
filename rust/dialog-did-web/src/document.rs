@@ -19,6 +19,7 @@ use crate::verifier::MultiVerifier;
 const ED25519_MULTICODEC: [u8; 2] = [0xed, 0x01];
 
 /// The P-256 public-key multicodec prefix (unsigned-varint of `0x1200`).
+#[cfg(feature = "es256")]
 const P256_MULTICODEC: [u8; 2] = [0x80, 0x24];
 
 /// A DID document, reduced to the verification methods.
@@ -234,8 +235,30 @@ fn verifier_from_multibase(multibase: &str) -> Result<Verifier, ResolveError> {
 }
 
 /// Build a verifier from a JWK by re-encoding it as a `did:key`.
+///
+/// `kty` is checked against the curve rather than ignored: `crv` alone would
+/// let `{"kty":"RSA","crv":"P-256",...}` be read as a P-256 key, accepting a
+/// key the document does not actually declare.
 fn verifier_from_jwk(jwk: &Jwk) -> Result<Verifier, ResolveError> {
     let crv = jwk.crv.as_deref().unwrap_or_default();
+    let kty = jwk.kty.as_deref().unwrap_or_default();
+
+    let expected_kty = match crv {
+        "Ed25519" => "OKP",
+        #[cfg(feature = "es256")]
+        "P-256" => "EC",
+        other => {
+            return Err(ResolveError::UnsupportedKey(format!(
+                "unsupported JWK curve: {other}"
+            )));
+        }
+    };
+    if kty != expected_kty {
+        return Err(ResolveError::UnsupportedKey(format!(
+            "JWK curve {crv} requires kty {expected_kty}, got {kty}"
+        )));
+    }
+
     let did_key = match crv {
         "Ed25519" => {
             let x = decode_b64url(jwk.x.as_deref(), "x")?;
@@ -247,6 +270,7 @@ fn verifier_from_jwk(jwk: &Jwk) -> Result<Verifier, ResolveError> {
             }
             did_key_string(&ED25519_MULTICODEC, &x)
         }
+        #[cfg(feature = "es256")]
         "P-256" => {
             let x = decode_b64url(jwk.x.as_deref(), "x")?;
             let y = decode_b64url(jwk.y.as_deref(), "y")?;
@@ -257,9 +281,12 @@ fn verifier_from_jwk(jwk: &Jwk) -> Result<Verifier, ResolveError> {
                     y.len()
                 )));
             }
-            let compressed = compress_p256(&x, &y);
+            let compressed = compress_p256(&x, &y)?;
             did_key_string(&P256_MULTICODEC, &compressed)
         }
+        // Every other curve is refused above, where `kty` is checked against
+        // the curve. Repeat the refusal rather than panicking, so a future
+        // curve added to that match cannot turn into an unreachable panic.
         other => {
             return Err(ResolveError::UnsupportedKey(format!(
                 "unsupported JWK curve: {other}"
@@ -279,18 +306,43 @@ fn did_key_string(multicodec: &[u8], key: &[u8]) -> String {
     format!("did:key:z{}", raw.as_slice().to_base58())
 }
 
-/// Compress an uncompressed P-256 point `(x, y)` to 33 bytes: a `0x02`/`0x03`
-/// prefix chosen by the parity of `y`, followed by `x`.
-fn compress_p256(x: &[u8], y: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(33);
-    let prefix = if y.last().copied().unwrap_or(0) & 1 == 0 {
-        0x02
-    } else {
-        0x03
-    };
-    out.push(prefix);
-    out.extend_from_slice(x);
-    out
+/// Compress a P-256 point `(x, y)` to its 33-byte SEC1 form, refusing a point
+/// that is not actually on the curve.
+///
+/// # Why `y` is verified rather than reduced to its parity
+///
+/// Compression keeps only `x` and one parity bit of `y`, because a valid curve
+/// point is fully determined by them. Deriving the prefix straight from
+/// `y.last() & 1` therefore *discards* `y` — so a document could publish any
+/// `y` whatsoever, and as long as its low bit matched, resolution would
+/// silently produce the key that `x` alone names. A JWK whose `y` does not
+/// satisfy the curve equation is a malformed key, and a resolver feeding a
+/// signature check must refuse it rather than reinterpret it as a different,
+/// well-formed key the document never published.
+///
+/// Round-tripping through the uncompressed SEC1 encoding (`0x04 || x || y`)
+/// hands that check to the `p256` crate, which rejects an off-curve point.
+#[cfg(feature = "es256")]
+fn compress_p256(x: &[u8], y: &[u8]) -> Result<Vec<u8>, ResolveError> {
+    let mut uncompressed = Vec::with_capacity(1 + x.len() + y.len());
+    uncompressed.push(0x04);
+    uncompressed.extend_from_slice(x);
+    uncompressed.extend_from_slice(y);
+
+    let point = p256::EncodedPoint::from_bytes(&uncompressed).map_err(|e| {
+        ResolveError::UnsupportedKey(format!("P-256 JWK is not a valid SEC1 point: {e}"))
+    })?;
+    // `from_encoded_point` is what rejects a point off the curve; the encoded
+    // form above only checks the length and tag.
+    let key = p256::PublicKey::try_from(&point).map_err(|_| {
+        ResolveError::UnsupportedKey("P-256 JWK x and y are not a point on the curve".to_string())
+    })?;
+
+    Ok(
+        p256::elliptic_curve::sec1::ToEncodedPoint::to_encoded_point(&key, true)
+            .as_bytes()
+            .to_vec(),
+    )
 }
 
 /// Decode a base64url (unpadded) field, refusing an absent one.

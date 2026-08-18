@@ -10,7 +10,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod server;
 
-#[cfg(test)]
+// Native-only: the tests point a client at a locally-provisioned HTTP server
+// on 127.0.0.1, which a browser cannot reach.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod test;
 
 #[cfg(not(target_arch = "wasm32"))]

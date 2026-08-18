@@ -127,17 +127,21 @@ impl Fetch for ReqwestFetch {
             .map_err(|e| ResolveError::Fetch(format!("request to {url} failed: {e}")))?;
 
         let status = response.status();
-        if !status.is_success() {
+
+        // A redirect is refused rather than followed, so a 3xx arrives here as
+        // an ordinary non-success status. Name it before the generic branch,
+        // which would otherwise report it as a bare status code and leave the
+        // operator to work out that the redirect policy is what refused it.
+        if status.is_redirection() {
             return Err(ResolveError::Fetch(format!(
-                "{url} returned status {status}"
+                "{url} returned status {status}: redirected, and a DID document \
+                 must be served by the host the DID names"
             )));
         }
 
-        // A redirect is refused rather than followed, so a 3xx arrives here as
-        // a non-success status above. Name it plainly for the operator.
-        if status.is_redirection() {
+        if !status.is_success() {
             return Err(ResolveError::Fetch(format!(
-                "{url} redirected; a DID document must be served by the host the DID names"
+                "{url} returned status {status}"
             )));
         }
 

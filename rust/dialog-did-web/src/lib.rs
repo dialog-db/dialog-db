@@ -37,7 +37,7 @@ mod verifier;
 #[cfg(test)]
 mod tests;
 
-pub use cache::{CachingResolver, DEFAULT_NEGATIVE_TTL, DEFAULT_TTL};
+pub use cache::{CachingResolver, DEFAULT_NEGATIVE_TTL, DEFAULT_TTL, MAX_ENTRIES};
 pub use document::{DidDocument, Jwk, VerificationMethod};
 pub use error::ResolveError;
 pub use fetch::{Fetch, MAX_DOCUMENT_BYTES, ReqwestFetch};

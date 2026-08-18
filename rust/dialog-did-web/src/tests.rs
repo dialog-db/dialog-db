@@ -566,3 +566,237 @@ async fn it_refuses_did_web_with_wrong_key() {
         "a did:web document with the wrong key must not verify"
     );
 }
+
+/// A P-256 JWK whose `y` does not lie on the curve with `x` must be refused,
+/// not silently reinterpreted.
+///
+/// Compression keeps only `x` and one parity bit of `y`, so deriving the SEC1
+/// prefix straight from `y`'s low bit *discards* `y` entirely: a document could
+/// publish any `y` at all and, as long as its parity matched, resolution would
+/// hand back the well-formed key that `x` alone names. That turns a malformed
+/// published key into a valid one behind the operator's back. Since the
+/// authorizer resolves attacker-supplied issuer DIDs, the document contents are
+/// remote input, and a resolver feeding a signature check must refuse a key it
+/// cannot reconstruct exactly as published.
+#[cfg(feature = "es256")]
+#[dialog_common::test]
+async fn it_refuses_a_p256_jwk_whose_y_is_not_on_the_curve() {
+    let signer = Signer::from(Es256Signer::generate().await.unwrap());
+
+    // Recover the genuine point so `x` is real and only `y` is wrong: this
+    // pins the *validation*, not merely a length or base64 check.
+    let compressed = compressed_point_of(&signer);
+    let (parity, x) = compressed.split_first().expect("a 33-byte point");
+
+    // A `y` of the right length and the right parity, but not the real `y`.
+    let mut wrong_y = [0u8; 32];
+    wrong_y[0] = 0xAB;
+    wrong_y[31] = u8::from(*parity == 0x03);
+
+    let did_web = "did:web:offcurve.example";
+    let doc = jwk_p256_document(did_web, x, &wrong_y);
+    let fetch = MapFetch::new().with(
+        "https://offcurve.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let provider = DidWebProvider::with_fetch(fetch);
+
+    let did: Did = did_web.parse().unwrap();
+    let err = Resolve::new(did).perform(&provider).await.unwrap_err();
+    assert!(
+        matches!(err, ResolveError::UnsupportedKey(_)),
+        "a JWK whose (x, y) is not a curve point must be refused, got {err:?}"
+    );
+}
+
+/// The genuine `(x, y)` still resolves, so the curve check above refuses only
+/// invalid points rather than every P-256 JWK.
+#[cfg(feature = "es256")]
+#[dialog_common::test]
+async fn it_resolves_a_p256_jwk_with_a_valid_point() {
+    let signer = Signer::from(Es256Signer::generate().await.unwrap());
+    let (x, y) = uncompressed_coordinates_of(&signer);
+
+    let did_web = "did:web:p256jwk.example";
+    let doc = jwk_p256_document(did_web, &x, &y);
+    let fetch = MapFetch::new().with(
+        "https://p256jwk.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let provider = DidWebProvider::with_fetch(fetch);
+
+    let did: Did = did_web.parse().unwrap();
+    let verifier = Resolve::new(did).perform(&provider).await.unwrap();
+
+    let msg = b"valid p256 jwk";
+    let sig = VarsigSigner::sign(&signer, msg).await.unwrap();
+    verifier
+        .verify(msg, &sig)
+        .await
+        .expect("a well-formed P-256 JWK must still resolve and verify");
+}
+
+/// A JWK's `kty` must agree with its `crv`. `crv` alone would let
+/// `{"kty":"RSA","crv":"P-256"}` be read as a P-256 key, accepting a key under
+/// a type the document never declared.
+#[dialog_common::test]
+async fn it_refuses_a_jwk_whose_kty_contradicts_its_crv() {
+    let signer = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let key_bytes = signer
+        .verifier()
+        .as_ed25519()
+        .unwrap()
+        .0
+        .to_bytes()
+        .to_vec();
+    let x = base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        &key_bytes,
+    );
+
+    // The right key material, but declared under the wrong key type.
+    let did_web = "did:web:ktymismatch.example";
+    let doc = format!(
+        r#"{{
+            "id": "{did_web}",
+            "verificationMethod": [{{
+                "id": "{did_web}#0",
+                "type": "JsonWebKey2020",
+                "publicKeyJwk": {{ "kty": "EC", "crv": "Ed25519", "x": "{x}" }}
+            }}]
+        }}"#
+    );
+    let fetch = MapFetch::new().with(
+        "https://ktymismatch.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let provider = DidWebProvider::with_fetch(fetch);
+
+    let did: Did = did_web.parse().unwrap();
+    let err = Resolve::new(did).perform(&provider).await.unwrap_err();
+    assert!(
+        matches!(err, ResolveError::UnsupportedKey(_)),
+        "a JWK whose kty contradicts its crv must be refused, got {err:?}"
+    );
+}
+
+/// The cache must not grow without bound on attacker-chosen keys.
+///
+/// The authorizer resolves the issuer DID of any submitted invocation, so a
+/// remote party picks the cache keys. The cheapest keys to supply are the ones
+/// that *fail*: a malformed host is refused during URL derivation without a
+/// single network call, and that refusal is then stored as a negative entry. An
+/// unbounded map therefore grows at attacker request for free, which is a
+/// memory-exhaustion vector against the authorizing server. This pins that the
+/// map stays inside its bound while feeding it far more distinct DIDs than it
+/// can hold.
+#[dialog_common::test]
+async fn caching_is_bounded_against_attacker_chosen_dids() {
+    const CAPACITY: usize = 8;
+
+    let fetch = MapFetch::new();
+    let cached = CachingResolver::with_ttls_and_capacity(
+        MethodResolver::with_providers(DidKeyProvider, DidWebProvider::with_fetch(fetch.clone())),
+        std::time::Duration::from_secs(300),
+        std::time::Duration::from_secs(30),
+        CAPACITY,
+    );
+
+    // Each of these is refused by URL derivation (a decoded '@' would make the
+    // fetch target a different host), so none costs a network round trip.
+    for i in 0..(CAPACITY * 50) {
+        let did: Did = format!("did:web:h{i}.example%40evil.example")
+            .parse()
+            .unwrap();
+        assert!(
+            Resolve::new(did).perform(&cached).await.is_err(),
+            "a malformed did:web host must be refused"
+        );
+    }
+
+    assert_eq!(
+        fetch.calls(),
+        0,
+        "these DIDs must fail before any fetch, which is what makes them cheap to spam"
+    );
+    assert!(
+        cached.len() <= CAPACITY,
+        "the cache must stay within its bound, held {} with a cap of {CAPACITY}",
+        cached.len()
+    );
+}
+
+/// Bounding the cache must not break caching: a repeatedly resolved DID is
+/// still served from the cache rather than refetched.
+#[dialog_common::test]
+async fn caching_still_serves_a_hit_when_bounded() {
+    let signer = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let did_web = "did:web:bounded.example";
+    let doc = did_document_multibase(did_web, &signer);
+    let fetch = MapFetch::new().with(
+        "https://bounded.example/.well-known/did.json",
+        doc.into_bytes(),
+    );
+    let cached = CachingResolver::with_ttls_and_capacity(
+        DidWebProvider::with_fetch(fetch.clone()),
+        std::time::Duration::from_secs(300),
+        std::time::Duration::from_secs(30),
+        4,
+    );
+
+    let did: Did = did_web.parse().unwrap();
+    for _ in 0..5 {
+        Resolve::new(did.clone()).perform(&cached).await.unwrap();
+    }
+
+    assert_eq!(fetch.calls(), 1, "repeat resolutions must come from cache");
+}
+
+/// The compressed SEC1 point (33 bytes: parity prefix followed by `x`) behind a
+/// P-256 signer's `did:key`.
+#[cfg(feature = "es256")]
+fn compressed_point_of(signer: &Signer) -> Vec<u8> {
+    let did = signer.did();
+    let b58 = did.as_str().strip_prefix("did:key:z").expect("did:key:z");
+    let raw: Vec<u8> = base58::FromBase58::from_base58(b58).expect("base58");
+    // Drop the two-byte p256-pub multicodec prefix.
+    raw[2..].to_vec()
+}
+
+/// The genuine uncompressed `(x, y)` coordinates of a P-256 signer's key.
+#[cfg(feature = "es256")]
+fn uncompressed_coordinates_of(signer: &Signer) -> (Vec<u8>, Vec<u8>) {
+    let compressed = compressed_point_of(signer);
+    let point = p256::EncodedPoint::from_bytes(&compressed).expect("a valid compressed point");
+    let key = p256::PublicKey::try_from(&point).expect("a point on the curve");
+    let uncompressed = p256::elliptic_curve::sec1::ToEncodedPoint::to_encoded_point(&key, false);
+    let bytes = uncompressed.as_bytes();
+    // 0x04 tag, then x, then y.
+    (bytes[1..33].to_vec(), bytes[33..65].to_vec())
+}
+
+/// A did.json naming a single P-256 `publicKeyJwk` verification method built
+/// from raw `x` and `y` coordinates.
+#[cfg(feature = "es256")]
+fn jwk_p256_document(did_web: &str, x: &[u8], y: &[u8]) -> String {
+    let encode =
+        |b: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, b);
+    format!(
+        r#"{{
+            "id": "{did_web}",
+            "verificationMethod": [{{
+                "id": "{did_web}#0",
+                "type": "JsonWebKey2020",
+                "controller": "{did_web}",
+                "publicKeyJwk": {{
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "x": "{x}",
+                    "y": "{y}"
+                }}
+            }}]
+        }}"#,
+        x = encode(x),
+        y = encode(y)
+    )
+}

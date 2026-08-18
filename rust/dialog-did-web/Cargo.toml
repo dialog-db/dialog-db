@@ -16,7 +16,11 @@ test-fetch = []
 # cross-target fetch integration tests. Pulls the native server stack.
 helpers = ["dep:anyhow", "dep:tokio", "dialog-common/helpers"]
 integration-tests = ["helpers", "dialog-common/integration-tests"]
-web-integration-tests = ["helpers", "dialog-common/web-integration-tests"]
+# Deliberately does NOT pull `helpers`. The fetch tests point a client at a
+# locally-provisioned HTTP server on 127.0.0.1, which a browser cannot reach
+# (cross-origin / mixed content), so they are native-only. Mirrors how
+# dialog-remote-s3 keeps its server-backed tests out of the wasm run.
+web-integration-tests = ["dialog-common/web-integration-tests"]
 
 [dependencies]
 async-trait = { workspace = true }
