@@ -147,7 +147,7 @@ pub fn did_web_url(did: &str) -> Result<String, ResolveError> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn plain_host() {
         assert_eq!(
             did_web_url("did:web:example.com").unwrap(),
@@ -155,7 +155,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn host_with_path() {
         assert_eq!(
             did_web_url("did:web:example.com:path:to").unwrap(),
@@ -165,7 +165,7 @@ mod tests {
 
     /// The host allowlist must not reject the shapes did:web legitimately
     /// produces, so pin the accepted forms alongside the refused ones.
-    #[test]
+    #[dialog_common::test]
     fn accepts_ordinary_hosts_and_paths() {
         for did in [
             "did:web:example.com",
@@ -180,7 +180,7 @@ mod tests {
     }
 
     /// A second colon in the decoded host is not a second port.
-    #[test]
+    #[dialog_common::test]
     fn rejects_multiple_colons_in_host() {
         assert!(matches!(
             did_web_url("did:web:host.example%3A80%3A90"),
@@ -189,7 +189,7 @@ mod tests {
     }
 
     /// A port must be numeric: `host:evil` is not a host with a port.
-    #[test]
+    #[dialog_common::test]
     fn rejects_non_numeric_port() {
         assert!(matches!(
             did_web_url("did:web:host.example%3Anotaport"),
@@ -199,7 +199,7 @@ mod tests {
 
     /// An empty label (`host..example`, a leading or trailing dot) is not a
     /// hostname, and `..` in the host position is a traversal attempt.
-    #[test]
+    #[dialog_common::test]
     fn rejects_empty_host_label() {
         for did in [
             "did:web:host..example",
@@ -215,7 +215,7 @@ mod tests {
     }
 
     /// A single-dot segment is a dot-segment too, and normalizes away.
-    #[test]
+    #[dialog_common::test]
     fn rejects_single_dot_path_segment() {
         assert!(matches!(
             did_web_url("did:web:host.example:."),
@@ -225,7 +225,7 @@ mod tests {
 
     /// A decoded `#` would make the rest of the derived URL a fragment,
     /// truncating the `/did.json` suffix.
-    #[test]
+    #[dialog_common::test]
     fn rejects_fragment_in_path() {
         assert!(matches!(
             did_web_url("did:web:host.example:a%23b"),
@@ -234,7 +234,7 @@ mod tests {
     }
 
     /// A decoded `%` could start a fresh escape once re-parsed by the client.
-    #[test]
+    #[dialog_common::test]
     fn rejects_percent_in_path() {
         assert!(matches!(
             did_web_url("did:web:host.example:a%25b"),
@@ -242,7 +242,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn host_with_port() {
         assert_eq!(
             did_web_url("did:web:localhost%3A3000").unwrap(),
@@ -250,7 +250,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn rejects_non_web() {
         assert!(matches!(
             did_web_url("did:key:z6Mk"),
@@ -258,7 +258,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn rejects_empty_host() {
         assert!(matches!(
             did_web_url("did:web:"),
@@ -273,7 +273,7 @@ mod tests {
     /// letting a crafted DID choose any path on the host. Because the S3
     /// authorizer resolves attacker-supplied issuer DIDs over the network, this
     /// is a server-side request-forgery primitive.
-    #[test]
+    #[dialog_common::test]
     fn rejects_path_and_query_smuggled_into_host() {
         let url = did_web_url("did:web:victim.example%2Fadmin%3Fx%3D");
         assert!(
@@ -286,7 +286,7 @@ mod tests {
     /// component, which would make the fetch target a different host than the
     /// one the DID string appears to name (`good.com@evil.com` fetches
     /// `evil.com`).
-    #[test]
+    #[dialog_common::test]
     fn rejects_userinfo_in_host() {
         let url = did_web_url("did:web:good.com%40evil.example");
         assert!(
@@ -299,7 +299,7 @@ mod tests {
     /// on the host (`did:web:host:..:..` -> `https://host/../../did.json`),
     /// which combined with a missing document-`id` check lets any
     /// DID-document-shaped JSON on the host masquerade as this identity.
-    #[test]
+    #[dialog_common::test]
     fn rejects_dot_segment_path_traversal() {
         let url = did_web_url("did:web:host.example:..:..");
         assert!(
@@ -310,7 +310,7 @@ mod tests {
 
     /// A raw control or delimiter byte introduced by percent-decoding a path
     /// segment (here a CR/LF) must be refused rather than spliced into the URL.
-    #[test]
+    #[dialog_common::test]
     fn rejects_control_bytes_in_path() {
         let url = did_web_url("did:web:host.example:a%0d%0ab");
         assert!(

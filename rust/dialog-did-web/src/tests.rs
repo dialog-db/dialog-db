@@ -431,7 +431,7 @@ async fn caching_remembers_failure_briefly() {
     assert_eq!(fetch.calls(), 1, "a cached failure must not refetch");
 }
 
-#[test]
+#[dialog_common::test]
 fn document_selects_by_fragment() {
     let doc: DidDocument = serde_json::from_str(
         r#"{
@@ -453,7 +453,7 @@ fn document_selects_by_fragment() {
     );
 }
 
-#[test]
+#[dialog_common::test]
 fn url_derivation_is_wired() {
     assert_eq!(
         did_web_url("did:web:example.com:users:alice").unwrap(),
