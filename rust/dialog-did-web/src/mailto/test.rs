@@ -428,6 +428,87 @@ async fn mismatched_from_local_is_rejected() {
     );
 }
 
+/// Replaying a captured proof is inert, because the subject names the audience.
+///
+/// A DKIM signature is public and permanent: it rides in headers every relay,
+/// the recipient's provider, and anyone the mail is forwarded to can read. So
+/// the proof *will* be replayed, and the question is what a replayer gains.
+///
+/// The answer is nothing, because the binding's output is the `did:key` written
+/// in the signed subject. A replayer cannot substitute their own key, since
+/// changing the subject breaks `b=`; whoever presents the proof, to whichever
+/// relying party, it authorizes the same key it always named. Re-delivering it
+/// only restates a true statement.
+///
+/// This is why `did:mailto` needs no nonce or audience binding: the subject
+/// *is* the audience. It is a structural property worth pinning, because
+/// removing the key from the subject (say, moving it to an unsigned header)
+/// would silently turn a public, permanent proof into a bearer token.
+#[dialog_common::test]
+async fn a_replayed_proof_still_authorizes_only_the_subjects_key() {
+    let (signing, _key, p) = rsa_key();
+    let alice_key = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+    let eml = build_binding_eml(
+        "alice@example.com",
+        alice_key,
+        "example.com",
+        "sel",
+        RELAXED,
+        InnerKey::Rsa(&signing),
+    );
+
+    // Whoever holds the bytes can verify them: the proof is public material.
+    let proof = SignedEmail::from_raw_eml(&eml).unwrap();
+    let provider = key_provider_for("sel", "example.com", &format!("v=DKIM1; k=rsa; p={p}"));
+    let identity: Did = "did:mailto:example.com:alice".parse().unwrap();
+
+    // A third party replays it to a relying party that never received the mail.
+    let binding = verify_mailto_proof(&identity, &proof, &provider)
+        .await
+        .expect("a captured proof verifies for anyone holding it");
+
+    // And what they get is Alice's key, for Alice's identity. The replayer
+    // gained no authority they did not already have by reading the email.
+    assert_eq!(binding.authorized_key.did().as_str(), alice_key);
+    assert_eq!(binding.identity, identity);
+}
+
+/// The corollary: the key in the subject cannot be swapped for an attacker's.
+///
+/// The subject is inside `h=`, so `b=` covers it. Rewriting the key to one the
+/// attacker controls invalidates the signature, which is what makes the
+/// audience binding above load-bearing rather than incidental.
+#[dialog_common::test]
+async fn rewriting_the_subject_key_breaks_the_signature() {
+    let (signing, _key, p) = rsa_key();
+    let alice_key = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+    let eml = build_binding_eml(
+        "alice@example.com",
+        alice_key,
+        "example.com",
+        "sel",
+        RELAXED,
+        InnerKey::Rsa(&signing),
+    );
+
+    // Swap the subject's key for the attacker's, leaving everything else.
+    let attacker_key = "did:key:z6MkfQhLHBSFMuR7bQXTQeqe5kYUW51HpfZeaymgy1zkP2jM";
+    let tampered = String::from_utf8(eml)
+        .unwrap()
+        .replace(alice_key, attacker_key);
+
+    let proof = SignedEmail::from_raw_eml(tampered.as_bytes()).unwrap();
+    let provider = key_provider_for("sel", "example.com", &format!("v=DKIM1; k=rsa; p={p}"));
+    let identity: Did = "did:mailto:example.com:alice".parse().unwrap();
+
+    assert!(
+        verify_mailto_proof(&identity, &proof, &provider)
+            .await
+            .is_err(),
+        "the subject is signed, so substituting the audience key must not verify"
+    );
+}
+
 #[dialog_common::test]
 async fn non_binding_subject_is_rejected() {
     let (signing, _key, p) = rsa_key();
