@@ -1,6 +1,8 @@
 //! Signature algorithm configuration.
 
 pub mod curve;
+#[cfg(feature = "dkim")]
+pub mod dkim;
 pub mod ecdsa;
 pub mod eddsa;
 pub mod hash;

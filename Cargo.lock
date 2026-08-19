@@ -1188,12 +1188,15 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
+ "dialog-dkim",
  "dialog-ucan-core",
  "dialog-varsig",
+ "ed25519-dalek",
  "getrandom 0.2.16",
  "p256",
  "percent-encoding",
  "reqwest",
+ "rsa",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1203,6 +1206,22 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-test",
  "web-time",
+]
+
+[[package]]
+name = "dialog-dkim"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "dialog-common",
+ "ed25519-dalek",
+ "getrandom 0.2.16",
+ "rand 0.8.5",
+ "rsa",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
@@ -1665,6 +1684,7 @@ name = "dialog-varsig"
 version = "0.1.0"
 dependencies = [
  "dialog-common",
+ "dialog-dkim",
  "ed25519-dalek",
  "k256",
  "leb128",

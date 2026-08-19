@@ -1,0 +1,56 @@
+[package]
+name = "dialog-dkim"
+description = "Self-contained DKIM (RFC 6376) header parsing, canonicalization, and signature verification"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+# The whole crate is opt-in. `dkim` pulls in the RSA and ed25519 inner
+# algorithms DKIM signers use (a=rsa-sha256 / a=ed25519-sha256).
+default = []
+dkim = ["dep:rsa", "dep:ed25519-dalek", "dep:sha2", "dep:base64"]
+
+[dependencies]
+thiserror = { workspace = true }
+
+# DKIM inner-signature algorithms. The `rsa` crate is pure Rust and compiles to
+# wasm32, so DKIM's rsa-sha256 verification is available on every target (unlike
+# the WebCrypto-only RSA policy in dialog-credentials, which is about signing).
+rsa = { workspace = true, optional = true }
+ed25519-dalek = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+
+# DKIM verification uses no randomness, but the transitive `rsa` /
+# `ed25519-dalek` dependencies pull `getrandom` 0.2 through `rand_core`, which on
+# wasm needs its `js` feature to select a backend. This does not add any runtime
+# RNG use to the crate.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+
+[dev-dependencies]
+# The self-signed test-vector generator needs to build DKIM-signed emails with a
+# known key, so it needs the signing side of both inner algorithms.
+rsa = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+# Generating a deliberately undersized key for the RFC 8301 key-floor test.
+rand = { workspace = true }
+# The workspace test attribute, so these tests run on wasm32 as well as native.
+dialog-common = { workspace = true, features = ["helpers"] }
+
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+# These cfgs are used by the dialog_common::test proc macro.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(dialog_test_wasm_integration)",
+    "cfg(feature, values(\"web-integration-tests\"))",
+] }

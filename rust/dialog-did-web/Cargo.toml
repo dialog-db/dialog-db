@@ -18,6 +18,11 @@ rsa = ["dialog-credentials/rsa"]
 # enabling this lets did:web / did:plc documents resolve passkeys to a
 # WebAuthnVerifier through the same multibase / did:key path.
 webauthn = ["dialog-credentials/webauthn"]
+# did:mailto: a DKIM-signed "I am also known as {did:key}" email binds an email
+# identity to a did:key (a one-time powerline delegation). Verification resolves
+# the domain's DKIM key over DNS-over-HTTPS and checks the captured proof. Pulls
+# in the DKIM varsig arm and the self-contained DKIM verifier.
+mailto = ["dep:dialog-dkim", "dialog-varsig/dkim"]
 # Exposes `MapFetch`, an in-memory `Fetch` for tests and downstream mocking.
 test-fetch = []
 # Exposes the local did:web HTTP test server and its provisioning provider, for
@@ -37,6 +42,7 @@ base64 = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
+dialog-dkim = { workspace = true, optional = true }
 dialog-varsig = { workspace = true }
 p256 = { workspace = true, optional = true }
 percent-encoding = { workspace = true }
@@ -73,6 +79,11 @@ anyhow = { workspace = true }
 # Used by the webauthn-gated test to build a synthetic passkey assertion.
 base64 = { workspace = true }
 sha2 = { workspace = true }
+# The mailto-gated tests build DKIM-signed "I am also known as" emails with a
+# known key, so they need the signing side of the inner algorithms.
+dialog-dkim = { workspace = true, features = ["dkim"] }
+rsa = { workspace = true }
+ed25519-dalek = { workspace = true }
 
 # tokio for the test process is native-only: the wasm test client uses the
 # browser event loop via wasm-bindgen-test, and tokio's `net` pulls `mio`,

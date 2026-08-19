@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 dialog-common = { workspace = true }
+dialog-dkim = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 k256 = { workspace = true, optional = true }
 leb128 = { workspace = true }
@@ -58,6 +59,11 @@ edwards25519 = ["dep:ed25519-dalek"]
 
 es256 = ["secp256r1", "sha2_256"]
 webauthn = ["secp256r1", "sha2_256"]
+# DKIM: a did:mailto signature carries a captured DKIM-signed email. The actual
+# DKIM parsing / canonicalization / inner-signature verification lives in the
+# self-contained `dialog-dkim` crate; this feature only wires the varsig header
+# marker and the `AnySignature` arm.
+dkim = ["dep:dialog-dkim", "dialog-dkim/dkim"]
 es384 = ["secp384r1", "sha2_384"]
 es512 = ["secp521r1", "sha2_512"]
 es256k = ["secp256k1", "sha2_256"]
