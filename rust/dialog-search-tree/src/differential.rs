@@ -243,6 +243,13 @@ where
     seen: HashSet<Blake3Hash>,
     /// What a locally absent block means on this side.
     missing: MissingBlocks,
+    /// The by-reference frontier: roots of subtrees the walk wanted to
+    /// enter but could not, because their blocks are locally absent and
+    /// the [`MissingBlocks::Boundary`] policy settled them instead.
+    /// Empty under [`MissingBlocks::Deny`] (the walk fails first). Each
+    /// link names a whole unexplored subtree; a caller adjudicating what
+    /// the counterparty holds starts here.
+    unresolved: Vec<Link>,
 }
 
 impl<'a, Key, Value, Backend> SparseTree<'a, Key, Value, Backend>
@@ -298,6 +305,12 @@ where
                 expanded: vec![],
                 seen: HashSet::from([root.clone()]),
                 missing,
+                unresolved: vec![Link {
+                    separator: Vec::new(),
+                    node: root.clone(),
+                    // Advisory only, and unknowable for an unread root.
+                    scale: crate::Scale::MAX,
+                }],
             });
         }
         let nodes = if root == NULL_BLAKE3_HASH {
@@ -332,6 +345,7 @@ where
             expanded: vec![],
             seen,
             missing,
+            unresolved: vec![],
         })
     }
 
@@ -375,6 +389,7 @@ where
                     None if self.missing == MissingBlocks::Boundary => {
                         let lower_bound = self.nodes[offset].lower_bound().to_vec();
                         let ops = pending_ops(&self.nodes[offset]).to_vec();
+                        self.unresolved.push(link.clone());
                         self.nodes[offset] = SparseTreeNode::Settled { lower_bound, ops };
                         return Ok(false);
                     }
@@ -1184,6 +1199,7 @@ where
                     expanded: vec![],
                     seen: HashSet::new(),
                     missing: missing.source,
+                    unresolved: vec![],
                 },
                 target: SparseTree {
                     storage: target_storage,
@@ -1191,6 +1207,7 @@ where
                     expanded: vec![],
                     seen: HashSet::new(),
                     missing: missing.target,
+                    unresolved: vec![],
                 },
             });
         }
@@ -1445,6 +1462,21 @@ where
                 }
             }
         }
+    }
+
+    /// The target side's by-reference frontier: roots of subtrees the
+    /// walk needed to enter but could not, because their blocks are
+    /// locally absent and [`MissingBlocks::Boundary`] settled them.
+    ///
+    /// Always empty under [`MissingBlocks::Deny`] (the walk fails on the
+    /// first absent block instead). Each link names one unexplored
+    /// subtree, and the subtrees are disjoint: a link is recorded where
+    /// the descent stopped, never beneath another. A caller pushing to a
+    /// counterparty that cannot be assumed to hold this content
+    /// adjudicates per link — one existence probe settles a whole
+    /// subtree either way.
+    pub fn unresolved_target(&self) -> &[Link] {
+        &self.target.unresolved
     }
 
     /// Returns a stream of the nodes present in the target tree but absent

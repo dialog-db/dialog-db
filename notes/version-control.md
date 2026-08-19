@@ -418,6 +418,20 @@ A branch is two versioned cells under the repository subject: the head revision 
 - **Pull** is the scenario cascade above. A branch tracks several upstreams, each with its own sync base; `pull().from(target)` pulls any branch, tracking it from then on.
 - **Push** is fast-forward only: verify the upstream still sits at our recorded sync base, upload the tree blocks and blob bytes it lacks, then publish the head, so a published revision never references bytes the remote is missing. If the upstream moved, pull first.
 
+### Push from a partial replica
+
+Adoption by root (scenario 3) makes the local archive a partial replica, and push must compute "what the target lacks" over trees it partly holds only as hashes. Reads that miss are information, not faults, and the two sides of the novelty diff read absence differently:
+
+- **Base side**: the base is the recorded sync point with the very upstream being pushed to — a tree the target served or accepted — so an absent base block is definitionally target-known. The walk stops subtracting in that span and over-uploads held nodes instead; content-addressed puts absorb the duplicates. Sound at any remote count, and no stronger an assumption than equal-hash pruning already makes.
+- **Head side**: a block this replica does not hold is not its novelty (a replica stores what it mints), but whether the *target* holds it needs adjudication. The walk settles the node, records it on the **by-reference frontier** (`TreeDifference::unresolved_target`), and push adjudicates per frontier root, cheapest evidence first:
+  1. **Attribution** — when the target is the branch's only tracked remote, everything by-reference came from it. Zero requests.
+  2. **Existence probe** — one forked get per frontier root; a hit prunes the entire subtree. Sound because uploads are **children-before-parents** (waves with barriers for the held novelty, post-order for forwarded subtrees), so an aborted push leaves every store prefix-closed and presence implies subtree presence. A virgin target (no revision) skips probes outright.
+  3. **Fetch-forward** — content the target provably lacks is fetched from whichever tracked remote holds it and streamed through to the target, blobs and spilled values included, without ever being persisted on the pusher. This is the irreducible transfer: those bytes must reach the target through *someone*, and the pusher is the only bridge between stores that cannot talk to each other.
+
+The push fails loudly only for a block reachable from no store at all — which is an integrity problem, not a policy one.
+
+Cost shape: the single-remote steady state uploads exactly the commit delta with zero probes and zero downloads; the N-remote case pays one probe per by-reference frontier root plus the bytes the target genuinely lacks. Refinements not yet taken: blob probes currently open a read and drop it (a ranged 1-byte read, or HEAD where the store offers it, bounds the probe's bandwidth); watermark comparison can route but never proves *block* presence (a peer that merged the same facts may hold different node encodings), so it is deliberately not used as evidence here; and a hypothesize-and-flush check (predict the counterparty's node by applying our known ops to a held child and compare hashes — refutable for free when an op still sits unflushed in the parent's buffer) saves local reads, not network requests, and only applies where the pre-state is held, so it is left as a local-cost optimization.
+
 **Partial replication is unaffected throughout**: "seen" means "in my head's ancestry", not "bytes on my disk". A replica that adopts head H holds H's state regardless of which blocks it has fetched; laziness changes what is materialized, never what the state is. The one obligation: history entries must not be pruned (garbage collection needs a published floor below which fresh replicas bootstrap by adoption; future work).
 
 ## Measured costs

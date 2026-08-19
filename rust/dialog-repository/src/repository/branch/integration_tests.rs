@@ -1289,6 +1289,188 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
     Ok(())
 }
 
+/// A head carrying bulk adopted by reference from one remote pushes to a
+/// second remote, with the pusher acting as a bridge: content the target
+/// lacks is fetched from the remote that holds it and streamed through,
+/// never hydrated into the pusher's own archive.
+///
+/// The N-remote shape of the by-reference push: device pulls a rich
+/// history from remote A (scenario-3 adoption, zero reads), then pushes
+/// to a brand-new remote B. Every block B needs — tree nodes and the
+/// spilled value block a large fact left — crosses via the forwarder.
+/// The proof is a fresh replica that has only ever heard of B reading
+/// the complete history, big value included. A second push (one local
+/// commit) then rides the ordinary novelty path against the advanced
+/// base.
+#[dialog_common::test]
+async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // Remote A: rich history, including a spilled (larger than inline)
+    // value, pushed by the authoring device.
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "bridge-a").await?;
+    let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
+    let big = "b".repeat(inline_n + 1);
+    for batch in 0..4 {
+        let mut facts: Vec<_> = (0..75)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{batch}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{batch}-{i}")),
+                    cause: None,
+                })
+            })
+            .collect();
+        if batch == 0 {
+            facts.push(Instruction::Assert(Artifact {
+                the: "doc/body".parse()?,
+                of: "doc:big".parse()?,
+                is: Value::String(big.clone()),
+                cause: None,
+            }));
+        }
+        alice_branch
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+    alice_branch.push().perform(&operator).await?;
+
+    // The bridge device: same subject, fresh archive, tracking BOTH
+    // remotes. The pull from A adopts the head by root.
+    let b_address = S3Address {
+        bucket: format!("{}-second", s3.bucket),
+        ..s3.clone()
+    };
+    profile
+        .credential()
+        .site(s3_site_address(&b_address))
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator)
+        .await?;
+    let bridge_repo = profile
+        .repository(unique_name("bridge"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin_a = bridge_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let origin_b = bridge_repo
+        .remote("mirror")
+        .create(s3_site_address(&b_address))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let bridge_branch = bridge_repo.branch("main").open().perform(&operator).await?;
+    let remote_a = origin_a.branch("main").open().perform(&operator).await?;
+    bridge_branch
+        .set_upstream(remote_a)
+        .perform(&operator)
+        .await?;
+    bridge_branch
+        .pull()
+        .perform(&operator)
+        .await?
+        .expect("head adopted from A");
+
+    // Push the adopted head to B, which has never seen any of it.
+    let remote_b = origin_b.branch("main").open().perform(&operator).await?;
+    let pushed = bridge_branch
+        .push()
+        .to(&remote_b)
+        .perform(&operator)
+        .await?;
+    assert!(
+        pushed.is_some(),
+        "the bridge push to the second remote lands"
+    );
+
+    // A replica that has only ever heard of B reads the full history.
+    let reader_repo = profile
+        .repository(unique_name("reader"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let reader_origin = reader_repo
+        .remote("origin")
+        .create(s3_site_address(&b_address))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let reader_branch = reader_repo.branch("main").open().perform(&operator).await?;
+    let reader_remote = reader_origin
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    reader_branch
+        .set_upstream(reader_remote)
+        .perform(&operator)
+        .await?;
+    reader_branch
+        .pull()
+        .perform(&operator)
+        .await?
+        .expect("reader adopts from B");
+    let names: Vec<_> = reader_branch
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(names.len(), 300, "every bridged fact reads from B");
+    let bodies: Vec<_> = reader_branch
+        .claims()
+        .select(ArtifactSelector::new().the("doc/body".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        bodies.len(),
+        1,
+        "the spilled fact bridged with its value block"
+    );
+    assert_eq!(
+        bodies[0].is,
+        Value::String(big),
+        "the spilled value block reconstructs from B"
+    );
+
+    // Steady state: one local commit, pushed against the advanced base —
+    // the ordinary novelty path, no bridging left to do.
+    bridge_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:bridge".parse()?,
+            is: Value::String("Bridge".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+    let again = bridge_branch
+        .push()
+        .to(&remote_b)
+        .perform(&operator)
+        .await?;
+    assert!(again.is_some(), "the follow-up push lands its novelty");
+
+    Ok(())
+}
+
 #[dialog_common::test]
 async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
