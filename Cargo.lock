@@ -1173,6 +1173,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-did-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base58",
+ "base64",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-ucan-core",
+ "dialog-varsig",
+ "getrandom 0.2.16",
+ "p256",
+ "percent-encoding",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "signature",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+ "web-time",
+]
+
+[[package]]
 name = "dialog-effects"
 version = "0.1.0"
 dependencies = [
@@ -1411,6 +1438,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
+ "dialog-did-web",
  "dialog-effects",
  "dialog-remote-s3",
  "dialog-storage",

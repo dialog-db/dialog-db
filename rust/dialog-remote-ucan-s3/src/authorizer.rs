@@ -57,7 +57,7 @@ use dialog_ucan_core::ContainerError;
 use std::collections::BTreeMap;
 
 use dialog_capability::{Capability, Constraint, Did, Policy};
-use dialog_credentials::DidKeyResolver;
+use dialog_did_web::{CachingResolver, PerformingResolver, Resolve, WebResolver};
 use dialog_effects::{archive, blob, memory};
 use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
 use dialog_ucan_core::InvocationChain;
@@ -253,23 +253,76 @@ macro_rules! dispatch {
 /// 2. Verifies the delegation chain
 /// 3. Extracts commands and constructs effects
 /// 4. Delegates to S3 authorization for presigned URLs
-#[derive(Debug, Clone)]
-pub struct UcanAuthorizer {
+///
+/// The `Resolver` type parameter is the environment that resolves an issuer DID
+/// to its verifier. It defaults to [`CachingResolver<WebResolver>`], which
+/// resolves `did:key` locally and `did:web` over the network, caching the
+/// result. Inject a different provider with [`UcanAuthorizer::with_resolver`] to
+/// change the resolution policy (for example, `did:key`-only, or a custom
+/// fetcher).
+pub struct UcanAuthorizer<Resolver = CachingResolver<WebResolver>> {
     address: Address,
     credential: Option<S3Credential>,
+    resolver: std::sync::Arc<Resolver>,
+}
+
+impl<Resolver: std::fmt::Debug> std::fmt::Debug for UcanAuthorizer<Resolver> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UcanAuthorizer")
+            .field("address", &self.address)
+            .field("credential", &self.credential)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<Resolver> Clone for UcanAuthorizer<Resolver> {
+    fn clone(&self) -> Self {
+        Self {
+            address: self.address.clone(),
+            credential: self.credential.clone(),
+            resolver: self.resolver.clone(),
+        }
+    }
 }
 
 impl UcanAuthorizer {
     /// Create a new UCAN authorizer with the given address and credential.
     ///
-    /// `credential` is `None` for public/unsigned S3 endpoints.
+    /// `credential` is `None` for public/unsigned S3 endpoints. Resolution uses
+    /// the default [`CachingResolver<WebResolver>`]: `did:key` locally,
+    /// `did:web` over the network, cached.
     pub fn new(address: Address, credential: Option<S3Credential>) -> Self {
+        Self::with_resolver(
+            address,
+            credential,
+            CachingResolver::new(WebResolver::new()),
+        )
+    }
+}
+
+impl<Resolver> UcanAuthorizer<Resolver> {
+    /// Create a UCAN authorizer with an explicit resolve provider.
+    ///
+    /// `resolver` is any [`Provider<Resolve>`](dialog_capability::Provider),
+    /// letting the embedder choose the resolution policy: local-only,
+    /// network-enabled, a custom cache, or a mocked fetcher for tests.
+    pub fn with_resolver(
+        address: Address,
+        credential: Option<S3Credential>,
+        resolver: Resolver,
+    ) -> Self {
         Self {
             address,
             credential,
+            resolver: std::sync::Arc::new(resolver),
         }
     }
+}
 
+impl<Resolver> UcanAuthorizer<Resolver>
+where
+    Resolver: dialog_capability::Provider<Resolve> + dialog_common::ConditionalSync,
+{
     /// Authorize a UCAN container.
     ///
     /// # Arguments
@@ -295,11 +348,16 @@ impl UcanAuthorizer {
                 detail: e.to_string(),
             })
         })?;
-        chain.verify(&DidKeyResolver).await.map_err(|e| {
+        // Resolution runs through the configured provider by performing a
+        // `Resolve` capability per issuer DID. did:key resolves locally; did:web
+        // fetches the DID document; a cache sits in front. The chain verify path
+        // only sees a varsig resolver.
+        let resolver = PerformingResolver::new(self.resolver.as_ref());
+        chain.verify(&resolver).await.map_err(|e| {
             // Two different failures arrive here: their material not
-            // verifying, and our own setup being unable to check it.
-            // Only the first is a statement about their request, so only
-            // the first may read as one.
+            // verifying, and our own setup being unable to check it (for
+            // example, an unreachable did:web host). Only the first is a
+            // statement about their request, so only the first may read as one.
             S3Error::Authorization(match e {
                 // A proof whose signature is not its claimed issuer's is a
                 // forged chain, not merely malformed input: name the issuer
@@ -769,5 +827,53 @@ mod tests {
 
         let descriptor = result.unwrap();
         assert_eq!(descriptor.method, "GET");
+    }
+
+    /// An authorizer built with an explicit resolver still authorizes a normal
+    /// did:key invocation: the injected [`MethodResolver`] routes did:key
+    /// locally without touching the (mocked) did:web fetcher. This proves the
+    /// configurable-resolver wiring carries through to `authorize`.
+    #[dialog_common::test]
+    async fn it_authorizes_through_an_injected_resolver() {
+        use dialog_did_web::{DidKeyProvider, DidWebProvider, MapFetch, MethodResolver};
+
+        let signer = test_signer().await;
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
+
+        // A resolver whose did:web arm is a mock that serves nothing; did:key
+        // resolution must not depend on it.
+        let resolver = MethodResolver::with_providers(
+            DidKeyProvider,
+            DidWebProvider::with_fetch(MapFetch::new()),
+        );
+        let authorizer = UcanAuthorizer::with_resolver(address, Some(credentials), resolver);
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+
+        let container = build_self_invocation_container(
+            &signer,
+            vec!["archive".to_string(), "get".to_string()],
+            args,
+        )
+        .await;
+
+        let result = authorizer.authorize(&container).await;
+        assert!(
+            result.is_ok(),
+            "did:key invocation should authorize through the injected resolver: {:?}",
+            result
+        );
+        assert_eq!(result.unwrap().method, "GET");
     }
 }

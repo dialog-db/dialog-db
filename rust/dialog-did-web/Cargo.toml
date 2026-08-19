@@ -1,0 +1,76 @@
+[package]
+name = "dialog-did-web"
+description = "did:web resolution as an algorithm-agnostic Resolve capability"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = ["ed25519"]
+ed25519 = ["dialog-credentials/ed25519"]
+es256 = ["dialog-credentials/es256", "dep:p256"]
+# Exposes `MapFetch`, an in-memory `Fetch` for tests and downstream mocking.
+test-fetch = []
+# Exposes the local did:web HTTP test server and its provisioning provider, for
+# cross-target fetch integration tests. Pulls the native server stack.
+helpers = ["dep:anyhow", "dep:tokio", "dialog-common/helpers"]
+integration-tests = ["helpers", "dialog-common/integration-tests"]
+# Deliberately does NOT pull `helpers`. The fetch tests point a client at a
+# locally-provisioned HTTP server on 127.0.0.1, which a browser cannot reach
+# (cross-origin / mixed content), so they are native-only. Mirrors how
+# dialog-remote-s3 keeps its server-backed tests out of the wasm run.
+web-integration-tests = ["dialog-common/web-integration-tests"]
+
+[dependencies]
+async-trait = { workspace = true }
+base58 = { workspace = true }
+base64 = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-varsig = { workspace = true }
+p256 = { workspace = true, optional = true }
+percent-encoding = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+signature = { workspace = true }
+thiserror = { workspace = true }
+web-time = { workspace = true }
+
+# Native-only deps for the `helpers` feature (the local did:web test server).
+# A raw TcpListener serving fixed HTTP/1.1 responses needs no server framework.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+anyhow = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt", "macros", "net", "sync", "io-util"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+# The cross-target test macro's wasm inner-test expansion references
+# `wasm_bindgen`, so it must be a real dependency on wasm, not just a dev-dep.
+wasm-bindgen = { workspace = true }
+
+[dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
+# The P-256 JWK tests build and validate raw curve points to pin that an
+# invalid (x, y) is refused rather than reinterpreted.
+p256 = { workspace = true }
+dialog-credentials = { workspace = true, features = ["es256"] }
+serde_json = { workspace = true }
+wasm-bindgen-test = { workspace = true }
+dialog-ucan-core = { workspace = true }
+anyhow = { workspace = true }
+
+# tokio for the test process is native-only: the wasm test client uses the
+# browser event loop via wasm-bindgen-test, and tokio's `net` pulls `mio`,
+# which does not build for wasm.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "net", "sync"] }
+
+[lints.rust]
+# These cfgs are used by the dialog_common::test proc macro.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(dialog_test_wasm_integration)",
+    "cfg(feature, values(\"web-integration-tests\", \"integration-tests\", \"helpers\"))",
+] }

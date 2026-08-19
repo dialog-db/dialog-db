@@ -34,6 +34,8 @@ pub mod resolver;
 #[cfg(feature = "ed25519")]
 pub use resolver::{DidKeyResolveError, DidKeyResolver};
 #[cfg(feature = "ed25519")]
-pub use signature::{Algorithm, AlgorithmTag, DidFromStrError, Signature, Signer, Verifier};
+pub use signature::{
+    Algorithm, AlgorithmTag, DidFromStrError, Signature, Signer, Verifier, WithDid,
+};
 
 pub use credential::*;
