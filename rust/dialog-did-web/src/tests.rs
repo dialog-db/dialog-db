@@ -214,6 +214,36 @@ async fn it_verifies_a_signature_by_any_did_plc_key() {
     verifier.verify(msg, &sig1).await.unwrap();
 }
 
+/// A `#fragment` on a `did:plc` selects exactly that verification method, the
+/// same kid-hint path `did:web` has. The provider strips the fragment before
+/// URL derivation (a `#` is not base32, so an unstripped fragment would refuse
+/// the whole DID) and restricts the verifier to the selected method: a
+/// signature by the other key must not verify.
+#[dialog_common::test]
+async fn it_selects_a_single_plc_key_by_fragment() {
+    let key1 = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let key2 = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let doc = did_document_two_keys(PLC_DID, &key1, &key2);
+    let fetch = MapFetch::new().with(plc_url(PLC_DID), doc.into_bytes());
+    let provider = DidPlcProvider::with_fetch(fetch);
+
+    let did: Did = format!("{PLC_DID}#key-2").parse().unwrap();
+    let verifier = Resolve::new(did).perform(&provider).await.unwrap();
+
+    // The verifier's identity is the base did:plc DID (fragment stripped).
+    assert_eq!(verifier.did().as_str(), PLC_DID);
+
+    let msg = b"selected by plc fragment";
+    let sig2 = VarsigSigner::sign(&key2, msg).await.unwrap();
+    verifier.verify(msg, &sig2).await.unwrap();
+
+    let sig1 = VarsigSigner::sign(&key1, msg).await.unwrap();
+    assert!(
+        verifier.verify(msg, &sig1).await.is_err(),
+        "a fragment-selected plc verifier must refuse a signature by another key"
+    );
+}
+
 /// A `did:plc` document may list an unsupported key type (plc DIDs may carry a
 /// secp256k1 key we do not support yet). That method is SKIPPED, and resolution
 /// still succeeds as long as one supported key remains.

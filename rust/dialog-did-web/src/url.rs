@@ -383,7 +383,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn plc_identifier_in_path() {
         assert_eq!(
             did_plc_url("did:plc:ewvi7nxzyoun6zhxrhs64oiz").unwrap(),
@@ -391,7 +391,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn plc_rejects_non_plc() {
         assert!(matches!(
             did_plc_url("did:web:example.com"),
@@ -399,7 +399,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn plc_rejects_empty_identifier() {
         assert!(matches!(
             did_plc_url("did:plc:"),
@@ -407,7 +407,7 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn plc_rejects_non_base32_identifier() {
         assert!(matches!(
             did_plc_url("did:plc:has/slash"),
@@ -424,7 +424,7 @@ mod tests {
     /// this length; the code must enforce it, not just the charset, so a
     /// malformed short or long identifier is refused before it becomes a
     /// directory request URL.
-    #[test]
+    #[dialog_common::test]
     fn plc_rejects_wrong_length_identifier() {
         // One char: passes the charset test but is not a plc identifier.
         assert!(
