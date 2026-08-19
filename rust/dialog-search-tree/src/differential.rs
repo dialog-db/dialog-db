@@ -38,6 +38,46 @@ use crate::{
     resolve_pending,
 };
 
+/// How a comparison side treats a block that is absent from its storage.
+///
+/// A partial replica legitimately holds subtrees *by reference*: a
+/// fast-forward pull adopts the upstream head by root without fetching a
+/// block, so entire regions of a tree exist locally as nothing but hashes.
+/// Whether that absence is an error depends on what the difference is for:
+///
+/// - [`Deny`](MissingBlocks::Deny) (the default): absence is a fault.
+///   Merge and replication consumers need the entries themselves; a
+///   missing block means they cannot do their job, and failing loudly
+///   beats fabricating an answer.
+/// - [`Boundary`](MissingBlocks::Boundary): absence is information. A
+///   replica stores every block it mints, so a block it does not hold is
+///   not its novelty — it marks the boundary of local knowledge. The walk
+///   treats the node as settled: it contributes only the ops routed to it
+///   (those live in an ancestor's held bytes), is never descended, and is
+///   never reported novel. Sound for novelty computation on the SOURCE
+///   side unconditionally (losing subtraction only over-reports novelty,
+///   and content-addressed uploads are idempotent); sound on the TARGET
+///   side only when absence implies the counterparty holds the block —
+///   the caller owns that judgement (see `dialog-repository`'s push).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MissingBlocks {
+    /// A missing block fails the walk (the historical behavior).
+    #[default]
+    Deny,
+    /// A missing block bounds the walk: settle, don't descend, don't
+    /// report novel.
+    Boundary,
+}
+
+/// Per-side [`MissingBlocks`] policy for a difference computation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MissingPolicy {
+    /// Policy for the source (base) side of the comparison.
+    pub source: MissingBlocks,
+    /// Policy for the target side of the comparison.
+    pub target: MissingBlocks,
+}
+
 /// Represents a change in the key-value store.
 #[derive(Clone, Debug)]
 pub enum Change<Key, Value> {
@@ -201,6 +241,8 @@ where
     /// novelty report filters against it, so a shared node that had to be
     /// expanded for alignment is still never reported novel.
     seen: HashSet<Blake3Hash>,
+    /// What a locally absent block means on this side.
+    missing: MissingBlocks,
 }
 
 impl<'a, Key, Value, Backend> SparseTree<'a, Key, Value, Backend>
@@ -218,18 +260,46 @@ where
         storage: &ContentAddressedStorage<Backend>,
         hash: &Blake3Hash,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
-        let bytes = storage.retrieve(hash).await?.ok_or_else(|| {
+        Self::try_load(storage, hash).await?.ok_or_else(|| {
             DialogSearchTreeError::Node(format!("Blob not found in storage: {hash}"))
-        })?;
-        PersistentNode::try_from(Buffer::from(bytes))
+        })
+    }
+
+    /// Reads a node from storage by hash; `None` when the block is absent.
+    async fn try_load(
+        storage: &ContentAddressedStorage<Backend>,
+        hash: &Blake3Hash,
+    ) -> Result<Option<PersistentNode<Key, Value>>, DialogSearchTreeError> {
+        match storage.retrieve(hash).await? {
+            Some(bytes) => Ok(Some(PersistentNode::try_from(Buffer::from(bytes))?)),
+            None => Ok(None),
+        }
     }
 
     /// Initializes a sparse tree from a root hash. The root is not loaded;
     /// a null hash produces an empty frontier.
+    ///
+    /// Under [`MissingBlocks::Boundary`] an absent root yields an empty
+    /// frontier whose `seen` set still records the root hash: the whole
+    /// tree is held by reference, so this side contributes nothing to the
+    /// walk while the other side's matching subtrees still prune.
     async fn from_root(
         root: &Blake3Hash,
         storage: &'a ContentAddressedStorage<Backend>,
+        missing: MissingBlocks,
     ) -> Result<SparseTree<'a, Key, Value, Backend>, DialogSearchTreeError> {
+        if root != NULL_BLAKE3_HASH
+            && missing == MissingBlocks::Boundary
+            && Self::try_load(storage, root).await?.is_none()
+        {
+            return Ok(SparseTree {
+                storage,
+                nodes: vec![],
+                expanded: vec![],
+                seen: HashSet::from([root.clone()]),
+                missing,
+            });
+        }
         let nodes = if root == NULL_BLAKE3_HASH {
             vec![]
         } else {
@@ -261,6 +331,7 @@ where
             nodes,
             expanded: vec![],
             seen,
+            missing,
         })
     }
 
@@ -293,7 +364,27 @@ where
         let node = match &self.nodes[offset] {
             SparseTreeNode::Loaded { node, .. } => node.clone(),
             SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
-                Self::load(self.storage, &link.node).await?
+                match Self::try_load(self.storage, &link.node).await? {
+                    Some(node) => node,
+                    // The block is absent and absence bounds the walk: the
+                    // subtree is held by reference, so nothing beneath it is
+                    // this side's novelty and nothing beneath it can be read
+                    // to subtract from the other side. Settle the entry with
+                    // whatever ops an ancestor routed down (their bytes live
+                    // in that held ancestor), and stop here.
+                    None if self.missing == MissingBlocks::Boundary => {
+                        let lower_bound = self.nodes[offset].lower_bound().to_vec();
+                        let ops = pending_ops(&self.nodes[offset]).to_vec();
+                        self.nodes[offset] = SparseTreeNode::Settled { lower_bound, ops };
+                        return Ok(false);
+                    }
+                    None => {
+                        let hash = &self.nodes[offset].hash();
+                        return Err(DialogSearchTreeError::Node(format!(
+                            "Blob not found in storage: {hash}"
+                        )));
+                    }
+                }
             }
             SparseTreeNode::Settled { .. } => unreachable!("returned above"),
         };
@@ -710,11 +801,30 @@ where
                     SparseTreeNode::Loaded { node, pending, .. } => {
                         (node.clone(), pending.clone())
                     }
-                    SparseTreeNode::Ref(link) => {
-                        (Self::load(self.storage, &link.node).await?, Vec::new())
-                    }
-                    SparseTreeNode::Pending { link, pending } => {
-                        (Self::load(self.storage, &link.node).await?, pending.clone())
+                    SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
+                        let pending = pending_ops(sparse_node).to_vec();
+                        match Self::try_load(self.storage, &link.node).await? {
+                            Some(node) => (node, pending),
+                            // Absent and absence bounds the walk: the stored
+                            // entries are held by reference (not this side's
+                            // to enumerate); only the ops routed here — whose
+                            // bytes live in a held ancestor — contribute.
+                            None if self.missing == MissingBlocks::Boundary => {
+                                for (key, op) in winning_ops(&pending) {
+                                    if let NoveltyOp::Assert(value) = op {
+                                        yield Entry { key: Key::try_from_bytes(&key)?, value };
+                                    }
+                                }
+                                continue;
+                            }
+                            None => {
+                                let hash = &link.node;
+                                Err(DialogSearchTreeError::Node(format!(
+                                    "Blob not found in storage: {hash}"
+                                )))?;
+                                unreachable!("propagated above")
+                            }
+                        }
                     }
                     SparseTreeNode::Settled { .. } => unreachable!("handled above"),
                 };
@@ -726,14 +836,35 @@ where
                 // buffer plus the inherited ops the child's share covers, so a
                 // leaf receives exactly the ops a flush would deliver to it.
                 // The seed is whatever expansion already routed to this node.
-                let mut stack = vec![(node, routed)];
+                // A `None` frame is a child held only by reference (absent
+                // under the Boundary policy): its stored entries are not this
+                // side's to enumerate, so it contributes just the ops routed
+                // to it, emitted in its key-order turn.
+                let mut stack = vec![(Some(node), routed)];
                 while let Some((node, inherited)) = stack.pop() {
+                    let Some(node) = node else {
+                        for (key, op) in winning_ops(&inherited) {
+                            if let NoveltyOp::Assert(value) = op {
+                                yield Entry { key: Key::try_from_bytes(&key)?, value };
+                            }
+                        }
+                        continue;
+                    };
                     match node.body() {
                         ArchivedNodeBody::Index(index) => {
                             let mut children = Vec::with_capacity(index.len());
                             for at in 0..index.len() {
                                 let hash = index.hash_at(at)?;
-                                let child = Self::load(self.storage, hash).await?;
+                                let child = match Self::try_load(self.storage, hash).await? {
+                                    Some(child) => Some(child),
+                                    None if self.missing == MissingBlocks::Boundary => None,
+                                    None => {
+                                        Err(DialogSearchTreeError::Node(format!(
+                                            "Blob not found in storage: {hash}"
+                                        )))?;
+                                        unreachable!("propagated above")
+                                    }
+                                };
                                 // The child's own link buffer precedes the
                                 // inherited ops: it is one level deeper than
                                 // any ancestor that routed ops down here, and
@@ -944,12 +1075,40 @@ where
     where
         D: Distribution,
     {
+        Self::compute_with(
+            source_tree,
+            target_tree,
+            source_storage,
+            target_storage,
+            MissingPolicy::default(),
+        )
+        .await
+    }
+
+    /// [`compute`](Self::compute), with an explicit per-side
+    /// [`MissingPolicy`] for locally absent blocks.
+    ///
+    /// The default (both sides [`MissingBlocks::Deny`]) is `compute`
+    /// itself. [`MissingBlocks::Boundary`] is for novelty computation
+    /// over partial replicas — see the policy's own docs for which side
+    /// is sound when.
+    pub async fn compute_with<D>(
+        source_tree: &PersistentTree<Key, Value, D>,
+        target_tree: &PersistentTree<Key, Value, D>,
+        source_storage: &'a ContentAddressedStorage<Backend>,
+        target_storage: &'a ContentAddressedStorage<Backend>,
+        missing: MissingPolicy,
+    ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
+    where
+        D: Distribution,
+    {
         let mut difference = Self::compute_scoped(
             source_tree,
             target_tree,
             source_storage,
             target_storage,
             None,
+            missing,
         )
         .await?;
 
@@ -999,6 +1158,7 @@ where
             source_storage,
             target_storage,
             Some(scope),
+            MissingPolicy::default(),
         )
         .await
     }
@@ -1009,6 +1169,7 @@ where
         source_storage: &'a ContentAddressedStorage<Backend>,
         target_storage: &'a ContentAddressedStorage<Backend>,
         scope: Option<&[core::ops::RangeInclusive<Key>]>,
+        missing: MissingPolicy,
     ) -> Result<TreeDifference<'a, Key, Value, Backend>, DialogSearchTreeError>
     where
         D: Distribution,
@@ -1022,20 +1183,22 @@ where
                     nodes: vec![],
                     expanded: vec![],
                     seen: HashSet::new(),
+                    missing: missing.source,
                 },
                 target: SparseTree {
                     storage: target_storage,
                     nodes: vec![],
                     expanded: vec![],
                     seen: HashSet::new(),
+                    missing: missing.target,
                 },
             });
         }
 
         let mut source: SparseTree<'a, Key, Value, Backend> =
-            SparseTree::from_root(source_tree.root(), source_storage).await?;
+            SparseTree::from_root(source_tree.root(), source_storage, missing.source).await?;
         let mut target: SparseTree<'a, Key, Value, Backend> =
-            SparseTree::from_root(target_tree.root(), target_storage).await?;
+            SparseTree::from_root(target_tree.root(), target_storage, missing.target).await?;
 
         // Iteratively prune shared nodes and expand differing ones until a
         // fixed point: only differing leaf segments (and unique-range
@@ -1322,8 +1485,24 @@ where
                     SparseTreeNode::Settled { .. } => continue,
                     SparseTreeNode::Loaded { node, .. } => node.clone(),
                     SparseTreeNode::Ref(link) | SparseTreeNode::Pending { link, .. } => {
-                        SparseTree::<Key, Value, Backend>::load(self.target.storage, &link.node)
-                            .await?
+                        match SparseTree::<Key, Value, Backend>::try_load(
+                            self.target.storage,
+                            &link.node,
+                        )
+                        .await?
+                        {
+                            Some(node) => node,
+                            // Absent and absence bounds the walk: a block this
+                            // side never held is not its novelty to report.
+                            None if self.target.missing == MissingBlocks::Boundary => continue,
+                            None => {
+                                let hash = &link.node;
+                                Err(DialogSearchTreeError::Node(format!(
+                                    "Blob not found in storage: {hash}"
+                                )))?;
+                                unreachable!("propagated above")
+                            }
+                        }
                     }
                 };
                 yield node;
@@ -2048,6 +2227,114 @@ mod tests {
                 restored.get(&key.to_le_bytes(), &remote).await?,
                 Some(value),
                 "key {key} must be readable from the remote after upload"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// A replica that adopted the base by root holds none of its blocks,
+    /// only the nodes its own edits minted. Under the default policy the
+    /// novelty walk fails on the first absent base node; under
+    /// [`MissingBlocks::Boundary`] absence bounds the walk instead, and
+    /// the reported novelty is exactly the held minted set — sufficient
+    /// for a peer already holding the base to materialize the extension.
+    #[dialog_common::test]
+    async fn it_bounds_the_novelty_walk_at_absent_blocks() -> Result<()> {
+        use super::{MissingBlocks, MissingPolicy};
+
+        // The full history lives at the origin.
+        let mut origin = ContentAddressedStorage::new(CountingBackend::new());
+        let entries: Vec<(u32, Vec<u8>)> = (0..1000u32).map(|i| (i, vec![i as u8])).collect();
+        let base = build(entries.clone(), &mut origin).await?;
+        let mut extended = base.clone();
+        let mut delta = Delta::zero();
+        for i in 1000..1020u32 {
+            extended = extended
+                .edit()
+                .insert(i.to_le_bytes(), vec![i as u8], &origin)
+                .await?
+                .persist(&mut delta)?;
+            for (_, buffer) in delta.flush() {
+                origin
+                    .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
+                    .await?;
+            }
+        }
+
+        // The device holds ONLY the extension's minted nodes: the base was
+        // adopted by root, so not one of its blocks is present.
+        let mut device = ContentAddressedStorage::new(CountingBackend::new());
+        let mut minted: HashSet<Blake3Hash> = HashSet::new();
+        {
+            let difference = TreeDifference::compute(&base, &extended, &origin, &origin).await?;
+            let nodes = difference.novel_nodes();
+            futures_util::pin_mut!(nodes);
+            while let Some(node) = nodes.next().await {
+                let node = node?;
+                minted.insert(node.hash().clone());
+                device
+                    .store(node.buffer().as_ref().to_vec(), node.hash())
+                    .await?;
+            }
+        }
+        assert!(!minted.is_empty(), "the extension must mint nodes");
+
+        // The default policy fails on the first absent block, loudly.
+        let strict = TreeDifference::compute(&base, &extended, &device, &device).await;
+        assert!(
+            strict.is_err(),
+            "an absent block must fail the walk under the default policy"
+        );
+
+        // Boundary policy: the walk completes and reports exactly the
+        // minted set — nothing absent is claimed, nothing held is lost.
+        let difference = TreeDifference::compute_with(
+            &base,
+            &extended,
+            &device,
+            &device,
+            MissingPolicy {
+                source: MissingBlocks::Boundary,
+                target: MissingBlocks::Boundary,
+            },
+        )
+        .await?;
+        let nodes = difference.novel_nodes();
+        futures_util::pin_mut!(nodes);
+        let mut reported: HashSet<Blake3Hash> = HashSet::new();
+        while let Some(node) = nodes.next().await {
+            reported.insert(node?.hash().clone());
+        }
+        assert_eq!(
+            reported, minted,
+            "bounded novelty is exactly the held minted set"
+        );
+
+        // Sufficiency: a peer holding the base plus the reported set reads
+        // the whole extended tree — the same-remote push contract.
+        let mut peer = ContentAddressedStorage::new(CountingBackend::new());
+        {
+            let difference =
+                TreeDifference::compute(&TestTree::empty(), &base, &origin, &origin).await?;
+            let nodes = difference.novel_nodes();
+            futures_util::pin_mut!(nodes);
+            while let Some(node) = nodes.next().await {
+                let node = node?;
+                peer.store(node.buffer().as_ref().to_vec(), node.hash())
+                    .await?;
+            }
+        }
+        for hash in &reported {
+            let bytes = device.retrieve(hash).await?.expect("reported node is held");
+            peer.store(bytes, hash).await?;
+        }
+        let restored = TestTree::from_hash(extended.root().clone());
+        for (key, value) in (0..1020u32).map(|i| (i, vec![i as u8])) {
+            assert_eq!(
+                restored.get(&key.to_le_bytes(), &peer).await?,
+                Some(value),
+                "key {key} must be readable from the peer after upload"
             );
         }
 

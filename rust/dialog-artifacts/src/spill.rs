@@ -19,8 +19,8 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    BLOB_KEY_TAG, BlobChange, BlobKey, BlobRecord, Datum, DialogArtifactsError, ENTITY_KEY_TAG,
-    EntityKey, Key, KeyView, State,
+    BLOB_KEY_TAG, BlobKey, BlobRecord, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, Key,
+    KeyView, State,
     tree::{ArtifactTree, TreeStorageBridge},
 };
 
@@ -28,8 +28,17 @@ use crate::{
 /// publishing: a blob-index change or a spilled value block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShipmentRef {
-    /// A blob-index change (see [`BlobChange`]); only additions ship bytes.
-    Blob(BlobChange),
+    /// A blob newly referenced in the target tree; `size` is its index
+    /// record's byte count, carried here so shipping needs no re-read of
+    /// the record — the entry that named the blob already held it.
+    BlobAdded {
+        /// The blob's content hash.
+        hash: Blake3Hash,
+        /// The blob's size, from its index record.
+        size: u64,
+    },
+    /// A blob reference removed in the target tree; ships nothing.
+    BlobRemoved(Blake3Hash),
     /// A spilled value block newly referenced, by its 32-byte reference.
     SpilledValue(Blake3Hash),
 }
@@ -64,8 +73,11 @@ pub fn shipment_ref(
             // Decoding rejects a malformed record; a `None` decode is a
             // retraction tombstone, a reference only when removed.
             Ok(match (removed, BlobRecord::from_state(value)?) {
-                (false, Some(_)) => Some(ShipmentRef::Blob(BlobChange::Added(hash))),
-                (true, _) => Some(ShipmentRef::Blob(BlobChange::Removed(hash))),
+                (false, Some(record)) => Some(ShipmentRef::BlobAdded {
+                    hash,
+                    size: record.size,
+                }),
+                (true, _) => Some(ShipmentRef::BlobRemoved(hash)),
                 (false, None) => None,
             })
         }

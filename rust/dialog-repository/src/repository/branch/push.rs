@@ -1,5 +1,5 @@
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{BlobChange, BlobIndexExt as _, ShipmentRef, shipment_refs};
+use dialog_artifacts::{ShipmentRef, shipment_refs};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync};
@@ -8,7 +8,9 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_search_tree::{ContentAddressedStorage as TreeStorage, TreeDifference};
+use dialog_search_tree::{
+    ContentAddressedStorage as TreeStorage, MissingBlocks, MissingPolicy, TreeDifference,
+};
 use dialog_storage::StorageBackend as _;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
@@ -67,12 +69,16 @@ impl Push<'_> {
     ///
     /// For remote upstream, novel tree blocks are uploaded before the
     /// revision is published, so a published head never references bytes
-    /// the remote is missing. A known limit: the novelty diff reads the
-    /// LOCAL archive only, so a head carrying subtrees adopted by
-    /// reference from a *different* remote (a scenario-3 pull) cannot be
-    /// pushed to a second remote until those blocks are hydrated locally
-    /// — the push fails loudly on the missing blocks rather than
-    /// publishing a head the target cannot serve.
+    /// the remote is missing. The novelty walk reads the local archive
+    /// only and treats a block held by reference as the boundary of local
+    /// knowledge (see [`MissingBlocks`]): a base adopted by root from the
+    /// target — the everyday scenario-3 pull — diffs cleanly without
+    /// hydration, and only blocks this replica minted are shipped. A known
+    /// limit remains: a head carrying subtrees adopted by reference from a
+    /// *different* remote cannot be pushed to a second remote until those
+    /// blocks are hydrated locally — the walk stays strict there and the
+    /// push fails loudly on the missing blocks rather than publishing a
+    /// head the target cannot serve.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PushError>
     where
         Env: Provider<Get>
@@ -197,14 +203,52 @@ impl Push<'_> {
                 // Upload tree nodes present in our current tree but not
                 // in the base, so the remote can hydrate the new tree
                 // before we publish the revision pointing at it.
+                //
+                // The walk reads the local archive only, and a replica
+                // legitimately holds whole subtrees by reference (a
+                // fast-forward pull adopts the upstream head by root, zero
+                // reads), so absence must be information, not a fault:
+                //
+                // - The BASE is the recorded sync point with this very
+                //   upstream — a tree the target itself served or accepted —
+                //   so an absent base-side block is definitionally present
+                //   on the target. Losing its subtraction only over-uploads
+                //   held nodes, which idempotent content-addressed puts
+                //   absorb. Sound at any remote count.
+                // - A block absent under OUR head is not our novelty (a
+                //   replica stores what it mints), but it is provably the
+                //   TARGET's only when every tracked remote IS the target.
+                //   With another remote tracked, the head may carry
+                //   subtrees the target has never seen, and pruning them
+                //   would publish a head the target cannot serve — so the
+                //   walk stays strict and the push fails loudly instead
+                //   (hydrate those blocks locally, then push).
+                let sole_remote = branch.upstreams().iter().all(|entry| match entry {
+                    Upstream::Remote { remote, .. } => remote == remote_name,
+                    Upstream::Local { .. } => true,
+                });
+                let missing = MissingPolicy {
+                    source: MissingBlocks::Boundary,
+                    target: if sole_remote {
+                        MissingBlocks::Boundary
+                    } else {
+                        MissingBlocks::Deny
+                    },
+                };
+
                 let index = branch.archive().index();
                 let store = LocalIndex::new(env, index.clone());
                 let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
                 let current_tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
                 let tree_store = TreeStorage::new(TreeStorageBridge(store));
-                let difference =
-                    TreeDifference::compute(&base_tree, &current_tree, &tree_store, &tree_store)
-                        .await?;
+                let difference = TreeDifference::compute_with(
+                    &base_tree,
+                    &current_tree,
+                    &tree_store,
+                    &tree_store,
+                    missing,
+                )
+                .await?;
                 let novelty = difference.novel_nodes().map_err(Into::into);
                 let remote_archive = remote.archive();
                 let remote_index = remote_archive.index();
@@ -222,42 +266,49 @@ impl Push<'_> {
                 // a revision that references them, so a failed upload here
                 // aborts the push with the revision still unpublished.
                 let blob_store = LocalIndex::new(env, index.clone());
-                let current_index = Index::from_hash(NodeHash::from(*revision.tree.hash()));
                 let address = remote.address();
                 let mut refs = std::pin::pin!(shipment_refs(&difference));
                 while let Some(shipment) = refs.next().await {
                     match shipment? {
                         // Removals ship nothing; the remote keeps its bytes.
-                        ShipmentRef::Blob(BlobChange::Removed(_)) => {}
-                        ShipmentRef::Blob(BlobChange::Added(hash)) => {
+                        ShipmentRef::BlobRemoved(_) => {}
+                        // The size rides on the ref (from the index record the
+                        // differential already read), so shipping needs no
+                        // point read of the current tree — such a read would
+                        // descend by-reference regions the novelty walk is
+                        // careful never to require.
+                        ShipmentRef::BlobAdded { hash, size } => {
                             let digest = dialog_common::Blake3Hash::from(hash);
-                            // Size from the current tree's blob index (no byte
-                            // fetch).
-                            let record = current_index
-                                .get_blob(&blob_store, &hash)
-                                .await?
-                                .ok_or_else(|| {
-                                    BlobError::NotFound(format!(
-                                        "blob {digest:?} referenced by the tree but absent from its index"
-                                    ))
-                                })?;
                             // Local bytes -> remote import sink. Mirrors the
                             // remote `Read` fork in `branch/blob.rs` and
                             // `RemotePut`'s `Put` fork in `remote/archive.rs`,
                             // substituting the blob `Import` effect
                             // (single-part on the current providers).
-                            let mut source = branch
+                            let source = branch
                                 .archive()
                                 .blob()
                                 .read(digest.clone())
                                 .perform(env)
-                                .await?;
+                                .await;
+                            let mut source = match source {
+                                Ok(source) => source,
+                                // Bytes this replica never held: the record
+                                // rode into the head by reference, so under
+                                // the same gate as the node walk the target
+                                // already stores them.
+                                Err(BlobError::NotFound(_))
+                                    if missing.target == MissingBlocks::Boundary =>
+                                {
+                                    continue;
+                                }
+                                Err(error) => return Err(error.into()),
+                            };
                             let mut sink = address
                                 .subject
                                 .clone()
                                 .archive()
                                 .blob()
-                                .import(digest.clone(), record.size)
+                                .import(digest.clone(), size)
                                 .fork(address.site())
                                 .perform(env)
                                 .await?;
@@ -272,11 +323,18 @@ impl Push<'_> {
                         // nodes. Local bytes -> remote block put, mirroring
                         // the novel node upload.
                         ShipmentRef::SpilledValue(reference) => {
-                            let bytes = blob_store.get(&reference).await?.ok_or_else(|| {
-                                BlobError::NotFound(format!(
-                                    "spilled value block {reference:?} referenced by the tree but absent from the local archive"
-                                ))
-                            })?;
+                            let bytes = match blob_store.get(&reference).await? {
+                                Some(bytes) => bytes,
+                                // Held by reference: not this replica's to
+                                // ship, and under the gate the target has it.
+                                None if missing.target == MissingBlocks::Boundary => continue,
+                                None => {
+                                    return Err(BlobError::NotFound(format!(
+                                        "spilled value block {reference:?} referenced by the tree but absent from the local archive"
+                                    ))
+                                    .into());
+                                }
+                            };
                             remote_index.put(Buffer::from(bytes)).perform(env).await?;
                         }
                     }

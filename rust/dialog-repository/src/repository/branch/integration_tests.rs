@@ -1193,6 +1193,102 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     Ok(())
 }
 
+/// A device that adopted the upstream head by reference must be able to
+/// push its own novelty back to the same remote.
+///
+/// The everyday device cycle: a quiet replica pulls (scenario-3
+/// fast-forward adoption — the head lands by root, zero block reads),
+/// commits something of its own, and pushes. The push's novelty diff
+/// walks base against current through the LOCAL archive only
+/// (`LocalIndex`, no remote fallback), and where the trees differ it
+/// descends into base-side nodes the adoption never fetched — failing
+/// `Tree operation failed during push: Problem accessing node: Blob not
+/// found` even though the missing nodes live on the very remote being
+/// pushed to. The push.rs doc calls this a known limit for a head
+/// adopted from a *different* remote; this pins that the same-remote
+/// case must work, since it is every device's steady state.
+#[dialog_common::test]
+async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
+    s3: S3Address,
+) -> Result<()> {
+    use crate::helpers::Counting;
+
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // Device A gives the subject enough history that the tree has real
+    // depth — the adopted head must hold subtrees B never fetches.
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "adopt-push-a").await?;
+    for batch in 0..4 {
+        let facts: Vec<_> = (0..75)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{batch}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{batch}-{i}")),
+                    cause: None,
+                })
+            })
+            .collect();
+        alice_branch
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+    alice_branch.push().perform(&operator).await?;
+
+    // Device B, same subject, fresh archive: the pull adopts A's head.
+    let env = Counting::new(operator.clone());
+    let bob_repo = profile
+        .repository(unique_name("adopt-push-b"))
+        .open()
+        .perform(&env)
+        .await?;
+    let origin = bob_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&env)
+        .await?;
+    let bob_branch = bob_repo.branch("main").open().perform(&env).await?;
+    let remote_branch = origin.branch("main").open().perform(&env).await?;
+    bob_branch.set_upstream(remote_branch).perform(&env).await?;
+
+    env.reset();
+    bob_branch
+        .pull()
+        .perform(&env)
+        .await?
+        .expect("head adopted");
+    assert_eq!(
+        env.block_reads(),
+        0,
+        "the fixture must route through scenario-3 adoption (zero-read), \
+         or it no longer reproduces the by-reference base: {:?}",
+        env.snapshot()
+    );
+
+    // B's own novelty, then the push every device's sync drain performs.
+    bob_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:bob".parse()?,
+            is: Value::String("Bob".into()),
+            cause: None,
+        })]))
+        .perform(&env)
+        .await?;
+
+    let pushed = bob_branch.push().perform(&env).await?;
+    assert!(
+        pushed.is_some(),
+        "a device that adopted the upstream head by reference pushes its \
+         own novelty back to that same upstream"
+    );
+
+    Ok(())
+}
+
 #[dialog_common::test]
 async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
     let (operator, profile) = test_operator_with_profile().await;
