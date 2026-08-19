@@ -52,3 +52,19 @@ pub const ES256_VERIFIER_EXPORT_SIZE: usize = ES256_PUBLIC_TAG_SIZE + ES256_PUBL
 /// section begins.
 #[cfg(feature = "es256")]
 pub const ES256_PUBLIC_KEY_OFFSET: usize = ES256_PRIVATE_TAG_SIZE + ES256_PRIVATE_KEY_SIZE;
+
+/// Private-use multicodec varint marking a WebAuthn P-256 public key
+/// (`0x300001`). The key bytes that follow are an ordinary 33-byte compressed
+/// P-256 point; only the tag distinguishes a passkey from a plain p256-pub key.
+#[cfg(feature = "webauthn")]
+pub const WEBAUTHN_PUBLIC_TAG: &[u8] = &[0x81, 0x80, 0xc0, 0x01];
+/// Byte length of the WebAuthn public key multicodec tag prefix.
+#[cfg(feature = "webauthn")]
+pub const WEBAUTHN_PUBLIC_TAG_SIZE: usize = WEBAUTHN_PUBLIC_TAG.len();
+/// Length of a WebAuthn (P-256) compressed public point in bytes.
+#[cfg(feature = "webauthn")]
+pub const WEBAUTHN_PUBLIC_KEY_SIZE: usize = 33;
+/// Total size of a serialized WebAuthn verifier credential.
+#[cfg(feature = "webauthn")]
+pub const WEBAUTHN_VERIFIER_EXPORT_SIZE: usize =
+    WEBAUTHN_PUBLIC_TAG_SIZE + WEBAUTHN_PUBLIC_KEY_SIZE;

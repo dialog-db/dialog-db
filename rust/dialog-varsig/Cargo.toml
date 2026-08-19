@@ -57,6 +57,7 @@ edwards448 = []
 edwards25519 = ["dep:ed25519-dalek"]
 
 es256 = ["secp256r1", "sha2_256"]
+webauthn = ["secp256r1", "sha2_256"]
 es384 = ["secp384r1", "sha2_384"]
 es512 = ["secp521r1", "sha2_512"]
 es256k = ["secp256k1", "sha2_256"]

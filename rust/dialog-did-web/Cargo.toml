@@ -10,6 +10,10 @@ license.workspace = true
 default = ["ed25519"]
 ed25519 = ["dialog-credentials/ed25519"]
 es256 = ["dialog-credentials/es256", "dep:p256"]
+# A passkey verification method is a did:key with the WebAuthn multicodec, so
+# enabling this lets did:web / did:plc documents resolve passkeys to a
+# WebAuthnVerifier through the same multibase / did:key path.
+webauthn = ["dialog-credentials/webauthn"]
 # Exposes `MapFetch`, an in-memory `Fetch` for tests and downstream mocking.
 test-fetch = []
 # Exposes the local did:web HTTP test server and its provisioning provider, for
@@ -53,14 +57,18 @@ wasm-bindgen = { workspace = true }
 
 [dev-dependencies]
 dialog-common = { workspace = true, features = ["helpers"] }
-# The P-256 JWK tests build and validate raw curve points to pin that an
+# Used by the webauthn-gated test to build a synthetic passkey assertion,
+# and by the P-256 JWK tests, which build raw curve points to pin that an
 # invalid (x, y) is refused rather than reinterpreted.
-p256 = { workspace = true }
+p256 = { workspace = true, features = ["ecdsa"] }
 dialog-credentials = { workspace = true, features = ["es256"] }
 serde_json = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 dialog-ucan-core = { workspace = true }
 anyhow = { workspace = true }
+# Used by the webauthn-gated test to build a synthetic passkey assertion.
+base64 = { workspace = true }
+sha2 = { workspace = true }
 
 # tokio for the test process is native-only: the wasm test client uses the
 # browser event loop via wasm-bindgen-test, and tokio's `net` pulls `mio`,
