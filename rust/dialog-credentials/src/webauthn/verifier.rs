@@ -40,6 +40,10 @@ const FLAGS_OFFSET: usize = 32;
 /// The User Present bit of the flags byte: a human performed a gesture.
 const FLAG_USER_PRESENT: u8 = 0x01;
 
+/// The User Verified bit of the flags byte: the authenticator verified the
+/// human's identity (PIN, biometric), not merely their presence.
+const FLAG_USER_VERIFIED: u8 = 0x04;
+
 /// The `clientData.type` an *assertion* carries. A registration carries
 /// `"webauthn.create"` and must never be accepted as an authorization.
 const CLIENT_DATA_TYPE_GET: &str = "webauthn.get";
@@ -64,10 +68,11 @@ const CLIENT_DATA_TYPE_GET: &str = "webauthn.get";
 ///    an authorization over that payload.
 /// 2. The challenge is the multihash of the payload being authorized.
 /// 3. `authenticatorData` is long enough to hold the fields it must.
-/// 4. The User Present flag is set, so a human actually gestured. The signer
+/// 4. The User Present *and* User Verified flags are set, so a human gestured
+///    and the authenticator verified who they are (PIN, biometric). The signer
 ///    asks the browser for `userVerification: "required"`, but that is a
 ///    signing-time hint; an attacker assembling an assertion never goes
-///    through it.
+///    through it, so both bits are enforced here.
 /// 5. `rpIdHash` matches the expected relying party, *when one is known* (see
 ///    [`expecting_rp_id`](Self::expecting_rp_id)).
 /// 6. The inner ECDSA signature verifies, in its canonical low-S form.
@@ -248,6 +253,20 @@ impl WebAuthnVerifier {
         if authenticator_data[FLAGS_OFFSET] & FLAG_USER_PRESENT == 0 {
             return Err(WebAuthnVerifyError::InvalidAuthenticatorData(
                 "the User Present flag is not set".into(),
+            ));
+        }
+
+        // The human must also have been *verified* (PIN, biometric), not just
+        // present. The signer requests `userVerification: "required"`, so every
+        // assertion this stack produces carries UV; per WebAuthn, a relying
+        // party that requires verification must check the bit, because the
+        // request option is only a hint the verifier never sees. Without this,
+        // whoever *holds* the authenticator (a stolen security key with no PIN,
+        // or a client that asks for `userVerification: "discouraged"`) can mint
+        // presence-only assertions that verify.
+        if authenticator_data[FLAGS_OFFSET] & FLAG_USER_VERIFIED == 0 {
+            return Err(WebAuthnVerifyError::InvalidAuthenticatorData(
+                "the User Verified flag is not set".into(),
             ));
         }
 
@@ -746,6 +765,36 @@ mod tests {
         assert!(
             verifier.verify_webauthn(payload, &sig).is_err(),
             "an assertion with the User Present flag clear must not verify"
+        );
+    }
+
+    /// User *presence* alone is not enough: presence is a touch, verification
+    /// is an identity check (PIN, biometric). The signer always requests
+    /// `userVerification: "required"`, so honest assertions carry UV; an
+    /// assertion with UP set but UV clear is one minted by whoever merely
+    /// *holds* the authenticator — a stolen security key with no PIN, or a
+    /// client that asked for `userVerification: "discouraged"` — and must be
+    /// refused.
+    #[dialog_common::test]
+    async fn webauthn_refuses_an_assertion_without_user_verification() {
+        let payload = b"present but never verified";
+        let mut auth_data = Sha256::digest(b"example.com").to_vec();
+        auth_data.push(FLAG_USER_PRESENT); // UP set, UV clear
+        auth_data.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+
+        let (verifier, sig) = fixture_with(
+            payload,
+            &serde_json::json!({
+                "type": "webauthn.get",
+                "origin": "https://example.com",
+                "crossOrigin": false
+            }),
+            auth_data,
+        );
+
+        assert!(
+            verifier.verify_webauthn(payload, &sig).is_err(),
+            "an assertion with the User Verified flag clear must not verify"
         );
     }
 
