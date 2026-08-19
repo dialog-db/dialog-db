@@ -47,6 +47,7 @@ use dialog_query::{Any, Binding, Cardinality, Environment, InductiveRule, Match,
 use futures_util::{StreamExt as _, TryStreamExt};
 use std::sync::Arc;
 
+use crate::RemoteFallback;
 use crate::layer::tombstones_from;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
@@ -742,14 +743,16 @@ where
     // remote-only blocks.
     let upstreams = branch.upstreams();
     let remote = match upstreams.remote_name() {
-        Some(name) => branch
-            .subject()
-            .remote(name.to_string())
-            .load()
-            .perform(env)
-            .await
-            .ok(),
-        None => None,
+        Some(name) => {
+            let loaded = branch
+                .subject()
+                .remote(name.to_string())
+                .load()
+                .perform(env)
+                .await;
+            RemoteFallback::from_load(name, loaded)
+        }
+        None => RemoteFallback::None,
     };
     let store = crate::NetworkedIndex::new(env, branch.archive().index(), remote);
     let raw_store = store.clone();
