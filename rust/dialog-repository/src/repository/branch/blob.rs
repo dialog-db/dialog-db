@@ -64,7 +64,7 @@
 //! ```
 
 use crate::{
-    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite,
+    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
     RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, TreeReference, Upstream,
 };
 use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
@@ -204,9 +204,15 @@ where
 {
     let remote = match branch.upstream() {
         Some(Upstream::Remote { remote: name, .. }) => {
-            branch.subject().remote(name).load().perform(env).await.ok()
+            let loaded = branch
+                .subject()
+                .remote(name.clone())
+                .load()
+                .perform(env)
+                .await;
+            RemoteFallback::from_load(name, loaded)
         }
-        _ => None,
+        _ => RemoteFallback::None,
     };
     NetworkedIndex::new(env, branch.archive().index(), remote)
 }
@@ -473,14 +479,16 @@ where
     // able to hydrate blocks it holds by reference.
     let upstreams = branch.upstreams();
     let remote = match upstreams.remote_name() {
-        Some(name) => branch
-            .subject()
-            .remote(name.to_string())
-            .load()
-            .perform(env)
-            .await
-            .ok(),
-        None => None,
+        Some(name) => {
+            let loaded = branch
+                .subject()
+                .remote(name.to_string())
+                .load()
+                .perform(env)
+                .await;
+            RemoteFallback::from_load(name, loaded)
+        }
+        None => RemoteFallback::None,
     };
     let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 

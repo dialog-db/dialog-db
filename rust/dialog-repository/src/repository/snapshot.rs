@@ -42,9 +42,7 @@ use std::marker::PhantomData;
 
 use async_stream::try_stream;
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{
-    BlobChange, BlobIndexExt as _, Datum, Key, ShipmentRef, State, shipment_ref,
-};
+use dialog_artifacts::{BlobIndexExt as _, Datum, Key, ShipmentRef, State, shipment_ref};
 use dialog_capability::{Capability, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
 use dialog_effects::archive::prelude::{ArchiveSubjectExt as _, CatalogExt as _};
@@ -361,7 +359,7 @@ impl<C: Principal> SnapshotExport<'_, C> {
                         Some(ShipmentRef::SpilledValue(reference)) => {
                             spills.insert(reference);
                         }
-                        Some(ShipmentRef::Blob(BlobChange::Added(hash))) => {
+                        Some(ShipmentRef::BlobAdded { hash, .. }) => {
                             let hash = NodeHash::from(hash);
                             if blob_seen.insert(hash.clone()) {
                                 blobs.push(hash);

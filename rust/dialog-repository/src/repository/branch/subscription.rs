@@ -90,8 +90,8 @@ use futures_util::TryStreamExt as _;
 use super::session::{QueryEnv, QueryLayer};
 use crate::layer::tombstones_from;
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt as _, Revision, Upstream,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
+    RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Upstream,
 };
 
 /// The demand cover of one evaluation: every index key range the
@@ -586,18 +586,22 @@ where
         // a pull replicates tree nodes along changed paths but never spilled
         // value blocks, so the first poll after a pull that lands a spilled
         // fact inside the cover must be able to read the block through the
-        // remote. Failing to load the remote (e.g. no credentials) is
-        // non-fatal — the local archive alone may still satisfy the poll.
+        // remote. A failed load (e.g. no credentials) is carried into the
+        // fallback rather than swallowed: the local archive alone may
+        // still satisfy the poll, and a read that misses fails with the
+        // load failure as its cause instead of a bare not-found.
         let remote = match self.branch.upstream() {
-            Some(Upstream::Remote { remote: name, .. }) => self
-                .branch
-                .subject()
-                .remote(name)
-                .load()
-                .perform(env)
-                .await
-                .ok(),
-            _ => None,
+            Some(Upstream::Remote { remote: name, .. }) => {
+                let loaded = self
+                    .branch
+                    .subject()
+                    .remote(name.clone())
+                    .load()
+                    .perform(env)
+                    .await;
+                RemoteFallback::from_load(name, loaded)
+            }
+            _ => RemoteFallback::None,
         };
         let store = NetworkedIndex::new(env, self.branch.subject().archive().index(), remote);
         // Keep the raw backend to fetch spilled value blocks by reference.

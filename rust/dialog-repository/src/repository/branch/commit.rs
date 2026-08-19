@@ -1,6 +1,6 @@
 use crate::{
-    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
+    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, PublishError, RemoteFallback,
+    RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, TreeReference,
 };
 use dialog_artifacts::history::{Context, Edition, TreeHistory, Version, context_of, extend_skips};
 use dialog_artifacts::tree::WriteScope;
@@ -155,17 +155,24 @@ where
         // If the branch tracks a remote upstream, commits must be able
         // to read remote-only blocks on demand (pull only merges the
         // tree metadata, not every block). `NetworkedIndex` falls back
-        // to the remote when a block is missing locally.
+        // to the remote when a block is missing locally. A remote that
+        // fails to LOAD is not silently dropped: on a partial replica
+        // that store is the only place by-reference blocks can hydrate
+        // from, so the failure is carried into the fallback and surfaces
+        // — with its cause — on the first read that needed it, while a
+        // commit every block of which is local proceeds untouched.
         let upstreams = branch.upstreams();
         let remote = match upstreams.remote_name() {
-            Some(name) => branch
-                .subject()
-                .remote(name.to_string())
-                .load()
-                .perform(env)
-                .await
-                .ok(),
-            None => None,
+            Some(name) => {
+                let loaded = branch
+                    .subject()
+                    .remote(name.to_string())
+                    .load()
+                    .perform(env)
+                    .await;
+                RemoteFallback::from_load(name, loaded)
+            }
+            None => RemoteFallback::None,
         };
         let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
 

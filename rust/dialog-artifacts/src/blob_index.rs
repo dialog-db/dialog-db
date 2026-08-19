@@ -157,8 +157,10 @@ where
         let refs = shipment_refs(&difference);
         tokio::pin!(refs);
         for await item in refs {
-            if let ShipmentRef::Blob(change) = item? {
-                yield change;
+            match item? {
+                ShipmentRef::BlobAdded { hash, .. } => yield BlobChange::Added(hash),
+                ShipmentRef::BlobRemoved(hash) => yield BlobChange::Removed(hash),
+                ShipmentRef::SpilledValue(_) => {}
             }
         }
     }

@@ -13,8 +13,8 @@ use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 
 use crate::{
-    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt,
+    Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
+    RepositoryArchiveExt as _, RepositoryMemoryExt,
 };
 
 /// Command struct for selecting artifacts from a branch.
@@ -83,20 +83,24 @@ impl Select<'_> {
             + 'static,
     {
         // Load a remote if the branch tracks one so the networked
-        // index can fall back to it for blocks missing locally. Failing
-        // to load the remote (e.g. no credentials) is non-fatal — the
-        // local archive alone may still satisfy the query.
+        // index can fall back to it for blocks missing locally. A
+        // failed load (e.g. no credentials) is carried into the
+        // fallback rather than swallowed: the local archive alone may
+        // still satisfy the query, but a read that misses fails with
+        // the load failure as its cause instead of a bare not-found.
         let upstreams = self.branch.upstreams();
         let remote = match upstreams.remote_name() {
-            Some(name) => self
-                .branch
-                .subject()
-                .remote(name.to_string())
-                .load()
-                .perform(env)
-                .await
-                .ok(),
-            None => None,
+            Some(name) => {
+                let loaded = self
+                    .branch
+                    .subject()
+                    .remote(name.to_string())
+                    .load()
+                    .perform(env)
+                    .await;
+                RemoteFallback::from_load(name, loaded)
+            }
+            None => RemoteFallback::None,
         };
 
         let store = NetworkedIndex::new(env, self.catalog(), remote);
@@ -241,16 +245,18 @@ impl SelectOwned<'_> {
         // there.
         let upstreams = self.0.branch.upstreams();
         let remote = match upstreams.remote_name() {
-            Some(name) => self
-                .0
-                .branch
-                .subject()
-                .remote(name.to_string())
-                .load()
-                .perform(env)
-                .await
-                .ok(),
-            None => None,
+            Some(name) => {
+                let loaded = self
+                    .0
+                    .branch
+                    .subject()
+                    .remote(name.to_string())
+                    .load()
+                    .perform(env)
+                    .await;
+                RemoteFallback::from_load(name, loaded)
+            }
+            None => RemoteFallback::None,
         };
 
         let store = NetworkedIndex::new(env, self.catalog(), remote);

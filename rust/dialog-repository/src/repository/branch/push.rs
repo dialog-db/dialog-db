@@ -1,20 +1,27 @@
+use std::collections::HashSet;
+
 use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_artifacts::{BlobChange, BlobIndexExt as _, ShipmentRef, shipment_refs};
+use dialog_artifacts::{
+    Datum, Key as ArtifactKey, ShipmentRef, State, shipment_ref, shipment_refs,
+};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Buffer, ConditionalSync};
-use dialog_effects::archive::prelude::ArchiveSubjectExt as _;
+use dialog_effects::archive::prelude::{ArchiveExt as _, ArchiveSubjectExt as _, CatalogExt as _};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
 use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_search_tree::{ContentAddressedStorage as TreeStorage, TreeDifference};
+use dialog_search_tree::{
+    ArchivedNodeBody, ContentAddressedStorage as TreeStorage, MissingBlocks, MissingPolicy,
+    NoveltyOp, PersistentNode, TreeDifference, into_owned,
+};
 use dialog_storage::StorageBackend as _;
-use futures_util::{StreamExt as _, TryStreamExt as _};
+use futures_util::{StreamExt as _, stream};
 
 use crate::{
-    Branch, Index, LocalIndex, PublishError, PushError, RemoteSite, RepositoryArchiveExt as _,
-    RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
+    Branch, Index, LocalIndex, PublishError, PushError, RemoteRepository, RemoteSite,
+    RepositoryArchiveExt as _, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -65,14 +72,28 @@ impl Push<'_> {
     /// - `Err(PushError::NonFastForward)` — upstream has moved since
     ///   the last sync; pull to integrate before pushing again.
     ///
-    /// For remote upstream, novel tree blocks are uploaded before the
-    /// revision is published, so a published head never references bytes
-    /// the remote is missing. A known limit: the novelty diff reads the
-    /// LOCAL archive only, so a head carrying subtrees adopted by
-    /// reference from a *different* remote (a scenario-3 pull) cannot be
-    /// pushed to a second remote until those blocks are hydrated locally
-    /// — the push fails loudly on the missing blocks rather than
-    /// publishing a head the target cannot serve.
+    /// For remote upstream, bytes land on the remote in reference order
+    /// — blob bytes and spilled values, then by-reference frontier
+    /// subtrees, then held novelty children-before-parents, then the
+    /// revision — so EVERY prefix of a push (an aborted one included)
+    /// leaves the remote closure-complete: a block's presence implies
+    /// the presence of everything it references. That closure property
+    /// is what makes another pusher's existence probes trustworthy, and
+    /// it is why a published head never references bytes the remote is
+    /// missing.
+    ///
+    /// The novelty walk reads the local archive only and treats a block
+    /// held by reference as the boundary of local knowledge (see
+    /// [`MissingBlocks`]): a base adopted by root from the target — the
+    /// everyday scenario-3 pull — diffs cleanly without hydration, and
+    /// only blocks this replica minted are shipped. A head carrying
+    /// subtrees adopted from *other* tracked remotes is adjudicated at
+    /// that boundary: content the target provably has (attribution when
+    /// it is the sole tracked remote, one existence probe per subtree
+    /// root otherwise) moves nothing; content it provably lacks is
+    /// fetched from the remotes that hold it and streamed through to the
+    /// target without being persisted here. The push fails loudly only
+    /// for content reachable from no store at all.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PushError>
     where
         Env: Provider<Get>
@@ -85,6 +106,7 @@ impl Push<'_> {
             + Provider<Fork<RemoteSite, Resolve>>
             + Provider<Fork<RemoteSite, Publish>>
             + Provider<Fork<RemoteSite, BlobImport>>
+            + Provider<Fork<RemoteSite, BlobRead>>
             + ConditionalSync
             + 'static,
     {
@@ -197,67 +219,144 @@ impl Push<'_> {
                 // Upload tree nodes present in our current tree but not
                 // in the base, so the remote can hydrate the new tree
                 // before we publish the revision pointing at it.
+                //
+                // The walk reads the local archive only, and a replica
+                // legitimately holds whole subtrees by reference (a
+                // fast-forward pull adopts the upstream head by root, zero
+                // reads), so absence is information, not a fault
+                // ([`MissingBlocks::Boundary`], both sides):
+                //
+                // - The BASE is the recorded sync point with this very
+                //   upstream — a tree the target itself served or accepted —
+                //   so an absent base-side block is definitionally present
+                //   on the target. Losing its subtraction only over-uploads
+                //   held nodes, which idempotent content-addressed puts
+                //   absorb. Sound at any remote count.
+                // - A block absent under OUR head is not our novelty (a
+                //   replica stores what it mints). Whether the TARGET has
+                //   it is adjudicated below, per unresolved subtree root:
+                //   free attribution when the target is the only tracked
+                //   remote, one existence probe otherwise, and a
+                //   fetch-forward transfer — streamed through, never
+                //   persisted locally — only for content the target
+                //   provably lacks.
+                let missing = MissingPolicy {
+                    source: MissingBlocks::Boundary,
+                    target: MissingBlocks::Boundary,
+                };
+
                 let index = branch.archive().index();
                 let store = LocalIndex::new(env, index.clone());
                 let base_tree = Index::from_hash(NodeHash::from(*base.hash()));
                 let current_tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
                 let tree_store = TreeStorage::new(TreeStorageBridge(store));
-                let difference =
-                    TreeDifference::compute(&base_tree, &current_tree, &tree_store, &tree_store)
-                        .await?;
-                let novelty = difference.novel_nodes().map_err(Into::into);
+                let difference = TreeDifference::compute_with(
+                    &base_tree,
+                    &current_tree,
+                    &tree_store,
+                    &tree_store,
+                    missing,
+                )
+                .await?;
+
                 let remote_archive = remote.archive();
                 let remote_index = remote_archive.index();
-                let upload = remote_index.upload(novelty).perform(env);
-                // Boxed because the upload future carries the full
-                // stream type and produces large futures.
-                Box::pin(upload).await?;
 
-                // Ship the blocks the tree nodes reference but the node upload
-                // does not carry: blob bytes and spilled value blocks. Both
-                // are surfaced by ONE entry-level drain of the SAME
-                // differential the node upload just walked (`shipment_refs`),
-                // so the changed paths are read once per push instead of once
-                // per concern. Bytes must land on the remote before we publish
-                // a revision that references them, so a failed upload here
-                // aborts the push with the revision still unpublished.
+                // Everything below lands on the remote in REFERENCE ORDER —
+                // a block's referents (blob bytes, spilled value blocks,
+                // child nodes, forwarded subtrees) are durable before any
+                // block that names them: blobs and spills first, then the
+                // by-reference frontier subtrees, then the held novelty
+                // children-before-parents, then the revision. The ordering
+                // is a protocol invariant, not a nicety: the existence
+                // probes prune a whole subtree on one positive answer, which
+                // is sound only if a block's presence on a protocol-written
+                // store implies the presence of everything it references —
+                // and that holds only if every prefix of every push
+                // (aborted ones included) leaves the store closure-complete.
+                //
+                // Attribution first, since the shipment of by-reference
+                // content depends on it. When the target is the only remote
+                // reachable from the tracked upstream set, everything held
+                // by reference came from it — attribution, zero requests.
+                // Otherwise one probe per item settles it, and only content
+                // the target provably lacks is transferred, fetched from the
+                // remotes that have it and streamed through without being
+                // persisted.
+                //
+                // Reachable means TRANSITIVE: a local upstream shares this
+                // archive, but its head can hold content by reference from
+                // remotes only IT tracks — attribution that stopped at the
+                // local entry would credit that content to this branch's own
+                // remote and silently skip forwarding it.
+                let tracked = tracked_remote_names(branch, env).await?;
+                let sole_remote = tracked.iter().all(|name| name == remote_name);
+                let sources = if sole_remote {
+                    Vec::new()
+                } else {
+                    source_remotes(&tracked, branch, remote_name, env).await
+                };
+
+                // Ship the blocks the tree nodes reference but the node
+                // upload does not carry: blob bytes and spilled value
+                // blocks, surfaced by ONE entry-level drain of the SAME
+                // differential the node upload walks (`shipment_refs`), so
+                // the changed paths are read once per push instead of once
+                // per concern. These land FIRST: a node must never be
+                // durable on the remote before the bytes its entries name,
+                // or an aborted push leaves probe-trustable residue that a
+                // later pusher prunes against — publishing a head whose
+                // blobs the remote does not hold.
                 let blob_store = LocalIndex::new(env, index.clone());
-                let current_index = Index::from_hash(NodeHash::from(*revision.tree.hash()));
                 let address = remote.address();
                 let mut refs = std::pin::pin!(shipment_refs(&difference));
                 while let Some(shipment) = refs.next().await {
                     match shipment? {
                         // Removals ship nothing; the remote keeps its bytes.
-                        ShipmentRef::Blob(BlobChange::Removed(_)) => {}
-                        ShipmentRef::Blob(BlobChange::Added(hash)) => {
+                        ShipmentRef::BlobRemoved(_) => {}
+                        // The size rides on the ref (from the index record the
+                        // differential already read), so shipping needs no
+                        // point read of the current tree — such a read would
+                        // descend by-reference regions the novelty walk is
+                        // careful never to require.
+                        ShipmentRef::BlobAdded { hash, size } => {
                             let digest = dialog_common::Blake3Hash::from(hash);
-                            // Size from the current tree's blob index (no byte
-                            // fetch).
-                            let record = current_index
-                                .get_blob(&blob_store, &hash)
-                                .await?
-                                .ok_or_else(|| {
-                                    BlobError::NotFound(format!(
-                                        "blob {digest:?} referenced by the tree but absent from its index"
-                                    ))
-                                })?;
                             // Local bytes -> remote import sink. Mirrors the
                             // remote `Read` fork in `branch/blob.rs` and
                             // `RemotePut`'s `Put` fork in `remote/archive.rs`,
                             // substituting the blob `Import` effect
                             // (single-part on the current providers).
-                            let mut source = branch
+                            let source = branch
                                 .archive()
                                 .blob()
                                 .read(digest.clone())
                                 .perform(env)
-                                .await?;
+                                .await;
+                            let mut source = match source {
+                                Ok(source) => source,
+                                // Bytes this replica never held: the record
+                                // rode into the head by reference. Sole
+                                // remote → the target stores them by
+                                // attribution; otherwise adjudicate — probe
+                                // the target, forward from a source remote
+                                // only on a miss.
+                                Err(BlobError::NotFound(_)) => {
+                                    if !sole_remote {
+                                        ensure_blob_on_target(
+                                            digest, size, branch, &remote, &sources, env,
+                                        )
+                                        .await?;
+                                    }
+                                    continue;
+                                }
+                                Err(error) => return Err(error.into()),
+                            };
                             let mut sink = address
                                 .subject
                                 .clone()
                                 .archive()
                                 .blob()
-                                .import(digest.clone(), record.size)
+                                .import(digest.clone(), size)
                                 .fork(address.site())
                                 .perform(env)
                                 .await?;
@@ -272,14 +371,108 @@ impl Push<'_> {
                         // nodes. Local bytes -> remote block put, mirroring
                         // the novel node upload.
                         ShipmentRef::SpilledValue(reference) => {
-                            let bytes = blob_store.get(&reference).await?.ok_or_else(|| {
-                                BlobError::NotFound(format!(
-                                    "spilled value block {reference:?} referenced by the tree but absent from the local archive"
-                                ))
-                            })?;
+                            let bytes = match blob_store.get(&reference).await? {
+                                Some(bytes) => bytes,
+                                // Held by reference: not this replica's to
+                                // ship. Sole remote → the target has it by
+                                // attribution; otherwise adjudicate.
+                                None => {
+                                    if !sole_remote {
+                                        ensure_block_on_target(
+                                            NodeHash::from(reference),
+                                            branch,
+                                            &remote,
+                                            &sources,
+                                            env,
+                                        )
+                                        .await?;
+                                    }
+                                    continue;
+                                }
+                            };
                             remote_index.put(Buffer::from(bytes)).perform(env).await?;
                         }
                     }
+                }
+
+                // Adjudicate the by-reference frontier: subtree roots the
+                // novelty walk could not enter. These land BEFORE the held
+                // novelty — held nodes reference frontier roots as children,
+                // and a parent durable before its subtree would be
+                // probe-trustable residue on an aborted push.
+                if !sole_remote {
+                    // A virgin target (no fetched revision) holds nothing:
+                    // every probe would miss, so skip them all and forward
+                    // outright. One shared visited set across roots — a
+                    // block reachable from two frontier links crosses once.
+                    let target_may_have = upstream.revision().is_some();
+                    let mut visited: HashSet<NodeHash> = HashSet::new();
+                    for link in difference.unresolved_target() {
+                        forward_subtree(
+                            link.node.clone(),
+                            branch,
+                            &remote,
+                            &sources,
+                            target_may_have,
+                            &mut visited,
+                            env,
+                        )
+                        .await?;
+                    }
+                }
+
+                // Upload the held novelty children-before-parents: waves of
+                // nodes whose in-set children are already durable, concurrent
+                // within a wave, a barrier between waves. Children NOT in the
+                // novelty set are either shared with the base (already on the
+                // target) or by-reference frontier roots (settled above), so
+                // by the time any node lands here its full closure is durable.
+                let mut pending: Vec<_> = {
+                    let novelty = difference.novel_nodes();
+                    futures_util::pin_mut!(novelty);
+                    let mut nodes = Vec::new();
+                    while let Some(node) = novelty.next().await {
+                        nodes.push(node?);
+                    }
+                    nodes
+                };
+                let mut durable: HashSet<NodeHash> = HashSet::new();
+                let in_set: HashSet<NodeHash> =
+                    pending.iter().map(|node| node.hash().clone()).collect();
+                while !pending.is_empty() {
+                    let (wave, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|node| {
+                        node_children(node).is_ok_and(|children| {
+                            children
+                                .iter()
+                                .all(|child| !in_set.contains(child) || durable.contains(child))
+                        })
+                    });
+                    if wave.is_empty() {
+                        // A cycle cannot exist in a hash tree, so an empty
+                        // wave means a node failed to decode (or the
+                        // invariant broke some other way). Either way,
+                        // continuing would publish a head the target cannot
+                        // serve — fail the push instead.
+                        for node in &rest {
+                            node_children(node)?;
+                        }
+                        return Err(dialog_search_tree::DialogSearchTreeError::Node(
+                            "novelty upload made no progress: children-before-parents \
+                             ordering found no uploadable node"
+                                .into(),
+                        )
+                        .into());
+                    }
+                    for node in &wave {
+                        durable.insert(node.hash().clone());
+                    }
+                    let upload = remote_index
+                        .upload(stream::iter(wave.into_iter().map(Ok)))
+                        .perform(env);
+                    // Boxed because the upload future carries the full
+                    // stream type and produces large futures.
+                    Box::pin(upload).await?;
+                    pending = rest;
                 }
 
                 upstream.publish(revision.clone()).perform(env).await?;
@@ -330,6 +523,430 @@ impl Push<'_> {
 
         Ok(Some(revision))
     }
+}
+
+/// The direct children of a tree node, by hash. A segment has none.
+fn node_children(
+    node: &PersistentNode<ArtifactKey, State<Datum>>,
+) -> Result<Vec<NodeHash>, PushError> {
+    match node.body() {
+        ArchivedNodeBody::Index(index) => {
+            let links = index.links()?;
+            Ok(links.into_iter().map(|link| link.node).collect())
+        }
+        ArchivedNodeBody::Segment(_) => Ok(Vec::new()),
+    }
+}
+
+/// Every remote name reachable from the branch's tracked upstream set,
+/// resolved transitively through local upstream entries.
+///
+/// A local upstream lives in the same archive, so its blocks are "held"
+/// exactly as this branch's are — but its head can carry content by
+/// reference whose provenance is a remote only IT tracks. Provenance is
+/// what push attribution reasons over, so the walk follows every
+/// `Upstream::Local` entry into that branch's own tracked set (cycle-safe
+/// via a visited set) and returns the union of remote names. Attribution
+/// is sound only against this transitive set; the branch's own entries
+/// alone under-count where by-reference content can have come from.
+async fn tracked_remote_names<Env>(branch: &Branch, env: &Env) -> Result<Vec<String>, PushError>
+where
+    Env: Provider<Resolve> + ConditionalSync + 'static,
+{
+    let mut remotes: Vec<String> = Vec::new();
+    let mut visited: HashSet<String> = HashSet::from([branch.name().to_string()]);
+    let mut locals: Vec<String> = Vec::new();
+    for entry in branch.upstreams().iter() {
+        match entry {
+            Upstream::Remote { remote, .. } => {
+                if !remotes.contains(remote) {
+                    remotes.push(remote.clone());
+                }
+            }
+            Upstream::Local { branch: name, .. } => {
+                if visited.insert(name.clone()) {
+                    locals.push(name.clone());
+                }
+            }
+        }
+    }
+    while let Some(name) = locals.pop() {
+        let local = branch.subject().branch(name).load().perform(env).await?;
+        for entry in local.upstreams().iter() {
+            match entry {
+                Upstream::Remote { remote, .. } => {
+                    if !remotes.contains(remote) {
+                        remotes.push(remote.clone());
+                    }
+                }
+                Upstream::Local { branch: name, .. } => {
+                    if visited.insert(name.clone()) {
+                        locals.push(name.clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok(remotes)
+}
+
+/// Load every reachable tracked remote other than the push target,
+/// best-effort: a remote that fails to load is simply not a source. The
+/// forwarder tries sources in order and fails loudly only when content
+/// is available nowhere.
+async fn source_remotes<Env>(
+    tracked: &[String],
+    branch: &Branch,
+    target: &str,
+    env: &Env,
+) -> Vec<RemoteRepository>
+where
+    Env: Provider<Resolve> + ConditionalSync + 'static,
+{
+    let mut sources = Vec::with_capacity(tracked.len());
+    for name in tracked {
+        if name == target {
+            continue;
+        }
+        if let Ok(remote) = branch
+            .subject()
+            .remote(name.clone())
+            .load()
+            .perform(env)
+            .await
+        {
+            sources.push(remote);
+        }
+    }
+    sources
+}
+
+/// One request answering "does `remote` hold this block": a forked
+/// catalog get. The bytes of a hit are discarded — the answer is the
+/// point — and a dumb store offers nothing cheaper than a get.
+async fn remote_has_block<Env>(
+    hash: &NodeHash,
+    remote: &RemoteRepository,
+    env: &Env,
+) -> Result<bool, PushError>
+where
+    Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+{
+    let address = remote.address();
+    let found: Option<Vec<u8>> = address
+        .subject
+        .clone()
+        .archive()
+        .catalog("index")
+        .get(hash.clone())
+        .fork(&address.address)
+        .perform(env)
+        .await
+        .map_err(dialog_storage::DialogStorageError::from)
+        .map_err(dialog_search_tree::DialogSearchTreeError::from)?;
+    Ok(found.is_some())
+}
+
+/// A block's bytes from `remote`, if it holds them.
+async fn remote_block<Env>(
+    hash: &NodeHash,
+    remote: &RemoteRepository,
+    env: &Env,
+) -> Result<Option<Vec<u8>>, PushError>
+where
+    Env: Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+{
+    let address = remote.address();
+    address
+        .subject
+        .clone()
+        .archive()
+        .catalog("index")
+        .get(hash.clone())
+        .fork(&address.address)
+        .perform(env)
+        .await
+        .map_err(dialog_storage::DialogStorageError::from)
+        .map_err(dialog_search_tree::DialogSearchTreeError::from)
+        .map_err(PushError::from)
+}
+
+/// A block's bytes from wherever this replica can reach them: the local
+/// archive first (free), then each source remote in order.
+async fn block_from_anywhere<Env>(
+    hash: &NodeHash,
+    branch: &Branch,
+    sources: &[RemoteRepository],
+    env: &Env,
+) -> Result<Option<Vec<u8>>, PushError>
+where
+    Env:
+        Provider<Get> + Provider<Put> + Provider<Fork<RemoteSite, Get>> + ConditionalSync + 'static,
+{
+    let local = LocalIndex::new(env, branch.archive().index());
+    if let Some(bytes) = local
+        .get(hash.as_bytes())
+        .await
+        .map_err(dialog_search_tree::DialogSearchTreeError::from)?
+    {
+        return Ok(Some(bytes));
+    }
+    for source in sources {
+        if let Some(bytes) = remote_block(hash, source, env).await? {
+            return Ok(Some(bytes));
+        }
+    }
+    Ok(None)
+}
+
+/// Make sure the target holds a content-addressed block (a tree node's
+/// sibling store also holds spilled values): probe once, and forward the
+/// bytes from wherever they are reachable only on a miss. Never persists
+/// the bytes locally — the pusher is a bridge here, not a replica.
+async fn ensure_block_on_target<Env>(
+    hash: NodeHash,
+    branch: &Branch,
+    target: &RemoteRepository,
+    sources: &[RemoteRepository],
+    env: &Env,
+) -> Result<(), PushError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Put>>
+        + ConditionalSync
+        + 'static,
+{
+    if remote_has_block(&hash, target, env).await? {
+        return Ok(());
+    }
+    let Some(bytes) = block_from_anywhere(&hash, branch, sources, env).await? else {
+        return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
+            "block {hash} is referenced by the head but reachable from no store: \
+             not local, not on the push target, not on any tracked remote"
+        ))
+        .into());
+    };
+    target
+        .archive()
+        .index()
+        .put(Buffer::from(bytes))
+        .perform(env)
+        .await?;
+    Ok(())
+}
+
+/// Make sure the target holds a blob's bytes: probe once (a forked read,
+/// dropped unconsumed on a hit), and stream them from wherever they are
+/// reachable only on a miss.
+async fn ensure_blob_on_target<Env>(
+    digest: dialog_common::Blake3Hash,
+    size: u64,
+    branch: &Branch,
+    target: &RemoteRepository,
+    sources: &[RemoteRepository],
+    env: &Env,
+) -> Result<(), PushError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + Provider<Fork<RemoteSite, BlobImport>>
+        + Provider<Resolve>
+        + ConditionalSync
+        + 'static,
+{
+    let address = target.address();
+    let probe = address
+        .subject
+        .clone()
+        .archive()
+        .blob()
+        .read(digest.clone())
+        .fork(address.site())
+        .perform(env)
+        .await;
+    match probe {
+        // Present; the unconsumed reader is dropped. (A ranged 1-byte
+        // read would bound the probe's bandwidth too — refinement noted
+        // in the version-control notes.)
+        Ok(_) => return Ok(()),
+        Err(BlobError::NotFound(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    // Local bytes first (free), then each source remote.
+    let mut source = match branch
+        .archive()
+        .blob()
+        .read(digest.clone())
+        .perform(env)
+        .await
+    {
+        Ok(reader) => Some(reader),
+        Err(BlobError::NotFound(_)) => None,
+        Err(error) => return Err(error.into()),
+    };
+    if source.is_none() {
+        for origin in sources {
+            let origin_address = origin.address();
+            match origin_address
+                .subject
+                .clone()
+                .archive()
+                .blob()
+                .read(digest.clone())
+                .fork(origin_address.site())
+                .perform(env)
+                .await
+            {
+                Ok(reader) => {
+                    source = Some(reader);
+                    break;
+                }
+                Err(BlobError::NotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    let Some(mut source) = source else {
+        return Err(BlobError::NotFound(format!(
+            "blob {digest:?} is referenced by the head but reachable from no store: \
+             not local, not on the push target, not on any tracked remote"
+        ))
+        .into());
+    };
+
+    let mut sink = address
+        .subject
+        .clone()
+        .archive()
+        .blob()
+        .import(digest, size)
+        .fork(address.site())
+        .perform(env)
+        .await?;
+    while let Some(chunk) = source.next().await? {
+        sink.write_all(&chunk).await?;
+    }
+    sink.finish().await?;
+    Ok(())
+}
+
+/// Transfer a by-reference subtree to the target, minimally: probe each
+/// node once (a positive prunes its whole subtree — sound because
+/// uploads are children-before-parents, so presence implies subtree
+/// presence), fetch a missing node from wherever it is reachable, ship
+/// the blobs and spilled values its entries name, and upload the node
+/// itself only after its children — all streamed through without ever
+/// persisting a byte locally.
+async fn forward_subtree<Env>(
+    root: NodeHash,
+    branch: &Branch,
+    target: &RemoteRepository,
+    sources: &[RemoteRepository],
+    target_may_have: bool,
+    visited: &mut HashSet<NodeHash>,
+    env: &Env,
+) -> Result<(), PushError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<BlobRead>
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Put>>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + Provider<Fork<RemoteSite, BlobImport>>
+        + ConditionalSync
+        + 'static,
+{
+    enum Frame {
+        Enter(NodeHash),
+        Emit(Vec<u8>),
+    }
+    let mut stack = vec![Frame::Enter(root)];
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Enter(hash) => {
+                if !visited.insert(hash.clone()) {
+                    continue;
+                }
+                if target_may_have && remote_has_block(&hash, target, env).await? {
+                    continue;
+                }
+                let Some(bytes) = block_from_anywhere(&hash, branch, sources, env).await? else {
+                    return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
+                        "node {hash} is referenced by the head but reachable from no store: \
+                         not local, not on the push target, not on any tracked remote"
+                    ))
+                    .into());
+                };
+                let node = PersistentNode::<ArtifactKey, State<Datum>>::try_from(Buffer::from(
+                    bytes.clone(),
+                ))?;
+
+                // The entries this node carries (stored in a segment,
+                // buffered in an index) may name blob bytes and spilled
+                // value blocks the target also lacks; ship those before
+                // the node lands, mirroring the top-level shipment loop.
+                let mut entries: Vec<(ArtifactKey, State<Datum>)> = Vec::new();
+                match node.body() {
+                    ArchivedNodeBody::Segment(segment) => {
+                        segment.for_each_entry::<ArtifactKey, _>(|key, value| {
+                            entries.push((ArtifactKey::from(key.to_vec()), into_owned(value)?));
+                            Ok(())
+                        })?;
+                    }
+                    ArchivedNodeBody::Index(index) => {
+                        for entry in index.all_novelty::<ArtifactKey>()? {
+                            if let NoveltyOp::Assert(value) = entry.op {
+                                entries.push((ArtifactKey::from(entry.key), value));
+                            }
+                        }
+                    }
+                }
+                for (key, value) in entries {
+                    match shipment_ref(&key, &value, false)? {
+                        Some(ShipmentRef::BlobAdded { hash, size }) => {
+                            let digest = dialog_common::Blake3Hash::from(hash);
+                            ensure_blob_on_target(digest, size, branch, target, sources, env)
+                                .await?;
+                        }
+                        Some(ShipmentRef::SpilledValue(reference)) => {
+                            ensure_block_on_target(
+                                NodeHash::from(reference),
+                                branch,
+                                target,
+                                sources,
+                                env,
+                            )
+                            .await?;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // The node's own upload waits for its children: Emit sits
+                // beneath the child frames on the stack, so it pops only
+                // after every child subtree is settled — the invariant the
+                // probes rely on.
+                stack.push(Frame::Emit(bytes));
+                for child in node_children(&node)? {
+                    stack.push(Frame::Enter(child));
+                }
+            }
+            Frame::Emit(bytes) => {
+                target
+                    .archive()
+                    .index()
+                    .put(Buffer::from(bytes))
+                    .perform(env)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

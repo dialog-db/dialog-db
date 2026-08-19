@@ -33,6 +33,7 @@ use crate::{
 pub struct Download<'a> {
     branch: &'a Branch,
     from: Option<Upstream>,
+    revision: Option<Revision>,
 }
 
 impl Branch {
@@ -46,11 +47,20 @@ impl Branch {
         Download {
             branch: self,
             from: None,
+            revision: None,
         }
     }
 }
 
 impl Download<'_> {
+    /// Materialize `revision` instead of the branch's current head —
+    /// how a caller downloads a prepared-but-not-yet-adopted revision
+    /// so the head never advances past the blocks the store holds.
+    pub fn of(mut self, revision: Revision) -> Self {
+        self.revision = Some(revision);
+        self
+    }
+
     /// Materialize the branch's current revision locally.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), DownloadError>
     where
@@ -65,7 +75,7 @@ impl Download<'_> {
             + 'static,
     {
         let branch = self.branch;
-        let Some(revision) = branch.revision() else {
+        let Some(revision) = self.revision.or_else(|| branch.revision()) else {
             return Ok(());
         };
         let upstream = self.from.or_else(|| branch.upstream());
@@ -116,8 +126,13 @@ impl<'a> Pull<'a> {
 }
 
 impl PullDownload<'_> {
-    /// Pull, then materialize the adopted head locally. Returns what the
-    /// pull returned.
+    /// Pull with the materialization ORDERED BEFORE the head advance:
+    /// prepare the merge, download every block and blob the prepared
+    /// revision references, and only then commit the cell advance. A
+    /// failed download — offline included — leaves the local revision
+    /// untouched, so the branch can never point at blocks the store
+    /// lacks: there is no window in which a crash or a lost connection
+    /// strands a by-reference head. Returns what the pull returned.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<Revision>, PullError>
     where
         Env: Provider<Get>
@@ -137,10 +152,18 @@ impl PullDownload<'_> {
     {
         let branch = self.0.branch();
         let from = self.0.source().cloned();
-        let pulled = self.0.perform(env).await?;
-        if pulled.is_some() {
-            Download { branch, from }.perform(env).await?;
+        // Boxed: the prepare future carries the whole pull machinery and
+        // trips the large-futures lint inline.
+        let prepared = Box::pin(self.0.prepare(env)).await?;
+        if let Some(revision) = prepared.revision().cloned() {
+            Download {
+                branch,
+                from,
+                revision: Some(revision),
+            }
+            .perform(env)
+            .await?;
         }
-        Ok(pulled)
+        prepared.commit(env).await
     }
 }
