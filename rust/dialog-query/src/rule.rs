@@ -15,6 +15,7 @@
 //! [`AnalyzerError`](crate::AnalyzerError)) reference, so error
 //! reporting is uniform across both kinds.
 
+use crate::artifact::Entity;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::{AnalysisError, TypeError};
 use crate::planner::Planner;
@@ -63,6 +64,33 @@ pub enum Rule {
 }
 
 impl Rule {
+    /// This rule's content-addressed identity, if it has a canonical
+    /// encoding — see [`DeductiveRule::try_this`] /
+    /// [`InductiveRule::try_this`].
+    pub fn try_this(&self) -> Option<Entity> {
+        match self {
+            Rule::Deductive(r) => r.try_this(),
+            Rule::Inductive(r) => r.try_this(),
+        }
+    }
+
+    /// Human-readable description, when the rule carries one.
+    pub fn description(&self) -> Option<&str> {
+        match self {
+            Rule::Deductive(r) => r.description(),
+            Rule::Inductive(r) => r.description(),
+        }
+    }
+
+    /// This rule with the given description. Descriptions live
+    /// outside the content address.
+    pub fn with_description(self, description: Option<String>) -> Self {
+        match self {
+            Rule::Deductive(r) => Rule::Deductive(r.with_description(description)),
+            Rule::Inductive(r) => Rule::Inductive(r.with_description(description)),
+        }
+    }
+
     /// The conclusion (head) of this rule.
     pub fn conclusion(&self) -> &ConceptDescriptor {
         match self {

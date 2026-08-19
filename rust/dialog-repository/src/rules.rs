@@ -60,7 +60,7 @@ use crate::{Revision, schema};
 // rule types themselves; this module re-uses them for its selectors,
 // caches, and dispatch probing.
 pub(crate) use dialog_query::rule::statement::{
-    conclusion_attr, on_attr, on_entity, reads_attr, source_attr,
+    conclusion_attr, description_attr, on_attr, on_entity, reads_attr, source_attr,
 };
 
 /// The `dialog.concept/transient` marker attribute. A concept carrying it

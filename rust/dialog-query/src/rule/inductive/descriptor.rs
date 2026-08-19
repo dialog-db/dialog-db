@@ -64,12 +64,13 @@ impl InductiveRuleDescriptor {
             premises.push(Premise::Unless(Negation::not(proposition)));
         }
 
-        match (self.assert, self.retract) {
+        let rule = match (self.assert, self.retract) {
             (Some(conclusion), None) => InductiveRule::new(conclusion, premises),
             (None, Some(conclusion)) => InductiveRule::retracting(conclusion, premises),
             (Some(_), Some(_)) => Err(TypeError::ConflictingHead),
             (None, None) => Err(TypeError::MissingHead),
-        }
+        }?;
+        Ok(rule.with_description(self.description))
     }
 }
 
@@ -77,6 +78,39 @@ impl InductiveRuleDescriptor {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A description survives compilation and serde, but never the
+    /// canonical encoding: the described rule and its
+    /// description-less twin share bytes and identity.
+    #[dialog_common::test]
+    fn it_keeps_the_description_outside_the_content_address() {
+        let body = json!({
+            "assert!": {
+                "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "count": { "?": { "name": "count" } }
+                }
+            }]
+        });
+        let mut described = body.clone();
+        described["description"] = json!("Carries the count forward");
+
+        let plain: InductiveRule = serde_json::from_value(body).unwrap();
+        let described: InductiveRule = serde_json::from_value(described).unwrap();
+
+        assert_eq!(described.description(), Some("Carries the count forward"));
+        assert_eq!(described.encode(), plain.encode());
+        assert_eq!(described.this(), plain.this());
+        // Serde round-trips the prose even though the encoding drops it.
+        let json = serde_json::to_value(&described).unwrap();
+        assert_eq!(json["description"], json!("Carries the count forward"));
+    }
 
     #[dialog_common::test]
     fn it_deserializes_increment_counter_rule() {

@@ -35,17 +35,28 @@ pub struct DeductiveRule {
     /// The narrowed premises, inferred types, and dependency graph
     /// produced by analysis.
     analysis: AnalyzedRule,
+    /// Human-readable description, carried through compilation but
+    /// deliberately outside the content address (like the transient
+    /// marker on concepts): prose can change without moving the
+    /// rule's identity. Persisted as a sidecar
+    /// `dialog.rule/description` claim, never inside the canonical
+    /// body.
+    description: Option<String>,
 }
 impl Compile for DeductiveRule {
     const KIND: RuleKind = RuleKind::Deductive;
 
     fn from_analysis(analysis: AnalyzedRule) -> Self {
-        DeductiveRule { analysis }
+        DeductiveRule {
+            analysis,
+            description: None,
+        }
     }
 
     fn in_progress(conclusion: ConceptDescriptor, premises: Vec<Premise>) -> Self {
         DeductiveRule {
             analysis: AnalyzedRule::in_progress(conclusion, premises),
+            description: None,
         }
     }
 }
@@ -81,6 +92,18 @@ impl DeductiveRule {
             });
         }
         compile_rule::<Self>(conclusion, premises, reduce.into_iter().collect())
+    }
+
+    /// This rule with the given description. Descriptions live
+    /// outside the content address -- see the field docs.
+    pub fn with_description(mut self, description: Option<String>) -> Self {
+        self.description = description;
+        self
+    }
+
+    /// Human-readable description, when the rule carries one.
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
     /// The checked `reduce` clause entries, in head-field order.
@@ -162,7 +185,7 @@ impl DeductiveRule {
         }
 
         DeductiveRuleDescriptor {
-            description: None,
+            description: self.description.clone(),
             deduce: self.conclusion().clone(),
             when,
             unless,
@@ -192,7 +215,13 @@ impl DeductiveRule {
     /// needed. This is the same encoding dialog content-addresses with
     /// elsewhere.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
-        serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
+        // The canonical form always carries `description: None`: the
+        // description is outside the content address, so a described
+        // rule and its description-less twin encode -- and are
+        // stored -- byte-identically.
+        let mut canonical = self.descriptor();
+        canonical.description = None;
+        serde_ipld_dagcbor::to_vec(&canonical).ok()
     }
 
     /// This rule's content-addressed identity, if it has a canonical

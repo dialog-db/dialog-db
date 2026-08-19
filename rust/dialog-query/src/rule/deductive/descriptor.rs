@@ -111,7 +111,10 @@ impl DeductiveRuleDescriptor {
             premises.push(Premise::Unless(Negation::not(proposition)));
         }
 
-        DeductiveRule::with_reduce(self.deduce, premises, self.reduce)
+        Ok(
+            DeductiveRule::with_reduce(self.deduce, premises, self.reduce)?
+                .with_description(self.description),
+        )
     }
 }
 
