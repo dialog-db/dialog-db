@@ -152,7 +152,9 @@ impl PullDownload<'_> {
     {
         let branch = self.0.branch();
         let from = self.0.source().cloned();
-        let prepared = self.0.prepare(env).await?;
+        // Boxed: the prepare future carries the whole pull machinery and
+        // trips the large-futures lint inline.
+        let prepared = Box::pin(self.0.prepare(env)).await?;
         if let Some(revision) = prepared.revision().cloned() {
             Download {
                 branch,

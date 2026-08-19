@@ -1372,8 +1372,17 @@ where
                 // datum rather than being overwritten. A later retraction
                 // covers the whole set — an insert-overwrite here silently
                 // orphaned the earlier claim, which could then resurrect the
-                // fact through a merge. Versioned writes only; the probe rides
-                // the same spine the insert below loads anyway.
+                // fact through a merge. Versioned writes only.
+                //
+                // On the canonical target this probe is free (the insert
+                // rebuilds the same leaf it reads); on the buffered target
+                // the insert is a blind append and this probe is the ONLY
+                // read the assert performs — one EAV spine, on a partial
+                // replica hydrated through the store's remote fallback. The
+                // AEV/VAE/history spines are never read by any write, so
+                // nothing downstream may assume a commit hydrated the paths
+                // it touched (see notes/version-control.md, "Push from a
+                // partial replica").
                 if version.is_some()
                     && let Some(State::Added(standing)) =
                         transient.read(&entity_key, storage).await?

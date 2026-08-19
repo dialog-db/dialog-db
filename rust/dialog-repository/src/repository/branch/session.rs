@@ -32,7 +32,8 @@ use crate::rules::{
 };
 use crate::schema::{DidExt as _, Session, SessionBranch, session};
 use crate::{
-    Branch, NetworkedIndex, RemoteSite, RepositoryArchiveExt as _, RepositoryMemoryExt, Upstream,
+    Branch, NetworkedIndex, RemoteFallback, RemoteSite, RepositoryArchiveExt as _,
+    RepositoryMemoryExt, Upstream,
 };
 
 /// A composable query over one or more branches plus an in-memory
@@ -372,9 +373,15 @@ where
 
         let remote = match branch.upstream() {
             Some(Upstream::Remote { remote: name, .. }) => {
-                branch.subject().remote(name).load().perform(env).await.ok()
+                let loaded = branch
+                    .subject()
+                    .remote(name.clone())
+                    .load()
+                    .perform(env)
+                    .await;
+                RemoteFallback::from_load(name, loaded)
             }
-            _ => None,
+            _ => RemoteFallback::None,
         };
 
         let store = NetworkedIndex::new(env, select.catalog(), remote);
@@ -474,14 +481,16 @@ where
     async fn execute(&self, input: Blake3Hash) -> Result<Option<Vec<u8>>, DialogArtifactsError> {
         for branch in &self.branches {
             let remote = match branch.upstream() {
-                Some(Upstream::Remote { remote: name, .. }) => branch
-                    .subject()
-                    .remote(name)
-                    .load()
-                    .perform(self.env)
-                    .await
-                    .ok(),
-                _ => None,
+                Some(Upstream::Remote { remote: name, .. }) => {
+                    let loaded = branch
+                        .subject()
+                        .remote(name.clone())
+                        .load()
+                        .perform(self.env)
+                        .await;
+                    RemoteFallback::from_load(name, loaded)
+                }
+                _ => RemoteFallback::None,
             };
             let store = NetworkedIndex::new(self.env, branch.archive().index(), remote);
             let cached = branch
