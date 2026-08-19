@@ -565,6 +565,43 @@ async fn dkim_key_lookup_is_cached() {
     assert_eq!(fetch_handle.calls(), 1);
 }
 
+/// The DKIM key cache must not grow without bound on attacker-chosen keys.
+///
+/// The `(selector, domain)` pair comes from the proof's `s=`/`d=` tags, and any
+/// real DKIM record on the internet (every provider selector times every
+/// domain) makes a valid entry, so a hostile stream of proofs can otherwise pin
+/// unbounded memory in the verifying server. This pins that the map stays
+/// inside its bound while resolving far more distinct pairs than it can hold.
+#[dialog_common::test]
+async fn dkim_key_cache_is_bounded() {
+    const CAPACITY: usize = 4;
+
+    let (_signing, _key, p) = rsa_key();
+    let record = format!("v=DKIM1; k=rsa; p={p}");
+
+    // One MapFetch serving a distinct DoH route per (selector, domain) pair.
+    let mut fetch = MapFetch::new();
+    for i in 0..(CAPACITY * 10) {
+        let url =
+            format!("https://dns.google/resolve?name=s{i}._domainkey.host{i}.example&type=TXT");
+        fetch = fetch.with(url, doh_body(&record));
+    }
+    let provider = DkimKeyProvider::with_fetch(fetch).with_capacity(CAPACITY);
+
+    for i in 0..(CAPACITY * 10) {
+        provider
+            .resolve_key(&format!("s{i}"), &format!("host{i}.example"))
+            .await
+            .unwrap();
+    }
+
+    assert!(
+        provider.cached_keys() <= CAPACITY,
+        "the key cache must stay within its bound, held {} with a cap of {CAPACITY}",
+        provider.cached_keys()
+    );
+}
+
 #[dialog_common::test]
 async fn multiple_bindings_compose_into_multiverifier() {
     // Two "I am also known as" emails naming two different keys yield a

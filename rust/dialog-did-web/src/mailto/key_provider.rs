@@ -12,7 +12,12 @@
 //! DNS-over-HTTPS endpoint (`dns.google`) whose response is fully determined by
 //! the request URL's query string, which is what a GET-only [`Fetch`] supports.
 //!
-//! Resolutions are cached with a TTL, like [`CachingResolver`](crate::CachingResolver).
+//! Resolutions are cached with a TTL, like [`CachingResolver`](crate::CachingResolver),
+//! and the cache is bounded for the same reason that one is: the `(selector,
+//! domain)` key comes from an attacker-supplied proof, and the internet holds
+//! millions of real DKIM records (every provider selector times every domain),
+//! each a valid entry an attacker can make this cache hold. See
+//! [`MAX_KEY_ENTRIES`].
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -33,6 +38,15 @@ const DEFAULT_DOH_ENDPOINT: &str = "https://dns.google/resolve";
 
 /// The default cache TTL for a resolved DKIM key.
 pub const DEFAULT_DKIM_KEY_TTL: Duration = Duration::from_secs(3600);
+
+/// The most resolved keys a [`DkimKeyProvider`] will hold.
+///
+/// The `(selector, domain)` pair is attacker-chosen (it comes from the proof's
+/// `s=`/`d=` tags), and any real DKIM record on the internet makes a valid
+/// entry, so an unbounded map grows at attacker request. Real deployments talk
+/// to a handful of mail domains; this is orders of magnitude of headroom over
+/// that while capping what a hostile stream of proofs can pin in memory.
+pub const MAX_KEY_ENTRIES: usize = 1024;
 
 /// Check that `label` is a DNS name safe to interpolate into the DoH query.
 ///
@@ -74,6 +88,7 @@ pub struct DkimKeyProvider<F = ReqwestFetch> {
     fetch: F,
     endpoint: String,
     ttl: Duration,
+    max_entries: usize,
     cache: Mutex<HashMap<String, (Instant, DkimPublicKey)>>,
 }
 
@@ -98,6 +113,7 @@ impl<F: Fetch> DkimKeyProvider<F> {
             fetch,
             endpoint: DEFAULT_DOH_ENDPOINT.to_string(),
             ttl: DEFAULT_DKIM_KEY_TTL,
+            max_entries: MAX_KEY_ENTRIES,
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -114,6 +130,20 @@ impl<F: Fetch> DkimKeyProvider<F> {
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = ttl;
         self
+    }
+
+    /// Override the cache entry bound (clamped to at least 1).
+    #[must_use]
+    pub fn with_capacity(mut self, max_entries: usize) -> Self {
+        self.max_entries = max_entries.max(1);
+        self
+    }
+
+    /// How many resolved keys the cache currently holds. Never exceeds the
+    /// configured bound; exposed so the bound itself is testable.
+    #[must_use]
+    pub fn cached_keys(&self) -> usize {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// The DoH query URL for a `(selector, domain)` pair.
@@ -175,11 +205,28 @@ impl<F: Fetch> DkimKeyProvider<F> {
     }
 
     fn store(&self, key: String, value: DkimPublicKey) {
-        let expires = Instant::now() + self.ttl;
-        self.cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(key, (expires, value));
+        let now = Instant::now();
+        let expires = now + self.ttl;
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Bounded like `CachingResolver` (see the module docs): only a new key
+        // can grow the map, expired entries go first, then the entry nearest
+        // expiry, so eviction only ever costs a refetch.
+        if cache.len() >= self.max_entries && !cache.contains_key(&key) {
+            cache.retain(|_, (expires_at, _)| *expires_at > now);
+            while cache.len() >= self.max_entries {
+                let Some(soonest) = cache
+                    .iter()
+                    .min_by_key(|(_, (expires_at, _))| *expires_at)
+                    .map(|(k, _)| k.clone())
+                else {
+                    break;
+                };
+                cache.remove(&soonest);
+            }
+        }
+
+        cache.insert(key, (expires, value));
     }
 }
 
