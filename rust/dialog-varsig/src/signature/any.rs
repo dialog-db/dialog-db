@@ -28,6 +28,9 @@ use crate::algorithm::ecdsa::{Es256, Es256Signature};
 #[cfg(feature = "webauthn")]
 use crate::algorithm::webauthn::{WebAuthnP256, WebAuthnSignature};
 
+#[cfg(feature = "rsa")]
+use crate::algorithm::rsa::{Rs256, RsaSignature};
+
 /// The algorithm tag carried by [`AnySignature`] and [`AnyAlgorithm`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlgorithmTag {
@@ -39,6 +42,12 @@ pub enum AlgorithmTag {
     /// WebAuthn (P-256 assertion carrying authenticator context).
     #[cfg(feature = "webauthn")]
     WebAuthn,
+    /// RSA-2048 PKCS#1 v1.5 with SHA-256 (256-byte signatures).
+    #[cfg(feature = "rsa")]
+    Rsa2048,
+    /// RSA-4096 PKCS#1 v1.5 with SHA-256 (512-byte signatures).
+    #[cfg(feature = "rsa")]
+    Rsa4096,
 }
 
 impl AlgorithmTag {
@@ -57,6 +66,13 @@ impl AlgorithmTag {
             AlgorithmTag::Es256 => len == 64,
             #[cfg(feature = "webauthn")]
             AlgorithmTag::WebAuthn => len > 0,
+            // RSA signatures equal the modulus size: 256 bytes for RSA-2048 and
+            // 512 bytes for RSA-4096. The key size tag in the varsig header,
+            // not the body, is what distinguishes the two algorithms.
+            #[cfg(feature = "rsa")]
+            AlgorithmTag::Rsa2048 => len == 256,
+            #[cfg(feature = "rsa")]
+            AlgorithmTag::Rsa4096 => len == 512,
         }
     }
 }
@@ -83,6 +99,10 @@ impl SignatureAlgorithm for AnyAlgorithm {
             AlgorithmTag::Es256 => Es256::default().prefix(),
             #[cfg(feature = "webauthn")]
             AlgorithmTag::WebAuthn => WebAuthnP256::default().prefix(),
+            #[cfg(feature = "rsa")]
+            AlgorithmTag::Rsa2048 => Rs256::<256>::default().prefix(),
+            #[cfg(feature = "rsa")]
+            AlgorithmTag::Rsa4096 => Rs256::<512>::default().prefix(),
         }
     }
 
@@ -93,6 +113,10 @@ impl SignatureAlgorithm for AnyAlgorithm {
             AlgorithmTag::Es256 => Es256::default().config_tags(),
             #[cfg(feature = "webauthn")]
             AlgorithmTag::WebAuthn => WebAuthnP256::default().config_tags(),
+            #[cfg(feature = "rsa")]
+            AlgorithmTag::Rsa2048 => Rs256::<256>::default().config_tags(),
+            #[cfg(feature = "rsa")]
+            AlgorithmTag::Rsa4096 => Rs256::<512>::default().config_tags(),
         }
     }
 
@@ -112,6 +136,17 @@ impl SignatureAlgorithm for AnyAlgorithm {
         #[cfg(feature = "es256")]
         if let Some((_, rest)) = Es256::try_from_tags(bytes) {
             return Some((AnyAlgorithm(AlgorithmTag::Es256), rest));
+        }
+        // The two RSA headers share a prefix and hash tag and differ only in the
+        // trailing key-size tag, so each `try_from_tags` matches only its own
+        // size and there is no ordering hazard between them.
+        #[cfg(feature = "rsa")]
+        if let Some((_, rest)) = Rs256::<256>::try_from_tags(bytes) {
+            return Some((AnyAlgorithm(AlgorithmTag::Rsa2048), rest));
+        }
+        #[cfg(feature = "rsa")]
+        if let Some((_, rest)) = Rs256::<512>::try_from_tags(bytes) {
+            return Some((AnyAlgorithm(AlgorithmTag::Rsa4096), rest));
         }
         None
     }
@@ -195,6 +230,26 @@ impl From<WebAuthnSignature> for AnySignature {
         Self {
             algorithm: AlgorithmTag::WebAuthn,
             bytes: sig.to_vec().into_boxed_slice(),
+        }
+    }
+}
+
+#[cfg(feature = "rsa")]
+impl From<RsaSignature<256>> for AnySignature {
+    fn from(sig: RsaSignature<256>) -> Self {
+        Self {
+            algorithm: AlgorithmTag::Rsa2048,
+            bytes: sig.0.into_boxed_slice(),
+        }
+    }
+}
+
+#[cfg(feature = "rsa")]
+impl From<RsaSignature<512>> for AnySignature {
+    fn from(sig: RsaSignature<512>) -> Self {
+        Self {
+            algorithm: AlgorithmTag::Rsa4096,
+            bytes: sig.0.into_boxed_slice(),
         }
     }
 }
@@ -400,5 +455,62 @@ mod tests {
         assert_eq!(any.to_bytes(), expected.as_slice());
         let restored = WebAuthnSignature::from_bytes(any.to_bytes()).unwrap();
         assert_eq!(restored.authenticator_data, vec![0xAA; 37]);
+    }
+
+    #[cfg(feature = "rsa")]
+    #[test]
+    fn rsa_header_distinguishes_2048_from_4096() {
+        use crate::SignatureAlgorithm;
+
+        let rsa2048 = AnyAlgorithm(AlgorithmTag::Rsa2048);
+        let rsa4096 = AnyAlgorithm(AlgorithmTag::Rsa4096);
+
+        let mut header_2048 = vec![rsa2048.prefix()];
+        header_2048.extend(rsa2048.config_tags());
+        let mut header_4096 = vec![rsa4096.prefix()];
+        header_4096.extend(rsa4096.config_tags());
+
+        // The two headers share prefix + hash tag but differ in the key-size
+        // tag, so each parses back to its own tag and never the other.
+        assert_ne!(header_2048, header_4096);
+        let (parsed_2048, rest) = AnyAlgorithm::try_from_tags(&header_2048).unwrap();
+        assert_eq!(parsed_2048.0, AlgorithmTag::Rsa2048);
+        assert!(rest.is_empty());
+        let (parsed_4096, rest) = AnyAlgorithm::try_from_tags(&header_4096).unwrap();
+        assert_eq!(parsed_4096.0, AlgorithmTag::Rsa4096);
+        assert!(rest.is_empty());
+    }
+
+    #[cfg(feature = "rsa")]
+    #[test]
+    fn rsa_from_algorithm_bytes_enforces_width() {
+        use crate::algorithm::rsa::RsaSignature;
+
+        // A 2048 header accepts only a 256-byte body; a 4096 header only 512.
+        let ok_2048 = <AnySignature as Signature>::from_algorithm_bytes(
+            &AnyAlgorithm(AlgorithmTag::Rsa2048),
+            &[0u8; 256],
+        )
+        .unwrap();
+        assert_eq!(ok_2048.algorithm(), AlgorithmTag::Rsa2048);
+        assert!(
+            <AnySignature as Signature>::from_algorithm_bytes(
+                &AnyAlgorithm(AlgorithmTag::Rsa2048),
+                &[0u8; 512],
+            )
+            .is_err()
+        );
+        let ok_4096 = <AnySignature as Signature>::from_algorithm_bytes(
+            &AnyAlgorithm(AlgorithmTag::Rsa4096),
+            &[0u8; 512],
+        )
+        .unwrap();
+        assert_eq!(ok_4096.algorithm(), AlgorithmTag::Rsa4096);
+
+        // The concrete signature body roundtrips through the agnostic wrapper.
+        let sig = RsaSignature::<256>::from_bytes(vec![7u8; 256]).unwrap();
+        let any = AnySignature::from(sig.clone());
+        assert_eq!(any.algorithm(), AlgorithmTag::Rsa2048);
+        assert_eq!(any.to_bytes(), sig.to_bytes());
     }
 }

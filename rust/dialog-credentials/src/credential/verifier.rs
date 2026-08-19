@@ -59,6 +59,8 @@ impl VerifierCredential {
             Verifier::WebAuthn(verifier) => {
                 VerifierCredentialExport(webauthn_native::export(verifier))
             }
+            #[cfg(feature = "rsa")]
+            Verifier::Rsa(verifier) => VerifierCredentialExport(rsa_native::export(verifier)),
         }
     }
 
@@ -88,9 +90,38 @@ impl VerifierCredential {
             return Ok(Self(Verifier::WebAuthn(verifier)));
         }
 
+        #[cfg(feature = "rsa")]
+        if let Some(verifier) = rsa_native::try_import(data)? {
+            return Ok(Self(Verifier::Rsa(verifier)));
+        }
+
         Err(CredentialExportError::InvalidFormat(
             "unrecognized verifier credential tag".into(),
         ))
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "rsa"))]
+mod rsa_native {
+    use super::CredentialExportError;
+    use crate::credential::constants::{RSA_PUBLIC_TAG, RSA_PUBLIC_TAG_SIZE};
+    use crate::rsa::{RsaVerifier, RsaVerifyingKey};
+
+    pub(super) fn export(verifier: &RsaVerifier) -> Vec<u8> {
+        let key_der = verifier.0.to_pkcs1_der();
+        let mut buffer = Vec::with_capacity(RSA_PUBLIC_TAG_SIZE + key_der.len());
+        buffer.extend_from_slice(RSA_PUBLIC_TAG);
+        buffer.extend_from_slice(&key_der);
+        buffer
+    }
+
+    pub(super) fn try_import(data: &[u8]) -> Result<Option<RsaVerifier>, CredentialExportError> {
+        if !data.starts_with(RSA_PUBLIC_TAG) {
+            return Ok(None);
+        }
+        let key = RsaVerifyingKey::from_pkcs1_der(&data[RSA_PUBLIC_TAG_SIZE..])
+            .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
+        Ok(Some(RsaVerifier(key)))
     }
 }
 
@@ -208,6 +239,15 @@ impl VerifierCredential {
                 buffer.extend_from_slice(&compressed);
                 buffer
             }
+            #[cfg(feature = "rsa")]
+            Verifier::Rsa(verifier) => {
+                use crate::credential::constants::RSA_PUBLIC_TAG;
+                let key_der = verifier.0.to_pkcs1_der();
+                let mut buffer = Vec::with_capacity(RSA_PUBLIC_TAG.len() + key_der.len());
+                buffer.extend_from_slice(RSA_PUBLIC_TAG);
+                buffer.extend_from_slice(&key_der);
+                buffer
+            }
         }
     }
 
@@ -263,6 +303,19 @@ impl VerifierCredential {
                 let verifier = crate::webauthn::WebAuthnVerifier::from_sec1_bytes(key)
                     .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
                 return Ok(Self(Verifier::WebAuthn(verifier)));
+            }
+        }
+
+        #[cfg(feature = "rsa")]
+        {
+            use crate::credential::constants::RSA_PUBLIC_TAG;
+            // The RSA key body is variable length, so match on the tag prefix
+            // alone rather than an exact length.
+            if bytes.starts_with(RSA_PUBLIC_TAG) {
+                let key = &bytes[RSA_PUBLIC_TAG.len()..];
+                let vk = crate::rsa::RsaVerifyingKey::from_pkcs1_der(key)
+                    .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
+                return Ok(Self(Verifier::Rsa(crate::rsa::RsaVerifier(vk))));
             }
         }
 

@@ -10,6 +10,10 @@ license.workspace = true
 default = ["ed25519"]
 ed25519 = ["dialog-credentials/ed25519"]
 es256 = ["dialog-credentials/es256", "dep:p256"]
+# RSA verification methods are did:keys with the rsa-pub multicodec, so enabling
+# this lets did:web / did:plc documents resolve RSA keys through the same
+# multibase / did:key path.
+rsa = ["dialog-credentials/rsa"]
 # A passkey verification method is a did:key with the WebAuthn multicodec, so
 # enabling this lets did:web / did:plc documents resolve passkeys to a
 # WebAuthnVerifier through the same multibase / did:key path.
@@ -61,7 +65,7 @@ dialog-common = { workspace = true, features = ["helpers"] }
 # and by the P-256 JWK tests, which build raw curve points to pin that an
 # invalid (x, y) is refused rather than reinterpreted.
 p256 = { workspace = true, features = ["ecdsa"] }
-dialog-credentials = { workspace = true, features = ["es256"] }
+dialog-credentials = { workspace = true, features = ["es256", "rsa"] }
 serde_json = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 dialog-ucan-core = { workspace = true }

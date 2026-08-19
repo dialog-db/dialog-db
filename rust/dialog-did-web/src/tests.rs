@@ -5,8 +5,16 @@
 //! agnostic verifier that resolution recovers is checked by actually verifying a
 //! signature the matching signer produced.
 
+use dialog_credentials::rsa::RsaSigner;
 use dialog_credentials::{Ed25519Signer, Es256Signer, Signer};
 use dialog_varsig::{Did, Principal, Signer as VarsigSigner, Verifier as VarsigVerifier};
+
+/// A signer built from the cached 2048-bit RSA test key. Generating an RSA key
+/// per test is far too slow, so every test shares this fixed key.
+fn rsa_signer() -> Signer {
+    let der = include_bytes!("fixtures/rsa_test_2048.pkcs1.der");
+    Signer::from(RsaSigner::from_pkcs1_der(der).unwrap())
+}
 
 use crate::document::DidDocument;
 use crate::fetch::MapFetch;
@@ -96,6 +104,31 @@ async fn it_verifies_a_signature_by_any_document_key() {
     // A signature by the FIRST key must also verify.
     let sig1 = VarsigSigner::sign(&key1, msg).await.unwrap();
     verifier.verify(msg, &sig1).await.unwrap();
+}
+
+/// An RSA verification method in a did:web document resolves to an RSA verifier
+/// (via the rsa-pub multicodec + variable-length did:key parse) and verifies a
+/// signature the matching RSA signer produced.
+#[dialog_common::test]
+async fn it_resolves_and_verifies_an_rsa_did_web_key() {
+    let key = rsa_signer();
+    let did_web = "did:web:rsa.example";
+    let doc = did_document_multibase(did_web, &key);
+    let fetch = MapFetch::new().with("https://rsa.example/.well-known/did.json", doc.into_bytes());
+    let provider = DidWebProvider::with_fetch(fetch);
+
+    let did: Did = did_web.parse().unwrap();
+    let verifier = Resolve::new(did).perform(&provider).await.unwrap();
+    assert_eq!(verifier.did().as_str(), did_web);
+
+    let msg = b"signed under did:web with an rsa key";
+    let sig = VarsigSigner::sign(&key, msg).await.unwrap();
+    verifier.verify(msg, &sig).await.unwrap();
+
+    // A signature by a different key must be refused.
+    let outsider = Signer::from(Ed25519Signer::generate().await.unwrap());
+    let bad = VarsigSigner::sign(&outsider, msg).await.unwrap();
+    assert!(verifier.verify(msg, &bad).await.is_err());
 }
 
 /// A signature made with a key that is NOT in the document must be refused,

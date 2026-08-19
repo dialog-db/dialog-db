@@ -53,6 +53,23 @@ pub const ES256_VERIFIER_EXPORT_SIZE: usize = ES256_PUBLIC_TAG_SIZE + ES256_PUBL
 #[cfg(feature = "es256")]
 pub const ES256_PUBLIC_KEY_OFFSET: usize = ES256_PRIVATE_TAG_SIZE + ES256_PRIVATE_KEY_SIZE;
 
+/// Multicodec varint for an RSA public key (`rsa-pub`, `0x1205`). The key bytes
+/// that follow are the PKCS#1 DER `RSAPublicKey` and are variable length, so an
+/// RSA credential is not a fixed size like the curve credentials.
+#[cfg(feature = "rsa")]
+pub const RSA_PUBLIC_TAG: &[u8] = &[0x85, 0x24];
+/// Byte length of the RSA public key multicodec tag prefix.
+#[cfg(feature = "rsa")]
+pub const RSA_PUBLIC_TAG_SIZE: usize = RSA_PUBLIC_TAG.len();
+/// Private-use multicodec varint marking an RSA PKCS#1 DER private key. There is
+/// no registered `rsa-priv` code, so an application-local private-use tag marks
+/// the variable-length private key body that follows.
+#[cfg(feature = "rsa")]
+pub const RSA_PRIVATE_TAG: &[u8] = &[0x81, 0x80, 0xc0, 0x02];
+/// Byte length of the RSA private key multicodec tag prefix.
+#[cfg(feature = "rsa")]
+pub const RSA_PRIVATE_TAG_SIZE: usize = RSA_PRIVATE_TAG.len();
+
 /// Private-use multicodec varint marking a WebAuthn P-256 public key
 /// (`0x300001`). The key bytes that follow are an ordinary 33-byte compressed
 /// P-256 point; only the tag distinguishes a passkey from a plain p256-pub key.
