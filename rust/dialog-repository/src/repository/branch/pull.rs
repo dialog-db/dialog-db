@@ -968,6 +968,16 @@ pub struct Merged<'a> {
 }
 
 impl PreparedPull<'_> {
+    /// The revision [`commit`](Self::commit) will publish, if any — the
+    /// merged head a caller can materialize locally BEFORE advancing the
+    /// cells, so the branch never points at blocks the store lacks.
+    pub fn revision(&self) -> Option<&Revision> {
+        match self {
+            PreparedPull::NoOp => None,
+            PreparedPull::Merged(merged) => Some(&merged.new_revision),
+        }
+    }
+
     /// Phase two: advance the branch cells — the head to the merged revision
     /// and the sync-base marker to the merged upstream tree.
     ///
