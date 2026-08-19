@@ -37,7 +37,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::Context;
 
 use rexie::TransactionResult;
 use thiserror::Error as ThisError;
@@ -270,9 +270,7 @@ mod tests {
                 // Stranded, as characterized: handlers armed after the
                 // terminal event never fire. Park the future so its
                 // closures outlive any late event.
-                web_sys::console::log_1(
-                    &"late-armed done() stranded, as characterized".into(),
-                );
+                web_sys::console::log_1(&"late-armed done() stranded, as characterized".into());
                 wasm_bindgen_futures::spawn_local(async move {
                     let _ = late.await;
                 });
