@@ -341,6 +341,12 @@ pub enum PushError {
     #[error("Failed to load remote during push: {0}")]
     LoadRemote(#[from] LoadRemoteError),
 
+    /// Loading a local upstream branch during push failed. Push walks
+    /// local upstream entries to attribute by-reference content to the
+    /// remotes it actually came from.
+    #[error("Failed to load local upstream branch during push: {0}")]
+    LoadBranch(#[from] LoadBranchError),
+
     /// Opening the remote branch failed.
     #[error("Failed to open remote branch during push: {0}")]
     OpenRemoteBranch(#[from] OpenRemoteBranchError),

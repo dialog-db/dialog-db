@@ -27,10 +27,29 @@ use dialog_operator::helpers::{test_operator_with_profile, unique_name};
 // Only the native-only tests below construct one.
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_effects::blob::BlobError;
+// The aborted-push rig and its closure audit are native-only, like the
+// tests that use them.
+#[cfg(not(feature = "web-integration-tests"))]
+use crate::{RemoteRepository, RemoteSite};
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_artifacts::{ShipmentRef, shipment_ref};
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_capability::{Fork, Provider};
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _};
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_effects::{
+    Rejection,
+    blob::{BlobWriter, Import as BlobImportEffect},
+};
 use dialog_network::Network;
 use dialog_operator::{Operator, Profile};
 use dialog_remote_s3::helpers::S3Address;
 use dialog_remote_s3::{Address as S3SiteAddress, S3Credential};
+#[cfg(not(feature = "web-integration-tests"))]
+use dialog_search_tree::NoveltyOp;
 use dialog_search_tree::{
     ArchivedNodeBody, ContentAddressedStorage as TreeStorage, Traversable as _, Visit, into_owned,
 };
@@ -1467,6 +1486,530 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
         .perform(&operator)
         .await?;
     assert!(again.is_some(), "the follow-up push lands its novelty");
+
+    Ok(())
+}
+
+/// Delegating [`Provider`] impls for [`AbortOnRemoteBlobImport`]: every
+/// effect a push needs passes through untouched except the one the rig
+/// fails.
+#[cfg(not(feature = "web-integration-tests"))]
+macro_rules! delegate_provider {
+    ($($command:ty),+ $(,)?) => {
+        $(
+            #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+            #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+            impl<P> Provider<$command> for AbortOnRemoteBlobImport<P>
+            where
+                P: Provider<$command> + dialog_common::ConditionalSync,
+            {
+                async fn execute(
+                    &self,
+                    input: <$command as dialog_capability::Command>::Input,
+                ) -> <$command as dialog_capability::Command>::Output {
+                    self.inner.execute(input).await
+                }
+            }
+        )+
+    };
+}
+
+/// A provider that delegates every effect a push needs except remote
+/// blob imports, which it rejects — a deterministic stand-in for a push
+/// dying mid-transfer (a dropped connection, a killed tab). The push
+/// protocol's reference-order invariant says whatever such a push
+/// managed to land must be closure-complete; residue that violates it
+/// poisons a later pusher's existence probes into publishing a head the
+/// store cannot serve.
+#[cfg(not(feature = "web-integration-tests"))]
+struct AbortOnRemoteBlobImport<P> {
+    inner: P,
+}
+
+#[cfg(not(feature = "web-integration-tests"))]
+delegate_provider!(
+    dialog_effects::archive::Get,
+    dialog_effects::archive::Put,
+    dialog_effects::memory::Resolve,
+    dialog_effects::memory::Publish,
+    dialog_effects::blob::Read,
+    Fork<RemoteSite, dialog_effects::archive::Get>,
+    Fork<RemoteSite, dialog_effects::archive::Put>,
+    Fork<RemoteSite, dialog_effects::memory::Resolve>,
+    Fork<RemoteSite, dialog_effects::memory::Publish>,
+    Fork<RemoteSite, dialog_effects::blob::Read>,
+);
+
+#[cfg(not(feature = "web-integration-tests"))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<P> Provider<Fork<RemoteSite, BlobImportEffect>> for AbortOnRemoteBlobImport<P>
+where
+    P: dialog_common::ConditionalSync,
+{
+    async fn execute(
+        &self,
+        _input: Fork<RemoteSite, BlobImportEffect>,
+    ) -> Result<BlobWriter, BlobError> {
+        Err(BlobError::Rejected(Rejection::Unavailable {
+            reason: "rigged abort: this push dies at its first remote blob import".into(),
+        }))
+    }
+}
+
+/// Asserts the push protocol's reference-order invariant on a remote:
+/// every head-tree block the remote holds is closure-complete — its
+/// children, the blob bytes its entries name, and the spilled value
+/// blocks they reference are all present too. This must hold after ANY
+/// prefix of a push, aborted pushes included: it is what entitles a
+/// later pusher to prune a whole subtree on one positive existence
+/// probe. The head is walked through `index` (the pusher's archive,
+/// optionally hydrating through a source remote), never trusting the
+/// remote under test for its own audit.
+#[cfg(not(feature = "web-integration-tests"))]
+async fn assert_remote_closure_complete(
+    operator: &Operator<VolatileSpace>,
+    index: NetworkedIndex<'_, Operator<VolatileSpace>>,
+    head: NodeHash,
+    remote: &RemoteRepository,
+) -> Result<()> {
+    // Walk the head tree, collecting per node: its hash, its children,
+    // and the blob/spill references its entries carry (stored entries in
+    // a segment, buffered ops in an index node — both are bytes of the
+    // node that holds them).
+    let storage = TreeStorage::new(TreeStorageBridge(index));
+    let tree = Index::from_hash(head);
+    let mut nodes: Vec<(NodeHash, Vec<NodeHash>, Vec<ShipmentRef>)> = Vec::new();
+    let visits = tree.traverse_available(&storage);
+    futures_util::pin_mut!(visits);
+    while let Some(visit) = visits.next().await {
+        let Visit::Present(node) = visit? else {
+            panic!("the audit walk must reach every block of the head");
+        };
+        let children = match node.body() {
+            ArchivedNodeBody::Index(body) => {
+                body.links()?.into_iter().map(|link| link.node).collect()
+            }
+            ArchivedNodeBody::Segment(_) => Vec::new(),
+        };
+        let mut entries: Vec<(Key, State<Datum>)> = Vec::new();
+        match node.body() {
+            ArchivedNodeBody::Segment(segment) => {
+                segment.for_each_entry::<Key, _>(|key, value| {
+                    entries.push((Key::from(key.to_vec()), into_owned(value)?));
+                    Ok(())
+                })?;
+            }
+            ArchivedNodeBody::Index(body) => {
+                for entry in body.all_novelty::<Key>()? {
+                    if let NoveltyOp::Assert(value) = entry.op {
+                        entries.push((Key::from(entry.key), value));
+                    }
+                }
+            }
+        }
+        let mut references = Vec::new();
+        for (key, value) in entries {
+            if let Some(reference) = shipment_ref(&key, &value, false)? {
+                references.push(reference);
+            }
+        }
+        nodes.push((node.hash().clone(), children, references));
+    }
+
+    // Probe the remote once per block.
+    let address = remote.address();
+    let mut present: HashSet<NodeHash> = HashSet::new();
+    for (hash, _, _) in &nodes {
+        let found: Option<Vec<u8>> = address
+            .subject
+            .clone()
+            .archive()
+            .catalog("index")
+            .get(hash.clone())
+            .fork(&address.address)
+            .perform(operator)
+            .await?;
+        if found.is_some() {
+            present.insert(hash.clone());
+        }
+    }
+
+    // The invariant: presence implies the presence of everything
+    // referenced.
+    for (hash, children, references) in &nodes {
+        if !present.contains(hash) {
+            continue;
+        }
+        for child in children {
+            assert!(
+                present.contains(child),
+                "closure violated: node {hash} is on the remote but its \
+                 child {child} is not — an aborted push left residue that \
+                 poisons existence probes"
+            );
+        }
+        for reference in references {
+            match reference {
+                ShipmentRef::BlobAdded {
+                    hash: blob_hash, ..
+                } => {
+                    let digest = NodeHash::from(*blob_hash);
+                    let probe = address
+                        .subject
+                        .clone()
+                        .archive()
+                        .blob()
+                        .read(digest.clone())
+                        .fork(address.site())
+                        .perform(operator)
+                        .await;
+                    let on_remote = match probe {
+                        Ok(_) => true,
+                        Err(BlobError::NotFound(_)) => false,
+                        Err(error) => return Err(error.into()),
+                    };
+                    assert!(
+                        on_remote,
+                        "closure violated: node {hash} is on the remote but \
+                         blob {digest} its entries name is not — an aborted \
+                         push left residue that poisons existence probes"
+                    );
+                }
+                ShipmentRef::SpilledValue(reference) => {
+                    let reference = NodeHash::from(*reference);
+                    let found: Option<Vec<u8>> = address
+                        .subject
+                        .clone()
+                        .archive()
+                        .catalog("index")
+                        .get(reference.clone())
+                        .fork(&address.address)
+                        .perform(operator)
+                        .await?;
+                    assert!(
+                        found.is_some(),
+                        "closure violated: node {hash} is on the remote but \
+                         spilled value block {reference} is not"
+                    );
+                }
+                ShipmentRef::BlobRemoved(_) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An aborted push must leave the target closure-complete — the
+/// steady-state (sole remote) shape.
+///
+/// The push protocol writes in reference order: blob bytes and spilled
+/// values, then by-reference subtrees, then held novelty children before
+/// parents, then the revision. A push that uploaded its tree nodes FIRST
+/// and died at the blob transfer would leave the remote holding nodes
+/// whose blobs it lacks; that residue is unreachable today (the revision
+/// was never published), but the moment another device pushes
+/// overlapping content it probes those nodes, prunes on the hit, skips
+/// the blobs, and publishes — a head the remote cannot serve. Pinned
+/// here at the source: no prefix of a push may leave a present block
+/// with an absent referent.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+    let (repo, branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "abort-closure").await?;
+
+    let facts: Vec<_> = (0..60)
+        .map(|i| {
+            Instruction::Assert(Artifact {
+                the: "user/name".parse().expect("valid attribute"),
+                of: format!("user:{i}").parse().expect("valid entity"),
+                is: Value::String(format!("resident-{i}")),
+                cause: None,
+            })
+        })
+        .collect();
+    branch
+        .commit(stream::iter(facts))
+        .perform(&operator)
+        .await?;
+    let blob_bytes = b"closure-pinned blob".repeat(64).to_vec();
+    Blob::import(stream::iter(vec![Ok(blob_bytes)]))
+        .write(branch.blobs())
+        .perform(&operator)
+        .await?;
+
+    let rigged = AbortOnRemoteBlobImport {
+        inner: operator.clone(),
+    };
+    let aborted = branch.push().perform(&rigged).await;
+    assert!(
+        aborted.is_err(),
+        "the rigged push must abort at the blob import"
+    );
+
+    let origin = repo.remote("origin").load().perform(&operator).await?;
+    let head = NodeHash::from(*branch.revision().expect("committed").tree.hash());
+    let index = NetworkedIndex::new(&operator, branch.archive().index(), None);
+    assert_remote_closure_complete(&operator, index, head, &origin).await?;
+
+    Ok(())
+}
+
+/// An aborted push must leave the target closure-complete — the
+/// N-remote bridge shape, which additionally exercises the ordering
+/// between held novelty and the by-reference frontier.
+///
+/// The bridge device holds only what its own commit minted; the adopted
+/// bulk (including a blob) is by reference from remote A. Its held
+/// nodes reference the adopted subtree roots as children, so uploading
+/// held novelty before forwarding the frontier would leave parents on B
+/// whose children never arrived when the transfer dies — exactly the
+/// probe-poisoning residue. The rig kills the push at the first blob
+/// import; whatever landed on B must still be closure-complete.
+#[cfg(not(feature = "web-integration-tests"))]
+#[dialog_common::test]
+async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // Remote A: history plus a blob, from the authoring device.
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "abort-bridge-a").await?;
+    for batch in 0..3 {
+        let facts: Vec<_> = (0..60)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{batch}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{batch}-{i}")),
+                    cause: None,
+                })
+            })
+            .collect();
+        alice_branch
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+    let blob_bytes = b"bridge blob".repeat(128).to_vec();
+    Blob::import(stream::iter(vec![Ok(blob_bytes)]))
+        .write(alice_branch.blobs())
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+
+    // The bridge device: adopts A's head by reference, commits its own
+    // fact on top (held novelty whose children are by-reference roots).
+    let b_address = S3Address {
+        bucket: format!("{}-second", s3.bucket),
+        ..s3.clone()
+    };
+    profile
+        .credential()
+        .site(s3_site_address(&b_address))
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator)
+        .await?;
+    let bridge_repo = profile
+        .repository(unique_name("abort-bridge"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin_a = bridge_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let origin_b = bridge_repo
+        .remote("mirror")
+        .create(s3_site_address(&b_address))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let bridge_branch = bridge_repo.branch("main").open().perform(&operator).await?;
+    let remote_a = origin_a.branch("main").open().perform(&operator).await?;
+    bridge_branch
+        .set_upstream(remote_a)
+        .perform(&operator)
+        .await?;
+    bridge_branch
+        .pull()
+        .perform(&operator)
+        .await?
+        .expect("head adopted from A");
+    bridge_branch
+        .commit(stream::iter(vec![Instruction::Assert(Artifact {
+            the: "user/name".parse()?,
+            of: "user:bridge".parse()?,
+            is: Value::String("Bridge".into()),
+            cause: None,
+        })]))
+        .perform(&operator)
+        .await?;
+
+    // The rigged push to B dies when the adopted blob would cross.
+    let remote_b = origin_b.branch("main").open().perform(&operator).await?;
+    let rigged = AbortOnRemoteBlobImport {
+        inner: operator.clone(),
+    };
+    let aborted = bridge_branch.push().to(&remote_b).perform(&rigged).await;
+    assert!(
+        aborted.is_err(),
+        "the rigged bridge push must abort at the blob import"
+    );
+
+    // Audit B against the full head, hydrating the walk through A (the
+    // bridge holds the adopted region only by reference).
+    let head = NodeHash::from(*bridge_branch.revision().expect("committed").tree.hash());
+    let index = NetworkedIndex::new(
+        &operator,
+        bridge_branch.archive().index(),
+        Some(origin_a.clone()),
+    );
+    assert_remote_closure_complete(&operator, index, head, &origin_b).await?;
+
+    Ok(())
+}
+
+/// Content adopted through a LOCAL upstream must still be forwarded to
+/// a remote that lacks it.
+///
+/// The laundering shape: branch `backup` tracks remote A and adopts its
+/// head by root; branch `main` pulls from local `backup` — same archive,
+/// zero reads — so `main`'s head holds content whose provenance no entry
+/// of `main`'s own upstream set names. Attribution that stops at the
+/// local entry concludes the push target already has everything held by
+/// reference, skips forwarding, and publishes a head the target cannot
+/// serve. Attribution must resolve local upstreams transitively: the
+/// content's remotes are `backup`'s remotes.
+#[dialog_common::test]
+async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // Remote A: history from the authoring device.
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "launder-a").await?;
+    for batch in 0..3 {
+        let facts: Vec<_> = (0..60)
+            .map(|i| {
+                Instruction::Assert(Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{batch}-{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{batch}-{i}")),
+                    cause: None,
+                })
+            })
+            .collect();
+        alice_branch
+            .commit(stream::iter(facts))
+            .perform(&operator)
+            .await?;
+    }
+    alice_branch.push().perform(&operator).await?;
+
+    // The device: `backup` adopts from A by root; `main` adopts from
+    // local `backup`. Neither pull reads a block, so `main`'s archive
+    // holds the whole head by reference and `main`'s upstream set names
+    // only the local branch.
+    let b_address = S3Address {
+        bucket: format!("{}-second", s3.bucket),
+        ..s3.clone()
+    };
+    profile
+        .credential()
+        .site(s3_site_address(&b_address))
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&operator)
+        .await?;
+    let device_repo = profile
+        .repository(unique_name("launder-device"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin_a = device_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let origin_b = device_repo
+        .remote("mirror")
+        .create(s3_site_address(&b_address))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let backup = device_repo
+        .branch("backup")
+        .open()
+        .perform(&operator)
+        .await?;
+    let remote_a = origin_a.branch("main").open().perform(&operator).await?;
+    backup.set_upstream(remote_a).perform(&operator).await?;
+    backup
+        .pull()
+        .perform(&operator)
+        .await?
+        .expect("backup adopts from A");
+    let main = device_repo.branch("main").open().perform(&operator).await?;
+    main.pull()
+        .from(&backup)
+        .perform(&operator)
+        .await?
+        .expect("main adopts from local backup");
+
+    // Push main to B: everything is by reference and nothing in main's
+    // own upstream set names A — the forward must happen anyway.
+    let remote_b = origin_b.branch("main").open().perform(&operator).await?;
+    let pushed = main.push().to(&remote_b).perform(&operator).await?;
+    assert!(
+        pushed.is_some(),
+        "the push through the local-upstream provenance lands"
+    );
+
+    // A replica that has only ever heard of B reads the full history.
+    let reader_repo = profile
+        .repository(unique_name("launder-reader"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let reader_origin = reader_repo
+        .remote("origin")
+        .create(s3_site_address(&b_address))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let reader_branch = reader_repo.branch("main").open().perform(&operator).await?;
+    let reader_remote = reader_origin
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    reader_branch
+        .set_upstream(reader_remote)
+        .perform(&operator)
+        .await?;
+    reader_branch
+        .pull()
+        .perform(&operator)
+        .await?
+        .expect("reader adopts from B");
+    let names: Vec<_> = reader_branch
+        .claims()
+        .select(ArtifactSelector::new().the("user/name".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        names.len(),
+        180,
+        "every fact adopted through the local upstream reads from B"
+    );
 
     Ok(())
 }
