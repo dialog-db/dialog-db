@@ -84,6 +84,8 @@ where
         let store = tx
             .store(INDEX_STORE)
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
 
         // Base58 encode key for better DevTools readability
         let key = JsValue::from_str(&key.as_ref().to_base58());
@@ -94,7 +96,8 @@ where
             .await
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
-        tx.done()
+        armed
+            .settle()
             .await
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
@@ -109,6 +112,8 @@ where
         let store = tx
             .store(INDEX_STORE)
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
 
         // Base58 encode key for lookup
         let key = JsValue::from_str(&key.as_ref().to_base58());
@@ -130,7 +135,8 @@ where
                 ))
             })?
             .to_vec();
-        tx.done()
+        armed
+            .settle()
             .await
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
@@ -177,6 +183,8 @@ where
         let store = tx
             .store(MEMORY_STORE)
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
 
         // Treat address as UTF-8 string for DevTools readability
         let key = address_to_string(address)?;
@@ -211,6 +219,8 @@ where
         let store = tx
             .store(MEMORY_STORE)
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
 
         // Treat address as UTF-8 string for DevTools readability
         let key = address_to_string(address)?;
@@ -256,7 +266,8 @@ where
                     .await
                     .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
-                tx.done()
+                armed
+                    .settle()
                     .await
                     .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
@@ -280,7 +291,8 @@ where
                     .await
                     .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
-                tx.done()
+                armed
+                    .settle()
                     .await
                     .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 
@@ -318,6 +330,8 @@ where
         let store = tx
             .store(INDEX_STORE)
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
 
         tokio::pin!(stream);
 
@@ -336,7 +350,8 @@ where
             ))
         })?;
 
-        tx.done()
+        armed
+            .settle()
             .await
             .map_err(|error| DialogStorageError::Storage(format!("{error}")))?;
 

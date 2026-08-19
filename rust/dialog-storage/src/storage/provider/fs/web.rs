@@ -301,11 +301,14 @@ mod registry {
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
         let value = store
             .get(JsValue::from_str(id))
             .await
             .map_err(|e| FileSystemError::Io(format!("reading registry entry: {e}")))?;
-        tx.done()
+        armed
+            .settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("closing registry transaction: {e}")))?;
 
@@ -334,6 +337,8 @@ mod registry {
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
         let keys = store
             .get_all_keys(None, None)
             .await
@@ -342,7 +347,8 @@ mod registry {
             .get_all(None, None)
             .await
             .map_err(|e| FileSystemError::Io(format!("listing registry entries: {e}")))?;
-        tx.done()
+        armed
+            .settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("closing registry transaction: {e}")))?;
 
@@ -365,11 +371,14 @@ mod registry {
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
         store
             .put(handle.as_ref(), Some(&JsValue::from_str(&id)))
             .await
             .map_err(|e| FileSystemError::Io(format!("storing registry entry: {e}")))?;
-        tx.done()
+        armed
+            .settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("committing registry entry: {e}")))?;
         Ok(id)
@@ -384,11 +393,14 @@ mod registry {
         let store = tx
             .store(STORE)
             .map_err(|e| FileSystemError::Io(format!("opening registry store: {e}")))?;
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
         store
             .delete(JsValue::from_str(id))
             .await
             .map_err(|e| FileSystemError::Io(format!("deleting registry entry: {e}")))?;
-        tx.done()
+        armed
+            .settle()
             .await
             .map_err(|e| FileSystemError::Io(format!("committing registry deletion: {e}")))?;
         Ok(())

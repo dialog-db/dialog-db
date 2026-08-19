@@ -129,9 +129,12 @@ impl StoreSession {
             .store(&self.store_name)
             .map_err(|e| IndexedDbError::Store(e.to_string()))?;
 
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
         let result = select(object_store).await?;
 
-        tx.done()
+        armed
+            .settle()
             .await
             .map_err(|e| IndexedDbError::Transaction(e.to_string()))?;
 
@@ -153,9 +156,12 @@ impl StoreSession {
             .store(&self.store_name)
             .map_err(|e| IndexedDbError::Store(e.to_string()))?;
 
+        // Armed before the first request: see `crate::storage::settle`.
+        let armed = crate::storage::settle::arm(tx);
         let result = mutate(object_store).await?;
 
-        tx.done()
+        armed
+            .settle()
             .await
             .map_err(|e| IndexedDbError::Transaction(e.to_string()))?;
 
