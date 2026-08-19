@@ -55,6 +55,13 @@ pub struct InductiveRule {
     analysis: AnalyzedRule,
     /// Whether a firing asserts or retracts the head's facts.
     polarity: Polarity,
+    /// Human-readable description, carried through compilation but
+    /// deliberately outside the content address (like the transient
+    /// marker on concepts): prose can change without moving the
+    /// rule's identity. Persisted as a sidecar
+    /// `dialog.rule/description` claim, never inside the canonical
+    /// body.
+    description: Option<String>,
 }
 
 impl Compile for InductiveRule {
@@ -64,6 +71,7 @@ impl Compile for InductiveRule {
         InductiveRule {
             analysis,
             polarity: Polarity::Assert,
+            description: None,
         }
     }
 
@@ -71,6 +79,7 @@ impl Compile for InductiveRule {
         InductiveRule {
             analysis: AnalyzedRule::in_progress(conclusion, premises),
             polarity: Polarity::Assert,
+            description: None,
         }
     }
 }
@@ -99,6 +108,18 @@ impl InductiveRule {
     pub fn with_polarity(mut self, polarity: Polarity) -> Self {
         self.polarity = polarity;
         self
+    }
+
+    /// This rule with the given description. Descriptions live
+    /// outside the content address — see the field docs.
+    pub fn with_description(mut self, description: Option<String>) -> Self {
+        self.description = description;
+        self
+    }
+
+    /// Human-readable description, when the rule carries one.
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
     /// Whether a firing asserts or retracts the head's facts.
@@ -144,8 +165,15 @@ impl InductiveRule {
     /// rules built directly from raw [`AttributeQuery`](crate::AttributeQuery)
     /// premises encode to nothing, because `Proposition`'s
     /// formal-notation `Serialize` rejects attribute propositions.
+    ///
+    /// The canonical form always carries `description: None`: the
+    /// description is outside the content address, so a described
+    /// rule and its description-less twin encode — and are stored —
+    /// byte-identically.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
-        serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
+        let mut canonical = self.descriptor();
+        canonical.description = None;
+        serde_ipld_dagcbor::to_vec(&canonical).ok()
     }
 
     /// This rule's content-addressed identity, if it has a canonical
@@ -204,7 +232,7 @@ impl InductiveRule {
             Polarity::Retract => (None, Some(self.conclusion().clone())),
         };
         InductiveRuleDescriptor {
-            description: None,
+            description: self.description.clone(),
             assert,
             retract,
             when,
