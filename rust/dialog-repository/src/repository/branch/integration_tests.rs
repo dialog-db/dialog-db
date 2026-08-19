@@ -1193,6 +1193,123 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     Ok(())
 }
 
+/// A retraction must survive a concurrent three-way pull.
+///
+/// The resurrection scenario observed in the wild: Alice and Bob share
+/// a branch. Bob has pulled fact F. Alice pushes something unrelated,
+/// moving the upstream past Bob's sync base. Bob retracts F and
+/// commits. Bob then pulls: the merge is a genuine three-way (base has
+/// F, theirs has F plus Alice's novelty, ours has the retraction). If
+/// the merge treats theirs' unchanged copy of F as novelty over ours,
+/// the retraction silently loses and the deleted fact resurrects on
+/// every such merge — user-visible as "I delete a space and it comes
+/// right back on refresh".
+#[dialog_common::test]
+async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_operator_with_profile().await;
+
+    // Alice creates the shared branch with fact F and pushes.
+    let (alice_repo, alice_branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "retract-alice").await?;
+    let fact = Artifact {
+        the: "user/name".parse()?,
+        of: "user:alice".parse()?,
+        is: Value::String("Alice".into()),
+        cause: None,
+    };
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(fact.clone())]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+
+    // Bob tracks the same subject and pulls F.
+    let bob_repo = profile
+        .repository(unique_name("retract-bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = bob_repo
+        .remote("origin")
+        .create(s3_site_address(&s3))
+        .subject(alice_repo.did())
+        .perform(&operator)
+        .await?;
+    let bob_branch = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    bob_branch
+        .set_upstream(remote_branch)
+        .perform(&operator)
+        .await?;
+    bob_branch.pull().perform(&operator).await?;
+
+    // Alice moves the upstream past Bob's sync base with an unrelated fact.
+    let unrelated = Artifact {
+        the: "user/name".parse()?,
+        of: "user:carol".parse()?,
+        is: Value::String("Carol".into()),
+        cause: None,
+    };
+    alice_branch
+        .commit(stream::iter(vec![Instruction::Assert(unrelated)]))
+        .perform(&operator)
+        .await?;
+    alice_branch.push().perform(&operator).await?;
+
+    // Bob retracts F locally.
+    bob_branch
+        .commit(stream::iter(vec![Instruction::Retract(fact.clone())]))
+        .perform(&operator)
+        .await?;
+    let after_retract: Vec<_> = bob_branch
+        .claims()
+        .select(ArtifactSelector::new().of("user:alice".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        after_retract.is_empty(),
+        "the retraction must take locally before the pull"
+    );
+
+    // Bob pulls: a real three-way merge (ours moved, theirs moved).
+    bob_branch.pull().perform(&operator).await?;
+
+    let after_pull: Vec<_> = bob_branch
+        .claims()
+        .select(ArtifactSelector::new().of("user:alice".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(
+        after_pull.is_empty(),
+        "the retraction must survive the merge; got resurrected: {after_pull:?}"
+    );
+
+    // And the unrelated novelty must have arrived.
+    let carol: Vec<_> = bob_branch
+        .claims()
+        .select(ArtifactSelector::new().of("user:carol".parse()?))
+        .to_owned()
+        .perform(&operator)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(carol.len(), 1, "concurrent novelty still merges in");
+
+    Ok(())
+}
+
 /// A device that adopted the upstream head by reference must be able to
 /// push its own novelty back to the same remote.
 ///
