@@ -168,15 +168,32 @@ impl<S: Signature> Delegation<S> {
     where
         R: dialog_varsig::resolver::Resolver<S>,
     {
-        let payload = self
-            .envelope()
-            .encode()
-            .map_err(SignatureVerificationError::EncodingError)?;
         let verifier = resolver
             .resolve(self.issuer())
             .await
             .map_err(SignatureVerificationError::ResolutionError)?;
-        Verifier::verify(&verifier, &payload, self.signature())
+        self.verify_with::<R::Error>(&verifier).await
+    }
+
+    /// Verify this delegation's signature against an already-resolved verifier.
+    ///
+    /// Split out from [`verify_signature`](Self::verify_signature) so a chain
+    /// can resolve each distinct issuer DID once and reuse the verifier across
+    /// every link that names it, rather than resolving per link.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SignatureVerificationError`] if the payload cannot be
+    /// encoded or the signature does not verify.
+    pub async fn verify_with<E: std::error::Error>(
+        &self,
+        verifier: &impl Verifier<S>,
+    ) -> Result<(), SignatureVerificationError<E>> {
+        let payload = self
+            .envelope()
+            .encode()
+            .map_err(SignatureVerificationError::EncodingError)?;
+        Verifier::verify(verifier, &payload, self.signature())
             .await
             .map_err(SignatureVerificationError::VerificationError)
     }

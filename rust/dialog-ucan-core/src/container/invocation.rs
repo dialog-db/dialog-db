@@ -19,7 +19,12 @@ use super::check_failed_to_container_error;
 use super::{Container, ContainerError};
 use crate::{
     Delegation, Invocation,
-    invocation::{InvocationCheckError, SignatureVerificationError, StoredCheckError},
+    command::Command,
+    invocation::{Invalid, Unavailable, VerifyError},
+    promise::Promised,
+    revocation::RevocationChecker,
+    time::TimeRange,
+    verification::{Verifiable, VerificationContext},
 };
 use dialog_varsig::AnySignature;
 use dialog_varsig::Did;
@@ -67,66 +72,94 @@ impl<S: Signature> InvocationChain<S> {
         }
     }
 
-    /// Verify the invocation chain using rs-ucan's verification.
+    /// Verify this invocation chain.
     ///
-    /// This performs complete verification:
-    /// 1. Signature verification (issuer signed the invocation)
-    /// 2. Proof chain validation (issuer->subject chain via proofs)
-    /// 3. Command attenuation checks
-    /// 4. Policy predicate evaluation
+    /// Checks, in order: the proof chain's structure (principal alignment,
+    /// subject consistency, command attenuation, policy predicates, and time
+    /// bounds against `ctx`'s sampled instant), then every signature — the
+    /// invocation's and each delegation link's — and every link's revocation
+    /// status.
     ///
-    /// The invocation's `proofs` field contains CIDs that reference
-    /// delegations in the container. This method builds a store from
-    /// those delegations and uses rs-ucan's `Invocation::check` to verify.
-    pub async fn verify<R: Resolver<S>>(&self, resolver: &R) -> Result<(), ContainerError>
+    /// Structure is checked first and costs no I/O, so a chain that does not
+    /// hold up spends no DID resolutions and no crypto. Resolution then runs
+    /// once per *distinct* issuer, and signatures and revocation lookups run
+    /// concurrently, stopping at the first decisive refusal.
+    ///
+    /// Returns the chain's effective time window.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ContainerError`] if the chain does not hold up, a
+    /// signature does not verify, an issuer cannot be resolved, or a link
+    /// has been revoked.
+    pub async fn verify<C>(
+        &self,
+        ctx: &VerificationContext<'_, C>,
+    ) -> Result<TimeRange, ContainerError>
     where
-        R::Error: std::error::Error,
+        C: Verifiable<
+                Runtime,
+                S,
+                Proof = Arc<Delegation<S>>,
+                Delegations = ProofStore<S>,
+                Revocations: RevocationChecker,
+            >,
+        <C::Resolver as Resolver<S>>::Error: std::error::Error + Clone + 'static,
     {
-        // Build delegation store from our map
-        let store: ProofStore<S> = Arc::new(Mutex::new(self.delegations.clone()));
-
-        // Use rs-ucan's full verification
         self.invocation
-            .check::<Runtime, _, _, _>(&store, resolver)
+            .check::<Runtime, _, _, _>(ctx)
             .await
-            .map(|_| ())
             .map_err(|err| match err {
-                // A resolution failure (an unreachable did:web host, a resolver
-                // that cannot look the issuer up) is our setup being unable to
-                // check their material, not a statement that their material is
-                // bad. It reads as Configuration, not Invocation.
-                InvocationCheckError::SignatureVerification(
-                    SignatureVerificationError::ResolutionError(resolve_err),
-                ) => ContainerError::Configuration(format!(
-                    "could not resolve the invocation issuer: {resolve_err}"
-                )),
-                InvocationCheckError::SignatureVerification(sig_err) => {
-                    ContainerError::Invocation(format!("invalid signature: {}", sig_err))
-                }
-                InvocationCheckError::StoredCheck(stored_err) => match stored_err {
-                    StoredCheckError::GetError(get_err) => {
-                        ContainerError::Invocation(format!("proof not found: {}", get_err))
+                // Their material did not hold up: the decision crosses the
+                // boundary as itself.
+                VerifyError::Invalid(invalid) => match invalid {
+                    Invalid::InvocationSignature(sig_err) => {
+                        ContainerError::Invocation(format!("invalid signature: {sig_err}"))
                     }
-                    StoredCheckError::SignatureVerification { issuer, source } => {
+                    Invalid::DelegationSignature { issuer, source } => {
                         ContainerError::InvalidDelegationSignature {
                             issuer,
                             detail: source.to_string(),
                         }
                     }
-                    StoredCheckError::CheckFailed(check_err) => {
-                        check_failed_to_container_error(check_err)
+                    Invalid::MissingProof(get_err) => {
+                        ContainerError::Invocation(format!("proof not found: {get_err}"))
                     }
+                    Invalid::Chain(check_err) => check_failed_to_container_error(check_err),
+                    Invalid::Revoked { cid, found } => ContainerError::Revoked {
+                        cid,
+                        revoker: found.principal,
+                    },
+                },
+                // Our own setup being unable to check says nothing about
+                // their request, so it must not read as a denial.
+                VerifyError::Unavailable(unavailable) => match unavailable {
+                    Unavailable::DidResolution { did, detail } => ContainerError::Configuration(
+                        format!("could not resolve '{did}': {detail}"),
+                    ),
+                    Unavailable::RevocationLookup { cid, source } => ContainerError::Configuration(
+                        format!("could not determine revocation status of '{cid}': {source}"),
+                    ),
                 },
             })
     }
 
+    /// The proof store this chain's delegations live in.
+    ///
+    /// Exposed so an environment implementing [`Verifiable`] can hand the
+    /// chain's own proofs to the verifier.
+    #[must_use]
+    pub fn proof_store(&self) -> ProofStore<S> {
+        Arc::new(Mutex::new(self.delegations.clone()))
+    }
+
     /// Get the command from the invocation.
-    pub fn command(&self) -> &crate::command::Command {
+    pub fn command(&self) -> &Command {
         self.invocation.command()
     }
 
     /// Get the arguments from the invocation.
-    pub fn arguments(&self) -> &BTreeMap<String, crate::promise::Promised> {
+    pub fn arguments(&self) -> &BTreeMap<String, Promised> {
         self.invocation.arguments()
     }
 
@@ -255,11 +288,33 @@ impl<'de> Deserialize<'de> for InvocationChain<AnySignature> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::Command;
     use crate::helpers::{create_delegation, generate_signer};
+    use crate::revocation::UnverifiedRevocations;
+    use crate::revocation::{RevocationMatch, RevocationSelector};
     use crate::subject::Subject;
+    use crate::verification::Environment;
     use crate::{DelegationBuilder, InvocationBuilder};
     use dialog_credentials::DidKeyResolver;
     use dialog_varsig::Principal;
+
+    /// The environment these tests verify against: the chain's own proofs,
+    /// `did:key` resolution, and no revocation lookups.
+    type TestEnv = Environment<
+        ProofStore<AnySignature>,
+        DidKeyResolver,
+        UnverifiedRevocations,
+        Arc<Delegation<AnySignature>>,
+    >;
+
+    fn test_environment(chain: &InvocationChain<AnySignature>) -> TestEnv {
+        Environment::new(chain.proof_store(), DidKeyResolver, UnverifiedRevocations)
+    }
+
+    /// A context over `env`, judged against the system clock.
+    fn test_context(env: &TestEnv) -> VerificationContext<'_, TestEnv> {
+        VerificationContext::new(env)
+    }
 
     /// Create a test invocation chain with a valid delegation.
     async fn create_test_invocation_chain() -> (InvocationChain<AnySignature>, Did) {
@@ -343,7 +398,7 @@ mod tests {
         let (chain, _) = create_test_invocation_chain().await;
 
         // Should verify successfully
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_ok(),
             "Expected verification to succeed: {:?}",
@@ -393,7 +448,7 @@ mod tests {
 
         // The full chain verifies: the delegation link under ed25519, the
         // invocation link under p256, one validation pass over mixed algorithms.
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_ok(),
             "Expected mixed-algorithm chain to verify: {:?}",
@@ -459,7 +514,7 @@ mod tests {
         let chain = InvocationChain::new(invocation, HashMap::new());
 
         // Should fail verification due to missing proof
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("proof not found"));
     }
@@ -500,8 +555,213 @@ mod tests {
         let chain = InvocationChain::new(invocation, delegations);
 
         // Should fail verification due to issuer mismatch
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(result.is_err());
+    }
+
+    /// Reports every query as unanswerable.
+    #[derive(Debug, thiserror::Error)]
+    #[error("revocation service unreachable")]
+    struct Unreachable;
+
+    #[derive(Debug, Clone, Copy)]
+    struct OfflineRevocations;
+
+    impl RevocationChecker for OfflineRevocations {
+        type Error = Unreachable;
+
+        async fn query(
+            &self,
+            _selector: RevocationSelector<'_>,
+        ) -> Result<Option<RevocationMatch>, Self::Error> {
+            Err(Unreachable)
+        }
+    }
+
+    /// Reports one specific delegation as revoked, by a named principal.
+    #[derive(Debug, Clone)]
+    struct RevokedLink {
+        cid: Cid,
+        principal: Did,
+    }
+
+    impl RevocationChecker for RevokedLink {
+        type Error = Unreachable;
+
+        async fn query(
+            &self,
+            selector: RevocationSelector<'_>,
+        ) -> Result<Option<RevocationMatch>, Self::Error> {
+            if selector.delegation == self.cid && selector.by.contains(&self.principal) {
+                return Ok(Some(RevocationMatch {
+                    revocation: selector.delegation,
+                    principal: self.principal.clone(),
+                }));
+            }
+            Ok(None)
+        }
+    }
+
+    // The validity invariant, at its sharpest. A caller may legitimately
+    // choose to fail open when the revocation service is unreachable, so
+    // "revocation unavailable" must never be what a caller sees for a chain
+    // that does not verify — otherwise that choice would also accept forged
+    // chains. Tolerance relaxes revocation and nothing else.
+    #[dialog_common::test]
+    async fn it_reports_a_forged_signature_even_when_revocation_is_unreachable() {
+        let subject_signer = generate_signer().await;
+        let subject_did = subject_signer.did();
+        let attacker_signer = generate_signer().await;
+
+        // Claims the subject as issuer so principal alignment passes and
+        // only the signature is wrong. Structured any other way, the chain
+        // would fail alignment first and this would pass with signature
+        // checking disabled entirely.
+        let forged = Delegation::forge(
+            subject_did.clone(),
+            attacker_signer.did(),
+            Subject::Specific(subject_did.clone()),
+            Command::new(vec!["storage".to_string(), "get".to_string()]),
+            &attacker_signer,
+        )
+        .await
+        .expect("forged delegation");
+        let forged_cid = forged.to_cid();
+
+        let invocation = InvocationBuilder::new()
+            .issuer(attacker_signer.clone())
+            .audience(&subject_did)
+            .subject(&subject_did)
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .proofs(vec![forged_cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = HashMap::new();
+        delegations.insert(forged_cid, Arc::new(forged));
+        let chain = InvocationChain::new(invocation, delegations);
+
+        // The most permissive revocation policy available.
+        let environment = Environment::new(
+            chain.proof_store(),
+            DidKeyResolver,
+            OfflineRevocations.tolerate_unavailable(),
+        );
+        let ctx = VerificationContext::new(&environment);
+        let error = chain
+            .verify(&ctx)
+            .await
+            .expect_err("a forged signature must refuse the chain");
+
+        assert!(
+            matches!(error, ContainerError::InvalidDelegationSignature { .. }),
+            "expected the signature refusal rather than an unavailable \
+             revocation service, got: {error:?}"
+        );
+    }
+
+    // A refusal names which link was revoked and who withdrew it, so an
+    // operator can tell which authority failed rather than only that
+    // something did.
+    #[dialog_common::test]
+    async fn it_names_the_revoked_link_and_its_revoker() {
+        let subject_signer = generate_signer().await;
+        let subject_did = subject_signer.did();
+        let operator_signer = generate_signer().await;
+
+        let delegation = create_delegation(
+            &subject_signer,
+            &operator_signer,
+            &subject_signer,
+            &["storage", "get"],
+        )
+        .await
+        .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let invocation = InvocationBuilder::new()
+            .issuer(operator_signer.clone())
+            .audience(&subject_did)
+            .subject(&subject_did)
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = HashMap::new();
+        delegations.insert(cid, Arc::new(delegation));
+        let chain = InvocationChain::new(invocation, delegations);
+
+        let environment = Environment::new(
+            chain.proof_store(),
+            DidKeyResolver,
+            RevokedLink {
+                cid,
+                principal: subject_did.clone(),
+            },
+        );
+        let ctx = VerificationContext::new(&environment);
+        let error = chain
+            .verify(&ctx)
+            .await
+            .expect_err("a revoked link must refuse the chain");
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&cid.to_string()),
+            "the refusal must name the revoked link: {rendered}"
+        );
+    }
+
+    // Tolerance is about not knowing, never knowing-and-ignoring: a
+    // revocation the checker did find still refuses the chain.
+    #[dialog_common::test]
+    async fn it_refuses_a_confirmed_revocation_even_when_tolerating() {
+        let subject_signer = generate_signer().await;
+        let subject_did = subject_signer.did();
+        let operator_signer = generate_signer().await;
+
+        let delegation = create_delegation(
+            &subject_signer,
+            &operator_signer,
+            &subject_signer,
+            &["storage", "get"],
+        )
+        .await
+        .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let invocation = InvocationBuilder::new()
+            .issuer(operator_signer.clone())
+            .audience(&subject_did)
+            .subject(&subject_did)
+            .command(vec!["storage".to_string(), "get".to_string()])
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = HashMap::new();
+        delegations.insert(cid, Arc::new(delegation));
+        let chain = InvocationChain::new(invocation, delegations);
+
+        let environment = Environment::new(
+            chain.proof_store(),
+            DidKeyResolver,
+            RevokedLink {
+                cid,
+                principal: subject_did,
+            }
+            .tolerate_unavailable(),
+        );
+        let ctx = VerificationContext::new(&environment);
+        assert!(
+            chain.verify(&ctx).await.is_err(),
+            "tolerating an unavailable service must not tolerate a \
+             confirmed revocation"
+        );
     }
 
     // Pins the delegation-link signature forgery. A structurally-valid
@@ -555,7 +815,7 @@ mod tests {
 
         // Must be rejected: the delegation link's signature is not the
         // subject's, so the chain grants the attacker nothing.
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_err(),
             "forged delegation-link signature must be rejected, got: {result:?}"
@@ -641,7 +901,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_ok(),
             "Expected verification to succeed with powerline in middle: {:?}",
@@ -681,7 +941,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_err(),
             "Expected verification to fail when invocation subject doesn't match powerline root issuer"
@@ -720,7 +980,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_ok(),
             "Expected verification to succeed when invocation subject matches powerline root issuer: {:?}",
@@ -773,7 +1033,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_err(),
             "Expected verification to fail when redelegation after powerline root uses wrong subject"
@@ -825,7 +1085,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_ok(),
             "Expected verification to succeed when redelegation after powerline root uses correct subject: {:?}",
@@ -950,7 +1210,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, delegations);
 
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_ok(),
             "Expected /archive delegation to authorize /archive/put invocation: {:?}",
@@ -993,7 +1253,10 @@ mod tests {
         let original_chain = InvocationChain::new(invocation, delegations);
 
         assert!(
-            original_chain.verify(&DidKeyResolver).await.is_ok(),
+            original_chain
+                .verify(&test_context(&test_environment(&original_chain)))
+                .await
+                .is_ok(),
             "Original chain should verify"
         );
 
@@ -1002,7 +1265,9 @@ mod tests {
         let restored_chain: InvocationChain<AnySignature> =
             serde_ipld_dagcbor::from_slice(&cbor_bytes).expect("Failed to deserialize");
 
-        let result = restored_chain.verify(&DidKeyResolver).await;
+        let result = restored_chain
+            .verify(&test_context(&test_environment(&restored_chain)))
+            .await;
         assert!(
             result.is_ok(),
             "Restored chain should still verify: {:?}",
@@ -1034,7 +1299,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, HashMap::new());
 
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_ok(),
             "Self-invocation (issuer == subject, empty proofs) should verify: {:?}",
@@ -1059,7 +1324,7 @@ mod tests {
 
         let chain = InvocationChain::new(invocation, HashMap::new());
 
-        let result = chain.verify(&DidKeyResolver).await;
+        let result = chain.verify(&test_context(&test_environment(&chain))).await;
         assert!(
             result.is_err(),
             "Invocation with issuer != subject and no proofs should fail verification"

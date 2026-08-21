@@ -60,8 +60,8 @@ use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_did_web::{CachingResolver, PerformingResolver, Resolve, WebResolver};
 use dialog_effects::{archive, blob, memory};
 use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
-use dialog_ucan_core::InvocationChain;
 use dialog_ucan_core::promise::Promised;
+use dialog_ucan_core::{Environment, InvocationChain, VerificationContext};
 use ipld_core::ipld::Ipld;
 use serde::de::DeserializeOwned;
 
@@ -353,7 +353,15 @@ where
         // fetches the DID document; a cache sits in front. The chain verify path
         // only sees a varsig resolver.
         let resolver = PerformingResolver::new(self.resolver.as_ref());
-        chain.verify(&resolver).await.map_err(|e| {
+        // No revocation store exists yet, so nothing is looked up. Named for
+        // what it does: it establishes nothing about revocation status.
+        let environment = Environment::new(
+            chain.proof_store(),
+            resolver,
+            dialog_ucan_core::UnverifiedRevocations,
+        );
+        let context = VerificationContext::new(&environment);
+        chain.verify(&context).await.map_err(|e| {
             // Two different failures arrive here: their material not
             // verifying, and our own setup being unable to check it (for
             // example, an unreachable did:web host). Only the first is a
@@ -365,6 +373,11 @@ where
                 ContainerError::InvalidDelegationSignature { issuer, .. } => {
                     AuthorizeError::InvalidSignature { issuer }
                 }
+                // The authority was withdrawn rather than never held or
+                // forged, so retrying with the same proof is pointless.
+                ContainerError::Revoked { .. } => AuthorizeError::Revoked {
+                    subject: chain.subject().clone(),
+                },
                 ContainerError::Invocation(detail) => AuthorizeError::Malformed {
                     detail: format!("invocation chain did not verify: {detail}"),
                 },

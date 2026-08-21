@@ -17,11 +17,14 @@ pub mod issuer;
 pub mod number;
 pub mod principal;
 pub mod promise;
+pub mod revocation;
 // pub mod receipt; TODO Reenable after first release
 pub mod subject;
+pub mod sync;
 pub mod task;
 pub mod time;
 pub mod unset;
+pub mod verification;
 
 #[cfg(any(test, feature = "helpers"))]
 pub mod helpers;
@@ -38,6 +41,11 @@ pub use delegation::{
     builder::{BuildError as DelegationBuildError, DelegationBuilder},
 };
 pub use invocation::{
-    CheckFailed, Invocation, InvocationPayload,
+    CheckError, CheckFailed, Invalid, Invocation, InvocationPayload, Unavailable, VerifyError,
     builder::{BuildError as InvocationBuildError, InvocationBuilder},
 };
+pub use revocation::{
+    RevocationChecker, RevocationMatch, RevocationSelector, TolerateUnavailability,
+    UnverifiedRevocations,
+};
+pub use verification::{Environment, Verifiable, VerificationContext};

@@ -2,7 +2,10 @@
 mod invocation_conformance {
     use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::OnceLock};
 
-    use dialog_ucan_core::{Delegation, Invocation, delegation::store};
+    use dialog_ucan_core::{
+        CheckError, Delegation, Invocation, VerificationContext, delegation::store, future::Local,
+        revocation::UnverifiedRevocations, time::TimeRange, verification::Environment,
+    };
     use dialog_varsig::eddsa::Ed25519Signature;
     use ipld_core::{cid::Cid, ipld::Ipld};
     use testresult::TestResult;
@@ -28,6 +31,35 @@ mod invocation_conformance {
     }
 
     type DelegationStore = Rc<RefCell<HashMap<Cid, Rc<Delegation<Ed25519Signature>>>>>;
+
+    use dialog_credentials::ed25519::Ed25519KeyResolver;
+
+    /// Verify `invocation` against `store`, judging time bounds at `time`.
+    ///
+    /// The fixtures carry the instant each case is meant to be evaluated at,
+    /// so the check runs against that rather than the wall clock.
+    async fn check_at(
+        invocation: &Invocation<Ed25519Signature>,
+        store: &DelegationStore,
+        time: Option<dialog_ucan_core::time::Timestamp>,
+    ) -> Result<TimeRange, CheckError<Local, Ed25519Signature, TestEnv>> {
+        let environment = test_environment(store);
+        let ctx = VerificationContext::at(&environment, time);
+        invocation.check::<Local, _, _, _>(&ctx).await
+    }
+
+    /// The environment these tests verify against: the fixture's own store,
+    /// `did:key` resolution, and no revocation lookups.
+    type TestEnv = Environment<
+        DelegationStore,
+        Ed25519KeyResolver,
+        UnverifiedRevocations,
+        Rc<Delegation<Ed25519Signature>>,
+    >;
+
+    fn test_environment(store: &DelegationStore) -> TestEnv {
+        Environment::new(store.clone(), Ed25519KeyResolver, UnverifiedRevocations)
+    }
 
     fn new_store() -> DelegationStore {
         Rc::new(RefCell::new(HashMap::new()))
@@ -171,7 +203,6 @@ mod invocation_conformance {
 
     mod valid {
         use super::*;
-        use dialog_credentials::ed25519::Ed25519KeyResolver;
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         use wasm_bindgen_test::wasm_bindgen_test;
@@ -190,20 +221,15 @@ mod invocation_conformance {
                 let proofs = parse_proofs(entry);
                 let delegation_store = build_store(proofs).await;
 
-                let result = invocation
-                    .check(&delegation_store, &Ed25519KeyResolver)
-                    .await;
-
-                let range = result.unwrap_or_else(|e| {
-                    panic!("valid[{idx}] '{name}' should pass check but got: {e:?}")
-                });
-
-                range.check(&time).unwrap_or_else(|e| {
-                    panic!(
-                        "valid[{idx}] '{name}': fixture time not in range: {e}, \
-                         range={range:?}, time={time:?}"
-                    )
-                });
+                // The fixture's instant is judged inside the check now, so a
+                // valid case must pass at that instant rather than merely
+                // yield a range the caller could test.
+                let verdict: TimeRange = check_at(&invocation, &delegation_store, Some(time))
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("valid[{idx}] '{name}' should pass check but got: {e:?}")
+                    });
+                let range = &verdict;
 
                 eprintln!("valid[{idx}] '{name}': check passed, time_range = {range:?}");
             }
@@ -214,8 +240,7 @@ mod invocation_conformance {
 
     mod invalid {
         use super::*;
-        use dialog_credentials::ed25519::Ed25519KeyResolver;
-        use dialog_ucan_core::invocation::{CheckFailed, InvocationCheckError, StoredCheckError};
+        use dialog_ucan_core::{CheckFailed, Invalid, VerifyError};
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         use wasm_bindgen_test::wasm_bindgen_test;
@@ -315,16 +340,14 @@ mod invocation_conformance {
 
                 let delegation_store = build_store(valid_proofs).await;
 
-                let result = invocation
-                    .check(&delegation_store, &Ed25519KeyResolver)
-                    .await;
+                let result = check_at(&invocation, &delegation_store, Some(time)).await;
 
                 match error_name {
                     "InvalidClaim" => {
                         let err = result
                             .expect_err(&format!("invalid[{idx}] '{name}' should fail check"));
                         match &err {
-                            InvocationCheckError::StoredCheck(StoredCheckError::CheckFailed(
+                            VerifyError::Invalid(Invalid::Chain(
                                 CheckFailed::UnauthorizedSubject { .. }
                                 | CheckFailed::UnprovenSubject { .. },
                             )) => {}
@@ -338,32 +361,25 @@ mod invocation_conformance {
                         let err = result
                             .expect_err(&format!("invalid[{idx}] '{name}' should fail check"));
                         match &err {
-                            InvocationCheckError::StoredCheck(StoredCheckError::GetError(_)) => {}
+                            VerifyError::Invalid(Invalid::MissingProof(_)) => {}
                             other => panic!(
                                 "invalid[{idx}] '{name}': expected GetError(Missing), got: {other:?}"
                             ),
                         }
                     }
                     "Expired" | "TooEarly" => {
-                        match &result {
-                            Ok(range) => {
-                                assert!(
-                                    range.check(&time).is_err(),
-                                    "invalid[{idx}] '{name}' ({error_name}): \
-                                     expected fixture time to be outside range, \
-                                     but range={range:?}, time={time:?}"
-                                );
-                            }
-                            Err(_) => {
-                                // Any error is an acceptable rejection.
-                            }
-                        }
+                        // Time is judged inside the check, so these must be
+                        // rejected outright rather than merely yielding a
+                        // range that excludes the fixture instant.
+                        result.expect_err(&format!(
+                            "invalid[{idx}] '{name}' ({error_name}) should fail check at {time:?}"
+                        ));
                     }
                     "InvalidAudience" => {
                         let err = result
                             .expect_err(&format!("invalid[{idx}] '{name}' should fail check"));
                         match &err {
-                            InvocationCheckError::StoredCheck(StoredCheckError::CheckFailed(
+                            VerifyError::Invalid(Invalid::Chain(
                                 CheckFailed::DelegationAudienceMismatch { .. },
                             )) => {}
                             other => panic!(
@@ -376,7 +392,7 @@ mod invocation_conformance {
                         let err = result
                             .expect_err(&format!("invalid[{idx}] '{name}' should fail check"));
                         match &err {
-                            InvocationCheckError::StoredCheck(StoredCheckError::CheckFailed(
+                            VerifyError::Invalid(Invalid::Chain(
                                 CheckFailed::UnauthorizedSubject { .. }
                                 | CheckFailed::UnprovenSubject { .. },
                             )) => {}
@@ -390,8 +406,11 @@ mod invocation_conformance {
                         let err = result
                             .expect_err(&format!("invalid[{idx}] '{name}' should fail check"));
                         match &err {
-                            InvocationCheckError::SignatureVerification(_) => {}
-                            InvocationCheckError::StoredCheck(StoredCheckError::GetError(_)) => {}
+                            VerifyError::Invalid(
+                                Invalid::InvocationSignature(_)
+                                | Invalid::DelegationSignature { .. }
+                                | Invalid::MissingProof(_),
+                            ) => {}
                             other => panic!(
                                 "invalid[{idx}] '{name}': expected SignatureVerification \
                                  or GetError(Missing), got: {other:?}"
@@ -402,7 +421,7 @@ mod invocation_conformance {
                         let err = result
                             .expect_err(&format!("invalid[{idx}] '{name}' should fail check"));
                         match &err {
-                            InvocationCheckError::StoredCheck(StoredCheckError::CheckFailed(
+                            VerifyError::Invalid(Invalid::Chain(
                                 CheckFailed::PolicyViolation(_)
                                 | CheckFailed::PolicyIncompatibility(_),
                             )) => {}
