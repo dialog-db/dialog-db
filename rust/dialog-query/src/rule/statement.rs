@@ -37,6 +37,15 @@ pub fn conclusion_attr() -> Attribute {
     the!("dialog.rule/conclusion").into()
 }
 
+/// The `dialog.rule/description` sidecar attribute: a rule's
+/// human-readable prose, stored beside the canonical body rather than
+/// inside it so editing the prose never moves the rule's
+/// content-addressed identity (the same stance
+/// `dialog.concept/transient` takes for concepts).
+pub fn description_attr() -> Attribute {
+    the!("dialog.rule/description").into()
+}
+
 /// The `dialog.rule/induces` index attribute — the inductive sibling of
 /// `dialog.rule/conclusion`, kept separate so deductive resolution never
 /// hydrates (and discards) inductive rules concluding a queried
@@ -136,6 +145,13 @@ impl Statement for &DeductiveRule {
             rule_entity.clone(),
             Value::Bytes(self.encode()),
         );
+        if let Some(description) = self.description() {
+            update.associate(
+                description_attr(),
+                rule_entity.clone(),
+                Value::String(description.to_owned()),
+            );
+        }
         for reads in reads_entities(self) {
             update.associate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
         }
@@ -153,6 +169,13 @@ impl Statement for &DeductiveRule {
             rule_entity.clone(),
             Value::Bytes(self.encode()),
         );
+        if let Some(description) = self.description() {
+            update.dissociate(
+                description_attr(),
+                rule_entity.clone(),
+                Value::String(description.to_owned()),
+            );
+        }
         for reads in reads_entities(self) {
             update.dissociate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
         }
@@ -182,6 +205,13 @@ impl Statement for &InductiveRule {
             rule_entity.clone(),
             Value::Bytes(self.encode()),
         );
+        if let Some(description) = self.description() {
+            update.associate(
+                description_attr(),
+                rule_entity.clone(),
+                Value::String(description.to_owned()),
+            );
+        }
         update.associate(
             induces_attr(),
             rule_entity.clone(),
@@ -199,6 +229,13 @@ impl Statement for &InductiveRule {
             rule_entity.clone(),
             Value::Bytes(self.encode()),
         );
+        if let Some(description) = self.description() {
+            update.dissociate(
+                description_attr(),
+                rule_entity.clone(),
+                Value::String(description.to_owned()),
+            );
+        }
         update.dissociate(
             induces_attr(),
             rule_entity.clone(),
