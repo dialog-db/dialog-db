@@ -110,6 +110,9 @@ pub fn check_chain<'a, S: Signature + 'a, I: IntoIterator<Item = &'a Delegation<
 mod tests {
     use super::*;
     use crate::DelegationBuilder;
+    // The crate's re-exports, not `std::time`: on wasm a `Timestamp` wraps
+    // `web_time::SystemTime`, so `std::time` values do not convert.
+    use crate::time::timestamp::{Duration, UNIX_EPOCH};
     use dialog_credentials::{Ed25519Signer, Signer};
     use dialog_varsig::{AnySignature, Principal};
     use testresult::TestResult;
@@ -201,7 +204,7 @@ mod tests {
             .subject(Subject::Specific(alice.did()))
             .command(vec!["test".to_string()])
             .expiration(Timestamp::try_from(
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000),
+                UNIX_EPOCH + Duration::from_secs(1_000_000_000),
             )?)
             .try_build()
             .await?;

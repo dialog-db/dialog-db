@@ -13,6 +13,7 @@
 
 use super::ContainerError;
 use super::invocation::InvocationChain;
+use crate::container::Container;
 use crate::{
     Delegation,
     delegation::{SignatureVerificationError, chain::check_chain, store::DelegationStore},
@@ -25,6 +26,7 @@ use crate::{
 use dialog_varsig::{Did, Resolver, Signature};
 use ipld_core::cid::Cid;
 use std::borrow::Borrow;
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -367,6 +369,66 @@ impl From<MalformedRevocationChain> for ContainerError {
     }
 }
 
+impl<S: Signature + serde::Serialize> RevocationChain<S>
+where
+    Delegation<S>: serde::Serialize,
+{
+    /// Assemble a revocation together with the blocks its arguments name.
+    ///
+    /// `delegations` must contain every CID the revocation names — the target
+    /// and each witness hop — plus any delegation cited in `prf`. Missing
+    /// blocks are [`MalformedRevocationChain::MissingBlock`], the same
+    /// finding parsing a container short of them produces.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MalformedRevocationChain`] if a named block is absent.
+    pub fn assemble(
+        revocation: Revocation<S>,
+        delegations: HashMap<Cid, Arc<Delegation<S>>>,
+    ) -> Result<Self, MalformedRevocationChain> {
+        let chain = InvocationChain::new(revocation.invocation().clone(), delegations);
+        Self::try_from(chain)
+    }
+
+    /// Serialize to a container carrying every block a verifier needs.
+    ///
+    /// Distinct from [`InvocationChain::to_bytes`], which emits only the
+    /// delegations named in `prf`. A revocation's witness is named by
+    /// `args.pth` instead, so that writer would drop it and leave the
+    /// receiver unable to resolve the links it was handed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ContainerError`] if encoding fails.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, ContainerError> {
+        let mut tokens =
+            vec![
+                serde_ipld_dagcbor::to_vec(&self.chain.invocation).map_err(|error| {
+                    ContainerError::Invocation(format!("failed to encode the revocation: {error}"))
+                })?,
+            ];
+        let mut seen: std::collections::BTreeSet<Cid> = std::collections::BTreeSet::new();
+
+        // The witness first, then anything `prf` cites: a receiver needs
+        // both, and a block named twice is emitted once.
+        let witness = std::iter::once(&self.revoked).chain(self.path.iter());
+        let proofs = self
+            .chain
+            .invocation
+            .proofs()
+            .iter()
+            .filter_map(|cid| self.chain.delegation(cid));
+        for delegation in witness.chain(proofs) {
+            if seen.insert(delegation.to_cid()) {
+                tokens.push(delegation.encoded().to_vec());
+            }
+        }
+
+        Container::new(tokens).into_bytes()
+    }
+}
+
 impl<S: Signature> TryFrom<InvocationChain<S>> for RevocationChain<S> {
     type Error = MalformedRevocationChain;
 
@@ -406,7 +468,17 @@ mod tests {
     use crate::helpers::generate_signer;
     use crate::revocation::{UnverifiedRevocations, builder::RevocationBuilder};
     use crate::verification::Environment;
-    use crate::{DelegationBuilder, InvocationChain, command::Command, time::Timestamp};
+    use crate::{
+        DelegationBuilder,
+        InvocationChain,
+        command::Command,
+        // The crate's re-exports, not `std::time`: on wasm a `Timestamp` wraps
+        // `web_time::SystemTime`, so `std::time` values do not convert.
+        time::{
+            Timestamp,
+            timestamp::{Duration, UNIX_EPOCH},
+        },
+    };
     use dialog_credentials::{DidKeyResolver, Signer};
     use dialog_varsig::{AnySignature, Principal};
     use std::collections::HashMap;
@@ -685,7 +757,7 @@ mod tests {
             .subject(Subject::Specific(alice.did()))
             .command(vec!["storage".to_string()])
             .expiration(Timestamp::try_from(
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000),
+                UNIX_EPOCH + Duration::from_secs(1_000_000_000),
             )?)
             .try_build()
             .await?;
@@ -751,6 +823,51 @@ mod tests {
         let onward = hop(&carol, &dave, &alice).await?;
 
         validate(&revocation_chain(&dave, &target, &[&first, &target, &onward]).await?).await?;
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn a_packed_revocation_round_trips_with_its_witness() -> TestResult {
+        // `InvocationChain::to_bytes` emits only the delegations named in
+        // `prf`. A revocation's witness is named by `args.pth` instead, so
+        // that writer drops it and leaves the receiver unable to resolve
+        // the links it was handed.
+        let alice = generate_signer().await;
+        let bob = generate_signer().await;
+        let carol = generate_signer().await;
+
+        let first = hop(&alice, &bob, &alice).await?;
+        let target = hop(&bob, &carol, &alice).await?;
+        let chain = revocation_chain(&bob, &target, &[&first, &target]).await?;
+
+        let bytes = chain.to_bytes()?;
+        let parsed = RevocationChain::try_from(InvocationChain::try_from(bytes.as_slice())?)?;
+
+        assert_eq!(parsed.revoked().to_cid(), target.to_cid());
+        assert_eq!(parsed.path().len(), 2, "both witness hops must survive");
+        validate(&parsed).await?;
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn assembling_without_a_named_block_is_malformed() -> TestResult {
+        // Assembly answers the same question parsing does, so a caller
+        // that forgets a block gets the same finding rather than a
+        // half-built chain.
+        let alice = generate_signer().await;
+        let bob = generate_signer().await;
+        let target = hop(&alice, &bob, &alice).await?;
+
+        let revocation = RevocationBuilder::new(alice.clone(), target.to_cid())
+            .path(vec![target.to_cid()])
+            .try_build()
+            .await?;
+
+        let result = RevocationChain::assemble(revocation, HashMap::new());
+        assert!(
+            matches!(result, Err(MalformedRevocationChain::MissingBlock { .. })),
+            "a missing block must be malformed, not a partial chain"
+        );
         Ok(())
     }
 
