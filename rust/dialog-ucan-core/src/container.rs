@@ -22,6 +22,8 @@ pub mod invocation;
 mod check_failed;
 pub use check_failed::check_failed_to_container_error;
 
+use dialog_varsig::Did;
+use ipld_core::cid::Cid;
 use ipld_core::ipld::Ipld;
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -41,9 +43,20 @@ pub enum ContainerError {
     #[error("Delegation from '{issuer}' does not carry a valid signature: {detail}")]
     InvalidDelegationSignature {
         /// The principal the forged proof claims as its issuer.
-        issuer: dialog_varsig::Did,
+        issuer: Did,
         /// Human-readable description of the verification failure.
         detail: String,
+    },
+
+    /// A delegation in the chain has been revoked by a principal entitled
+    /// to revoke it. Kept distinct from a signature failure so the authorize
+    /// boundary can say the authority was withdrawn rather than forged.
+    #[error("Delegation '{cid}' was revoked by '{revoker}'")]
+    Revoked {
+        /// The revoked delegation.
+        cid: Cid,
+        /// The principal that revoked it.
+        revoker: Did,
     },
 
     /// Invalid configuration.

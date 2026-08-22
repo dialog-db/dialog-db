@@ -5,6 +5,7 @@
 //! agnostic verifier that resolution recovers is checked by actually verifying a
 //! signature the matching signer produced.
 
+use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::{Ed25519Signer, Es256Signer, Signer};
 use dialog_varsig::{Did, Principal, Signer as VarsigSigner, Verifier as VarsigVerifier};
 
@@ -16,6 +17,28 @@ use crate::url::did_web_url;
 use crate::{CachingResolver, ResolveError};
 
 /// The `did:key` multibase tail (`z...`) for a signer's public key.
+/// Verify `chain` against `resolver`, judged at the current time and
+/// performing no revocation lookups.
+async fn verify<R>(
+    chain: &dialog_ucan_core::InvocationChain<dialog_varsig::AnySignature>,
+    resolver: R,
+) -> Result<dialog_ucan_core::time::TimeRange, dialog_ucan_core::ContainerError>
+where
+    R: dialog_varsig::Resolver<
+            dialog_varsig::AnySignature,
+            Error: Clone + ConditionalSend + ConditionalSync + 'static,
+        >,
+{
+    let environment = dialog_ucan_core::Environment::new(
+        chain.proof_store(),
+        resolver,
+        dialog_ucan_core::UnverifiedRevocations,
+    );
+    chain
+        .verify(&dialog_ucan_core::VerificationContext::new(&environment))
+        .await
+}
+
 fn multibase_of(signer: &Signer) -> String {
     let did = signer.did();
     did.as_str()
@@ -755,8 +778,7 @@ async fn signs_and_verifies_under_did_web(key: Signer) {
     );
 
     let resolver = PerformingResolver::new(&env);
-    chain
-        .verify(&resolver)
+    verify(&chain, resolver)
         .await
         .expect("a did:web-issued invocation should verify");
 }
@@ -813,7 +835,7 @@ async fn it_refuses_did_web_with_wrong_key() {
 
     let resolver = PerformingResolver::new(&env);
     assert!(
-        chain.verify(&resolver).await.is_err(),
+        verify(&chain, resolver).await.is_err(),
         "a did:web document with the wrong key must not verify"
     );
 }

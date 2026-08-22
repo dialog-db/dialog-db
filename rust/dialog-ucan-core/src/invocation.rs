@@ -20,8 +20,14 @@ use crate::{
     subject::Subject,
     time::{TimeBoundError, range::TimeRange, timestamp::Timestamp},
 };
+use crate::{
+    delegation::SignatureVerificationError as DelegationSignatureError,
+    revocation::{RevocationChecker, RevocationMatch, RevocationSelector},
+    verification::{Verifiable, VerificationContext},
+};
 use builder::InvocationBuilder;
 use dialog_varsig::{Did, Resolver, Signature, Verifier};
+use futures::{StreamExt, stream::FuturesUnordered};
 use ipld_core::{cid::Cid, ipld::Ipld};
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -29,7 +35,7 @@ use serde::{
 };
 use std::{
     borrow::{Borrow, Cow},
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt::Debug,
 };
 use thiserror::Error;
@@ -116,42 +122,195 @@ impl<S: Signature> Invocation<S> {
         to_dagcbor_cid(&self)
     }
 
-    /// Check if this invocation is valid.
+    /// Verify this invocation and its whole proof chain.
     ///
-    /// This method performs two checks:
-    /// 1. Verifies that the invocation's signature is valid
-    /// 2. Validates the proof chain using the provided delegation store
+    /// Runs in three phases, ordered so that cheap refusals cost nothing and
+    /// expensive work is shared and overlapped:
+    ///
+    /// 1. **Structural, no I/O.** Proof lookup and
+    ///    [`syntactic_checks`](InvocationPayload::syntactic_checks): alignment,
+    ///    attenuation, policy, and time bounds against the context's sampled
+    ///    instant. A chain that fails here spends no network calls and no
+    ///    crypto.
+    /// 2. **Resolution, concurrent and deduplicated.** Every distinct issuer
+    ///    DID is resolved exactly once, all in flight together. Deduplication
+    ///    is load-bearing rather than an optimization: the caching resolver
+    ///    has no in-flight dedup, so resolving per link concurrently would
+    ///    turn one fetch into N for a DID that appears more than once — and
+    ///    repeated issuers are the normal case.
+    /// 3. **Signatures and revocations, concurrent.** Every link's signature
+    ///    (against its already-resolved verifier) and every link's revocation
+    ///    query are driven together. The first decisive refusal returns at
+    ///    once, dropping the rest, which cancels the in-flight work.
+    ///
+    /// Verification is strict: a revocation query that cannot be performed
+    /// fails the chain rather than proceeding as though the delegation stood.
+    /// A caller willing to proceed without that evidence says so by wrapping
+    /// the checker (see
+    /// [`tolerate_unavailable`](crate::RevocationChecker::tolerate_unavailable)),
+    /// which is a choice made where the environment is built.
     ///
     /// # Errors
     ///
-    /// Returns an [`InvocationCheckError`] if signature verification fails
-    /// or if the proof chain validation fails.
-    pub async fn check<
+    /// Returns a [`VerifyError`] if the chain does not check out,
+    /// a signature does not verify, an issuer cannot be resolved, or a link
+    /// has been revoked.
+    pub async fn check<K, T, St, C>(
+        &self,
+        ctx: &VerificationContext<'_, C>,
+    ) -> Result<
+        TimeRange,
+        VerifyError<
+            K,
+            S,
+            T,
+            St,
+            <C::Resolver as Resolver<S>>::Error,
+            <C::Revocations as RevocationChecker>::Error,
+        >,
+    >
+    where
         K: FutureKind,
         T: Borrow<Delegation<S>>,
         St: DelegationStore<K, S, T>,
-        R: Resolver<S>,
-    >(
-        &self,
-        proof_store: &St,
-        resolver: &R,
-    ) -> Result<TimeRange, InvocationCheckError<K, S, T, St, R>> {
-        // 1. Verify signature
-        self.verify_signature(resolver)
-            .await
-            .map_err(InvocationCheckError::SignatureVerification)?;
-
-        // 2. Check proof chain and compute valid time range. This also
-        //    verifies each delegation link's own signature against its
-        //    resolved issuer key, so a forged proof cannot pass just
-        //    because the invocation itself is validly signed.
-        let time_range = self
+        C: Verifiable<K, S, Proof = T, Delegations = St>,
+        // Cloned when a resolution failure is reported: several links may
+        // name the same unresolvable issuer.
+        <C::Resolver as Resolver<S>>::Error: Clone,
+    {
+        // Phase 1: structure. Nothing below runs if this fails.
+        let (proofs, range) = self
             .payload()
-            .check(proof_store, resolver)
+            .check::<K, S, T, St, C, _>(ctx)
             .await
-            .map_err(InvocationCheckError::StoredCheck)?;
+            .map_err(VerifyError::Invalid)?;
 
-        Ok(time_range)
+        let delegations: Vec<&Delegation<S>> = proofs.iter().map(Borrow::borrow).collect();
+
+        // Phase 2 and the revocation half of phase 3 are independent, so they
+        // run together rather than in sequence: revocation queries do not
+        // need any resolved key.
+        // Who may revoke each link.
+        //
+        // The revocation spec's pseudocode computes one `delegators` set for
+        // the whole chain:
+        //
+        //     const delegators = invocation.prf.map(proof => proof.iss)
+        //
+        // Applied uniformly that is too permissive: for a chain a -> b -> c -> d
+        // it lets d's issuer revoke c, so a principal who merely *received*
+        // authority could revoke the grant it depends on. Authority to revoke
+        // flows downward, so the candidate set is scoped per link: the issuers
+        // at or above it, plus that link's own audience (its immediate
+        // recipient, who may always disclaim what it was given).
+        //
+        //     check a  => [a.iss, a.aud]
+        //     check c  => [a.iss, b.iss, c.iss, c.aud]
+        //
+        // d.iss never appears when checking c.
+        let mut prefix: Vec<Did> = Vec::with_capacity(delegations.len() + 1);
+        let revokers_per_link: Vec<Vec<Did>> = delegations
+            .iter()
+            .map(|delegation| {
+                prefix.push(delegation.issuer().clone());
+                let mut candidates = prefix.clone();
+                candidates.push(delegation.audience().clone());
+                candidates
+            })
+            .collect();
+
+        let mut revocations = FuturesUnordered::new();
+        for (delegation, revokers) in delegations.iter().zip(&revokers_per_link) {
+            let cid = delegation.to_cid();
+            let revokers = revokers.as_slice();
+            revocations.push(async move {
+                match ctx
+                    .environment()
+                    .revocations()
+                    .query(RevocationSelector::new(cid, revokers))
+                    .await
+                {
+                    Ok(None) => Ok(()),
+                    Ok(Some(found)) => Err(VerifyError::<K, S, T, St, _, _>::Invalid(
+                        Invalid::Revoked { cid, found },
+                    )),
+                    // The question went unanswered. A caller willing to
+                    // proceed without the answer says so by wrapping the
+                    // checker, not by us guessing here.
+                    Err(source) => Err(VerifyError::Unavailable(Unavailable::RevocationLookup {
+                        cid,
+                        source,
+                    })),
+                }
+            });
+        }
+
+        // Resolve each distinct issuer exactly once, while the revocation
+        // lookups above are already in flight.
+        let mut wanted: BTreeSet<&Did> = delegations.iter().map(|d| d.issuer()).collect();
+        wanted.insert(self.issuer());
+        let verifiers = resolve_each_once(ctx.environment().resolver(), wanted).await;
+
+        let verifier_for = |did: &Did| {
+            verifiers
+                .get(did)
+                .expect("every issuer was collected before resolving")
+                .as_ref()
+        };
+
+        // Two homogeneous queues rather than one boxed queue: the two kinds
+        // of check have different future types, and boxing them into a single
+        // stream would make the whole verification `!Send`. They are still
+        // driven together below.
+        let mut signatures = FuturesUnordered::new();
+
+        for delegation in delegations.iter().map(Some).chain(std::iter::once(None)) {
+            // `None` stands for the invocation's own signature, checked
+            // alongside the links rather than before them.
+            let issuer = delegation.map_or_else(|| self.issuer(), |d| d.issuer());
+            signatures.push(async move {
+                let verifier = match verifier_for(issuer) {
+                    Ok(verifier) => verifier,
+                    // Without the key the signature cannot be checked, so the
+                    // chain is unproven — not merely un-revocation-checked.
+                    // No tolerance setting can accept that.
+                    Err(detail) => {
+                        return Err(VerifyError::Unavailable(Unavailable::DidResolution {
+                            did: issuer.clone(),
+                            detail: detail.clone(),
+                        }));
+                    }
+                };
+
+                match delegation {
+                    Some(delegation) => delegation
+                        .verify_with::<<C::Resolver as Resolver<S>>::Error>(verifier)
+                        .await
+                        .map_err(|source| {
+                            VerifyError::Invalid(Invalid::DelegationSignature {
+                                issuer: issuer.clone(),
+                                source,
+                            })
+                        }),
+                    None => self
+                        .verify_with::<<C::Resolver as Resolver<S>>::Error>(verifier)
+                        .await
+                        .map_err(|err| VerifyError::Invalid(Invalid::InvocationSignature(err))),
+                }
+            });
+        }
+
+        // Drive both queues together, aborting on the first refusal.
+        // Dropping them cancels whatever is still in flight.
+        loop {
+            futures::select_biased! {
+                result = signatures.select_next_some() => result?,
+                result = revocations.select_next_some() => result?,
+                complete => break,
+            }
+        }
+
+        Ok(range)
     }
 
     #[must_use]
@@ -184,15 +343,32 @@ impl<S: Signature> Invocation<S> {
     where
         R: Resolver<S>,
     {
-        let encoded = self
-            .envelope()
-            .encode()
-            .map_err(SignatureVerificationError::EncodingError)?;
         let verifier = resolver
             .resolve(self.issuer())
             .await
             .map_err(SignatureVerificationError::ResolutionError)?;
-        Verifier::verify(&verifier, &encoded, self.signature())
+        self.verify_with::<R::Error>(&verifier).await
+    }
+
+    /// Verify this invocation's signature against an already-resolved verifier.
+    ///
+    /// Split out from [`verify_signature`](Self::verify_signature) so a chain
+    /// can resolve each distinct issuer DID once and share the verifier with
+    /// every delegation link that names the same issuer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SignatureVerificationError`] if the payload cannot be
+    /// encoded or the signature does not verify.
+    pub async fn verify_with<E: std::error::Error>(
+        &self,
+        verifier: &impl Verifier<S>,
+    ) -> Result<(), SignatureVerificationError<E>> {
+        let encoded = self
+            .envelope()
+            .encode()
+            .map_err(SignatureVerificationError::EncodingError)?;
+        Verifier::verify(verifier, &encoded, self.signature())
             .await
             .map_err(SignatureVerificationError::VerificationError)
     }
@@ -327,47 +503,47 @@ impl InvocationPayload {
         to_dagcbor_cid(&self)
     }
 
-    /// Check if an [`InvocationPayload`] with proofs stored in a delegation store is valid.
+    /// Check that this payload's proof chain authorizes it.
     ///
-    /// In addition to the structural [`syntactic_checks`](Self::syntactic_checks),
-    /// this verifies each delegation link's own signature against the key its
-    /// `iss` resolves to. A proof that is not actually signed by its claimed
-    /// issuer is rejected, even when the invocation itself is validly signed.
+    /// This is the structural pass only: principal alignment, subject
+    /// consistency, command attenuation, policy predicates, and time bounds
+    /// judged against the context's sampled instant. It performs no key
+    /// resolution, no signature verification, and no revocation lookup — the
+    /// caller does those, after this has passed.
+    ///
+    /// Running structure first is deliberate: a chain that fails alignment
+    /// costs nothing, rather than paying a DID resolution per link before
+    /// finding out.
     ///
     /// # Errors
     ///
-    /// Returns a [`StoredCheckError`] if the check fails.
-    pub async fn check<
+    /// Returns an [`Invalid`] if a proof is missing from the store or
+    /// the chain does not check out.
+    pub async fn check<K, S, T, St, C, RE>(
+        &self,
+        ctx: &VerificationContext<'_, C>,
+    ) -> Result<(Vec<T>, TimeRange), Invalid<K, S, T, St, RE>>
+    where
         K: FutureKind,
         S: Signature,
         T: Borrow<Delegation<S>>,
         St: DelegationStore<K, S, T>,
-        R: Resolver<S>,
-    >(
-        &self,
-        proof_store: &St,
-        resolver: &R,
-    ) -> Result<TimeRange, StoredCheckError<K, S, T, St, R>> {
-        let realized_proofs: Vec<T> = proof_store
+        C: Verifiable<K, S, Proof = T, Delegations = St>,
+        RE: std::error::Error,
+    {
+        let proofs: Vec<T> = ctx
+            .environment()
+            .delegations()
             .get_all(&self.proofs)
             .await
-            .map_err(StoredCheckError::GetError)?;
-        let dlgs: Vec<&Delegation<S>> = realized_proofs.iter().map(Borrow::borrow).collect();
+            .map_err(Invalid::MissingProof)?;
 
-        // Every link must carry a signature that verifies against its own
-        // resolved issuer key. Without this a forged delegation (valid
-        // structure, garbage signature) would authorize an attacker.
-        for delegation in &dlgs {
-            delegation
-                .verify_signature(resolver)
-                .await
-                .map_err(|source| StoredCheckError::SignatureVerification {
-                    issuer: delegation.issuer().clone(),
-                    source,
-                })?;
-        }
+        let range = {
+            let borrowed: Vec<&Delegation<S>> = proofs.iter().map(Borrow::borrow).collect();
+            self.syntactic_checks(borrowed, ctx.time())?
+        };
 
-        Ok(self.syntactic_checks(dlgs)?)
+        Ok((proofs, range))
     }
 
     /// Check if an [`InvocationPayload`] is valid.
@@ -382,6 +558,7 @@ impl InvocationPayload {
     pub fn syntactic_checks<'a, S: Signature + 'a, I: IntoIterator<Item = &'a Delegation<S>>>(
         &'a self,
         proofs: I,
+        now: Option<Timestamp>,
     ) -> Result<TimeRange, CheckFailed> {
         let args: Ipld = self
             .arguments()
@@ -483,6 +660,14 @@ impl InvocationPayload {
         // Verify the accumulated time window is non-empty.
         if !time_range.is_valid() {
             return Err(CheckFailed::InvalidTimeWindow { range: time_range });
+        }
+
+        // A non-empty window only says the chain *could* be valid at some
+        // instant. Judge it against the one this verification was given:
+        // without this an expired delegation still authorizes. `None` is a
+        // deliberate opt-out (historical replay, no trusted clock).
+        if let Some(now) = now {
+            time_range.check(&now)?;
         }
 
         Ok(time_range)
@@ -664,6 +849,35 @@ impl PayloadTag for InvocationPayload {
     }
 }
 
+/// Resolve each distinct DID exactly once, all concurrently.
+///
+/// Deduplicating before resolving is the point: the caching resolver has no
+/// in-flight dedup, so N concurrent lookups of the same DID would all miss the
+/// cache together and all fetch. Collapsing to distinct DIDs first keeps that
+/// at one request per DID no matter how many links name it.
+///
+/// The resolver's verifier type is opaque (RPITIT), so this returns the map by
+/// way of a generic rather than naming it.
+async fn resolve_each_once<'a, 'r, S, R>(
+    resolver: &'r R,
+    dids: BTreeSet<&'a Did>,
+) -> HashMap<&'a Did, Result<impl Verifier<S> + use<'a, 'r, S, R>, R::Error>>
+where
+    S: Signature,
+    R: Resolver<S>,
+{
+    let mut pending = FuturesUnordered::new();
+    for did in dids {
+        pending.push(async move { (did, resolver.resolve(did).await) });
+    }
+
+    let mut resolved = HashMap::new();
+    while let Some((did, result)) = pending.next().await {
+        resolved.insert(did, result);
+    }
+    resolved
+}
+
 /// Errors that can occur when checking an invocation
 #[derive(Debug, Clone, Error)]
 pub enum CheckFailed {
@@ -736,35 +950,6 @@ pub enum CheckFailed {
     TimeBound(#[from] TimeBoundError),
 }
 
-/// Errors that can occur when checking an invocation with proofs stored in a delegation store
-#[derive(Debug, Error)]
-pub enum StoredCheckError<
-    K: FutureKind,
-    S: Signature,
-    T: Borrow<Delegation<S>>,
-    St: DelegationStore<K, S, T>,
-    R: Resolver<S>,
-> {
-    /// Error getting proofs from the store
-    #[error(transparent)]
-    GetError(St::GetError),
-
-    /// A delegation link's own signature did not verify against its
-    /// resolved issuer key. The `issuer` is the principal the proof claims
-    /// to be signed by.
-    #[error("delegation from '{issuer}' does not carry a valid signature: {source}")]
-    SignatureVerification {
-        /// The principal the forged proof claims as its issuer.
-        issuer: Did,
-        /// The underlying verification failure.
-        source: crate::delegation::SignatureVerificationError<R::Error>,
-    },
-
-    /// Proof check failed
-    #[error(transparent)]
-    CheckFailed(#[from] CheckFailed),
-}
-
 /// Error type for invocation signature verification.
 #[derive(Debug, thiserror::Error)]
 pub enum SignatureVerificationError<E: std::error::Error = signature::Error> {
@@ -783,20 +968,118 @@ pub enum SignatureVerificationError<E: std::error::Error = signature::Error> {
 
 /// Errors that can occur when checking an invocation (signature + proofs)
 #[derive(Debug, Error)]
-pub enum InvocationCheckError<
+pub enum VerifyError<
     K: FutureKind,
     S: Signature,
     T: Borrow<Delegation<S>>,
     St: DelegationStore<K, S, T>,
-    R: Resolver<S>,
+    RE: std::error::Error,
+    XE: std::error::Error,
 > {
-    /// Signature verification failed
+    /// The chain does not hold up: it is invalid, and no retry or better
+    /// connectivity changes that.
+    ///
+    /// Every variant of [`Invalid`] is a statement about the caller's
+    /// material.
     #[error(transparent)]
-    SignatureVerification(SignatureVerificationError<R::Error>),
+    Invalid(#[from] Invalid<K, S, T, St, RE>),
 
-    /// Proof chain check failed
+    /// We could not establish whether the chain holds up.
+    ///
+    /// This says nothing about the chain — only that something we depend on
+    /// was unreachable. It must never be reported as a denial.
     #[error(transparent)]
-    StoredCheck(StoredCheckError<K, S, T, St, R>),
+    Unavailable(#[from] Unavailable<RE, XE>),
+}
+
+/// The error [`Invocation::check`] produces for a given environment.
+///
+/// Spells out the six parameters once so callers can name the type without
+/// repeating them.
+pub type CheckError<K, S, C> = VerifyError<
+    K,
+    S,
+    <C as Verifiable<K, S>>::Proof,
+    <C as Verifiable<K, S>>::Delegations,
+    <<C as Verifiable<K, S>>::Resolver as Resolver<S>>::Error,
+    <<C as Verifiable<K, S>>::Revocations as RevocationChecker>::Error,
+>;
+
+/// The chain is invalid. A statement about the caller's material.
+#[derive(Debug, Error)]
+pub enum Invalid<
+    K: FutureKind,
+    S: Signature,
+    T: Borrow<Delegation<S>>,
+    St: DelegationStore<K, S, T>,
+    RE: std::error::Error,
+> {
+    /// The invocation's own signature did not verify.
+    #[error("invocation does not carry a valid signature: {0}")]
+    InvocationSignature(SignatureVerificationError<RE>),
+
+    /// A delegation link's signature did not verify against its claimed
+    /// issuer's key.
+    #[error("delegation from '{issuer}' does not carry a valid signature: {source}")]
+    DelegationSignature {
+        /// The principal the proof claims as its issuer.
+        issuer: Did,
+        /// The underlying verification failure.
+        source: DelegationSignatureError<RE>,
+    },
+
+    /// A proof the chain refers to was not supplied.
+    #[error(transparent)]
+    MissingProof(St::GetError),
+
+    /// The chain's structure does not authorize the invocation: principal
+    /// alignment, attenuation, policy, or time bounds.
+    #[error(transparent)]
+    Chain(#[from] CheckFailed),
+
+    /// A delegation in the chain has been revoked.
+    #[error("delegation '{cid}' was revoked by '{}'", found.principal)]
+    Revoked {
+        /// The revoked delegation.
+        cid: Cid,
+        /// The revocation that matched: its document and its issuer.
+        found: RevocationMatch,
+    },
+}
+
+/// We could not establish whether the chain holds up.
+///
+/// Distinct from [`Invalid`] because the two mean opposite things at a trust
+/// boundary: one is grounds to refuse, the other is grounds to say "ask again".
+#[derive(Debug, Error)]
+pub enum Unavailable<RE: std::error::Error, XE: std::error::Error> {
+    /// An issuer DID could not be resolved to a verifier.
+    ///
+    /// Without the key the signature cannot be checked, so the chain is
+    /// unproven — not invalid. Distinct from a revocation gap: this leaves a
+    /// signature unverified, so no tolerance setting can accept it.
+    #[error("could not resolve issuer '{did}': {detail}")]
+    DidResolution {
+        /// The issuer that could not be resolved.
+        did: Did,
+        /// Why resolution failed.
+        detail: RE,
+    },
+
+    /// A revocation lookup failed and the checker did not tolerate it.
+    ///
+    /// Says nothing about whether the delegation was revoked, only that the
+    /// question went unanswered. A caller willing to proceed without that
+    /// answer uses
+    /// [`tolerate_unavailable`](crate::RevocationChecker::tolerate_unavailable),
+    /// which turns this into an unknown recorded in the verdict instead.
+    #[error("could not determine revocation status of '{cid}': {source}")]
+    RevocationLookup {
+        /// The delegation whose status is unknown.
+        cid: Cid,
+        /// Why the lookup failed.
+        source: XE,
+    },
 }
 
 #[cfg(test)]
@@ -811,9 +1094,12 @@ mod tests {
             policy::{predicate::Predicate, selector::select::Select},
             store,
         },
+        future::Local,
         promise::Promised,
+        revocation::{RevocationMatch, UnverifiedRevocations},
         subject::Subject,
         time::{TimeRange, Timestamp},
+        verification::Environment,
     };
     use builder::InvocationBuilder;
     use dialog_credentials::DidKeyResolver;
@@ -1104,6 +1390,41 @@ mod tests {
         store::insert(store, Rc::new(delegation)).await.unwrap()
     }
 
+    /// A verification environment over `store`, judged against the system
+    /// clock and performing no revocation lookups.
+    type TestEnv = Environment<
+        DelegationStore,
+        DidKeyResolver,
+        UnverifiedRevocations,
+        Rc<Delegation<Ed25519Signature>>,
+    >;
+
+    fn env(store: &DelegationStore) -> TestEnv {
+        Environment::new(store.clone(), DidKeyResolver, UnverifiedRevocations)
+    }
+
+    /// Verify against the system clock.
+    async fn check(
+        invocation: &Invocation<Ed25519Signature>,
+        store: &DelegationStore,
+    ) -> Result<TimeRange, String> {
+        check_at(invocation, store, Some(Timestamp::now())).await
+    }
+
+    /// Verify against a specific instant (`None` skips time bounds).
+    async fn check_at(
+        invocation: &Invocation<Ed25519Signature>,
+        store: &DelegationStore,
+        time: Option<Timestamp>,
+    ) -> Result<TimeRange, String> {
+        let environment = env(store);
+        let ctx = VerificationContext::at(&environment, time);
+        invocation
+            .check::<Local, _, _, _>(&ctx)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
     #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     async fn chain_check_valid_single_delegation() -> TestResult {
@@ -1131,7 +1452,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation.check(&delegation_store, &DidKeyResolver).await?;
+        check(&invocation, &delegation_store).await?;
 
         Ok(())
     }
@@ -1167,7 +1488,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err = result.expect_err("Chain check should fail when proof audience != invoker");
         let err_msg = err.to_string();
         assert!(
@@ -1215,7 +1536,7 @@ mod tests {
             .await?;
 
         // Should fail: proof.issuer (random) != subject
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err = result.expect_err("Chain check should fail when proof issuer != subject");
         let err_msg = err.to_string();
         assert!(
@@ -1300,7 +1621,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation.check(&delegation_store, &DidKeyResolver).await?;
+        check(&invocation, &delegation_store).await?;
 
         Ok(())
     }
@@ -1335,7 +1656,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err = result.expect_err("Should fail: proof subject (b) != invocation subject (a)");
         let err_msg = err.to_string();
         assert!(
@@ -1384,7 +1705,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err = result.expect_err("Should fail: root delegation issuer (b) != subject (a)");
         let err_msg = err.to_string();
         assert!(
@@ -1431,7 +1752,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation.check(&delegation_store, &DidKeyResolver).await?;
+        check(&invocation, &delegation_store).await?;
 
         Ok(())
     }
@@ -1465,7 +1786,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err = result.expect_err("Should fail: powerline issuer (b) != invocation subject (a)");
         let err_msg = err.to_string();
         assert!(
@@ -1524,7 +1845,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation.check(&delegation_store, &DidKeyResolver).await?;
+        check(&invocation, &delegation_store).await?;
 
         Ok(())
     }
@@ -1571,7 +1892,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err =
             result.expect_err("Should fail: second proof subject (b) != established subject (a)");
         let err_msg = err.to_string();
@@ -1609,7 +1930,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err = result.expect_err("Should fail: self-issued invocation with issuer != subject");
         let err_msg = err.to_string();
         assert!(
@@ -1644,7 +1965,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation.check(&delegation_store, &DidKeyResolver).await?;
+        check(&invocation, &delegation_store).await?;
 
         Ok(())
     }
@@ -1676,7 +1997,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err = result.expect_err("Should fail: invocation command not covered by delegation");
         let err_msg = err.to_string();
         assert!(
@@ -1722,7 +2043,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation.check(&delegation_store, &DidKeyResolver).await?;
+        check(&invocation, &delegation_store).await?;
 
         Ok(())
     }
@@ -1768,7 +2089,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err = result.expect_err("Should fail: arguments violate delegation policy");
         let err_msg = err.to_string();
         assert!(
@@ -1817,7 +2138,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation.check(&delegation_store, &DidKeyResolver).await?;
+        check(&invocation, &delegation_store).await?;
 
         Ok(())
     }
@@ -1873,7 +2194,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err = result.expect_err("Should fail: chain linkage broken at second hop");
         let err_msg = err.to_string();
         assert!(
@@ -1940,7 +2261,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation.check(&delegation_store, &DidKeyResolver).await?;
+        check(&invocation, &delegation_store).await?;
 
         Ok(())
     }
@@ -1975,7 +2296,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation.check(&delegation_store, &DidKeyResolver).await?;
+        check(&invocation, &delegation_store).await?;
 
         Ok(())
     }
@@ -1999,7 +2320,7 @@ mod tests {
             .try_build()
             .await?;
 
-        invocation.check(&delegation_store, &DidKeyResolver).await?;
+        check(&invocation, &delegation_store).await?;
 
         Ok(())
     }
@@ -2019,7 +2340,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let range = invocation.check(&delegation_store, &DidKeyResolver).await?;
+        let range = check(&invocation, &delegation_store).await?;
 
         assert_eq!(range, TimeRange::unbounded());
         Ok(())
@@ -2054,7 +2375,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let range = invocation.check(&delegation_store, &DidKeyResolver).await?;
+        let range = check(&invocation, &delegation_store).await?;
 
         assert_eq!(range.not_before, Bound::Unbounded);
         assert_eq!(range.expiration, Bound::Included(exp));
@@ -2109,7 +2430,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let range = invocation.check(&delegation_store, &DidKeyResolver).await?;
+        let range = check(&invocation, &delegation_store).await?;
 
         // nbf = max(now, unbounded) = now
         assert_eq!(range.not_before, Bound::Included(now));
@@ -2166,7 +2487,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let result = invocation.check(&delegation_store, &DidKeyResolver).await;
+        let result = check(&invocation, &delegation_store).await;
         let err = result.expect_err("Should fail: time windows don't overlap");
         let err_msg = err.to_string();
         assert!(
@@ -2209,7 +2530,7 @@ mod tests {
             .try_build()
             .await?;
 
-        let range = invocation.check(&delegation_store, &DidKeyResolver).await?;
+        let range = check(&invocation, &delegation_store).await?;
 
         // The invocation's tighter expiration should win
         assert_eq!(range.expiration, Bound::Included(exp_invocation));
@@ -2264,12 +2585,529 @@ mod tests {
             .try_build()
             .await?;
 
-        let range = invocation.check(&delegation_store, &DidKeyResolver).await?;
+        let range = check(&invocation, &delegation_store).await?;
 
         // nbf = max(now, unbounded) = now (narrow wins)
         assert_eq!(range.not_before, Bound::Included(now));
         // exp = min(exp_narrow, exp_wide) = exp_narrow (narrow wins)
         assert_eq!(range.expiration, Bound::Included(exp_narrow));
+        Ok(())
+    }
+
+    use crate::time::timestamp::{Duration, UNIX_EPOCH};
+
+    /// A checker that fails every lookup, standing in for an unreachable
+    /// revocation service.
+    #[derive(Debug, thiserror::Error)]
+    #[error("revocation service unreachable")]
+    struct Unreachable;
+
+    #[derive(Debug, Clone, Copy)]
+    struct OfflineRevocations;
+
+    impl RevocationChecker for OfflineRevocations {
+        type Error = Unreachable;
+
+        async fn query(
+            &self,
+            _selector: RevocationSelector<'_>,
+        ) -> Result<Option<RevocationMatch>, Self::Error> {
+            Err(Unreachable)
+        }
+    }
+
+    /// Records the candidate revoker sets it was queried with.
+    #[derive(Debug, Clone, Default)]
+    struct RecordingRevocations(Rc<RefCell<Vec<Vec<Did>>>>);
+
+    impl RevocationChecker for RecordingRevocations {
+        type Error = Unreachable;
+
+        async fn query(
+            &self,
+            selector: RevocationSelector<'_>,
+        ) -> Result<Option<RevocationMatch>, Self::Error> {
+            RefCell::borrow_mut(&self.0).push(selector.by.to_vec());
+            Ok(None)
+        }
+    }
+
+    /// A checker that reports every delegation as revoked.
+    #[derive(Debug, Clone)]
+    struct AllRevoked(Did);
+
+    impl RevocationChecker for AllRevoked {
+        type Error = Unreachable;
+
+        async fn query(
+            &self,
+            selector: RevocationSelector<'_>,
+        ) -> Result<Option<RevocationMatch>, Self::Error> {
+            Ok(Some(RevocationMatch {
+                revocation: selector.delegation,
+                principal: self.0.clone(),
+            }))
+        }
+    }
+
+    /// A resolver that counts how many times each DID was resolved.
+    #[derive(Debug, Default, Clone)]
+    struct CountingResolver(Rc<RefCell<usize>>);
+
+    impl dialog_varsig::Resolver<Ed25519Signature> for CountingResolver {
+        type Error = dialog_credentials::DidKeyResolveError;
+
+        async fn resolve(
+            &self,
+            did: &Did,
+        ) -> Result<impl dialog_varsig::Verifier<Ed25519Signature>, Self::Error> {
+            *RefCell::borrow_mut(&self.0) += 1;
+            dialog_varsig::Resolver::<Ed25519Signature>::resolve(&DidKeyResolver, did).await
+        }
+    }
+
+    /// Build a one-link chain: `subject -> invoker`, invoked by `invoker`.
+    async fn one_link_chain(
+        expiration: Option<Timestamp>,
+    ) -> TestResult<(Invocation<Ed25519Signature>, DelegationStore)> {
+        let subject = test_signer(90).await;
+        let invoker = test_signer(91).await;
+
+        let mut builder = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&invoker)
+            .subject(Subject::Specific(subject.did()))
+            .command(vec!["test".to_string()]);
+        if let Some(exp) = expiration {
+            builder = builder.expiration(exp);
+        }
+        let delegation = builder.try_build().await?;
+
+        let store = new_store();
+        let cid = store_delegation(&store, delegation).await;
+
+        let invocation = InvocationBuilder::new()
+            .issuer(invoker.clone())
+            .audience(&subject)
+            .subject(&subject)
+            .command(vec!["test".to_string()])
+            .proofs(vec![cid])
+            .try_build()
+            .await?;
+
+        Ok((invocation, store))
+    }
+
+    /// Build an `n`-hop chain rooted at `subject`, invoked by the final
+    /// audience. Returns the invocation, the store, and the signers in chain
+    /// order (`[subject, hop1, hop2, ..., invoker]`).
+    async fn multi_hop_chain(
+        hops: usize,
+    ) -> TestResult<(
+        Invocation<Ed25519Signature>,
+        DelegationStore,
+        Vec<Ed25519Signer>,
+    )> {
+        assert!(hops >= 1, "a chain needs at least one delegation");
+
+        let mut signers = Vec::with_capacity(hops + 1);
+        for seed in 0..=hops {
+            signers.push(test_signer(120 + u8::try_from(seed).expect("small seed")).await);
+        }
+        let subject = signers[0].clone();
+
+        let store = new_store();
+        let mut cids = Vec::with_capacity(hops);
+        for hop in 0..hops {
+            let delegation = DelegationBuilder::new()
+                .issuer(signers[hop].clone())
+                .audience(&signers[hop + 1])
+                .subject(Subject::Specific(subject.did()))
+                .command(vec!["test".to_string()])
+                .try_build()
+                .await?;
+            cids.push(store_delegation(&store, delegation).await);
+        }
+
+        let invoker = signers[hops].clone();
+        let invocation = InvocationBuilder::new()
+            .issuer(invoker)
+            .audience(&subject)
+            .subject(&subject)
+            .command(vec!["test".to_string()])
+            .proofs(cids)
+            .try_build()
+            .await?;
+
+        Ok((invocation, store, signers))
+    }
+
+    /// Run a verification whose revocation checker records what it was asked,
+    /// returning the candidate revoker set per link, in chain order.
+    async fn recorded_revokers(
+        invocation: &Invocation<Ed25519Signature>,
+        store: &DelegationStore,
+    ) -> TestResult<Vec<Vec<Did>>> {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let environment: Environment<
+            DelegationStore,
+            DidKeyResolver,
+            RecordingRevocations,
+            Rc<Delegation<Ed25519Signature>>,
+        > = Environment::new(
+            store.clone(),
+            DidKeyResolver,
+            RecordingRevocations(seen.clone()),
+        );
+        let ctx = VerificationContext::new(&environment);
+        invocation
+            .check::<Local, _, _, _>(&ctx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut recorded = RefCell::borrow(&seen).clone();
+        // Queries complete concurrently, so order by chain position: each
+        // link's prefix is strictly longer than the one before it.
+        recorded.sort_by_key(Vec::len);
+        Ok(recorded)
+    }
+
+    #[dialog_common::test]
+    async fn an_expired_delegation_is_refused() -> TestResult {
+        // Expired in 2001. Before this check existed, it authorized.
+        let expired = Timestamp::try_from(UNIX_EPOCH + Duration::from_secs(1_000_000_000))?;
+        let (invocation, store) = one_link_chain(Some(expired)).await?;
+
+        let result = check(&invocation, &store).await;
+        assert!(result.is_err(), "an expired delegation must not authorize");
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn an_expired_delegation_passes_when_time_is_not_judged() -> TestResult {
+        // `None` is the explicit opt-out: replaying history, or no trusted
+        // clock. It must skip the bound rather than default to the epoch.
+        let expired = Timestamp::try_from(UNIX_EPOCH + Duration::from_secs(1_000_000_000))?;
+        let (invocation, store) = one_link_chain(Some(expired)).await?;
+
+        check_at(&invocation, &store, None).await?;
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn a_delegation_is_refused_before_it_is_valid() -> TestResult {
+        let subject = test_signer(92).await;
+        let invoker = test_signer(93).await;
+
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&invoker)
+            .subject(Subject::Specific(subject.did()))
+            .command(vec!["test".to_string()])
+            .not_before(Timestamp::five_years_from_now())
+            .try_build()
+            .await?;
+
+        let store = new_store();
+        let cid = store_delegation(&store, delegation).await;
+
+        let invocation = InvocationBuilder::new()
+            .issuer(invoker.clone())
+            .audience(&subject)
+            .subject(&subject)
+            .command(vec!["test".to_string()])
+            .proofs(vec![cid])
+            .try_build()
+            .await?;
+
+        assert!(
+            check(&invocation, &store).await.is_err(),
+            "a not-yet-valid delegation must not authorize"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn each_distinct_issuer_is_resolved_exactly_once() -> TestResult {
+        // Regression guard for the concurrency-vs-cache hazard: the caching
+        // resolver has no in-flight dedup, so resolving per link would turn
+        // one fetch into N for a repeated DID.
+        let (invocation, store) = one_link_chain(None).await?;
+
+        let counter = Rc::new(RefCell::new(0usize));
+        let environment = Environment::new(
+            store.clone(),
+            CountingResolver(counter.clone()),
+            UnverifiedRevocations,
+        );
+        let ctx = VerificationContext::new(&environment);
+        invocation
+            .check::<Local, _, _, _>(&ctx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Two distinct issuers here (subject and invoker), each resolved once.
+        assert_eq!(
+            *RefCell::borrow(&*counter),
+            2,
+            "each distinct issuer resolves once"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn a_structural_failure_costs_no_resolutions() -> TestResult {
+        // Pins the phase ordering: structure is judged before any I/O.
+        let subject = test_signer(94).await;
+        let invoker = test_signer(95).await;
+        let stranger = test_signer(96).await;
+
+        // Delegation to someone other than the invoker: misaligned chain.
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&stranger)
+            .subject(Subject::Specific(subject.did()))
+            .command(vec!["test".to_string()])
+            .try_build()
+            .await?;
+
+        let store = new_store();
+        let cid = store_delegation(&store, delegation).await;
+
+        let invocation = InvocationBuilder::new()
+            .issuer(invoker.clone())
+            .audience(&subject)
+            .subject(&subject)
+            .command(vec!["test".to_string()])
+            .proofs(vec![cid])
+            .try_build()
+            .await?;
+
+        let counter = Rc::new(RefCell::new(0usize));
+        let environment = Environment::new(
+            store.clone(),
+            CountingResolver(counter.clone()),
+            UnverifiedRevocations,
+        );
+        let ctx = VerificationContext::new(&environment);
+        let result = invocation.check::<Local, _, _, _>(&ctx).await;
+
+        assert!(result.is_err(), "a misaligned chain must be refused");
+        assert_eq!(
+            *RefCell::borrow(&*counter),
+            0,
+            "a structural failure must not pay for any DID resolution"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn an_unreachable_revocation_service_is_not_a_denial() -> TestResult {
+        let (invocation, store) = one_link_chain(None).await?;
+
+        let environment = Environment::new(store.clone(), DidKeyResolver, OfflineRevocations);
+        let ctx = VerificationContext::new(&environment);
+        let err = invocation
+            .check::<Local, _, _, _>(&ctx)
+            .await
+            .expect_err("a strict checker must not accept an unknown status");
+
+        // It must read as "could not check", never as "invalid".
+        assert!(
+            matches!(
+                err,
+                VerifyError::Unavailable(Unavailable::RevocationLookup { .. })
+            ),
+            "expected an unavailability, got: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn tolerating_an_unreachable_service_lets_a_valid_chain_pass() -> TestResult {
+        // Wrapping the checker is the whole opt-in: verification stays strict
+        // otherwise, and the caller made this choice where the environment
+        // was built.
+        let (invocation, store) = one_link_chain(None).await?;
+
+        let environment = Environment::new(
+            store.clone(),
+            DidKeyResolver,
+            OfflineRevocations.tolerate_unavailable(),
+        );
+        let ctx = VerificationContext::new(&environment);
+        invocation
+            .check::<Local, _, _, _>(&ctx)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn tolerating_still_refuses_a_confirmed_revocation() -> TestResult {
+        // Tolerance is about not knowing, never knowing-and-ignoring.
+        let (invocation, store) = one_link_chain(None).await?;
+        let revoker = test_did(90).await;
+
+        let environment = Environment::new(
+            store.clone(),
+            DidKeyResolver,
+            AllRevoked(revoker).tolerate_unavailable(),
+        );
+        let ctx = VerificationContext::new(&environment);
+        let err = invocation
+            .check::<Local, _, _, _>(&ctx)
+            .await
+            .expect_err("a confirmed revocation must be refused");
+
+        assert!(
+            matches!(err, VerifyError::Invalid(Invalid::Revoked { .. })),
+            "expected a revocation refusal, got: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn an_invalid_chain_beats_an_unreachable_revocation_service() -> TestResult {
+        // The central invariant: if the chain is bad, the caller must learn
+        // *that*, never "revocation service unreachable". Otherwise a caller
+        // willing to fail open on unavailability would accept a bad chain.
+        let expired = Timestamp::try_from(UNIX_EPOCH + Duration::from_secs(1_000_000_000))?;
+        let (invocation, store) = one_link_chain(Some(expired)).await?;
+
+        let environment = Environment::new(store.clone(), DidKeyResolver, OfflineRevocations);
+        let ctx = VerificationContext::new(&environment);
+        let err = invocation
+            .check::<Local, _, _, _>(&ctx)
+            .await
+            .expect_err("an expired chain must be refused");
+
+        assert!(
+            matches!(err, VerifyError::Invalid(_)),
+            "an invalid chain must report its invalidity, got: {err:?}"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn a_single_link_is_revocable_by_its_issuer_and_its_audience() -> TestResult {
+        // The root grant: its issuer made it, its audience received it, and
+        // either may withdraw it.
+        let (invocation, store, signers) = multi_hop_chain(1).await?;
+        let recorded = recorded_revokers(&invocation, &store).await?;
+
+        assert_eq!(recorded.len(), 1, "one query per link");
+        assert_eq!(recorded[0], vec![signers[0].did(), signers[1].did()]);
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn each_link_is_revocable_by_its_prefix_and_its_own_audience() -> TestResult {
+        // a -> b -> c -> d
+        //   check a  => [a.iss, a.aud]
+        //   check b  => [a.iss, b.iss, b.aud]
+        //   check c  => [a.iss, b.iss, c.iss, c.aud]
+        let (invocation, store, signers) = multi_hop_chain(3).await?;
+        let recorded = recorded_revokers(&invocation, &store).await?;
+
+        assert_eq!(recorded.len(), 3, "one query per link");
+        assert_eq!(recorded[0], vec![signers[0].did(), signers[1].did()]);
+        assert_eq!(
+            recorded[1],
+            vec![signers[0].did(), signers[1].did(), signers[2].did()]
+        );
+        assert_eq!(
+            recorded[2],
+            vec![
+                signers[0].did(),
+                signers[1].did(),
+                signers[2].did(),
+                signers[3].did()
+            ]
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn a_downstream_principal_may_not_revoke_an_upstream_link() -> TestResult {
+        // The central rule: in a -> b -> c -> d, d's issuer must not appear
+        // when checking c. Authority to revoke flows downward, so a principal
+        // that merely received authority cannot revoke the grant it rests on.
+        let (invocation, store, signers) = multi_hop_chain(3).await?;
+        let recorded = recorded_revokers(&invocation, &store).await?;
+
+        // Link index i is delegation signers[i] -> signers[i+1]. Everyone
+        // strictly below it must be absent.
+        for (link, candidates) in recorded.iter().enumerate() {
+            for (position, signer) in signers.iter().enumerate().skip(link + 2) {
+                assert!(
+                    !candidates.contains(&signer.did()),
+                    "link {link}: principal at position {position} is downstream \
+                     and must not be able to revoke it"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn the_invocation_issuer_may_revoke_only_the_link_it_received() -> TestResult {
+        // The invoker is the final delegation's audience, so it may revoke
+        // that link — but no earlier one.
+        let (invocation, store, signers) = multi_hop_chain(3).await?;
+        let recorded = recorded_revokers(&invocation, &store).await?;
+        let invoker = signers.last().expect("chain has signers").did();
+
+        assert!(
+            recorded[2].contains(&invoker),
+            "the invoker received the last link and may disclaim it"
+        );
+        assert!(
+            !recorded[0].contains(&invoker) && !recorded[1].contains(&invoker),
+            "the invoker must not be able to revoke links it did not receive"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn a_self_issued_invocation_queries_no_revocations() -> TestResult {
+        // No proofs means no links, so there is nothing to look up.
+        let signer = test_signer(140).await;
+        let invocation = InvocationBuilder::new()
+            .issuer(signer.clone())
+            .audience(&signer)
+            .subject(&signer)
+            .command(vec!["test".to_string()])
+            .proofs(vec![])
+            .try_build()
+            .await?;
+
+        let recorded = recorded_revokers(&invocation, &new_store()).await?;
+        assert!(recorded.is_empty(), "no proofs, no revocation queries");
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn a_revocation_by_an_authorized_principal_refuses_the_chain() -> TestResult {
+        let (invocation, store, signers) = multi_hop_chain(2).await?;
+        let root = signers[0].did();
+
+        let environment: Environment<
+            DelegationStore,
+            DidKeyResolver,
+            AllRevoked,
+            Rc<Delegation<Ed25519Signature>>,
+        > = Environment::new(store.clone(), DidKeyResolver, AllRevoked(root));
+        let ctx = VerificationContext::new(&environment);
+        let err = invocation
+            .check::<Local, _, _, _>(&ctx)
+            .await
+            .expect_err("a revoked link must refuse the chain");
+
+        assert!(
+            matches!(err, VerifyError::Invalid(Invalid::Revoked { .. })),
+            "expected a revocation refusal, got: {err:?}"
+        );
         Ok(())
     }
 }
