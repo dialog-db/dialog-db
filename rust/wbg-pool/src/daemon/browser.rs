@@ -7,11 +7,25 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{mpsc, oneshot, Mutex};
+
+/// Process group of the running browser, if any. The daemon's shutdown
+/// watchdog runs on a plain thread with no access to async state, so it
+/// needs a way to take the browser down without going through [`Browser`].
+static BROWSER_GROUP: AtomicI32 = AtomicI32::new(0);
+
+/// Kills the browser and everything it spawned, from anywhere, without the
+/// async runtime. Safe to call when no browser is running.
+pub fn kill_browser_group() {
+    let group = BROWSER_GROUP.swap(0, Ordering::SeqCst);
+    if group > 0 {
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+}
 
 pub struct BrowserPool {
     profile_dir: PathBuf,
@@ -176,11 +190,18 @@ impl Browser {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
+            // Chrome's renderers, GPU process and zygote are its children,
+            // and a renderer wedged in a runaway test loop never services
+            // the IPC teardown that is supposed to stop it. Putting the
+            // browser in its own process group lets `kill` reach the whole
+            // tree instead of leaving orphans behind burning cores.
+            .process_group(0)
             .kill_on_drop(true);
 
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to launch browser {}", binary.display()))?;
+        let group = child.id().unwrap_or_default() as i32;
 
         let stderr = child.stderr.take().context("browser stderr not piped")?;
         let mut lines = tokio::io::BufReader::new(stderr).lines();
@@ -213,11 +234,20 @@ impl Browser {
         tokio::spawn(async move { while lines.next_line().await.ok().flatten().is_some() {} });
 
         let cdp = CdpClient::connect(&ws_url).await?;
+        // Only published once the browser is fully up: every earlier return
+        // drops `child`, which kills it (`kill_on_drop`), and a stale group
+        // recorded here could later name an unrelated recycled pid.
+        BROWSER_GROUP.store(group, Ordering::SeqCst);
         Ok(Browser { child, cdp })
     }
 
     async fn kill(&mut self) {
-        let _ = self.child.kill().await;
+        kill_browser_group();
+        let _ = self.child.start_kill();
+        // Reaping goes through the runtime's signal driver; if that is not
+        // making progress the daemon must still be able to exit, so this
+        // wait is bounded. The browser is already dead either way.
+        let _ = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await;
     }
 }
 
@@ -310,13 +340,11 @@ impl CdpClient {
                                 Ok(text) => text,
                                 Err(_) => continue,
                             },
-                            _ => {
-                                task_alive.store(false, Ordering::SeqCst);
-                                for (_, reply) in pending.drain() {
-                                    let _ = reply.send(Err(anyhow!("browser connection lost")));
-                                }
-                                continue;
-                            }
+                            // The browser went away. A closed WebSocketStream
+                            // is fused: it answers every subsequent poll
+                            // immediately, so the reader has to stop here
+                            // rather than loop and burn a core forever.
+                            _ => break,
                         };
                         let Ok(value) = serde_json::from_str::<Value>(text.as_str()) else { continue };
                         let Some(id) = value.get("id").and_then(Value::as_u64) else { continue };
@@ -330,6 +358,10 @@ impl CdpClient {
                         }
                     }
                 }
+            }
+            task_alive.store(false, Ordering::SeqCst);
+            for (_, reply) in pending.drain() {
+                let _ = reply.send(Err(anyhow!("browser connection lost")));
             }
         });
 
@@ -361,5 +393,56 @@ impl CdpClient {
             .await
             .context("timed out waiting for the browser to answer a CDP call")?
             .map_err(|_| anyhow!("browser connection lost"))?
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// CPU time this process has burned, in milliseconds.
+    fn cpu_millis() -> u128 {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        let millis = |time: libc::timeval| time.tv_sec as u128 * 1000 + time.tv_usec as u128 / 1000;
+        millis(usage.ru_utime) + millis(usage.ru_stime)
+    }
+
+    /// Serves one WebSocket handshake and then drops the connection, the way
+    /// the browser's DevTools endpoint goes away when Chrome exits.
+    async fn closing_devtools_endpoint() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(tokio_tungstenite::accept_async(stream).await.unwrap());
+        });
+        format!("ws://{addr}")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_reader_stops_when_the_browser_goes_away() {
+        let client = CdpClient::connect(&closing_devtools_endpoint().await)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // A closed WebSocketStream answers every poll immediately, so a
+        // reader that keeps polling it pegs a core for as long as the daemon
+        // lives -- which is until its idle timeout, or forever when the
+        // spinning starves the shutdown path that killing the browser began.
+        let before = cpu_millis();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let burned = cpu_millis() - before;
+        assert!(
+            burned < 100,
+            "the CDP reader burned {burned}ms of CPU while idle after the browser exited"
+        );
+
+        assert!(!client.is_alive());
+        assert!(client
+            .call("Target.createTarget", json!({}), None)
+            .await
+            .is_err());
     }
 }
