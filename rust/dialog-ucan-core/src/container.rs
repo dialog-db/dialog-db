@@ -18,6 +18,7 @@
 
 pub mod delegation;
 pub mod invocation;
+pub mod revocation;
 
 mod check_failed;
 pub use check_failed::check_failed_to_container_error;

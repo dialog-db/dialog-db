@@ -45,7 +45,7 @@ use crate::future::Local as Runtime;
 use crate::future::Sendable as Runtime;
 
 /// In-memory delegation store for verification.
-type ProofStore<S> = Arc<Mutex<HashMap<Cid, Arc<Delegation<S>>>>>;
+pub type ProofStore<S> = Arc<Mutex<HashMap<Cid, Arc<Delegation<S>>>>>;
 
 /// An invocation with its delegation chain, parsed from a UCAN container.
 ///
@@ -142,6 +142,16 @@ impl<S: Signature> InvocationChain<S> {
                     ),
                 },
             })
+    }
+
+    /// Look up a delegation the container carries as a block.
+    ///
+    /// The container holds every token that travelled with the invocation,
+    /// which is not only its `prf` chain: a `/ucan/revoke` also carries the
+    /// delegations its `rev` and `pth` arguments name.
+    #[must_use]
+    pub fn delegation(&self, cid: &Cid) -> Option<&Arc<Delegation<S>>> {
+        self.delegations.get(cid)
     }
 
     /// The proof store this chain's delegations live in.
