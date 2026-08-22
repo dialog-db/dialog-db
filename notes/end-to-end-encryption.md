@@ -52,6 +52,36 @@ The paper's implementation lives at
 licensing to be confirmed). Evaluating it as a dependency should precede
 reimplementation.
 
+#### Operation history is the cost that grows
+
+Table 1 puts sender cost at `O(log n)` primitives and existing-recipient cost
+at `O(1)`, but a *new* member pays `O(h_B)` — they replay the whole operation
+history. The paper quantifies it: **each `Update` grows the welcome message by
+2.5 kB and adds 40 µs to processing it.**
+
+For a chat group that is fine. A Dialog space lives far longer than a
+conversation, so a few thousand membership operations means a multi-megabyte
+welcome and a visible join delay. The paper waves at checkpointing as an
+optimization (§4.3.3, footnote 16 — "in practice we find replaying the full
+history does not cause performance issues"); for us it is likely to be
+required, not optional. Budget for it in Phase 4 rather than discovering it
+later.
+
+The other cost to plan for is concurrency. §6.2 partitions a 64-member group
+four ways and finds recovery cost grows with the *fraction of distinct members*
+who updated while partitioned, then plateaus once every member has updated
+once — further updates add little. Absolute numbers are small (~30 ms CPU,
+~150 KiB to resolve every conflict node), so this is a shape to be aware of
+rather than a risk.
+
+#### Post-quantum is a primitive swap, not a redesign
+
+`BeeKEM_PQ` (§7) replaces the NIKE with a KEM: each node additionally stores a
+ciphertext from encapsulating the sibling's public key, and everything else
+stays as it is. That means PQ migration is contained — *provided* the group
+protocol carries its own version independent of the block-sealing suite byte.
+Version the two separately from the start; they will not move together.
+
 ### Where Dialog's requirements differ from messaging
 
 BeeKEM is parameterized by a key-retention parameter `κ`: members keep their
