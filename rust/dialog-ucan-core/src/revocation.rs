@@ -8,6 +8,9 @@
 //! chain, so it supplies the candidate set.
 
 use crate::sync::{ConditionalSend, ConditionalSync};
+pub mod action;
+pub mod builder;
+
 use dialog_varsig::Did;
 use ipld_core::cid::Cid;
 use std::error::Error;

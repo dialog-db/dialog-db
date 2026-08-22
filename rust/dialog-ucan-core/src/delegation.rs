@@ -4,6 +4,7 @@
 //! [the GitHub repo](https://github.com/ucan-wg/invocation/).
 
 pub mod builder;
+pub mod chain;
 pub mod policy;
 pub mod store;
 

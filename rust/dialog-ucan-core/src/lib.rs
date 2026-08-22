@@ -35,6 +35,9 @@ mod sealed;
 
 pub use container::delegation::DelegationChain;
 pub use container::invocation::InvocationChain;
+pub use container::revocation::{
+    Denial, MalformedRevocationChain, RevocationChain, RevocationError,
+};
 pub use container::{Container, ContainerError};
 pub use delegation::{
     Delegation,
@@ -44,6 +47,8 @@ pub use invocation::{
     CheckError, CheckFailed, Invalid, Invocation, InvocationPayload, Unavailable, VerifyError,
     builder::{BuildError as InvocationBuildError, InvocationBuilder},
 };
+pub use revocation::action::{MalformedRevocation, Revocation};
+pub use revocation::builder::RevocationBuilder;
 pub use revocation::{
     RevocationChecker, RevocationMatch, RevocationSelector, TolerateUnavailability,
     UnverifiedRevocations,
