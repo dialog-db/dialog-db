@@ -86,6 +86,46 @@ async fn coverage() -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+/// Releases a run's browser tab and page slot, including when the request
+/// future is dropped instead of finishing. nextest kills runner processes
+/// routinely (a slow-test timeout, `--fail-fast`, Ctrl-C), which cancels the
+/// handler mid-run; a tab left behind keeps executing its test, and a test
+/// that never returns then pegs a core for as long as the daemon lives.
+struct RunGuard {
+    daemon: Arc<Daemon>,
+    run_id: u64,
+    target: Option<String>,
+}
+
+impl RunGuard {
+    fn new(daemon: &Arc<Daemon>, run_id: u64) -> RunGuard {
+        RunGuard {
+            daemon: daemon.clone(),
+            run_id,
+            target: None,
+        }
+    }
+
+    /// Hands the guard the tab to close once the run is over.
+    fn owns_tab(&mut self, target: String) {
+        self.target = Some(target);
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.daemon.runs.lock().unwrap().remove(&self.run_id);
+        let Some(target) = self.target.take() else {
+            return;
+        };
+        let daemon = self.daemon.clone();
+        tokio::spawn(async move {
+            daemon.browser.close_tab(&target).await;
+            daemon.touch();
+        });
+    }
+}
+
 struct ActiveGuard(Arc<Daemon>);
 
 impl ActiveGuard {
@@ -163,6 +203,7 @@ async fn execute_run(daemon: &Arc<Daemon>, request: RunRequest) -> Result<RunRep
     );
 
     let (report_tx, report_rx) = oneshot::channel();
+    let mut guard = RunGuard::new(daemon, run_id);
     daemon.runs.lock().unwrap().insert(
         run_id,
         RunSlot {
@@ -177,13 +218,12 @@ async fn execute_run(daemon: &Arc<Daemon>, request: RunRequest) -> Result<RunRep
     // and with it fresh IndexedDB, OPFS, localStorage, caches and cookies.
     let url = format!("http://t-{run_id}.localhost:{}/r/{run_id}/", daemon.port);
 
-    let target = match daemon.browser.create_tab(&url).await {
-        Ok(target) => target,
-        Err(error) => {
-            daemon.runs.lock().unwrap().remove(&run_id);
-            return Err(error).context("failed to open a browser tab");
-        }
-    };
+    let target = daemon
+        .browser
+        .create_tab(&url)
+        .await
+        .context("failed to open a browser tab")?;
+    guard.owns_tab(target.clone());
 
     let timeout = Duration::from_secs(request.timeout_secs.max(1));
     let report = match tokio::time::timeout(timeout, report_rx).await {
@@ -217,10 +257,6 @@ async fn execute_run(daemon: &Arc<Daemon>, request: RunRequest) -> Result<RunRep
             }
         }
     };
-
-    daemon.browser.close_tab(&target).await;
-    daemon.runs.lock().unwrap().remove(&run_id);
-    daemon.touch();
 
     Ok(report)
 }

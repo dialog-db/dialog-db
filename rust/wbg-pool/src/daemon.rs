@@ -168,6 +168,15 @@ async fn run(state_dir: PathBuf, idle_timeout: u64) -> Result<()> {
 }
 
 pub async fn shutdown(daemon: &Daemon) -> ! {
+    // A daemon that starts shutting down and never finishes is the worst
+    // outcome available here: it is detached, so nothing reaps it, and it
+    // keeps whatever it was holding. Guarantee the exit from a plain
+    // thread, which still runs if the async runtime stops making progress.
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(10));
+        browser::kill_browser_group();
+        std::process::exit(0);
+    });
     daemon.browser.kill().await;
     remove_state_file_if_ours(&daemon.state_dir);
     let _ = std::fs::remove_dir_all(&daemon.work_dir);
@@ -189,10 +198,22 @@ fn sweep_stale_work_dirs(state_dir: &Path) {
         else {
             continue;
         };
-        if pid != std::process::id() && !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        if pid != std::process::id() && !process_alive(pid) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
+}
+
+/// Whether a process is still running. `/proc` is not portable across the
+/// unices this runs on (macOS has no `/proc`, where every pid would look
+/// dead and a live daemon's work directory would be swept out from under
+/// it), so ask the kernel directly. `EPERM` means the pid exists but is
+/// someone else's, which still counts as alive.
+fn process_alive(pid: u32) -> bool {
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn write_state_file(state_dir: &Path, port: u16) -> Result<()> {
