@@ -6,47 +6,11 @@ use super::ContainerError;
 use crate::invocation::CheckFailed;
 
 /// Convert a `CheckFailed` error to a `ContainerError`.
+///
+/// The decision travels whole. Each of these is a statement about the
+/// caller's material — which link, and how it failed — and a caller
+/// answering it to its own clients needs that to stay readable rather
+/// than arriving as prose it would have to parse.
 pub fn check_failed_to_container_error(err: CheckFailed) -> ContainerError {
-    match err {
-        CheckFailed::DelegationAudienceMismatch {
-            claimed,
-            authorized,
-        } => ContainerError::Invocation(format!(
-            "invalid proof issuer chain: claimed {} authorized {}",
-            claimed, authorized
-        )),
-        CheckFailed::UnauthorizedSubject {
-            claimed,
-            authorized,
-        } => ContainerError::Invocation(format!(
-            "subject not allowed by proof: claimed {} authorized {}",
-            claimed, authorized
-        )),
-        CheckFailed::UnprovenSubject { subject, issuer } => ContainerError::Invocation(format!(
-            "root proof issuer is not the subject: subject {} issuer {}",
-            subject, issuer
-        )),
-        CheckFailed::CommandEscalation {
-            claimed,
-            authorized,
-        } => ContainerError::Invocation(format!(
-            "command mismatch: expected {:?}, found {:?}",
-            authorized, claimed
-        )),
-        CheckFailed::PolicyViolation(predicate) => {
-            ContainerError::Invocation(format!("predicate failed: {:?}", predicate))
-        }
-        CheckFailed::PolicyIncompatibility(run_err) => {
-            ContainerError::Invocation(format!("predicate run error: {}", run_err))
-        }
-        CheckFailed::WaitingOnPromise(waiting) => {
-            ContainerError::Invocation(format!("waiting on promise: {:?}", waiting))
-        }
-        CheckFailed::InvalidTimeWindow { range } => {
-            ContainerError::Invocation(format!("invalid time window: {:?}", range))
-        }
-        CheckFailed::TimeBound(err) => {
-            ContainerError::Invocation(format!("time bound error: {:?}", err))
-        }
-    }
+    ContainerError::Unauthorized(err)
 }

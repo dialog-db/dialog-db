@@ -60,7 +60,9 @@ use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_did_web::{CachingResolver, PerformingResolver, Resolve, WebResolver};
 use dialog_effects::{archive, blob, memory};
 use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
+use dialog_ucan_core::invocation::CheckFailed;
 use dialog_ucan_core::promise::Promised;
+use dialog_ucan_core::time::TimeBoundError;
 use dialog_ucan_core::{Environment, InvocationChain, VerificationContext};
 use ipld_core::ipld::Ipld;
 use serde::de::DeserializeOwned;
@@ -246,6 +248,71 @@ macro_rules! dispatch {
     };
 }
 
+/// Name the access decision a chain check reached.
+///
+/// Every arm of [`CheckFailed`] has a counterpart in [`AuthorizeError`] —
+/// the variants were written to mirror each other — so this loses
+/// nothing. Only the two cases that are about a promise or an
+/// impossible window have no access-decision counterpart, and they stay
+/// descriptive.
+fn check_failed_to_authorize_error(reason: CheckFailed) -> AuthorizeError {
+    match reason {
+        CheckFailed::UnauthorizedSubject {
+            claimed,
+            authorized,
+        }
+        | CheckFailed::DelegationAudienceMismatch {
+            claimed,
+            authorized,
+        } => AuthorizeError::InvalidAudience {
+            claimed,
+            authorized,
+        },
+        CheckFailed::UnprovenSubject { subject, issuer } => AuthorizeError::UnprovenSubject {
+            claimed: issuer,
+            authorized: subject,
+        },
+        CheckFailed::CommandEscalation {
+            claimed,
+            authorized,
+        } => AuthorizeError::CommandEscalation {
+            claimed: claimed.to_string(),
+            authorized: authorized.to_string(),
+        },
+        CheckFailed::PolicyViolation(predicate) => AuthorizeError::PolicyViolation {
+            predicate: format!("{predicate:?}"),
+        },
+        CheckFailed::TimeBound(TimeBoundError::Expired { expiration, at }) => {
+            AuthorizeError::Expired {
+                expiration: expiration.to_unix(),
+                at: at.to_unix(),
+            }
+        }
+        CheckFailed::TimeBound(TimeBoundError::NotYetValid { not_before, at }) => {
+            AuthorizeError::NotValidBefore {
+                not_before: not_before.to_unix(),
+                at: at.to_unix(),
+            }
+        }
+        // A window no instant satisfies is a defect in the chain itself
+        // rather than a clock verdict, so it is not `Expired`: no fresh
+        // proof at any time would help.
+        other @ (CheckFailed::InvalidTimeWindow { .. }
+        | CheckFailed::PolicyIncompatibility(_)
+        | CheckFailed::WaitingOnPromise(_)) => AuthorizeError::Malformed {
+            detail: other.to_string(),
+        },
+    }
+}
+
+/// The resolution policy an authorizer uses unless told otherwise:
+/// `did:key` locally, `did:web` over the network, cached.
+///
+/// Named so an embedder can spell out an authorizer that keeps the
+/// default resolver while supplying its own revocation checker, without
+/// taking a dependency on `dialog-did-web` just to write the type down.
+pub type DefaultResolver = CachingResolver<WebResolver>;
+
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
 ///
 /// This is the server-side component that:
@@ -260,13 +327,19 @@ macro_rules! dispatch {
 /// result. Inject a different provider with [`UcanAuthorizer::with_resolver`] to
 /// change the resolution policy (for example, `did:key`-only, or a custom
 /// fetcher).
-pub struct UcanAuthorizer<Resolver = CachingResolver<WebResolver>> {
+pub struct UcanAuthorizer<
+    Resolver = CachingResolver<WebResolver>,
+    Revocations = dialog_ucan_core::UnverifiedRevocations,
+> {
     address: Address,
     credential: Option<S3Credential>,
     resolver: std::sync::Arc<Resolver>,
+    revocations: std::sync::Arc<Revocations>,
 }
 
-impl<Resolver: std::fmt::Debug> std::fmt::Debug for UcanAuthorizer<Resolver> {
+impl<Resolver: std::fmt::Debug, Revocations> std::fmt::Debug
+    for UcanAuthorizer<Resolver, Revocations>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UcanAuthorizer")
             .field("address", &self.address)
@@ -275,12 +348,13 @@ impl<Resolver: std::fmt::Debug> std::fmt::Debug for UcanAuthorizer<Resolver> {
     }
 }
 
-impl<Resolver> Clone for UcanAuthorizer<Resolver> {
+impl<Resolver, Revocations> Clone for UcanAuthorizer<Resolver, Revocations> {
     fn clone(&self) -> Self {
         Self {
             address: self.address.clone(),
             credential: self.credential.clone(),
             resolver: self.resolver.clone(),
+            revocations: self.revocations.clone(),
         }
     }
 }
@@ -306,6 +380,10 @@ impl<Resolver> UcanAuthorizer<Resolver> {
     /// `resolver` is any [`Provider<Resolve>`](dialog_capability::Provider),
     /// letting the embedder choose the resolution policy: local-only,
     /// network-enabled, a custom cache, or a mocked fetcher for tests.
+    ///
+    /// Revocation is unchecked: see
+    /// [`with_revocations`](UcanAuthorizer::with_revocations) to supply an
+    /// index.
     pub fn with_resolver(
         address: Address,
         credential: Option<S3Credential>,
@@ -315,13 +393,37 @@ impl<Resolver> UcanAuthorizer<Resolver> {
             address,
             credential,
             resolver: std::sync::Arc::new(resolver),
+            revocations: std::sync::Arc::new(dialog_ucan_core::UnverifiedRevocations),
         }
     }
 }
 
-impl<Resolver> UcanAuthorizer<Resolver>
+impl<Resolver, Revocations> UcanAuthorizer<Resolver, Revocations> {
+    /// Check every proof against `revocations` while verifying.
+    ///
+    /// Without this an authorizer establishes nothing about revocation
+    /// status — the default checker is named for that. Supplying one moves
+    /// the question inside the chain walk, where it is asked per link
+    /// against the principals entitled to revoke that link, rather than
+    /// being re-derived by the caller afterwards from a flatter view of the
+    /// chain.
+    pub fn with_revocations<Checked>(
+        self,
+        revocations: Checked,
+    ) -> UcanAuthorizer<Resolver, Checked> {
+        UcanAuthorizer {
+            address: self.address,
+            credential: self.credential,
+            resolver: self.resolver,
+            revocations: std::sync::Arc::new(revocations),
+        }
+    }
+}
+
+impl<Resolver, Revocations> UcanAuthorizer<Resolver, Revocations>
 where
     Resolver: dialog_capability::Provider<Resolve> + dialog_common::ConditionalSync,
+    Revocations: dialog_ucan_core::revocation::RevocationChecker + dialog_common::ConditionalSync,
 {
     /// Authorize a UCAN container.
     ///
@@ -353,13 +455,11 @@ where
         // fetches the DID document; a cache sits in front. The chain verify path
         // only sees a varsig resolver.
         let resolver = PerformingResolver::new(self.resolver.as_ref());
-        // No revocation store exists yet, so nothing is looked up. Named for
-        // what it does: it establishes nothing about revocation status.
-        let environment = Environment::new(
-            chain.proof_store(),
-            resolver,
-            dialog_ucan_core::UnverifiedRevocations,
-        );
+        // Revocation is the embedder's to supply: the default checker looks
+        // nothing up and is named for that, while `with_revocations` puts a
+        // real index behind it. Either way the question is asked inside the
+        // chain walk, per link and per entitled revoker.
+        let environment = Environment::new(chain.proof_store(), resolver, &*self.revocations);
         let context = VerificationContext::new(&environment);
         chain.verify(&context).await.map_err(|e| {
             // Two different failures arrive here: their material not
@@ -378,6 +478,12 @@ where
                 ContainerError::Revoked { .. } => AuthorizeError::Revoked {
                     subject: chain.subject().clone(),
                 },
+                // The chain was read and judged, so the refusal can say
+                // which question it failed. `Malformed` is reserved for
+                // input we could not read at all, and answering an
+                // expired proof with it would tell a caller to fix its
+                // encoding when it needs to fetch a fresh delegation.
+                ContainerError::Unauthorized(reason) => check_failed_to_authorize_error(reason),
                 ContainerError::Invocation(detail) => AuthorizeError::Malformed {
                     detail: format!("invocation chain did not verify: {detail}"),
                 },
@@ -844,6 +950,337 @@ mod tests {
 
     /// An authorizer built with an explicit resolver still authorizes a normal
     /// did:key invocation: the injected [`MethodResolver`] routes did:key
+    /// Reports one delegation as revoked, by a named principal.
+    #[derive(Debug, Clone)]
+    struct RevokedLink {
+        cid: ipld_core::cid::Cid,
+        principal: dialog_capability::Did,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("revocation index unreachable")]
+    struct IndexUnreachable;
+
+    impl dialog_ucan_core::revocation::RevocationChecker for RevokedLink {
+        type Error = IndexUnreachable;
+
+        async fn query(
+            &self,
+            selector: dialog_ucan_core::revocation::RevocationSelector<'_>,
+        ) -> Result<Option<dialog_ucan_core::revocation::RevocationMatch>, Self::Error> {
+            if selector.delegation == self.cid && selector.by.contains(&self.principal) {
+                return Ok(Some(dialog_ucan_core::revocation::RevocationMatch {
+                    revocation: selector.delegation,
+                    principal: self.principal.clone(),
+                }));
+            }
+            Ok(None)
+        }
+    }
+
+    /// A chain resting on a revoked delegation must not authorize — and the
+    /// same chain must authorize without a checker, so the refusal is the
+    /// checker's doing rather than something else about the container.
+    #[dialog_common::test]
+    async fn it_refuses_a_chain_whose_proof_was_revoked() {
+        let subject = test_signer().await;
+        let operator = Ed25519Signer::generate().await.expect("operator key");
+
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(vec!["archive".to_string()])
+            .try_build()
+            .await
+            .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+
+        let invocation = InvocationBuilder::new()
+            .issuer(operator.clone())
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(vec!["archive".to_string(), "get".to_string()])
+            .arguments(args)
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, std::sync::Arc::new(delegation));
+        let container = InvocationChain::new(invocation, delegations)
+            .to_bytes()
+            .expect("container");
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
+
+        // Without a checker the chain stands: nothing is looked up.
+        let unchecked = UcanAuthorizer::new(address.clone(), Some(credentials.clone()));
+        assert!(
+            unchecked.authorize(&container).await.is_ok(),
+            "the chain itself is sound"
+        );
+
+        // With one, the revoked proof refuses it.
+        let checked =
+            UcanAuthorizer::new(address, Some(credentials)).with_revocations(RevokedLink {
+                cid,
+                principal: subject.did(),
+            });
+        let error = checked
+            .authorize(&container)
+            .await
+            .expect_err("a revoked proof must refuse the chain");
+        assert!(
+            matches!(
+                error,
+                S3Error::Authorization(dialog_capability::access::AuthorizeError::Revoked { .. })
+            ),
+            "expected a revocation refusal, got: {error:?}"
+        );
+    }
+
+    /// Asking beyond what a delegation grants is named as escalation.
+    ///
+    /// The grant covers `archive`, the invocation asks for `blob/put`.
+    /// That is a decision about authority, and it must be tellable from
+    /// unreadable input: the fix is a wider delegation, not a re-encoded
+    /// request.
+    #[dialog_common::test]
+    async fn it_names_a_command_escalation_as_escalation() {
+        let subject = test_signer().await;
+        let operator = Ed25519Signer::generate().await.expect("operator key");
+
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(vec!["archive".to_string()])
+            .try_build()
+            .await
+            .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+        let invocation = InvocationBuilder::new()
+            .issuer(operator.clone())
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(vec!["blob".to_string(), "put".to_string()])
+            .arguments(args)
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, std::sync::Arc::new(delegation));
+        let container = InvocationChain::new(invocation, delegations)
+            .to_bytes()
+            .expect("container");
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let error = UcanAuthorizer::new(address, Some(S3Credential::new("key", "secret")))
+            .authorize(&container)
+            .await
+            .expect_err("asking beyond the grant must refuse the chain");
+
+        match error {
+            S3Error::Authorization(
+                dialog_capability::access::AuthorizeError::CommandEscalation {
+                    claimed,
+                    authorized,
+                },
+            ) => {
+                assert!(
+                    claimed.contains("blob"),
+                    "the refusal must name what was asked for, got: {claimed}"
+                );
+                assert!(
+                    authorized.contains("archive"),
+                    "and what was actually granted, got: {authorized}"
+                );
+            }
+            other => panic!("expected an escalation refusal, got: {other:?}"),
+        }
+    }
+
+    /// A proof issued to somebody else names both principals.
+    ///
+    /// The delegation is addressed to a third party, so the operator
+    /// presenting it was never its audience. Both DIDs survive the trip
+    /// to the boundary, which is the point: a caller can say whose proof
+    /// this was and who tried to use it, rather than reporting that
+    /// something unspecified did not line up.
+    #[dialog_common::test]
+    async fn it_names_both_principals_when_a_proof_was_issued_to_someone_else() {
+        let subject = test_signer().await;
+        let operator = Ed25519Signer::generate().await.expect("operator key");
+        let stranger = Ed25519Signer::generate().await.expect("stranger key");
+
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&stranger.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(vec!["archive".to_string()])
+            .try_build()
+            .await
+            .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+        // The operator presents a proof addressed to the stranger.
+        let invocation = InvocationBuilder::new()
+            .issuer(operator.clone())
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(vec!["archive".to_string(), "get".to_string()])
+            .arguments(args)
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, std::sync::Arc::new(delegation));
+        let container = InvocationChain::new(invocation, delegations)
+            .to_bytes()
+            .expect("container");
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let error = UcanAuthorizer::new(address, Some(S3Credential::new("key", "secret")))
+            .authorize(&container)
+            .await
+            .expect_err("a proof issued to someone else must refuse the chain");
+
+        match error {
+            S3Error::Authorization(
+                dialog_capability::access::AuthorizeError::InvalidAudience {
+                    claimed,
+                    authorized,
+                },
+            ) => {
+                assert_eq!(claimed, operator.did(), "the principal that presented it");
+                assert_eq!(authorized, stranger.did(), "the principal it was issued to");
+            }
+            other => panic!("expected an audience refusal, got: {other:?}"),
+        }
+    }
+
+    /// An expired proof is refused as expired, not as malformed input.
+    ///
+    /// The chain walk judges the window and knows exactly which bound
+    /// failed and when. That verdict used to reach the boundary as
+    /// rendered prose and land in `Malformed`, so a caller answering its
+    /// own clients could only say the request was unreadable — telling
+    /// the holder of a lapsed delegation to fix its encoding, when what
+    /// it needs is a fresh proof.
+    #[dialog_common::test]
+    async fn it_names_an_expired_proof_as_expired() {
+        // The crate's own re-exports, not `std::time`: on wasm a
+        // `Timestamp` wraps `web_time::SystemTime`, so std values do not
+        // convert.
+        use dialog_ucan_core::time::{Duration, SystemTime, Timestamp};
+
+        let subject = test_signer().await;
+        let operator = Ed25519Signer::generate().await.expect("operator key");
+
+        let expired_at = Timestamp::new(SystemTime::now() - Duration::from_secs(3_600))
+            .expect("a representable timestamp");
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(vec!["archive".to_string()])
+            .expiration(expired_at)
+            .try_build()
+            .await
+            .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+
+        let invocation = InvocationBuilder::new()
+            .issuer(operator.clone())
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(vec!["archive".to_string(), "get".to_string()])
+            .arguments(args)
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, std::sync::Arc::new(delegation));
+        let container = InvocationChain::new(invocation, delegations)
+            .to_bytes()
+            .expect("container");
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let authorizer =
+            UcanAuthorizer::new(address, Some(S3Credential::new("access-key-id", "secret")));
+
+        let error = authorizer
+            .authorize(&container)
+            .await
+            .expect_err("an expired proof must refuse the chain");
+        match error {
+            S3Error::Authorization(dialog_capability::access::AuthorizeError::Expired {
+                expiration,
+                at,
+            }) => {
+                assert_eq!(
+                    expiration,
+                    expired_at.to_unix(),
+                    "the refusal must name the bound that lapsed"
+                );
+                assert!(at >= expiration, "and the instant it was judged at");
+            }
+            other => panic!("expected an expiry refusal, got: {other:?}"),
+        }
+    }
+
     /// locally without touching the (mocked) did:web fetcher. This proves the
     /// configurable-resolver wiring carries through to `authorize`.
     #[dialog_common::test]
