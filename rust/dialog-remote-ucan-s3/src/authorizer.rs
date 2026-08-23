@@ -1208,14 +1208,16 @@ mod tests {
     /// it needs is a fresh proof.
     #[dialog_common::test]
     async fn it_names_an_expired_proof_as_expired() {
-        use dialog_ucan_core::time::Timestamp;
+        // The crate's own re-exports, not `std::time`: on wasm a
+        // `Timestamp` wraps `web_time::SystemTime`, so std values do not
+        // convert.
+        use dialog_ucan_core::time::{Duration, SystemTime, Timestamp};
 
         let subject = test_signer().await;
         let operator = Ed25519Signer::generate().await.expect("operator key");
 
-        let expired_at =
-            Timestamp::new(std::time::SystemTime::now() - std::time::Duration::from_secs(3_600))
-                .expect("a representable timestamp");
+        let expired_at = Timestamp::new(SystemTime::now() - Duration::from_secs(3_600))
+            .expect("a representable timestamp");
         let delegation = DelegationBuilder::new()
             .issuer(subject.clone())
             .audience(&operator.did())
