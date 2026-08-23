@@ -246,6 +246,14 @@ macro_rules! dispatch {
     };
 }
 
+/// The resolution policy an authorizer uses unless told otherwise:
+/// `did:key` locally, `did:web` over the network, cached.
+///
+/// Named so an embedder can spell out an authorizer that keeps the
+/// default resolver while supplying its own revocation checker, without
+/// taking a dependency on `dialog-did-web` just to write the type down.
+pub type DefaultResolver = CachingResolver<WebResolver>;
+
 /// UCAN authorizer that wraps credentials and handles UCAN invocations.
 ///
 /// This is the server-side component that:
