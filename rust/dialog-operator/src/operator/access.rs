@@ -38,6 +38,7 @@ use dialog_capability::access::{
     Retain, Scope as _, TimeRange,
 };
 use dialog_capability::{Capability, Command, Did, Fork, Policy as _, Provider, Subject};
+use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
@@ -50,6 +51,18 @@ use dialog_ucan_core::subject::Subject as UcanSubject;
 use std::collections::HashMap;
 
 use dialog_artifacts::history::Version;
+
+/// The current moment in unix seconds, the unit delegation bounds use.
+///
+/// A clock behind the epoch cannot happen on a machine that can verify a
+/// signature; falling back to zero keeps the caller total, and nothing is
+/// lapsed relative to zero.
+fn now_s() -> u64 {
+    time::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
+}
 
 /// Resolved chains, valid for one branch head version.
 #[derive(Default)]
@@ -221,8 +234,8 @@ impl<S: Clone> Operator<S> {
 
     /// Serve a claim from the cache: the chain resolved for this key at
     /// the current epoch, re-verified against the claim's access and
-    /// duration. `None` on a miss or when the cached chain rejects this
-    /// particular claim.
+    /// duration, and still unlapsed. `None` on a miss or when the cached
+    /// chain rejects this particular claim.
     fn cached(&self, key: &(Did, Did, String), claim: &Prove<Ucan>) -> Option<UcanProof> {
         let branch = self.delegations.get()?;
         let epoch = branch.revision().map(|revision| revision.version());
@@ -238,6 +251,24 @@ impl<S: Clone> Operator<S> {
             effective = effective.intersect(&range);
         }
         if !effective.covers(&claim.duration) {
+            return None;
+        }
+        // The duration above is what the caller NEEDS, which for most
+        // read paths is nothing at all -- and an unbounded requirement is
+        // met by a window that closed hours ago. A memo, unlike a
+        // certificate, has no other reader to catch that: it is replayed
+        // for every claim on this key until the access branch head moves,
+        // so an entry that lapses mid-epoch would be served long past its
+        // end. Retiring it sends the claim back to the walk, which can
+        // still find a live route the memo has outlived.
+        //
+        // Only the lapsed end. An entry that has not STARTED yet may
+        // legitimately answer a claim for the window in which it does,
+        // and `covers` above already judged that.
+        if effective
+            .expiration
+            .is_some_and(|expiration| expiration < now_s())
+        {
             return None;
         }
 
@@ -690,6 +721,71 @@ mod tests {
             expiration: Some(now + 7200),
         };
         assert!(operator.resolve(widened).await.is_err());
+        Ok(())
+    }
+
+    /// A claim naming an instant resolves a route that is good then,
+    /// even when a lapsed one to the same subject is retained beside it.
+    ///
+    /// Both grants are admissible on everything but the clock, and
+    /// candidate order follows content hashes, so without the time bound
+    /// the walk picks between them arbitrarily -- and half the time
+    /// presents authority that stopped being valid an hour ago.
+    #[dialog_common::test]
+    async fn it_resolves_the_live_route_when_a_lapsed_one_sits_beside_it() -> Result<()> {
+        let (operator, _profile) = operator("lapsed-beside-live").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let now = now_s();
+        let lapsed = Timestamp::try_from((now - 3600) as i128).unwrap();
+        let live = Timestamp::try_from((now + 3600) as i128).unwrap();
+        retain_grant(&operator, &space, &holder, Some(lapsed)).await;
+        retain_grant(&operator, &space, &holder, Some(live)).await;
+
+        let mut at_now = claim(&holder, &space);
+        at_now.duration = TimeRange {
+            not_before: Some(now),
+            expiration: Some(now),
+        };
+        let proof = operator.resolve(at_now).await?;
+
+        assert_eq!(
+            proof.duration().expiration,
+            Some(now + 3600),
+            "the walk presented the lapsed grant although a live one was retained",
+        );
+        Ok(())
+    }
+
+    /// A memo lapses with the chain it holds.
+    ///
+    /// The duration a claim carries is what the caller NEEDS, and the
+    /// read paths need nothing in particular -- an unbounded requirement
+    /// is met by a window that closed an hour ago. A certificate has the
+    /// walk to re-judge it; a memo has no other reader, and would be
+    /// replayed for every claim on its key until the branch head next
+    /// moved.
+    #[dialog_common::test]
+    async fn it_retires_a_memo_whose_chain_has_lapsed() -> Result<()> {
+        let (operator, _profile) = operator("cache-lapsed").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let now = now_s();
+        let lapsed = Timestamp::try_from((now - 60) as i128).unwrap();
+        retain_grant(&operator, &space, &holder, Some(lapsed)).await;
+
+        // The walk itself has no clock, so an unbounded claim resolves
+        // the lapsed grant and records it: exactly the entry that must
+        // not then be served back.
+        operator.resolve(claim(&holder, &space)).await?;
+        assert_eq!(operator.cached_chains(), 1, "the walk's chain is recorded");
+
+        let key = Operator::<VolatileSpace>::cache_key(&claim(&holder, &space))
+            .expect("a specific subject and a distinct holder are cacheable");
+        assert!(
+            operator.cached(&key, &claim(&holder, &space)).is_none(),
+            "a memo holding a lapsed chain answered an unbounded claim",
+        );
         Ok(())
     }
 
