@@ -60,7 +60,9 @@ use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_did_web::{CachingResolver, PerformingResolver, Resolve, WebResolver};
 use dialog_effects::{archive, blob, memory};
 use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
+use dialog_ucan_core::invocation::CheckFailed;
 use dialog_ucan_core::promise::Promised;
+use dialog_ucan_core::time::TimeBoundError;
 use dialog_ucan_core::{Environment, InvocationChain, VerificationContext};
 use ipld_core::ipld::Ipld;
 use serde::de::DeserializeOwned;
@@ -246,6 +248,63 @@ macro_rules! dispatch {
     };
 }
 
+/// Name the access decision a chain check reached.
+///
+/// Every arm of [`CheckFailed`] has a counterpart in [`AuthorizeError`] —
+/// the variants were written to mirror each other — so this loses
+/// nothing. Only the two cases that are about a promise or an
+/// impossible window have no access-decision counterpart, and they stay
+/// descriptive.
+fn check_failed_to_authorize_error(reason: CheckFailed) -> AuthorizeError {
+    match reason {
+        CheckFailed::UnauthorizedSubject {
+            claimed,
+            authorized,
+        }
+        | CheckFailed::DelegationAudienceMismatch {
+            claimed,
+            authorized,
+        } => AuthorizeError::InvalidAudience {
+            claimed,
+            authorized,
+        },
+        CheckFailed::UnprovenSubject { subject, issuer } => AuthorizeError::UnprovenSubject {
+            claimed: issuer,
+            authorized: subject,
+        },
+        CheckFailed::CommandEscalation {
+            claimed,
+            authorized,
+        } => AuthorizeError::CommandEscalation {
+            claimed: claimed.to_string(),
+            authorized: authorized.to_string(),
+        },
+        CheckFailed::PolicyViolation(predicate) => AuthorizeError::PolicyViolation {
+            predicate: format!("{predicate:?}"),
+        },
+        CheckFailed::TimeBound(TimeBoundError::Expired { expiration, at }) => {
+            AuthorizeError::Expired {
+                expiration: expiration.to_unix(),
+                at: at.to_unix(),
+            }
+        }
+        CheckFailed::TimeBound(TimeBoundError::NotYetValid { not_before, at }) => {
+            AuthorizeError::NotValidBefore {
+                not_before: not_before.to_unix(),
+                at: at.to_unix(),
+            }
+        }
+        // A window no instant satisfies is a defect in the chain itself
+        // rather than a clock verdict, so it is not `Expired`: no fresh
+        // proof at any time would help.
+        other @ (CheckFailed::InvalidTimeWindow { .. }
+        | CheckFailed::PolicyIncompatibility(_)
+        | CheckFailed::WaitingOnPromise(_)) => AuthorizeError::Malformed {
+            detail: other.to_string(),
+        },
+    }
+}
+
 /// The resolution policy an authorizer uses unless told otherwise:
 /// `did:key` locally, `did:web` over the network, cached.
 ///
@@ -419,6 +478,12 @@ where
                 ContainerError::Revoked { .. } => AuthorizeError::Revoked {
                     subject: chain.subject().clone(),
                 },
+                // The chain was read and judged, so the refusal can say
+                // which question it failed. `Malformed` is reserved for
+                // input we could not read at all, and answering an
+                // expired proof with it would tell a caller to fix its
+                // encoding when it needs to fetch a fresh delegation.
+                ContainerError::Unauthorized(reason) => check_failed_to_authorize_error(reason),
                 ContainerError::Invocation(detail) => AuthorizeError::Malformed {
                     detail: format!("invocation chain did not verify: {detail}"),
                 },
@@ -986,6 +1051,232 @@ mod tests {
             ),
             "expected a revocation refusal, got: {error:?}"
         );
+    }
+
+    /// Asking beyond what a delegation grants is named as escalation.
+    ///
+    /// The grant covers `archive`, the invocation asks for `blob/put`.
+    /// That is a decision about authority, and it must be tellable from
+    /// unreadable input: the fix is a wider delegation, not a re-encoded
+    /// request.
+    #[dialog_common::test]
+    async fn it_names_a_command_escalation_as_escalation() {
+        let subject = test_signer().await;
+        let operator = Ed25519Signer::generate().await.expect("operator key");
+
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(vec!["archive".to_string()])
+            .try_build()
+            .await
+            .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+        let invocation = InvocationBuilder::new()
+            .issuer(operator.clone())
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(vec!["blob".to_string(), "put".to_string()])
+            .arguments(args)
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, std::sync::Arc::new(delegation));
+        let container = InvocationChain::new(invocation, delegations)
+            .to_bytes()
+            .expect("container");
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let error = UcanAuthorizer::new(address, Some(S3Credential::new("key", "secret")))
+            .authorize(&container)
+            .await
+            .expect_err("asking beyond the grant must refuse the chain");
+
+        match error {
+            S3Error::Authorization(
+                dialog_capability::access::AuthorizeError::CommandEscalation {
+                    claimed,
+                    authorized,
+                },
+            ) => {
+                assert!(
+                    claimed.contains("blob"),
+                    "the refusal must name what was asked for, got: {claimed}"
+                );
+                assert!(
+                    authorized.contains("archive"),
+                    "and what was actually granted, got: {authorized}"
+                );
+            }
+            other => panic!("expected an escalation refusal, got: {other:?}"),
+        }
+    }
+
+    /// A proof issued to somebody else names both principals.
+    ///
+    /// The delegation is addressed to a third party, so the operator
+    /// presenting it was never its audience. Both DIDs survive the trip
+    /// to the boundary, which is the point: a caller can say whose proof
+    /// this was and who tried to use it, rather than reporting that
+    /// something unspecified did not line up.
+    #[dialog_common::test]
+    async fn it_names_both_principals_when_a_proof_was_issued_to_someone_else() {
+        let subject = test_signer().await;
+        let operator = Ed25519Signer::generate().await.expect("operator key");
+        let stranger = Ed25519Signer::generate().await.expect("stranger key");
+
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&stranger.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(vec!["archive".to_string()])
+            .try_build()
+            .await
+            .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+        // The operator presents a proof addressed to the stranger.
+        let invocation = InvocationBuilder::new()
+            .issuer(operator.clone())
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(vec!["archive".to_string(), "get".to_string()])
+            .arguments(args)
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, std::sync::Arc::new(delegation));
+        let container = InvocationChain::new(invocation, delegations)
+            .to_bytes()
+            .expect("container");
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let error = UcanAuthorizer::new(address, Some(S3Credential::new("key", "secret")))
+            .authorize(&container)
+            .await
+            .expect_err("a proof issued to someone else must refuse the chain");
+
+        match error {
+            S3Error::Authorization(
+                dialog_capability::access::AuthorizeError::InvalidAudience {
+                    claimed,
+                    authorized,
+                },
+            ) => {
+                assert_eq!(claimed, operator.did(), "the principal that presented it");
+                assert_eq!(authorized, stranger.did(), "the principal it was issued to");
+            }
+            other => panic!("expected an audience refusal, got: {other:?}"),
+        }
+    }
+
+    /// An expired proof is refused as expired, not as malformed input.
+    ///
+    /// The chain walk judges the window and knows exactly which bound
+    /// failed and when. That verdict used to reach the boundary as
+    /// rendered prose and land in `Malformed`, so a caller answering its
+    /// own clients could only say the request was unreadable — telling
+    /// the holder of a lapsed delegation to fix its encoding, when what
+    /// it needs is a fresh proof.
+    #[dialog_common::test]
+    async fn it_names_an_expired_proof_as_expired() {
+        use dialog_ucan_core::time::Timestamp;
+
+        let subject = test_signer().await;
+        let operator = Ed25519Signer::generate().await.expect("operator key");
+
+        let expired_at =
+            Timestamp::new(std::time::SystemTime::now() - std::time::Duration::from_secs(3_600))
+                .expect("a representable timestamp");
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(vec!["archive".to_string()])
+            .expiration(expired_at)
+            .try_build()
+            .await
+            .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+
+        let invocation = InvocationBuilder::new()
+            .issuer(operator.clone())
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(vec!["archive".to_string(), "get".to_string()])
+            .arguments(args)
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, std::sync::Arc::new(delegation));
+        let container = InvocationChain::new(invocation, delegations)
+            .to_bytes()
+            .expect("container");
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let authorizer =
+            UcanAuthorizer::new(address, Some(S3Credential::new("access-key-id", "secret")));
+
+        let error = authorizer
+            .authorize(&container)
+            .await
+            .expect_err("an expired proof must refuse the chain");
+        match error {
+            S3Error::Authorization(dialog_capability::access::AuthorizeError::Expired {
+                expiration,
+                at,
+            }) => {
+                assert_eq!(
+                    expiration,
+                    expired_at.to_unix(),
+                    "the refusal must name the bound that lapsed"
+                );
+                assert!(at >= expiration, "and the instant it was judged at");
+            }
+            other => panic!("expected an expiry refusal, got: {other:?}"),
+        }
     }
 
     /// locally without touching the (mocked) did:web fetcher. This proves the

@@ -63,14 +63,22 @@ impl TimeRange {
     /// * [`TimeBoundError::Expired`] — if `time` is past the expiration bound
     /// * [`TimeBoundError::NotYetValid`] — if `time` is before the not-before bound
     pub fn check(&self, time: &Timestamp) -> Result<(), TimeBoundError> {
+        let expired = |expiration| TimeBoundError::Expired {
+            expiration,
+            at: *time,
+        };
         match self.expiration {
-            Bound::Included(exp) if *time > exp => return Err(TimeBoundError::Expired),
-            Bound::Excluded(exp) if *time >= exp => return Err(TimeBoundError::Expired),
+            Bound::Included(exp) if *time > exp => return Err(expired(exp)),
+            Bound::Excluded(exp) if *time >= exp => return Err(expired(exp)),
             _ => {}
         }
+        let early = |not_before| TimeBoundError::NotYetValid {
+            not_before,
+            at: *time,
+        };
         match self.not_before {
-            Bound::Included(nbf) if *time < nbf => return Err(TimeBoundError::NotYetValid),
-            Bound::Excluded(nbf) if *time <= nbf => return Err(TimeBoundError::NotYetValid),
+            Bound::Included(nbf) if *time < nbf => return Err(early(nbf)),
+            Bound::Excluded(nbf) if *time <= nbf => return Err(early(nbf)),
             _ => {}
         }
         Ok(())
